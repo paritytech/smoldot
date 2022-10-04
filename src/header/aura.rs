@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -19,7 +19,7 @@ use super::Error;
 use crate::util;
 
 use alloc::vec::Vec;
-use core::{cmp, convert::TryFrom, fmt, iter, slice};
+use core::{cmp, fmt, iter, slice};
 
 /// A consensus log item for AURA.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +33,7 @@ pub enum AuraConsensusLogRef<'a> {
 impl<'a> AuraConsensusLogRef<'a> {
     /// Decodes a [`AuraConsensusLogRef`] from a slice of bytes.
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, Error> {
-        Ok(match slice.get(0) {
+        Ok(match slice.first() {
             Some(1) => {
                 AuraConsensusLogRef::AuthoritiesChange(AuraAuthoritiesIter::decode(&slice[1..])?)
             }
@@ -71,9 +71,9 @@ impl<'a> AuraConsensusLogRef<'a> {
                         .map(either::Left),
                 )
             }
-            AuraConsensusLogRef::OnDisabled(digest) => either::Right(
-                iter::once(parity_scale_codec::Encode::encode(digest)).map(either::Right),
-            ),
+            AuraConsensusLogRef::OnDisabled(digest) => {
+                either::Right(iter::once(digest.to_le_bytes()).map(either::Right))
+            }
         };
 
         index.map(either::Left).chain(body.map(either::Right))
@@ -127,7 +127,11 @@ impl<'a> AuraAuthoritiesIter<'a> {
         let (data, num_items) = util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(data)
             .map_err(|_| Error::TooShort)?;
 
-        if data.len() != num_items * 32 {
+        if data.len()
+            != num_items
+                .checked_mul(32)
+                .ok_or(Error::BadAuraAuthoritiesListLen)?
+        {
             return Err(Error::BadAuraAuthoritiesListLen);
         }
 

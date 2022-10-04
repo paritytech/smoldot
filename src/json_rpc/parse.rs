@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -17,19 +17,20 @@
 
 //! Parse JSON-RPC method calls and notifications, and build responses messages.
 
-use alloc::string::String;
+use alloc::{borrow::Cow, string::String};
 
 /// Parses a JSON-encoded RPC method call or notification.
 pub fn parse_call(call_json: &str) -> Result<Call, ParseError> {
     let serde_call: SerdeCall = serde_json::from_str(call_json).map_err(ParseError)?;
 
     if let Some(id) = &serde_call.id {
+        // Because of https://github.com/serde-rs/json/issues/742, we can't use ̀`&str`.
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         #[serde(untagged)]
         enum SerdeId<'a> {
             Num(u64),
-            Str(&'a str),
+            Str(Cow<'a, str>),
         }
 
         if let Err(err) = serde_json::from_str::<SerdeId>(id.get()) {
@@ -44,7 +45,26 @@ pub fn parse_call(call_json: &str) -> Result<Call, ParseError> {
     })
 }
 
-/// Parsed JSON-RPC call.
+/// Builds a JSON call.
+///
+/// `method` must be the name of the method to call. `params_json` must be the JSON-formatted
+/// object or array containing the parameters of the call.
+///
+/// # Panic
+///
+/// Panics if the [`Call::id_json`] or [`Call::params_json`] isn't valid JSON.
+///
+pub fn build_call(call: Call) -> String {
+    serde_json::to_string(&SerdeCall {
+        jsonrpc: SerdeVersion::V2,
+        id: call.id_json.map(|id| serde_json::from_str(id).unwrap()),
+        method: call.method,
+        params: serde_json::from_str(call.params_json).unwrap(),
+    })
+    .unwrap()
+}
+
+/// Decoded JSON-RPC call.
 #[derive(Debug)]
 pub struct Call<'a> {
     /// JSON-formatted identifier of the request. `None` for notifications.
@@ -83,28 +103,6 @@ pub fn build_success_response(id_json: &str, result_json: &str) -> String {
         jsonrpc: SerdeVersion::V2,
         id: serde_json::from_str(id_json).expect("invalid id_json"),
         result: serde_json::from_str(result_json).expect("invalid result_json"),
-    })
-    .unwrap()
-}
-
-/// Builds a JSON event to a subscription.
-///
-/// `method` must be the name of the method that was used for the subscription. `id` must
-/// be the identifier of the subscription, as previously attributed by the server and returned to
-/// the client. `result_json` must be the JSON-formatted event.
-///
-/// # Panic
-///
-/// Panics if `result_json` isn't valid JSON.
-///
-pub fn build_subscription_event(method: &str, id: &str, result_json: &str) -> String {
-    serde_json::to_string(&SerdeSubscriptionEvent {
-        jsonrpc: SerdeVersion::V2,
-        method,
-        params: SerdeSubscriptionEventParams {
-            subscription: id,
-            result: serde_json::from_str(result_json).expect("invalid result_json"),
-        },
     })
     .unwrap()
 }
@@ -203,7 +201,7 @@ pub enum ErrorResponse<'a> {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct SerdeCall<'a> {
     jsonrpc: SerdeVersion,
-    #[serde(borrow)]
+    #[serde(borrow, skip_serializing_if = "Option::is_none")]
     id: Option<&'a serde_json::value::RawValue>,
     #[serde(borrow)]
     method: &'a str,
@@ -327,17 +325,58 @@ impl serde::Serialize for SerdeErrorCode {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct SerdeSubscriptionEvent<'a> {
-    jsonrpc: SerdeVersion,
-    method: &'a str,
-    params: SerdeSubscriptionEventParams<'a>,
-}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn parse_basic_works() {
+        let call = super::parse_call(
+            r#"{"jsonrpc":"2.0","id":5,"method":"foo","params":[5,true, "hello"]}"#,
+        )
+        .unwrap();
+        assert_eq!(call.id_json.unwrap(), "5");
+        assert_eq!(call.method, "foo");
+        assert_eq!(call.params_json, "[5,true, \"hello\"]");
+    }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct SerdeSubscriptionEventParams<'a> {
-    subscription: &'a str,
-    result: &'a serde_json::value::RawValue,
+    #[test]
+    fn parse_missing_id() {
+        let call = super::parse_call(r#"{"jsonrpc":"2.0","method":"foo","params":[]}"#).unwrap();
+        assert!(call.id_json.is_none());
+        assert_eq!(call.method, "foo");
+        assert_eq!(call.params_json, "[]");
+    }
+
+    #[test]
+    fn parse_id_string() {
+        let call =
+            super::parse_call(r#"{"jsonrpc":"2.0","id":"hello","method":"foo","params":[]}"#)
+                .unwrap();
+        assert_eq!(call.id_json.unwrap(), "\"hello\"");
+        assert_eq!(call.method, "foo");
+        assert_eq!(call.params_json, "[]");
+    }
+
+    #[test]
+    fn parse_id_string_escaped() {
+        let call =
+            super::parse_call(r#"{"jsonrpc":"2.0","id":"extern:\"health-checker:0\"","method":"system_health","params":[]}"#)
+                .unwrap();
+        assert_eq!(call.id_json.unwrap(), r#""extern:\"health-checker:0\"""#);
+        assert_eq!(call.method, "system_health");
+        assert_eq!(call.params_json, "[]");
+    }
+
+    #[test]
+    fn parse_wrong_jsonrpc() {
+        assert!(
+            super::parse_call(r#"{"jsonrpc":"2.1","id":5,"method":"foo","params":[]}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn parse_bad_id() {
+        assert!(
+            super::parse_call(r#"{"jsonrpc":"2.0","id":{},"method":"foo","params":[]}"#).is_err()
+        );
+    }
 }

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -22,10 +22,11 @@ use crate::{
     executor::host,
     header,
     trie::calculate_root,
+    verify::inherents,
 };
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, num::NonZeroU64, time::Duration};
+use core::{num::NonZeroU64, time::Duration};
 
 /// Configuration for a block generation.
 pub struct Config<'a, TLocAuth> {
@@ -49,7 +50,7 @@ pub enum ConfigConsensus<'a, TLocAuth> {
         /// an authorities list change digest item.
         current_authorities: header::AuraAuthoritiesIter<'a>,
 
-        /// Iterator to the list of sr25519 public keys available locally.
+        /// Iterator to the list of Sr25519 public keys available locally.
         ///
         /// Must implement `Iterator<Item = &[u8; 32]>`.
         local_authorities: TLocAuth,
@@ -61,16 +62,13 @@ pub enum ConfigConsensus<'a, TLocAuth> {
 #[must_use]
 pub enum Builder {
     /// None of the authorities available locally are allowed to produce a block.
-    AllSync,
+    Idle,
 
     /// Block production is idle, waiting for a slot.
     WaitSlot(WaitSlot),
 
     /// Block production is ready to start.
     Ready(AuthoringStart),
-
-    /// Currently authoring a block.
-    Authoring(BuilderAuthoring),
 }
 
 impl Builder {
@@ -88,13 +86,13 @@ impl Builder {
                 slot_duration,
             } => {
                 let consensus = match aura::next_slot_claim(aura::Config {
-                    current_authorities,
-                    local_authorities,
                     now_from_unix_epoch,
                     slot_duration,
+                    current_authorities,
+                    local_authorities,
                 }) {
                     Some(c) => c,
-                    None => return Builder::AllSync,
+                    None => return Builder::Idle,
                 };
 
                 debug_assert!(now_from_unix_epoch < consensus.slot_end_from_unix_epoch);
@@ -192,13 +190,36 @@ pub struct AuthoringStart {
 }
 
 impl AuthoringStart {
+    /// Returns when the authoring slot start, as a UNIX timestamp (i.e. number of seconds since
+    /// the UNIX epoch, ignoring leap seconds).
+    pub fn slot_start_from_unix_epoch(&self) -> Duration {
+        match self.consensus {
+            WaitSlotConsensus::Aura(claim) => claim.slot_start_from_unix_epoch,
+        }
+    }
+
+    /// Returns when the authoring slot ends, as a UNIX timestamp (i.e. number of seconds since
+    /// the UNIX epoch, ignoring leap seconds).
+    ///
+    /// The block should finish being authored before the slot ends.
+    /// However, in order for the network to perform smoothly, the block should have been
+    /// authored **and** propagated throughout the entire peer-to-peer network before the slot
+    /// ends.
+    pub fn slot_end_from_unix_epoch(&self) -> Duration {
+        match self.consensus {
+            WaitSlotConsensus::Aura(claim) => claim.slot_end_from_unix_epoch,
+        }
+    }
+
     /// Start producing the block.
     pub fn start(self, config: AuthoringStartConfig) -> BuilderAuthoring {
         let inner_block_build = runtime::build_block(runtime::Config {
+            block_number_bytes: config.block_number_bytes,
             parent_hash: config.parent_hash,
             parent_number: config.parent_number,
             parent_runtime: config.parent_runtime,
             top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
+            block_body_capacity: config.block_body_capacity,
             consensus_digest_log_item: match self.consensus {
                 WaitSlotConsensus::Aura(slot) => {
                     runtime::ConfigPreRuntime::Aura(header::AuraPreDigest {
@@ -208,19 +229,15 @@ impl AuthoringStart {
             },
         });
 
-        let inherent_data = runtime::InherentData {
+        let inherent_data = inherents::InherentData {
             timestamp: u64::try_from(config.now_from_unix_epoch.as_millis())
                 .unwrap_or(u64::max_value()),
-            consensus: match self.consensus {
-                WaitSlotConsensus::Aura(slot) => runtime::InherentDataConsensus::Aura {
-                    slot_number: slot.slot_number,
-                },
-            },
         };
 
         (Shared {
             inherent_data: Some(inherent_data),
             slot_claim: self.consensus,
+            block_number_bytes: config.block_number_bytes,
         })
         .with_runtime_inner(inner_block_build)
     }
@@ -228,6 +245,9 @@ impl AuthoringStart {
 
 /// Configuration to pass when the actual block authoring is started.
 pub struct AuthoringStartConfig<'a> {
+    /// Number of bytes used to encode block numbers in the header.
+    pub block_number_bytes: usize,
+
     /// Hash of the parent of the block to generate.
     ///
     /// Used to populate the header of the new block.
@@ -249,6 +269,10 @@ pub struct AuthoringStartConfig<'a> {
     /// Optional cache corresponding to the storage trie root hash calculation coming from the
     /// parent block verification.
     pub top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+
+    /// Capacity to reserve for the number of extrinsics. Should be higher than the approximate
+    /// number of extrinsics that are going to be applied.
+    pub block_body_capacity: usize,
 }
 
 /// More transactions can be added.
@@ -349,9 +373,14 @@ pub struct Seal {
 }
 
 impl Seal {
-    /// Returns the SCALE-encoded header that must be signed.
+    /// Returns the SCALE-encoded header whose hash must be signed.
     pub fn scale_encoded_header(&self) -> &[u8] {
         &self.block.scale_encoded_header
+    }
+
+    /// Returns the data to sign. This is the hash of the SCALE-encoded header of the block.
+    pub fn to_sign(&self) -> [u8; 32] {
+        header::hash_from_scale_encoded_header(&self.block.scale_encoded_header)
     }
 
     /// Returns the index within the list of authorities of the authority that must sign the
@@ -364,23 +393,29 @@ impl Seal {
         }
     }
 
-    /// Injects the sr25519 signature of the SCALE-encoded header from the given authority.
+    /// Injects the Sr25519 signature of the hash of the SCALE-encoded header from the given
+    /// authority.
     ///
     /// The method then returns the finished block.
     pub fn inject_sr25519_signature(mut self, signature: [u8; 64]) -> runtime::Success {
         // TODO: optimize?
-        let mut header: header::Header = header::decode(&self.block.scale_encoded_header)
-            .unwrap()
-            .into();
+        let mut header: header::Header = header::decode(
+            &self.block.scale_encoded_header,
+            self.shared.block_number_bytes,
+        )
+        .unwrap()
+        .into();
 
         // `push_aura_seal` error if there is already an Aura seal, indicating that the runtime
         // code is misbehaving. This condition is already verified when the `Seal` is created.
         header.digest.push_aura_seal(signature).unwrap();
 
-        self.block.scale_encoded_header = header.scale_encoding().fold(Vec::new(), |mut a, b| {
-            a.extend_from_slice(b.as_ref());
-            a
-        });
+        self.block.scale_encoded_header = header
+            .scale_encoding(self.shared.block_number_bytes)
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            });
 
         self.block
     }
@@ -402,7 +437,10 @@ pub enum Error {
 struct Shared {
     /// Inherent data waiting to be injected. Will be extracted from its `Option` when the inner
     /// block builder requests it.
-    inherent_data: Option<runtime::InherentData>,
+    inherent_data: Option<inherents::InherentData>,
+
+    /// Number of bytes used to encode the block number in the header.
+    block_number_bytes: usize,
 
     /// Slot that has been claimed.
     slot_claim: WaitSlotConsensus,
@@ -416,7 +454,10 @@ impl Shared {
                     // After the runtime has produced a block, the last step is to seal it.
 
                     // Verify the correctness of the header. If not, the runtime is misbehaving.
-                    let decoded_header = match header::decode(&block.scale_encoded_header) {
+                    let decoded_header = match header::decode(
+                        &block.scale_encoded_header,
+                        self.block_number_bytes,
+                    ) {
                         Ok(h) => h,
                         Err(_) => break BuilderAuthoring::Error(Error::InvalidHeaderGenerated),
                     };

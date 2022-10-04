@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -23,7 +23,7 @@ use rand::{
     distributions::{Distribution as _, Uniform},
     seq::SliceRandom as _,
 };
-use std::{collections::HashSet, convert::TryFrom as _};
+use std::collections::HashSet;
 
 #[test]
 fn remove_turns_storage_into_branch() {
@@ -326,13 +326,294 @@ fn insert_branch() {
 }
 
 #[test]
+fn remove_prefix_basic() {
+    let mut trie = TrieStructure::new();
+
+    trie.node([Nibble::try_from(1).unwrap()].iter().cloned())
+        .into_vacant()
+        .unwrap()
+        .insert_storage_value()
+        .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(4).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(4).unwrap(),
+            Nibble::try_from(5).unwrap(),
+            Nibble::try_from(6).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+
+    trie.remove_prefix(
+        [Nibble::try_from(1).unwrap(), Nibble::try_from(2).unwrap()]
+            .iter()
+            .cloned(),
+    );
+
+    assert_eq!(trie.len(), 1);
+    assert!(trie
+        .node([Nibble::try_from(1).unwrap(),].iter().cloned(),)
+        .into_occupied()
+        .unwrap()
+        .has_storage_value());
+}
+
+#[test]
+fn remove_prefix_clear_all() {
+    let mut trie = TrieStructure::new();
+
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(4).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(4).unwrap(),
+            Nibble::try_from(5).unwrap(),
+            Nibble::try_from(6).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+
+    trie.remove_prefix(
+        [Nibble::try_from(1).unwrap(), Nibble::try_from(2).unwrap()]
+            .iter()
+            .cloned(),
+    );
+
+    assert!(trie.is_empty());
+}
+
+#[test]
+fn remove_prefix_exact() {
+    let mut trie = TrieStructure::new();
+
+    trie.node([Nibble::try_from(1).unwrap()].iter().cloned())
+        .into_vacant()
+        .unwrap()
+        .insert_storage_value()
+        .insert((), ());
+
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+            Nibble::try_from(4).unwrap(),
+            Nibble::try_from(5).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+            Nibble::try_from(4).unwrap(),
+            Nibble::try_from(6).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+
+    trie.remove_prefix(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    );
+
+    assert_eq!(trie.len(), 1);
+    assert!(trie
+        .node([Nibble::try_from(1).unwrap(),].iter().cloned(),)
+        .into_occupied()
+        .unwrap()
+        .has_storage_value());
+}
+
+#[test]
+fn remove_prefix_doesnt_match_anything() {
+    let mut trie = TrieStructure::new();
+
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+
+    trie.remove_prefix(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(5).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    );
+
+    assert_eq!(trie.len(), 1);
+    assert!(trie
+        .node(
+            [
+                Nibble::try_from(1).unwrap(),
+                Nibble::try_from(2).unwrap(),
+                Nibble::try_from(3).unwrap(),
+            ]
+            .iter()
+            .cloned(),
+        )
+        .into_occupied()
+        .unwrap()
+        .has_storage_value());
+}
+
+#[test]
+fn remove_prefix_nothing_to_remove() {
+    let mut trie = TrieStructure::new();
+
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+
+    trie.remove_prefix(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+            Nibble::try_from(4).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    );
+
+    assert_eq!(trie.len(), 1);
+    assert!(trie
+        .node(
+            [
+                Nibble::try_from(1).unwrap(),
+                Nibble::try_from(2).unwrap(),
+                Nibble::try_from(3).unwrap(),
+            ]
+            .iter()
+            .cloned(),
+        )
+        .into_occupied()
+        .unwrap()
+        .has_storage_value());
+}
+
+#[test]
 fn fuzzing() {
     fn uniform_sample(min: u8, max: u8) -> u8 {
         Uniform::new_inclusive(min, max).sample(&mut rand::thread_rng())
     }
 
-    // We run the test a couple times because of randomness.
-    for _ in 0..16 {
+    // We run the test multiple times because of randomness.
+    for _ in 0..256 {
         // Generate a set of keys that will find themselves in the tries in the end.
         let final_storage: HashSet<Vec<Nibble>> = {
             let mut list = vec![Vec::new()];
@@ -353,9 +634,16 @@ fn fuzzing() {
         // Create multiple tries, each with a different order of insertion for the nodes.
         let mut tries = Vec::new();
         for _ in 0..16 {
+            #[derive(Debug, Copy, Clone)]
+            enum Op {
+                Insert,
+                Remove,
+                ClearPrefix,
+            }
+
             let mut operations = final_storage
                 .iter()
-                .map(|k| (k.clone(), true))
+                .map(|k| (k.clone(), Op::Insert))
                 .collect::<Vec<_>>();
             operations.shuffle(&mut rand::thread_rng());
 
@@ -379,30 +667,80 @@ fn fuzzing() {
                     Uniform::new_inclusive(0, max_remove_index).sample(&mut rand::thread_rng());
                 let insert_index =
                     Uniform::new_inclusive(0, remove_index).sample(&mut rand::thread_rng());
-                operations.insert(remove_index, (base_key.clone(), false));
-                operations.insert(insert_index, (base_key, true));
+                operations.insert(remove_index, (base_key.clone(), Op::Remove));
+                operations.insert(insert_index, (base_key, Op::Insert));
+            }
+
+            // Insert in `operations` a tuple of multiple insertions of the same prefix, and
+            // removal of said prefix.
+            for _ in 0..uniform_sample(0, 4) {
+                let mut base_key = match operations.choose(&mut rand::thread_rng()) {
+                    Some(op) => op.0.clone(),
+                    None => continue,
+                };
+
+                for _ in 0..uniform_sample(0, 2) {
+                    base_key.push(Nibble::try_from(uniform_sample(0, 15)).unwrap());
+                }
+
+                let max_remove_index = operations
+                    .iter()
+                    .position(|(k, _)| k.starts_with(&base_key))
+                    .unwrap_or(operations.len());
+
+                let mut remove_index =
+                    Uniform::new_inclusive(0, max_remove_index).sample(&mut rand::thread_rng());
+                operations.insert(remove_index, (base_key.clone(), Op::ClearPrefix));
+
+                for _ in 0..uniform_sample(0, 12) {
+                    let mut base_key = base_key.clone();
+                    for _ in 0..uniform_sample(0, 8) {
+                        base_key.push(Nibble::try_from(uniform_sample(0, 15)).unwrap());
+                    }
+
+                    if operations
+                        .iter()
+                        .take(remove_index)
+                        .any(|(k, _)| *k == base_key)
+                    {
+                        continue;
+                    }
+
+                    let insert_index =
+                        Uniform::new_inclusive(0, remove_index).sample(&mut rand::thread_rng());
+                    operations.insert(insert_index, (base_key, Op::Insert));
+                    remove_index += 1;
+                }
             }
 
             // Create a trie and applies `operations` on it.
             let mut trie = TrieStructure::new();
-            for (key, insert) in operations {
-                if insert {
-                    match trie.node(key.into_iter()) {
+            for (op_index, (key, op)) in operations.clone().into_iter().enumerate() {
+                match op {
+                    Op::Insert => match trie.node(key.into_iter()) {
                         super::Entry::Vacant(e) => {
                             e.insert_storage_value().insert((), ());
                         }
                         super::Entry::Occupied(super::NodeAccess::Branch(e)) => {
                             e.insert_storage_value();
                         }
-                        super::Entry::Occupied(super::NodeAccess::Storage(_)) => unreachable!(),
-                    }
-                } else {
-                    match trie.node(key.into_iter()) {
+                        super::Entry::Occupied(super::NodeAccess::Storage(_)) => {
+                            unreachable!("index: {}\nops:{:?}", op_index, operations)
+                        }
+                    },
+                    Op::Remove => match trie.node(key.into_iter()) {
                         super::Entry::Occupied(super::NodeAccess::Storage(e)) => {
                             e.remove();
                         }
-                        super::Entry::Vacant(_) => unreachable!(),
-                        super::Entry::Occupied(super::NodeAccess::Branch(_)) => unreachable!(),
+                        super::Entry::Vacant(_) => {
+                            unreachable!("index: {}\nops:{:?}", op_index, operations)
+                        }
+                        super::Entry::Occupied(super::NodeAccess::Branch(_)) => {
+                            unreachable!("index: {}\nops:{:?}", op_index, operations)
+                        }
+                    },
+                    Op::ClearPrefix => {
+                        trie.remove_prefix(key.into_iter());
                     }
                 }
             }
@@ -415,4 +753,32 @@ fn fuzzing() {
             tries[0].structure_equal(&tries[trie]);
         }
     }
+}
+
+#[test]
+fn iter_properly_traverses() {
+    let mut trie = TrieStructure::new();
+
+    // Fill the trie with entries with randomly generated keys.
+    for _ in 0..Uniform::new_inclusive(0, 32).sample(&mut rand::thread_rng()) {
+        let mut key = Vec::new();
+        for _ in 0..Uniform::new_inclusive(0, 12).sample(&mut rand::thread_rng()) {
+            key.push(
+                Nibble::try_from(Uniform::new_inclusive(0, 15).sample(&mut rand::thread_rng()))
+                    .unwrap(),
+            );
+        }
+
+        match trie.node(key.into_iter()) {
+            super::Entry::Vacant(e) => {
+                e.insert_storage_value().insert((), ());
+            }
+            super::Entry::Occupied(super::NodeAccess::Branch(e)) => {
+                e.insert_storage_value();
+            }
+            super::Entry::Occupied(super::NodeAccess::Storage(_)) => {}
+        }
+    }
+
+    assert_eq!(trie.all_nodes_ordered().count(), trie.nodes.len());
 }

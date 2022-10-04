@@ -1,5 +1,5 @@
 # Smoldot
-# Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+# Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 # SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 #
 # This program is free software: you can redistribute it and/or modify
@@ -25,21 +25,19 @@ on:
 
 jobs:
   build-push-docker-image:
-    name: Build and push Docker image
     runs-on: ubuntu-latest
     steps:
-    - uses: docker/setup-qemu-action@v1
-    - uses: docker/setup-buildx-action@v1
-    - uses: actions/checkout@v2.3.4
-    - name: Login to DockerHub
-      uses: docker/login-action@v1 
+    - uses: docker/setup-qemu-action@v2
+    - uses: docker/setup-buildx-action@v2
+    - uses: actions/checkout@v3
+    - uses: docker/login-action@v2 
       # This `if` adds an additional safety against accidental pushes.
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       with:
         registry: docker.pkg.github.com
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    - uses: docker/build-push-action@v2.7.0
+    - uses: docker/build-push-action@v3.1.1
       with:
         context: .
         file: ./bin/full-node/Dockerfile
@@ -51,12 +49,12 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.61
     steps:
-      - uses: actions/checkout@v2.3.4
-      - uses: actions/setup-node@v2.4.0
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3.5.0
         with:
-          node-version: 12
+          node-version: 12   # An old version is intentionally used in order to check compatibility
       - run: apt-get update && apt install -y binaryen # For `wasm-opt`
       - uses: actions-rs/toolchain@v1
         with:
@@ -77,29 +75,50 @@ jobs:
           package: ./bin/wasm-node/javascript/package.json
           access: public
 
-  # TODO: this stage is planned to be removed once smoldot is published on crates.io and its doc available on docs.rs
-  deploy-gh-pages:
+  deno-publish:
     runs-on: ubuntu-latest
-    container:
-      image: rust
+    # This action checks if a certain git tag exists. If not, it compiles the JavaScript package,
+    # then commits the compilation artifacts, tags the commit, and pushes the tag.
     steps:
-    - uses: actions/checkout@v2.3.4
-    - uses: Swatinem/rust-cache@v1
-      with:
-        key: docs
-    - run: cargo doc --verbose --workspace --all-features --no-deps
-    - uses: crazy-max/ghaction-github-pages@v2
-      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      with:
-        target_branch: gh-pages
-        build_dir: target/doc
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0   # Necessary below for checking if the tag exists.
+      - uses: actions/setup-node@v3.5.0
+        with:
+          node-version: 12
+      - uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
+      - run: sudo apt-get update && sudo apt install -y binaryen # For `wasm-opt`
+      - uses: actions-rs/toolchain@v1
+        with:
+          # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
+          toolchain: stable
+          profile: minimal
+      - uses: Swatinem/rust-cache@v1
+      - id: compute-tag  # Compute the tag that we might push.
+        run: echo "::set-output name=tag::light-js-deno-v`jq -r .version ./bin/wasm-node/javascript/package.json`"
+      - id: check-tag-exists  # Check whether the tag already exists.
+        run: echo "::set-output name=num-existing::`git tag -l | grep ${{ steps.compute-tag.outputs.tag }} | wc -l`"
+      - run: npm install
+        working-directory: ./bin/wasm-node/javascript
+      - run: npm publish --unsafe-perm --dry-run
+        working-directory: ./bin/wasm-node/javascript
+      - run: |
+          git add --force ./bin/wasm-node/javascript/dist/mjs  # --force bypasses the .gitignore
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git commit -m "Deno version publishing"
+      - run: |
+          git tag ${{ steps.compute-tag.outputs.tag }}
+        if: ${{ steps.check-tag-exists.outputs.num-existing == 0 }}
+      - run: git push origin ${{ steps.compute-tag.outputs.tag }}
+        if: ${{ steps.check-tag-exists.outputs.num-existing == 0 && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [build-push-docker-image, npm-publish, deploy-gh-pages]
+    needs: [build-push-docker-image, npm-publish, deno-publish]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success

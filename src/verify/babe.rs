@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -46,7 +46,7 @@
 //!
 //! The first epoch (epoch number 0) starts at `slot_number(block #1)` and ends at
 //! `slot_number(block #1) + slots_per_epoch`. The second epoch (epoch #1) starts at slot
-//! `end_of_epoch_1 + 1`. All epochs end at `start_of_new_epoch + slots_per_epoch`. Block #0
+//! `end_of_epoch_0 + 1`. All epochs end at `start_of_new_epoch + slots_per_epoch`. Block #0
 //! doesn't belong to any epoch.
 //!
 //! The header of first block produced after a transition to a new epoch (including block #1) must
@@ -61,7 +61,7 @@
 //!
 //! In order to produce a block, one must generate, using a
 //! [VRF (Verifiable Random Function)](https://en.wikipedia.org/wiki/Verifiable_random_function),
-//! and based on the slot number, genesis hash, and aformentioned "randomness value",
+//! and based on the slot number, genesis hash, and aforementioned "randomness value",
 //! a number whose value is lower than a certain threshold.
 //!
 //! The number that has been generated must be included in the header of the authored block,
@@ -69,7 +69,7 @@
 //! public keys allowed to generate blocks in that epoch. The weight associated to that public key
 //! determines the allowed threshold.
 //!
-//! The "randomess value" of an epoch `N` is calculated by combining the generated numbers of all
+//! The "randomness value" of an epoch `N` is calculated by combining the generated numbers of all
 //! the blocks of the epoch `N - 2`.
 //!
 //! ## Secondary slots
@@ -118,7 +118,7 @@
 //! determined by performing runtime calls.
 //!
 //! Any time verifying a block produces a `Some` in [`VerifySuccess::epoch_transition_target`],
-//! which is guarateed to be the case when verifying block number 1, an epoch transition occurs.
+//! which is guaranteed to be the case when verifying block number 1, an epoch transition occurs.
 //! When verifying a child of such block, the value formerly passed as
 //! [`VerifyConfig::parent_block_next_epoch`] must now be passed as
 //! [`VerifyConfig::parent_block_epoch`], and the value in
@@ -131,13 +131,16 @@
 
 use crate::{chain::chain_information, header};
 
-use core::{convert::TryFrom as _, num::NonZeroU64, time::Duration};
+use core::{num::NonZeroU64, time::Duration};
 use num_traits::{cast::ToPrimitive as _, identities::One as _};
 
 /// Configuration for [`verify_header`].
 pub struct VerifyConfig<'a> {
     /// Header of the block to verify.
     pub header: header::HeaderRef<'a>,
+
+    /// Number of bytes used to encode the block number in the header.
+    pub block_number_bytes: usize,
 
     /// Header of the parent of the block to verify.
     ///
@@ -156,9 +159,15 @@ pub struct VerifyConfig<'a> {
 
     /// Epoch the parent block belongs to. Must be `None` if and only if the parent block's number
     /// is 0, as block #0 doesn't belong to any epoch.
+    ///
+    /// If `Some`, then the [`chain_information::BabeEpochInformationRef::start_slot_number`]
+    /// must be `Some`.
     pub parent_block_epoch: Option<chain_information::BabeEpochInformationRef<'a>>,
 
     /// Epoch that follows the epoch the parent block belongs to.
+    ///
+    /// The [`chain_information::BabeEpochInformationRef::start_slot_number`] must be `None` if
+    /// and only if the [`chain_information::BabeEpochInformationRef::epoch_index`] is `0`.
     pub parent_block_next_epoch: chain_information::BabeEpochInformationRef<'a>,
 }
 
@@ -176,6 +185,8 @@ pub struct VerifySuccess {
     /// provided as [`VerifyConfig::parent_block_next_epoch`], and the value previously in
     /// [`VerifyConfig::parent_block_next_epoch`] must instead be passed as
     /// [`VerifyConfig::parent_block_epoch`].
+    ///
+    /// The new epoch information is guaranteed to be valid.
     pub epoch_transition_target: Option<chain_information::BabeEpochInformation>,
 }
 
@@ -194,6 +205,10 @@ pub enum VerifyError {
     UnexpectedEpochChangeLog,
     /// Block is the first block after a new epoch, but it is missing an epoch change digest log.
     MissingEpochChangeLog,
+    /// The header contains an epoch change that would put the Babe configuration in an
+    /// non-sensical state.
+    #[display(fmt = "Invalid Babe epoch change found in header: {}", _0)]
+    InvalidBabeParametersChange(chain_information::BabeValidityError),
     /// Authority index stored within block is out of range.
     InvalidAuthorityIndex,
     /// Block header signature is invalid.
@@ -262,7 +277,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
             curr.epoch_index.checked_add(1).unwrap(),
             config.parent_block_next_epoch.epoch_index
         );
-        assert_eq!(curr.epoch_index == 0, curr.start_slot_number.is_none());
+        assert!(curr.start_slot_number.is_some());
         assert!(curr.start_slot_number <= parent_slot_number);
     } else {
         assert_eq!(config.parent_block_next_epoch.epoch_index, 0);
@@ -365,6 +380,13 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
         }),
     };
 
+    // Make sure that the header wouldn't put Babe in a non-sensical state.
+    if let Some(epoch_transition_target) = &epoch_transition_target {
+        if let Err(err) = epoch_transition_target.validate() {
+            return Err(VerifyError::InvalidBabeParametersChange(err));
+        }
+    }
+
     // The signature in the seal applies to the header from where the signature isn't present.
     // Build the hash that is expected to be signed.
     // The signature cannot be verified yet, as the public key of the signer isn't known.
@@ -372,7 +394,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
         let mut unsealed_header = config.header;
         let _popped = unsealed_header.digest.pop_seal();
         debug_assert!(matches!(_popped, Some(header::Seal::Babe(_))));
-        unsealed_header.hash()
+        unsealed_header.hash(config.block_number_bytes)
     };
 
     // Fetch the authority that has supposedly signed the block.
@@ -470,7 +492,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
 ///
 /// The value of `c` can be found in the current Babe configuration.
 ///
-/// `authorities_weights` must be the list of all weights of all autorities.
+/// `authorities_weights` must be the list of all weights of all authorities.
 /// `authority_weight` must be the weight of the authority whose threshold to calculate.
 ///
 /// # Panic

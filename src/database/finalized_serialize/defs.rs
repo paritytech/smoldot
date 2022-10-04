@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -26,6 +26,7 @@ use hashbrown::HashMap;
 /// Error that can happen when deserializing the data.
 #[derive(Debug, derive_more::Display)]
 pub(super) enum DeserializeError {
+    #[display(fmt = "Failed to decode header: {}", _0)]
     Header(header::Error),
     ConsensusAlgorithmsMismatch,
     /// Some Babe-related information is missing.
@@ -42,6 +43,7 @@ pub(super) enum SerializedChainInformation {
 impl SerializedChainInformation {
     pub(super) fn decode(
         self,
+        block_number_bytes: usize,
     ) -> Result<
         (
             chain_information::ChainInformation,
@@ -50,7 +52,7 @@ impl SerializedChainInformation {
         DeserializeError,
     > {
         Ok(match self {
-            SerializedChainInformation::V1(from) => from.decode()?,
+            SerializedChainInformation::V1(from) => from.decode(block_number_bytes)?,
         })
     }
 }
@@ -86,16 +88,17 @@ pub(super) struct SerializedChainInformationV1 {
 impl SerializedChainInformationV1 {
     pub(super) fn new(
         from: chain_information::ChainInformationRef<'_>,
+        block_number_bytes: usize,
         finalized_storage: Option<impl Iterator<Item = (impl AsRef<[u8]>, impl AsRef<[u8]>)>>,
     ) -> Self {
         SerializedChainInformationV1 {
-            finalized_block_header: from.finalized_block_header.scale_encoding().fold(
-                Vec::new(),
-                |mut a, b| {
+            finalized_block_header: from
+                .finalized_block_header
+                .scale_encoding(block_number_bytes)
+                .fold(Vec::new(), |mut a, b| {
                     a.extend_from_slice(b.as_ref());
                     a
-                },
-            ),
+                }),
             aura_slot_duration: if let chain_information::ChainInformationConsensusRef::Aura {
                 slot_duration,
                 ..
@@ -189,6 +192,7 @@ impl SerializedChainInformationV1 {
 impl SerializedChainInformationV1 {
     pub(super) fn decode(
         self,
+        block_number_bytes: usize,
     ) -> Result<
         (
             chain_information::ChainInformation,
@@ -233,9 +237,12 @@ impl SerializedChainInformationV1 {
         };
 
         let chain_info = chain_information::ChainInformation {
-            finalized_block_header: header::decode(&self.finalized_block_header)
-                .map_err(DeserializeError::Header)?
-                .into(),
+            finalized_block_header: header::decode(
+                &self.finalized_block_header,
+                block_number_bytes,
+            )
+            .map_err(DeserializeError::Header)?
+            .into(),
             consensus,
             finality: if let Some(set_id) = self.grandpa_after_finalized_block_authorities_set_id {
                 chain_information::ChainInformationFinality::Grandpa {
@@ -263,7 +270,10 @@ impl SerializedChainInformationV1 {
             },
         };
 
-        // TODO: consider checking integrity of the storage against the header
+        // We could in principle check the integrity of the storage against the state root hash
+        // in the header. However, doing so would require obtaining the state version from the
+        // runtime, which would be very CPU intensive. Checking the integrity of the storage isn't
+        // a bad idea, but it would be inappropriate to do so in the decoding code.
         let finalized_storage = self.finalized_storage.map(|storage| {
             storage
                 .into_iter()
@@ -493,7 +503,7 @@ fn serialize_bytes<S: serde::Serializer>(data: &[u8], serializer: S) -> Result<S
     impl<'a> fmt::Display for Writer<'a> {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             for byte in self.0 {
-                write!(f, "{:02x}", byte)?
+                write!(f, "{:02x}", byte)?;
             }
             Ok(())
         }

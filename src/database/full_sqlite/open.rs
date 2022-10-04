@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -22,7 +22,7 @@
 use super::{encode_babe_epoch_information, AccessError, SqliteFullDatabase};
 use crate::chain::chain_information;
 
-use std::{convert::TryFrom as _, fs, path::Path};
+use std::{fs, path::Path};
 
 /// Opens the database using the given [`Config`].
 ///
@@ -198,8 +198,9 @@ CREATE TABLE IF NOT EXISTS aura_finalized_authorities(
     let is_empty = {
         let mut statement = database
             .prepare("SELECT COUNT(*) FROM meta WHERE key = ?")
+            .unwrap()
+            .bind(1, "best")
             .unwrap();
-        statement.bind(1, "best").unwrap();
         statement.next().unwrap();
         statement.read::<i64>(0).unwrap() == 0
     };
@@ -210,9 +211,13 @@ CREATE TABLE IF NOT EXISTS aura_finalized_authorities(
     Ok(if !is_empty {
         DatabaseOpen::Open(SqliteFullDatabase {
             database: parking_lot::Mutex::new(database),
+            block_number_bytes: config.block_number_bytes, // TODO: consider storing this value in the DB and check it when opening
         })
     } else {
-        DatabaseOpen::Empty(DatabaseEmpty { database })
+        DatabaseOpen::Empty(DatabaseEmpty {
+            database,
+            block_number_bytes: config.block_number_bytes,
+        })
     })
 }
 
@@ -221,6 +226,9 @@ CREATE TABLE IF NOT EXISTS aura_finalized_authorities(
 pub struct Config<'a> {
     /// Type of database.
     pub ty: ConfigTy<'a>,
+
+    /// Number of bytes used to encode the block number.
+    pub block_number_bytes: usize,
 }
 
 /// Type of database.
@@ -249,6 +257,9 @@ pub enum DatabaseOpen {
 pub struct DatabaseEmpty {
     /// See the similar field in [`SqliteFullDatabase`].
     database: sqlite::Connection,
+
+    /// See the similar field in [`SqliteFullDatabase`].
+    block_number_bytes: usize,
 }
 
 impl DatabaseEmpty {
@@ -265,11 +276,13 @@ impl DatabaseEmpty {
     ) -> Result<SqliteFullDatabase, AccessError> {
         let chain_information = chain_information.into();
 
-        let finalized_block_hash = chain_information.finalized_block_header.hash();
+        let finalized_block_hash = chain_information
+            .finalized_block_header
+            .hash(self.block_number_bytes);
 
         let scale_encoded_finalized_block_header = chain_information
             .finalized_block_header
-            .scale_encoding()
+            .scale_encoding(self.block_number_bytes)
             .fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
@@ -280,11 +293,10 @@ impl DatabaseEmpty {
                 .database
                 .prepare("INSERT INTO finalized_storage_top_trie(key, value) VALUES(?, ?)")
                 .unwrap();
-            for (key, value) in finalized_block_storage_top_trie_entries.clone() {
-                statement.bind(1, key).unwrap();
-                statement.bind(2, value).unwrap();
+            for (key, value) in finalized_block_storage_top_trie_entries {
+                statement = statement.bind(1, key).unwrap().bind(2, value).unwrap();
                 statement.next().unwrap();
-                statement.reset().unwrap();
+                statement = statement.reset().unwrap();
             }
         }
 
@@ -294,23 +306,22 @@ impl DatabaseEmpty {
                 .prepare(
                     "INSERT INTO blocks(hash, number, header, justification) VALUES(?, ?, ?, ?)",
                 )
-                .unwrap();
-            statement.bind(1, &finalized_block_hash[..]).unwrap();
-            statement
+                .unwrap()
+                .bind(1, &finalized_block_hash[..])
+                .unwrap()
                 .bind(
                     2,
                     i64::try_from(chain_information.finalized_block_header.number).unwrap(),
                 )
-                .unwrap();
-            statement
+                .unwrap()
                 .bind(3, &scale_encoded_finalized_block_header[..])
                 .unwrap();
             if let Some(finalized_block_justification) = &finalized_block_justification {
-                statement
+                statement = statement
                     .bind(4, &finalized_block_justification[..])
                     .unwrap();
             } else {
-                statement.bind(4, ()).unwrap();
+                statement = statement.bind(4, ()).unwrap();
             }
             statement.next().unwrap();
         }
@@ -321,11 +332,15 @@ impl DatabaseEmpty {
                 .prepare("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES(?, ?, ?)")
                 .unwrap();
             for (index, item) in finalized_block_body.enumerate() {
-                statement.bind(1, &finalized_block_hash[..]).unwrap();
-                statement.bind(2, i64::try_from(index).unwrap()).unwrap();
-                statement.bind(3, item).unwrap();
+                statement = statement
+                    .bind(1, &finalized_block_hash[..])
+                    .unwrap()
+                    .bind(2, i64::try_from(index).unwrap())
+                    .unwrap()
+                    .bind(3, item)
+                    .unwrap();
                 statement.next().unwrap();
-                statement.reset().unwrap();
+                statement = statement.reset().unwrap();
             }
         }
 
@@ -356,15 +371,15 @@ impl DatabaseEmpty {
                     .prepare("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                     .unwrap();
                 for (index, item) in finalized_triggered_authorities.iter().enumerate() {
-                    statement
-                        .bind(1, i64::from_ne_bytes(index.to_ne_bytes()))
-                        .unwrap();
-                    statement.bind(2, &item.public_key[..]).unwrap();
-                    statement
+                    statement = statement
+                        .bind(1, i64::try_from(index).unwrap())
+                        .unwrap()
+                        .bind(2, &item.public_key[..])
+                        .unwrap()
                         .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
                         .unwrap();
                     statement.next().unwrap();
-                    statement.reset().unwrap();
+                    statement = statement.reset().unwrap();
                 }
 
                 if let Some((height, list)) = finalized_scheduled_change {
@@ -376,22 +391,22 @@ impl DatabaseEmpty {
                         .prepare("INSERT INTO grandpa_scheduled_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                         .unwrap();
                     for (index, item) in list.iter().enumerate() {
-                        statement
-                            .bind(1, i64::from_ne_bytes(index.to_ne_bytes()))
-                            .unwrap();
-                        statement.bind(2, &item.public_key[..]).unwrap();
-                        statement
+                        statement = statement
+                            .bind(1, i64::try_from(index).unwrap())
+                            .unwrap()
+                            .bind(2, &item.public_key[..])
+                            .unwrap()
                             .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
                             .unwrap();
                         statement.next().unwrap();
-                        statement.reset().unwrap();
+                        statement = statement.reset().unwrap();
                     }
                 }
             }
         }
 
         match &chain_information.consensus {
-            chain_information::ChainInformationConsensusRef::AllAuthorized => {}
+            chain_information::ChainInformationConsensusRef::Unknown => {}
             chain_information::ChainInformationConsensusRef::Aura {
                 finalized_authorities_list,
                 slot_duration,
@@ -404,12 +419,13 @@ impl DatabaseEmpty {
                     .prepare("INSERT INTO aura_finalized_authorities(idx, public_key) VALUES(?, ?)")
                     .unwrap();
                 for (index, item) in finalized_authorities_list.clone().enumerate() {
-                    statement
-                        .bind(1, i64::from_ne_bytes(index.to_ne_bytes()))
+                    statement = statement
+                        .bind(1, i64::try_from(index).unwrap())
+                        .unwrap()
+                        .bind(2, &item.public_key[..])
                         .unwrap();
-                    statement.bind(2, &item.public_key[..]).unwrap();
                     statement.next().unwrap();
-                    statement.reset().unwrap();
+                    statement = statement.reset().unwrap();
                 }
             }
             chain_information::ChainInformationConsensusRef::Babe {
@@ -442,6 +458,7 @@ impl DatabaseEmpty {
 
         Ok(SqliteFullDatabase {
             database: parking_lot::Mutex::new(self.database),
+            block_number_bytes: self.block_number_bytes,
         })
     }
 }

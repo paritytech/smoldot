@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -82,7 +82,7 @@ pub struct VerifyProofConfig<'a, I> {
 ///
 /// Returns an error if the proof couldn't be verified.
 /// If the proof could be verified and the key has an associated storage value, `Ok(Some(_))` is
-/// returned, containining that storage value.
+/// returned, containing that storage value.
 /// If the proof could be verified but the key does not have an associated storage value,
 /// `Ok(None)` is returned.
 ///
@@ -92,12 +92,27 @@ pub struct VerifyProofConfig<'a, I> {
 pub fn verify_proof<'a, 'b>(
     config: VerifyProofConfig<'a, impl Iterator<Item = &'b [u8]> + Clone>,
 ) -> Result<Option<&'b [u8]>, Error> {
-    Ok(trie_node_info(TrieNodeInfoConfig {
+    match trie_node_info(TrieNodeInfoConfig {
         requested_key: nibble::bytes_to_nibbles(config.requested_key.iter().cloned()),
         trie_root_hash: config.trie_root_hash,
         proof: config.proof,
     })?
-    .storage_value)
+    .storage_value
+    {
+        StorageValue::None => Ok(None),
+        StorageValue::Known(v) => Ok(Some(v)),
+        StorageValue::HashKnownValueMissing(_) => {
+            // Considering that this function is specifically about obtaining the storage value
+            // of an item, if this storage item is missing we indicate that the proof is
+            // incomplete.
+            Err(Error::MissingProofEntry {
+                closest_ancestor_nibbles: {
+                    // Length of the requested key, in nibbles.
+                    config.requested_key.len() * 2
+                },
+            })
+        }
+    }
 }
 
 /// Configuration to pass to [`trie_node_info`].
@@ -129,7 +144,7 @@ pub struct TrieNodeInfoConfig<'a, K, I> {
 /// >           Only the minimum amount of information required is fetched from `proof`, and an
 /// >           error is returned if a problem happens during this process.
 pub fn trie_node_info<'a, 'b>(
-    config: TrieNodeInfoConfig<
+    mut config: TrieNodeInfoConfig<
         'a,
         impl Iterator<Item = nibble::Nibble> + Clone,
         impl Iterator<Item = &'b [u8]> + Clone,
@@ -152,8 +167,9 @@ pub fn trie_node_info_non_compact<'a, 'b>(
         impl Iterator<Item = &'b [u8]> + Clone,
     >,
 ) -> Result<TrieNodeInfo<'b>, Error> {
-    // The proof contains node values, while Merkle values will be needed. Create a list of
-    // Merkle values, one per entry in `config.proof`.
+    // A proof contains two types of items: trie node values, and standalone storage items. In
+    // both cases, we will later need a hashed version of them. Create a list of hashes, one per
+    // entry in `config.proof`.
     let merkle_values = config
         .proof
         .clone()
@@ -162,10 +178,10 @@ pub fn trie_node_info_non_compact<'a, 'b>(
                 blake2_rfc::blake2b::blake2b(32, &[], proof_entry)
                     .as_bytes()
                     .iter()
-                    .cloned()
+                    .copied()
                     .collect()
             } else {
-                proof_entry.iter().cloned().collect()
+                proof_entry.iter().copied().collect()
             }
         })
         .collect::<Vec<_>>();
@@ -193,13 +209,13 @@ pub fn trie_node_info_non_compact<'a, 'b>(
             match expected_nibbles_iter.next() {
                 None => {
                     return Ok(TrieNodeInfo {
-                        storage_value: None,
+                        storage_value: StorageValue::None,
                         children: Children::One(nibble),
                     });
                 }
                 Some(n) if n != nibble => {
                     return Ok(TrieNodeInfo {
-                        storage_value: None,
+                        storage_value: StorageValue::None,
                         children: Children::None,
                     });
                 }
@@ -218,7 +234,7 @@ pub fn trie_node_info_non_compact<'a, 'b>(
                 None => {
                     // No child with the requested index exists.
                     return Ok(TrieNodeInfo {
-                        storage_value: None,
+                        storage_value: StorageValue::None,
                         children: Children::None,
                     });
                 }
@@ -337,9 +353,23 @@ pub fn trie_node_info_compact<'a, 'b>(
                 node_value = child;
             }
         } else {
-            // The current node (as per `proof_iter`) exactly matches the requested key.
+            // The current node (i.e. `node_value`) exactly matches the requested key.
             return Ok(TrieNodeInfo {
-                storage_value: decoded_node_value.storage_value,
+                storage_value: match decoded_node_value.storage_value {
+                    proof_node_decode::StorageValue::Hashed(hash) => {
+                        // If the node contains a hash, the un-hashed value should also be found
+                        // in the proof as a standalone item.
+                        match merkle_values.iter().position(|v| v[..] == *hash) {
+                            None => StorageValue::HashKnownValueMissing(hash),
+                            Some(idx) => {
+                                let value = config.proof.nth(idx).unwrap();
+                                StorageValue::Known(value)
+                            }
+                        }
+                    }
+                    proof_node_decode::StorageValue::Unhashed(v) => StorageValue::Known(v),
+                    proof_node_decode::StorageValue::None => StorageValue::None,
+                },
                 children: Children::Multiple {
                     children_bitmap: decoded_node_value.children_bitmap(),
                 },
@@ -351,9 +381,20 @@ pub fn trie_node_info_compact<'a, 'b>(
 /// Information about a node of the trie.
 pub struct TrieNodeInfo<'a> {
     /// Storage value of the node, if any.
-    pub storage_value: Option<&'a [u8]>,
+    pub storage_value: StorageValue<'a>,
     /// Which children the node has.
     pub children: Children,
+}
+
+/// Storage value of the node.
+pub enum StorageValue<'a> {
+    /// The storage value was found in the proof. Contains the value.
+    Known(&'a [u8]),
+    /// The hash of the storage value was found, but the un-hashed value wasn't in the proof. This
+    /// indicates an incomplete proof.
+    HashKnownValueMissing(&'a [u8; 32]),
+    /// The node doesn't have a storage value.
+    None,
 }
 
 /// See [`TrieNodeInfo::children`].
@@ -402,7 +443,6 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use core::convert::TryFrom as _;
 
     #[test]
     fn basic_works() {

@@ -2,19 +2,45 @@ Lightweight Substrate and Polkadot client.
 
 # Introduction
 
-`smoldot` is a prototype of an alternative client of [Substrate](https://github.com/paritytech/substrate)-based chains, including [Polkadot](https://github.com/paritytech/polkadot/).
+`smoldot` is an alternative client of [Substrate](https://github.com/paritytech/substrate)-based chains, including [Polkadot](https://github.com/paritytech/polkadot/).
+
+There exists two clients: the full client and the wasm light node.
+The full client is currently a work in progress and doesn't support many features that the official client supports.
+
+The main development focus is currently around the wasm light node. Using https://github.com/polkadot-js/api/ and https://github.com/paritytech/substrate-connect/ (which uses smoldot as an implementation detail), one can easily connect to a chain and interact in a fully trust-less way with it, from JavaScript.
+
+The Wasm light node is published:
+
+- On NPM: <https://www.npmjs.com/package/@substrate/smoldot-light>
+- On Deno.land/x: <https://deno.land/x/smoldot> (URL to import: `https://deno.land/x/smoldot/index-deno.js`)
+
+# Objectives
+
+There exists multiple objectives behind this repository:
+
+- Write a client implementation that is as comprehensive as possible, to make it easier to understand the various components of a Substrate/Polkadot client. A large emphasis is put on documentation.
+- Implement a client that is lighter than Substrate, in terms of memory consumption, number of threads, and code size, in order to compile it to WebAssembly and distribute it in web pages.
+- Experiment with a new code architecture, to maybe upstream some components to Substrate and Polkadot.
+
+# Trade-offs
 
 In order to simplify the code, two main design decisions have been made compared to Substrate:
 
 - No native runtime. The execution time of the `wasmtime` library is satisfying enough that having a native runtime isn't critical anymore.
 
-- No pluggable architecture. `smoldot` supports a certain hardcoded list of consensus algorithms, at the moment Babe, Aura, and GrandPa. Support for other algorithms can only be added by modifying the code of smoldot, and it is not possible to plug a custom algorithm from outside.
+- No pluggable architecture. `smoldot` supports a certain hard coded list of consensus algorithms, at the moment Babe, Aura, and GrandPa. Support for other algorithms can only be added by modifying the code of smoldot, and it is not possible to plug a custom algorithm from outside.
 
-There exists two clients: the full client and the wasm light node.
+# Building manually
 
-The main development focus is currently around the wasm light node. Using https://github.com/polkadot-js/api/ and https://github.com/paritytech/substrate-connect/ (which uses smoldot as an implementation detail), one can easily connect to a chain and interact in a fully trust-less way with it, from JavaScript.
+## Wasm light node
 
-### Full client
+In order to run the wasm light node, you must have installed [rustup](https://rustup.rs/).
+
+The wasm light node can be tested with `cd bin/wasm-node/javascript` and `npm install; npm start`. This will compile the smoldot wasm light node and start a WebSocket server capable of answering JSON-RPC requests. This demo will print a list of URLs that you can navigate to in order to connect to a certain chain. For example you can navigate to <https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestend> in order to interact with the Westend chain.
+
+> Note: The `npm start` command starts a small JavaScript shim, on top of the wasm light node, that hard codes the chain to Westend and starts the WebSocket server. The wasm light node itself can connect to a variety of different chains (not only Westend) and doesn't start any server.
+
+## Full client
 
 The full client is a binary similar to the official Polkadot client, and can be tested with `cargo run`.
 
@@ -25,45 +51,3 @@ The following list is a best-effort list of packages that must be available on t
 - `clang` or `gcc`
 - `pkg-config`
 - `sqlite`
-
-### Wasm light node
-
-Pre-requisite: in order to run the wasm light node, you must have installed [rustup](https://rustup.rs/).
-
-The wasm light node can be tested with `cd bin/wasm-node/javascript` and `npm start`. This will compile the smoldot wasm light node and start a WebSocket server capable of answering JSON-RPC requests. You can then navigate to <https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944> in order to interact with the Westend chain.
-
-> Note: The `npm start` command starts a small JavaScript shim, on top of the wasm light node, that hardcodes the chain to Westend and starts the WebSocket server. The wasm light node itself can connect to a variety of different chains (not only Westend) and doesn't start any server.
-
-The Wasm light node is published on NPM: https://www.npmjs.com/package/smoldot
-
-# Objectives
-
-There exists multiple objectives behind this repository:
-
-- Write a client implementation that is as comprehensive as possible, to make it easier to understand the various components of a Substrate/Polkadot client. A large emphasis is put on documentation, and the documentation of the `main` branch is automatically deployed [here](https://paritytech.github.io/smoldot/smoldot/index.html).
-- Implement a client that is lighter than Substrate, in terms of memory consumption, number of threads, and code size, in order to compile it to WebAssembly and distribute it in webpages.
-- Experiment with a new code architecture, to maybe upstream some components to Substrate and Polkadot.
-
-# Status
-
-As a quick overview, at the time of writing of this README, the following is supported:
-
-- Verifying Babe and Aura blocks.
-- "Executing" blocks, by calling `Core_execute_block`.
-- Verifying GrandPa justifications and GrandPa commit messages.
-- "Optimistic syncing", in other words syncing by assuming that there isn't any fork.
-- Verifying storage trie proofs.
-- The WebSocket JSON-RPC server is in progress, but its design is still changing.
-- An informant.
-- A telemetry client (mostly copy-pasted from Substrate and substrate-telemetry).
-- An unfinished new networking stack.
-- A transaction pool for light clients.
-- A SQLite database for the full client.
-
-The following isn't done yet:
-
-- Authoring blocks isn't supported.
-- Transaction pool for full nodes is non-functional.
-- GrandPa votes gossiping.
-- The changes trie isn't implemented (it is not enabled on Westend, Kusama and Polkadot at the moment).
-- A Prometheus server. While not difficult to implement, it seems a bit overkill to have one at the moment.

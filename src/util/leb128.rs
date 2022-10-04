@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -23,7 +23,7 @@
 //! See <https://en.wikipedia.org/wiki/LEB128>.
 
 use alloc::vec::Vec;
-use core::{cmp, convert::TryFrom as _, mem};
+use core::{cmp, mem};
 
 /// Returns an LEB128-encoded integer as a list of bytes.
 ///
@@ -49,7 +49,7 @@ pub fn encode(value: impl Into<u64>) -> impl ExactSizeIterator<Item = u8> + Clon
                 return Some(u8::try_from(self.value).unwrap());
             }
 
-            let ret = (1 << 7) | u8::try_from(self.value & 0b1111111).unwrap();
+            let ret = (1 << 7) | u8::try_from(self.value & 0b111_1111).unwrap();
             self.value >>= 7;
             Some(ret)
         }
@@ -71,8 +71,81 @@ pub fn encode(value: impl Into<u64>) -> impl ExactSizeIterator<Item = u8> + Clon
 /// Returns an LEB128-encoded `usize` as a list of bytes.
 ///
 /// See also [`encode`].
-pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> {
+pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> + Clone {
+    // `encode_usize` can leverage `encode` thanks to the property checked in this debug_assert.
+    debug_assert!(usize::BITS <= u64::BITS);
     encode(u64::try_from(value).unwrap())
+}
+
+/// Decodes a LEB128-encoded `usize`.
+///
+/// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
+/// >           the type of `E`. Use `nom::error::Error<&[u8]>`.
+pub(crate) fn nom_leb128_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], usize, E> {
+    // `nom_leb128_usize` can leverage `nom_leb128_u64` thanks to the property checked in this
+    // debug_assert.
+    debug_assert!(usize::BITS <= u64::BITS);
+    let (rest, value) = nom_leb128_u64(bytes)?;
+
+    let value = match usize::try_from(value) {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(nom::Err::Error(nom::error::make_error(
+                bytes,
+                nom::error::ErrorKind::LengthValue,
+            )));
+        }
+    };
+
+    Ok((rest, value))
+}
+
+/// Decodes a LEB128-encoded `u64`.
+///
+/// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
+/// >           the type of `E`. Use `nom::error::Error<&[u8]>`.
+pub(crate) fn nom_leb128_u64<'a, E: nom::error::ParseError<&'a [u8]>>(
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], u64, E> {
+    let mut out = 0u64;
+
+    for (n, byte) in bytes.iter().enumerate() {
+        if (7 * n) >= usize::try_from(u64::BITS).unwrap() {
+            return Err(nom::Err::Error(nom::error::make_error(
+                bytes,
+                nom::error::ErrorKind::LengthValue,
+            )));
+        }
+
+        match u64::from(*byte & 0b111_1111).checked_mul(1 << (7 * n)) {
+            Some(o) => out |= o,
+            None => {
+                return Err(nom::Err::Error(nom::error::make_error(
+                    bytes,
+                    nom::error::ErrorKind::LengthValue,
+                )))
+            }
+        };
+
+        if (*byte & 0x80) == 0 {
+            // We want to avoid LEB128 numbers such as `[0x81, 0x0]`.
+            if n >= 1 && *byte == 0x0 {
+                return Err(nom::Err::Error(nom::error::make_error(
+                    bytes,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+
+            return Ok((&bytes[(n + 1)..], out));
+        }
+    }
+
+    Err(nom::Err::Error(nom::error::make_error(
+        bytes,
+        nom::error::ErrorKind::Eof,
+    )))
 }
 
 // TODO: document all this below
@@ -102,7 +175,15 @@ impl FramedInProgress {
     pub fn new(max_len: usize) -> Self {
         FramedInProgress {
             max_len,
-            buffer: Vec::with_capacity(32), // Reserve enough for the length prefix.
+            buffer: Vec::with_capacity({
+                // If the `max_size` is reasonably small, just allocate enough for the message,
+                // otherwise reserve just enough for the length prefix.
+                if max_len <= 32 * 1024 {
+                    max_len
+                } else {
+                    4 * mem::size_of::<usize>()
+                }
+            }),
             inner: FramedInner::Length,
         }
     }
@@ -112,13 +193,25 @@ impl FramedInProgress {
             let mut out = 0usize;
 
             for (n, byte) in buffer.iter().enumerate() {
-                match usize::from(*byte & 0b1111111).checked_mul(1 << (7 * n)) {
+                if (7 * n) >= usize::try_from(usize::BITS).unwrap() {
+                    return Some(Err(FramedError::LengthPrefixTooLarge));
+                }
+
+                match usize::from(*byte & 0b111_1111).checked_mul(1 << (7 * n)) {
                     Some(o) => out |= o,
                     None => return Some(Err(FramedError::LengthPrefixTooLarge)),
                 };
 
                 if (*byte & 0x80) == 0 {
-                    assert_eq!(n, buffer.len() - 1);
+                    // Note: this assertion holds true because of the implementation of `update`
+                    // below.
+                    debug_assert_eq!(n, buffer.len() - 1);
+
+                    // We want to avoid LEB128 numbers such as `[0x81, 0x0]`.
+                    if n >= 1 && *byte == 0x0 {
+                        return Some(Err(FramedError::NonMinimalLengthPrefix));
+                    }
+
                     return Some(Ok(out));
                 }
             }
@@ -165,9 +258,8 @@ impl FramedInProgress {
 
                     if expected_len == self.buffer.len() {
                         return Ok((total_read, Framed::Finished(self.buffer)));
-                    } else {
-                        return Ok((total_read, Framed::InProgress(self)));
                     }
+                    return Ok((total_read, Framed::InProgress(self)));
                 }
             }
         }
@@ -179,6 +271,9 @@ impl FramedInProgress {
 pub enum FramedError {
     /// The variable-length prefix is too large and cannot possibly represent a valid size.
     LengthPrefixTooLarge,
+    /// The variable-length prefix doesn't use the minimum possible LEB128 representation of
+    /// this number.
+    NonMinimalLengthPrefix,
     /// Maximum length of the frame has been exceeded.
     #[display(
         fmt = "Maximum length of the frame ({}) has been exceeded",
@@ -194,7 +289,7 @@ pub enum FramedError {
 mod tests {
     #[test]
     fn basic_encode() {
-        let obtained = super::encode(0x123456789abcdefu64).collect::<Vec<_>>();
+        let obtained = super::encode(0x123_4567_89ab_cdef_u64).collect::<Vec<_>>();
         assert_eq!(obtained, &[239, 155, 175, 205, 248, 172, 209, 145, 1]);
     }
 
@@ -212,6 +307,14 @@ mod tests {
             let obtained = iter.count();
             assert_eq!(expected, obtained);
         }
+    }
+
+    #[test]
+    fn decode_large_value() {
+        // Carefully crafted LEB128 that overflows the left shift before overflowing the
+        // encoded size.
+        let encoded = (0..256).map(|_| 129).collect::<Vec<_>>();
+        assert!(super::nom_leb128_usize::<nom::error::Error<&[u8]>>(&encoded).is_err());
     }
 
     // TODO: more tests

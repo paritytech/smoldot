@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -48,7 +48,6 @@ fn handshake_basic_works() {
                             read_bytes: 0,
                             written_bytes: 0,
                             wake_up_after: None,
-                            wake_up_future: None,
                         };
                         handshake1 = nego.read_write(&mut read_write).unwrap();
                         let (read_bytes, written_bytes) =
@@ -65,7 +64,6 @@ fn handshake_basic_works() {
                             read_bytes: 0,
                             written_bytes: 0,
                             wake_up_after: None,
-                            wake_up_future: None,
                         };
                         handshake1 = nego.read_write(&mut read_write).unwrap();
                         for _ in 0..read_write.read_bytes {
@@ -88,7 +86,6 @@ fn handshake_basic_works() {
                             read_bytes: 0,
                             written_bytes: 0,
                             wake_up_after: None,
-                            wake_up_future: None,
                         };
                         handshake2 = nego.read_write(&mut read_write).unwrap();
                         let (read_bytes, written_bytes) =
@@ -105,7 +102,6 @@ fn handshake_basic_works() {
                             read_bytes: 0,
                             written_bytes: 0,
                             wake_up_after: None,
-                            wake_up_future: None,
                         };
                         handshake2 = nego.read_write(&mut read_write).unwrap();
                         for _ in 0..read_write.read_bytes {

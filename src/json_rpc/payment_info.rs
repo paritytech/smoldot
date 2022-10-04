@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -17,15 +17,15 @@
 
 use super::methods;
 
-use core::{convert::TryFrom as _, iter};
-
 /// Produces the input to pass to the `TransactionPaymentApi_query_info` runtime call.
-// TODO: single-encoded or double-encoded tx?
 pub fn payment_info_parameters(
     extrinsic: &'_ [u8],
 ) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + Clone + '_ {
-    iter::once(either::Left(extrinsic))
-        .chain(iter::once(u32::try_from(extrinsic.len()).unwrap().to_le_bytes()).map(either::Right))
+    [
+        either::Left(extrinsic),
+        either::Right(u32::try_from(extrinsic.len()).unwrap().to_le_bytes()),
+    ]
+    .into_iter()
 }
 
 /// Name of the runtime function to call in order to obtain the payment fees.

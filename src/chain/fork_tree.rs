@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -98,17 +98,18 @@ impl<T> ForkTree<T> {
 
     /// Reserves additional capacity for at least `additional` new blocks without allocating.
     pub fn reserve(&mut self, additional: usize) {
-        self.nodes.reserve(additional)
+        self.nodes.reserve(additional);
     }
 
     /// Removes all elements in the tree, leaving it empty.
     pub fn clear(&mut self) {
         self.nodes.clear();
+        self.first_root = None;
     }
 
     /// Shrink the capacity of the tree as much as possible.
     pub fn shrink_to_fit(&mut self) {
-        self.nodes.shrink_to_fit()
+        self.nodes.shrink_to_fit();
     }
 
     /// Returns true if there isn't any element in the tree.
@@ -126,6 +127,41 @@ impl<T> ForkTree<T> {
         self.nodes.iter().map(|n| (NodeIndex(n.0), &n.1.data))
     }
 
+    /// Returns an iterator to all the node values. The returned items are guaranteed to be in an
+    /// order in which the parents are found before their children.
+    pub fn iter_ancestry_order(&'_ self) -> impl Iterator<Item = (NodeIndex, &'_ T)> + '_ {
+        iter::successors(self.first_root.map(NodeIndex), move |n| {
+            self.ancestry_order_next(*n)
+        })
+        .map(move |idx| (idx, &self.nodes[idx.0].data))
+    }
+
+    fn ancestry_order_next(&self, node_index: NodeIndex) -> Option<NodeIndex> {
+        debug_assert!(!self.nodes[node_index.0].is_prune_target_ancestor);
+
+        if let Some(idx) = self.nodes[node_index.0].first_child {
+            debug_assert_eq!(self.nodes[idx].parent, Some(node_index.0));
+            return Some(NodeIndex(idx));
+        }
+
+        if let Some(idx) = self.nodes[node_index.0].next_sibling {
+            debug_assert_eq!(self.nodes[idx].previous_sibling, Some(node_index.0));
+            debug_assert_eq!(self.nodes[idx].parent, self.nodes[node_index.0].parent);
+            return Some(NodeIndex(idx));
+        }
+
+        let mut return_value = self.nodes[node_index.0].parent;
+        while let Some(idx) = return_value {
+            if let Some(next_sibling) = self.nodes[idx].next_sibling {
+                debug_assert_eq!(self.nodes[next_sibling].previous_sibling, Some(idx));
+                debug_assert_eq!(self.nodes[next_sibling].parent, self.nodes[idx].parent);
+                return Some(NodeIndex(next_sibling));
+            }
+            return_value = self.nodes[idx].parent;
+        }
+        return_value.map(NodeIndex)
+    }
+
     /// Returns the value of the node with the given index.
     pub fn get(&self, index: NodeIndex) -> Option<&T> {
         self.nodes.get(index.0).map(|n| &n.data)
@@ -136,6 +172,42 @@ impl<T> ForkTree<T> {
         self.nodes.get_mut(index.0).map(|n| &mut n.data)
     }
 
+    /// Modifies all the block user datas and returns a new map.
+    ///
+    /// The returned tree keeps the same [`NodeIndex`]es as `self`.
+    pub fn map<U>(self, mut map: impl FnMut(T) -> U) -> ForkTree<U> {
+        ForkTree {
+            nodes: self
+                .nodes
+                .into_iter()
+                .map(|(index, node)| {
+                    let node = Node {
+                        parent: node.parent,
+                        first_child: node.first_child,
+                        next_sibling: node.next_sibling,
+                        previous_sibling: node.previous_sibling,
+                        is_prune_target_ancestor: node.is_prune_target_ancestor,
+                        data: map(node.data),
+                    };
+
+                    (index, node)
+                })
+                .collect(),
+            first_root: self.first_root,
+        }
+    }
+
+    /// Returns the ancestors of the given node. The iterator is empty if the node doesn't have
+    /// any parent.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn ancestors(&'_ self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> + '_ {
+        iter::successors(Some(node), move |n| self.nodes[n.0].parent.map(NodeIndex)).skip(1)
+    }
+
     /// Returns the parent of the given node. Returns `None` if the node doesn't have any parent.
     ///
     /// # Panic
@@ -144,6 +216,21 @@ impl<T> ForkTree<T> {
     ///
     pub fn parent(&self, node: NodeIndex) -> Option<NodeIndex> {
         self.nodes[node.0].parent.map(NodeIndex)
+    }
+
+    /// Returns the list of children that have the given node as parent.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn children(&'_ self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> + '_ {
+        let first = match node {
+            Some(n) => self.nodes[n.0].first_child,
+            None => self.first_root,
+        };
+
+        iter::successors(first, move |n| self.nodes[*n].next_sibling).map(NodeIndex)
     }
 
     /// Removes from the tree:
@@ -306,9 +393,16 @@ impl<T> ForkTree<T> {
         let iter1 = self
             .node_to_root_path(node1)
             .take_while(move |v| Some(*v) != common_ancestor);
-        let iter2 = self
-            .root_to_node_path(node2)
-            .skip_while(move |v| Some(*v) != common_ancestor);
+
+        let iter2 = if let Some(common_ancestor) = common_ancestor {
+            either::Left(
+                self.root_to_node_path(node2)
+                    .skip_while(move |v| *v != common_ancestor)
+                    .skip(1),
+            )
+        } else {
+            either::Right(self.root_to_node_path(node2))
+        };
 
         (iter1, iter2)
     }
@@ -523,6 +617,10 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
             }
 
             // Actually remove the node.
+            debug_assert!(self
+                .tree
+                .first_root
+                .map_or(true, |n| n != maybe_removed_node_index.0));
             let iter_node = self.tree.nodes.remove(maybe_removed_node_index.0);
 
             break Some(PrunedNode {
@@ -541,11 +639,26 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
 impl<'a, T> Drop for PruneAncestorsIter<'a, T> {
     fn drop(&mut self) {
         // Make sure that all elements are removed.
-        while let Some(_) = self.next() {}
+        loop {
+            if self.next().is_none() {
+                break;
+            }
+        }
 
-        debug_assert!(self.tree.first_root.is_some());
-        debug_assert!(self.tree.nodes.get(self.tree.first_root.unwrap()).is_some());
+        if self.uncles_only {
+            debug_assert!(self.tree.first_root.is_some());
+        }
+
+        debug_assert!(self
+            .tree
+            .first_root
+            .map_or(true, |fr| self.tree.nodes.contains(fr)));
+
         debug_assert_eq!(self.uncles_only, self.tree.get(self.new_final).is_some());
+
+        // Do a full pass on the tree. This triggers a lot of debug assertions.
+        #[cfg(debug_assertions)]
+        for _ in self.tree.iter_ancestry_order() {}
     }
 }
 
@@ -625,6 +738,35 @@ mod tests {
             tree.node_to_root_path(node4).collect::<Vec<_>>(),
             &[node4, node2]
         );
+    }
+
+    #[test]
+    fn ascend_descend_when_common_ancestor_is_not_root() {
+        let mut tree = ForkTree::new();
+
+        let node0 = tree.insert(None, ());
+        let node1 = tree.insert(Some(node0), ());
+        let node2 = tree.insert(Some(node0), ());
+
+        let (ascend, descend) = tree.ascend_and_descend(node1, node2);
+        assert_eq!(ascend.collect::<Vec<_>>(), vec![node1]);
+        assert_eq!(descend.collect::<Vec<_>>(), vec![node2]);
+
+        assert_eq!(tree.common_ancestor(node1, node2), Some(node0));
+    }
+
+    #[test]
+    fn ascend_descend_when_common_ancestor_is_root() {
+        let mut tree = ForkTree::new();
+
+        let node0 = tree.insert(None, ());
+        let node1 = tree.insert(None, ());
+
+        let (ascend, descend) = tree.ascend_and_descend(node0, node1);
+        assert_eq!(ascend.collect::<Vec<_>>(), vec![node0]);
+        assert_eq!(descend.collect::<Vec<_>>(), vec![node1]);
+
+        assert_eq!(tree.common_ancestor(node0, node1), None);
     }
 
     // TODO: add more testing for the order of elements returned by `prune_ancestors`

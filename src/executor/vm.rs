@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -18,7 +18,7 @@
 //! General-purpose WebAssembly virtual machine.
 //!
 //! Contains code related to running a WebAssembly virtual machine. Contrary to
-//! (`HostVm`)[super::host::HostVm], this module isn't aware of any of the host
+//! (`HostVm`)[`super::host::HostVm`], this module isn't aware of any of the host
 //! functions available to Substrate runtimes. It only contains the code required to run a virtual
 //! machine, with some adjustments explained below.
 //!
@@ -49,21 +49,6 @@
 //! is returned and the virtual machine is now paused. Once the logic of the host function has
 //! been executed, call `run` again, passing the return value of that host function.
 //!
-//! # About heap pages
-//!
-//! In the WebAssembly specification, the memory available in the WebAssembly virtual machine has
-//! an initial size and a maximum size. One of the instructions available in WebAssembly code is
-//! [the `memory.grow` instruction](https://webassembly.github.io/spec/core/bikeshed/#-hrefsyntax-instr-memorymathsfmemorygrow),
-//! which allows increasing the size of the memory.
-//!
-//! The Substrate/Polkadot runtime environment, however, differs. Rather than having a resizable
-//! memory, memory has a fixed size that consists of its initial size plus a number of pages equal
-//! to the value of `heap_pages` passed as parameter. It is forbidden for the WebAssembly code
-//! to use `memory.grow`.
-//!
-//! See also the [`../externals`] module for more information about how memory works in the
-//! context of the Substrate/Polkadot runtime.
-//!
 //! # About `__indirect_function_table`
 //!
 //! At initialization, the virtual machine will look for a table named `__indirect_function_table`.
@@ -84,7 +69,7 @@
 //! - Or by importing a memory object in its `(import)` section.
 //!
 //! The virtual machine in this module supports both variants. However, no more than one memory
-//! object can be exported or imported.
+//! object can be exported or imported, and it is illegal to not use any memory.
 //!
 //! The first variant used to be the default model when compiling to WebAssembly, but the second
 //! variant (importing memory objects) is preferred nowadays.
@@ -93,8 +78,10 @@ mod interpreter;
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
 mod jit;
 
+mod tests;
+
 use alloc::{string::String, vec::Vec};
-use core::{convert::TryFrom, fmt};
+use core::fmt;
 use smallvec::SmallVec;
 
 /// Compiled Wasm code.
@@ -115,7 +102,7 @@ enum ModuleInner {
 
 impl Module {
     /// Compiles the given Wasm code.
-    pub fn new(module: impl AsRef<[u8]>, exec_hint: ExecHint) -> Result<Self, NewErr> {
+    pub fn new(module: impl AsRef<[u8]>, exec_hint: ExecHint) -> Result<Self, ModuleError> {
         Ok(Module {
             inner: match exec_hint {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
@@ -124,9 +111,12 @@ impl Module {
                 ExecHint::CompileAheadOfTime => {
                     ModuleInner::Interpreter(interpreter::Module::new(module)?)
                 }
-                ExecHint::Oneshot | ExecHint::Untrusted => {
+                ExecHint::Oneshot | ExecHint::Untrusted | ExecHint::ForceWasmi => {
                     ModuleInner::Interpreter(interpreter::Module::new(module)?)
                 }
+
+                #[cfg(all(target_arch = "x86_64", feature = "std"))]
+                ExecHint::ForceWasmtime => ModuleInner::Jit(jit::Module::new(module)?),
             },
         })
     }
@@ -154,18 +144,17 @@ impl VirtualMachinePrototype {
     /// See [the module-level documentation](..) for an explanation of the parameters.
     pub fn new(
         module: &Module,
-        heap_pages: HeapPages,
         symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         Ok(VirtualMachinePrototype {
             inner: match &module.inner {
                 ModuleInner::Interpreter(module) => VirtualMachinePrototypeInner::Interpreter(
-                    interpreter::InterpreterPrototype::new(module, heap_pages, symbols)?,
+                    interpreter::InterpreterPrototype::new(module, symbols)?,
                 ),
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
-                ModuleInner::Jit(module) => VirtualMachinePrototypeInner::Jit(
-                    jit::JitPrototype::new(module, heap_pages, symbols)?,
-                ),
+                ModuleInner::Jit(module) => {
+                    VirtualMachinePrototypeInner::Jit(jit::JitPrototype::new(module, symbols)?)
+                }
             },
         })
     }
@@ -181,10 +170,26 @@ impl VirtualMachinePrototype {
         }
     }
 
+    /// Returns the maximum number of pages that the memory can have.
+    ///
+    /// `None` if there is no limit.
+    pub fn memory_max_pages(&self) -> Option<HeapPages> {
+        match &self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            VirtualMachinePrototypeInner::Jit(inner) => inner.memory_max_pages(),
+            VirtualMachinePrototypeInner::Interpreter(inner) => inner.memory_max_pages(),
+        }
+    }
+
     /// Turns this prototype into an actual virtual machine. This requires choosing which function
     /// to execute.
+    ///
+    /// The `min_memory_pages` value describes the minimum number of pages of Wasm memory that
+    /// should be initially available to the Wasm function call. In other words, the Wasm code
+    /// must be able to write to any memory location inferior to `min_memory_pages * 64 * 1024`.
     pub fn start(
         mut self,
+        min_memory_pages: HeapPages,
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<VirtualMachine, (StartErr, Self)> {
@@ -192,7 +197,7 @@ impl VirtualMachinePrototype {
             inner: match self.inner {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
                 VirtualMachinePrototypeInner::Jit(inner) => {
-                    match inner.start(function_name, params) {
+                    match inner.start(min_memory_pages, function_name, params) {
                         Ok(vm) => VirtualMachineInner::Jit(vm),
                         Err((err, proto)) => {
                             self.inner = VirtualMachinePrototypeInner::Jit(proto);
@@ -201,7 +206,7 @@ impl VirtualMachinePrototype {
                     }
                 }
                 VirtualMachinePrototypeInner::Interpreter(inner) => {
-                    match inner.start(function_name, params) {
+                    match inner.start(min_memory_pages, function_name, params) {
                         Ok(vm) => VirtualMachineInner::Interpreter(vm),
                         Err((err, proto)) => {
                             self.inner = VirtualMachinePrototypeInner::Interpreter(proto);
@@ -253,7 +258,7 @@ impl VirtualMachine {
     /// Returns the size of the memory, in bytes.
     ///
     /// > **Note**: This can change over time if the Wasm code uses the `grow` opcode.
-    pub fn memory_size(&self) -> u32 {
+    pub fn memory_size(&self) -> HeapPages {
         match &self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Jit(inner) => inner.memory_size(),
@@ -289,6 +294,18 @@ impl VirtualMachine {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Jit(inner) => inner.write_memory(offset, value),
             VirtualMachineInner::Interpreter(inner) => inner.write_memory(offset, value),
+        }
+    }
+
+    /// Increases the size of the memory by the given number of pages.
+    ///
+    /// Returns an error if the size of the memory can't be expanded more. This can be known ahead
+    /// of time by using [`VirtualMachinePrototype::memory_max_pages`].
+    pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
+        match &mut self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            VirtualMachineInner::Jit(inner) => inner.grow_memory(additional),
+            VirtualMachineInner::Interpreter(inner) => inner.grow_memory(additional),
         }
     }
 
@@ -330,10 +347,40 @@ pub enum ExecHint {
     Oneshot,
     /// The WebAssembly code running through this VM is untrusted.
     Untrusted,
+
+    /// Forces using the `wasmi` backend.
+    ///
+    /// This variant is useful for testing purposes.
+    ForceWasmi,
+    /// Forces using the `wasmtime` backend.
+    ///
+    /// This variant is useful for testing purposes.
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "x86_64", feature = "std"))))]
+    ForceWasmtime,
+}
+
+impl ExecHint {
+    /// Returns `ForceWasmtime` if it is available on the current platform, and `None` otherwise.
+    pub fn force_wasmtime_if_available() -> Option<ExecHint> {
+        #[cfg(all(target_arch = "x86_64", feature = "std"))]
+        fn value() -> Option<ExecHint> {
+            Some(ExecHint::ForceWasmtime)
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
+        fn value() -> Option<ExecHint> {
+            None
+        }
+        value()
+    }
 }
 
 /// Number of heap pages available to the Wasm code.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// Each page is `64kiB`.
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::Add, derive_more::Sub,
+)]
 pub struct HeapPages(u32);
 
 impl HeapPages {
@@ -389,7 +436,7 @@ impl<'a> From<&'a Signature> for wasmi::Signature {
         wasmi::Signature::new(
             sig.params
                 .iter()
-                .cloned()
+                .copied()
                 .map(wasmi::ValueType::from)
                 .collect::<Vec<_>>(),
             sig.ret_ty.map(wasmi::ValueType::from),
@@ -411,7 +458,7 @@ impl<'a> TryFrom<&'a wasmi::Signature> for Signature {
             params: sig
                 .params()
                 .iter()
-                .cloned()
+                .copied()
                 .map(ValueType::try_from)
                 .collect::<Result<_, _>>()?,
             ret_ty: sig.return_type().map(ValueType::try_from).transpose()?,
@@ -615,22 +662,45 @@ pub struct Trap(String);
 /// Error that can happen when initializing a [`VirtualMachinePrototype`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum NewErr {
-    /// Error while parsing or compiling the WebAssembly code.
-    #[display(fmt = "{}", _0)]
-    ModuleError(ModuleError),
+    /// Failed to resolve a function imported by the module.
+    #[display(fmt = "Unresolved function `{}`:`{}`", module_name, function)]
+    UnresolvedFunctionImport {
+        /// Name of the function that was unresolved.
+        function: String,
+        /// Name of module associated with the unresolved function.
+        module_name: String,
+    },
+    /// Smoldot doesn't support wasm runtime that have a start function. It is unclear whether
+    /// this is allowed in the Substrate/Polkadot specification.
+    #[display(fmt = "Start function not supported")]
+    // TODO: figure this out
+    StartFunctionNotSupported,
     /// If a "memory" symbol is provided, it must be a memory.
     #[display(fmt = "If a \"memory\" symbol is provided, it must be a memory.")]
     MemoryIsntMemory,
-    /// If a "__indirect_function_table" symbol is provided, it must be a table.
+    /// Wasm module imports a memory that isn't named "memory".
+    MemoryNotNamedMemory,
+    /// Wasm module doesn't contain any memory.
+    NoMemory,
+    /// Wasm module both imports and exports a memory.
+    TwoMemories,
+    /// If a `__indirect_function_table` symbol is provided, it must be a table.
     #[display(fmt = "If a \"__indirect_function_table\" symbol is provided, it must be a table.")]
     IndirectTableIsntTable,
     /// Failed to allocate memory for the virtual machine.
     CouldntAllocateMemory,
+    /// Error while parsing or compiling the WebAssembly code.
+    // TODO: remove as too imprecise?
+    #[display(fmt = "{}", _0)]
+    ModuleError(ModuleError),
 }
 
 /// Error that can happen when calling [`VirtualMachinePrototype::start`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum StartErr {
+    /// Number of heap pages that have been required is above the limits imposed by the Wasm
+    /// module.
+    RequiredMemoryTooLarge,
     /// Couldn't find the requested function.
     #[display(fmt = "Function to start was not found.")]
     FunctionNotFound,
@@ -679,17 +749,4 @@ pub enum GlobalValueErr {
     NotFound,
     /// Requested symbol isn't a `u32`.
     Invalid,
-}
-
-#[cfg(test)]
-mod tests {
-    // TODO:
-
-    #[test]
-    fn is_send() {
-        // Makes sure that the virtual machine types implement `Send`.
-        fn test<T: Send>() {}
-        test::<super::VirtualMachine>();
-        test::<super::VirtualMachinePrototype>();
-    }
 }

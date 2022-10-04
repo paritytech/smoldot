@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -17,14 +17,13 @@
 
 //! Calculation of the Merkle value of a node given the information about it.
 //!
-//! Use the [`calculate_merkle_root`] function to calculate the Merkle value. The [`Config`]
+//! Use the [`calculate_merkle_value`] function to calculate the Merkle value. The [`Config`]
 //! struct contains all the input required for the calculation.
 //!
 //! # Example
 //!
 //! ```
-//! use std::convert::TryFrom as _;
-//! use smoldot::trie::{Nibble, node_value};
+//! use smoldot::trie::{Nibble, TrieEntryVersion, node_value};
 //!
 //! let merkle_value = {
 //!     // The example node whose value we calculate has three children.
@@ -44,7 +43,7 @@
 //!         children
 //!     };
 //!
-//!     node_value::calculate_merkle_root(node_value::Config {
+//!     node_value::calculate_merkle_value(node_value::Config {
 //!         ty: node_value::NodeTy::NonRoot {
 //!             partial_key: [
 //!                 Nibble::try_from(8).unwrap(),
@@ -56,23 +55,24 @@
 //!         },
 //!         children: children.iter().map(|opt| opt.as_ref()),
 //!         stored_value: Some(b"hello world"),
+//!         version: TrieEntryVersion::V1,
 //!     })
 //! };
 //!
 //! assert_eq!(
 //!     merkle_value.as_ref(),
 //!     &[
-//!         195, 8, 193, 4, 4, 12, 102, 111, 111, 12, 98, 97, 114, 44, 104, 101, 108, 108, 111,
-//!         32, 119, 111, 114, 108, 100
+//!         195, 8, 193, 4, 4, 44, 104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100, 12,
+//!         102, 111, 111, 12, 98, 97, 114
 //!     ]
 //! );
 //! ```
 
-use super::nibble::Nibble;
+use super::{nibble::Nibble, TrieEntryVersion};
 use crate::util;
 
 use arrayvec::ArrayVec;
-use core::{convert::TryFrom as _, fmt};
+use core::fmt;
 
 /// Information about a node whose Merkle value is to be calculated.
 ///
@@ -87,6 +87,12 @@ pub struct Config<TChIter, TPKey, TVal> {
 
     /// Value of the node in the storage.
     pub stored_value: Option<TVal>,
+
+    /// Version to use for the encoding.
+    ///
+    /// Some input will lead to the same output no matter the version, but some other input will
+    /// produce a different output.
+    pub version: TrieEntryVersion,
 }
 
 /// Type of node whose node value is to be calculated.
@@ -119,7 +125,7 @@ pub enum NodeTy<TPKey> {
 ///
 /// Panics if `config.children.len() != 16`.
 ///
-pub fn calculate_merkle_root<'a, TChIter, TPKey, TVal>(
+pub fn calculate_merkle_value<'a, TChIter, TPKey, TVal>(
     config: Config<TChIter, TPKey, TVal>,
 ) -> Output
 where
@@ -130,6 +136,11 @@ where
     assert_eq!(config.children.len(), 16);
 
     let has_children = config.children.clone().any(|c| c.is_some());
+
+    let stored_value_to_be_hashed = config
+        .stored_value
+        .as_ref()
+        .map(|value| matches!(config.version, TrieEntryVersion::V1) && value.as_ref().len() >= 33);
 
     // This value will be used as the sink for all the components of the merkle value.
     let mut merkle_value_sink = if matches!(config.ty, NodeTy::Root { .. }) {
@@ -146,33 +157,37 @@ where
 
     // Push the header of the node to `merkle_value_sink`.
     {
-        // The first two most significant bits of the header contain the type of node.
-        let two_msb: u8 = {
-            let has_stored_value = config.stored_value.is_some();
-            match (has_stored_value, has_children) {
-                (false, false) => {
+        // The most significant bits of the header contain the type of node.
+        // See https://spec.polkadot.network/#defn-node-header
+        let (header_msb, header_pkll_num_bytes): (u8, u8) =
+            match (stored_value_to_be_hashed, has_children) {
+                (None, false) => {
                     // This should only ever be reached if we compute the root node of an
                     // empty trie.
-                    0b00
+                    // TODO: should this be a hard error? we will probably misencode if this condition fails
+                    debug_assert_eq!(partial_key.len(), 0);
+                    (0b00000000, 6)
                 }
-                (true, false) => 0b01,
-                (false, true) => 0b10,
-                (true, true) => 0b11,
-            }
-        };
+                (Some(false), false) => (0b01000000, 6),
+                (Some(true), false) => (0b00100000, 5),
+                (None, true) => (0b10000000, 6),
+                (Some(false), true) => (0b11000000, 6),
+                (Some(true), true) => (0b00010000, 4),
+            };
 
         // Another weird algorithm to encode the partial key length into the header.
         let mut pk_len = partial_key.len();
-        if pk_len >= 63 {
-            pk_len -= 63;
-            merkle_value_sink.update(&[(two_msb << 6) + 63]);
+        let pk_len_first_byte_max: u8 = (1 << header_pkll_num_bytes) - 1;
+        if pk_len >= usize::from(pk_len_first_byte_max) {
+            pk_len -= usize::from(pk_len_first_byte_max);
+            merkle_value_sink.update(&[header_msb | pk_len_first_byte_max]);
             while pk_len > 255 {
                 pk_len -= 255;
                 merkle_value_sink.update(&[255]);
             }
             merkle_value_sink.update(&[u8::try_from(pk_len).unwrap()]);
         } else {
-            merkle_value_sink.update(&[(two_msb << 6) + u8::try_from(pk_len).unwrap()]);
+            merkle_value_sink.update(&[header_msb | u8::try_from(pk_len).unwrap()]);
         }
     }
 
@@ -199,13 +214,21 @@ where
     // If there isn't any children, the node subvalue only consists in the storage value.
     // We take a shortcut and end the calculation now.
     if !has_children {
-        if let Some(stored_value) = config.stored_value {
-            // Doing something like `merkle_value_sink.update(stored_value.encode());` would be
-            // quite expensive because we would duplicate the storage value. Instead, we do the
-            // encoding manually by pushing the length then the value.
-            merkle_value_sink
-                .update(util::encode_scale_compact_usize(stored_value.as_ref().len()).as_ref());
-            merkle_value_sink.update(stored_value.as_ref());
+        if let Some(hash_stored_value) = stored_value_to_be_hashed {
+            let stored_value = config.stored_value.unwrap();
+
+            if hash_stored_value {
+                merkle_value_sink.update(
+                    blake2_rfc::blake2b::blake2b(32, &[], stored_value.as_ref()).as_bytes(),
+                );
+            } else {
+                // Doing something like `merkle_value_sink.update(stored_value.encode());` would be
+                // quite expensive because we would duplicate the storage value. Instead, we do the
+                // encoding manually by pushing the length then the value.
+                merkle_value_sink
+                    .update(util::encode_scale_compact_usize(stored_value.as_ref().len()).as_ref());
+                merkle_value_sink.update(stored_value.as_ref());
+            }
         }
 
         return merkle_value_sink.finalize();
@@ -222,7 +245,24 @@ where
         &children_bitmap.to_le_bytes()[..]
     });
 
-    // Push the merkle values of all the children.
+    // Add our own stored value.
+    if let Some(hash_stored_value) = stored_value_to_be_hashed {
+        let stored_value = config.stored_value.unwrap();
+
+        if hash_stored_value {
+            merkle_value_sink
+                .update(blake2_rfc::blake2b::blake2b(32, &[], stored_value.as_ref()).as_bytes());
+        } else {
+            // Doing something like `merkle_value_sink.update(stored_value.encode());` would be
+            // quite expensive because we would duplicate the storage value. Instead, we do the
+            // encoding manually by pushing the length then the value.
+            merkle_value_sink
+                .update(util::encode_scale_compact_usize(stored_value.as_ref().len()).as_ref());
+            merkle_value_sink.update(stored_value.as_ref());
+        }
+    }
+
+    // Finally, push the merkle values of all the children.
     for child in config.children.clone() {
         let child_merkle_value = match child {
             Some(v) => v,
@@ -235,16 +275,6 @@ where
         merkle_value_sink
             .update(util::encode_scale_compact_usize(child_merkle_value.as_ref().len()).as_ref());
         merkle_value_sink.update(child_merkle_value.as_ref());
-    }
-
-    // Finally, add our own stored value.
-    if let Some(stored_value) = config.stored_value {
-        // Doing something like `merkle_value_sink.update(stored_value.encode());` would be
-        // quite expensive because we would duplicate the storage value. Instead, we do the
-        // encoding manually by pushing the length then the value.
-        merkle_value_sink
-            .update(util::encode_scale_compact_usize(stored_value.as_ref().len()).as_ref());
-        merkle_value_sink.update(stored_value.as_ref());
     }
 
     merkle_value_sink.finalize()
@@ -306,7 +336,7 @@ impl fmt::Debug for Output {
     }
 }
 
-/// The merkle value of a node is defined as either the hash of the node value, or the node value
+/// The Merkle value of a node is defined as either the hash of the node value, or the node value
 /// itself if it is shorted than 32 bytes (or if we are the root).
 ///
 /// This struct serves as a helper to handle these situations. Rather than putting intermediary
@@ -348,15 +378,16 @@ impl HashOrInline {
 
 #[cfg(test)]
 mod tests {
-    use super::Nibble;
-    use core::{convert::TryFrom as _, iter};
+    use super::{Nibble, TrieEntryVersion};
+    use core::iter;
 
     #[test]
     fn empty_root() {
-        let obtained = super::calculate_merkle_root(super::Config {
+        let obtained = super::calculate_merkle_value(super::Config {
             ty: super::NodeTy::Root { key: iter::empty() },
             children: (0..16).map(|_| None),
             stored_value: None::<Vec<u8>>,
+            version: TrieEntryVersion::V0,
         });
 
         assert_eq!(
@@ -370,12 +401,13 @@ mod tests {
 
     #[test]
     fn empty_node() {
-        let obtained = super::calculate_merkle_root(super::Config {
+        let obtained = super::calculate_merkle_value(super::Config {
             ty: super::NodeTy::NonRoot {
                 partial_key: iter::empty(),
             },
             children: (0..16).map(|_| None),
             stored_value: None::<Vec<u8>>,
+            version: TrieEntryVersion::V0,
         });
 
         assert_eq!(obtained.as_ref(), &[0u8]);
@@ -399,7 +431,7 @@ mod tests {
             children
         };
 
-        let obtained = super::calculate_merkle_root(super::Config {
+        let obtained = super::calculate_merkle_value(super::Config {
             ty: super::NodeTy::NonRoot {
                 partial_key: [
                     Nibble::try_from(8).unwrap(),
@@ -411,13 +443,14 @@ mod tests {
             },
             children: children.iter().map(|opt| opt.as_ref()),
             stored_value: Some(b"hello world"),
+            version: TrieEntryVersion::V0,
         });
 
         assert_eq!(
             obtained.as_ref(),
             &[
-                195, 8, 193, 4, 4, 12, 102, 111, 111, 12, 98, 97, 114, 44, 104, 101, 108, 108, 111,
-                32, 119, 111, 114, 108, 100
+                195, 8, 193, 4, 4, 44, 104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100, 12,
+                102, 111, 111, 12, 98, 97, 114
             ]
         );
     }
@@ -425,12 +458,13 @@ mod tests {
     #[test]
     #[should_panic]
     fn bad_children_len() {
-        super::calculate_merkle_root(super::Config {
+        super::calculate_merkle_value(super::Config {
             ty: super::NodeTy::NonRoot {
                 partial_key: iter::empty(),
             },
             children: iter::empty(),
             stored_value: None::<Vec<u8>>,
+            version: TrieEntryVersion::V0,
         });
     }
 }

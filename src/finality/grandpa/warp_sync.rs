@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -15,13 +15,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+// TODO: really needs documentation
+
 use crate::chain::chain_information::{ChainInformationFinality, ChainInformationFinalityRef};
+use crate::finality;
 use crate::finality::justification::verify::{
     verify, Config as VerifyConfig, Error as VerifyError,
 };
-use crate::header::{DigestItemRef, GrandpaAuthority, GrandpaConsensusLogRef, Header};
+use crate::header::{self, DigestItemRef, GrandpaAuthority, GrandpaConsensusLogRef};
 use crate::informant::HashDisplay;
-use crate::network::protocol::GrandpaWarpSyncResponseFragment;
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -36,6 +38,9 @@ pub enum Error {
     },
     NonMinimalProof,
     EmptyProof,
+    InvalidHeader(header::Error),
+    InvalidJustification(finality::justification::decode::Error),
+    WrongChainAlgorithm,
 }
 
 impl fmt::Display for Error {
@@ -60,87 +65,119 @@ impl fmt::Display for Error {
                 "Warp sync proof fragment doesn't contain an authorities list change"
             ),
             Error::EmptyProof => write!(f, "Warp sync proof is empty"),
+            Error::InvalidHeader(_) => write!(f, "Failed to decode header"),
+            Error::InvalidJustification(_) => write!(f, "Failed to decode justification"),
+            Error::WrongChainAlgorithm => {
+                write!(f, "Chain information doesn't use the Grandpa algorithm")
+            }
         }
     }
 }
 
 #[derive(Debug)]
 pub struct Verifier {
+    /// If `true`, the verification should instantly fail with an error.
+    wrong_chain_algorithm: bool,
+
     index: usize,
     authorities_set_id: u64,
     authorities_list: Vec<GrandpaAuthority>,
-    fragments: Vec<GrandpaWarpSyncResponseFragment>,
+    fragments: Vec<WarpSyncFragment>,
     is_proof_complete: bool,
+
+    block_number_bytes: usize,
 }
 
 impl Verifier {
     pub fn new(
         start_chain_information_finality: ChainInformationFinalityRef,
-        warp_sync_response_fragments: Vec<GrandpaWarpSyncResponseFragment>,
+        block_number_bytes: usize,
+        warp_sync_response_fragments: Vec<WarpSyncFragment>,
         is_proof_complete: bool,
     ) -> Self {
-        let (authorities_list, authorities_set_id) = match start_chain_information_finality {
-            ChainInformationFinalityRef::Grandpa {
-                finalized_triggered_authorities,
-                after_finalized_block_authorities_set_id,
-                ..
-            } => {
-                let authorities_list = finalized_triggered_authorities.iter().cloned().collect();
-                (authorities_list, after_finalized_block_authorities_set_id)
-            }
-            // TODO:
-            _ => unimplemented!(),
-        };
+        let (wrong_chain_algorithm, authorities_list, authorities_set_id) =
+            match start_chain_information_finality {
+                ChainInformationFinalityRef::Grandpa {
+                    finalized_triggered_authorities,
+                    after_finalized_block_authorities_set_id,
+                    ..
+                } => {
+                    let authorities_list = finalized_triggered_authorities.to_vec();
+                    (
+                        false,
+                        authorities_list,
+                        after_finalized_block_authorities_set_id,
+                    )
+                }
+                _ => (true, Vec::new(), 0),
+            };
 
         Self {
+            wrong_chain_algorithm,
             index: 0,
             authorities_set_id,
             authorities_list,
             fragments: warp_sync_response_fragments,
             is_proof_complete,
+            block_number_bytes,
         }
     }
 
-    pub fn next(mut self) -> Result<Next, Error> {
+    pub fn next(mut self, randomness_seed: [u8; 32]) -> Result<Next, Error> {
+        if self.wrong_chain_algorithm {
+            return Err(Error::WrongChainAlgorithm);
+        }
+
         if self.fragments.is_empty() {
+            if self.is_proof_complete {
+                return Ok(Next::EmptyProof);
+            }
             return Err(Error::EmptyProof);
         }
 
         debug_assert!(self.fragments.len() > self.index);
         let fragment = &self.fragments[self.index];
 
-        let fragment_header_hash = fragment.header.hash();
-        if fragment.justification.target_hash != fragment_header_hash {
+        let fragment_header_hash =
+            header::hash_from_scale_encoded_header(&fragment.scale_encoded_header);
+        let justification = finality::justification::decode::decode_grandpa(
+            &fragment.scale_encoded_justification,
+            self.block_number_bytes,
+        )
+        .map_err(Error::InvalidJustification)?;
+        if *justification.target_hash != fragment_header_hash {
             return Err(Error::TargetHashMismatch {
-                justification_target_hash: fragment.justification.target_hash,
-                justification_target_height: fragment.justification.target_number.into(), // TODO: some u32/u64 mismatch here; figure out
+                justification_target_hash: *justification.target_hash,
+                justification_target_height: justification.target_number,
                 header_hash: fragment_header_hash,
             });
         }
 
         verify(VerifyConfig {
-            justification: (&fragment.justification).into(),
+            justification,
+            block_number_bytes: self.block_number_bytes,
             authorities_list: self.authorities_list.iter().map(|a| &a.public_key),
             authorities_set_id: self.authorities_set_id,
+            randomness_seed,
         })
         .map_err(Error::Verify)?;
 
-        let authorities_list = fragment
-            .header
-            .digest
-            .logs()
-            .filter_map(|log_item| match log_item {
-                DigestItemRef::GrandpaConsensus(grandpa_log_item) => match grandpa_log_item {
-                    GrandpaConsensusLogRef::ScheduledChange(change)
-                    | GrandpaConsensusLogRef::ForcedChange { change, .. } => {
-                        Some(change.next_authorities)
-                    }
+        let authorities_list =
+            header::decode(&fragment.scale_encoded_header, self.block_number_bytes)
+                .map_err(Error::InvalidHeader)?
+                .digest
+                .logs()
+                .find_map(|log_item| match log_item {
+                    DigestItemRef::GrandpaConsensus(grandpa_log_item) => match grandpa_log_item {
+                        GrandpaConsensusLogRef::ScheduledChange(change)
+                        | GrandpaConsensusLogRef::ForcedChange { change, .. } => {
+                            Some(change.next_authorities)
+                        }
+                        _ => None,
+                    },
                     _ => None,
-                },
-                _ => None,
-            })
-            .next()
-            .map(|next_authorities| next_authorities.map(GrandpaAuthority::from).collect());
+                })
+                .map(|next_authorities| next_authorities.map(GrandpaAuthority::from).collect());
 
         self.index += 1;
 
@@ -153,7 +190,7 @@ impl Verifier {
 
         if self.index == self.fragments.len() {
             Ok(Next::Success {
-                header: fragment.header.clone(),
+                scale_encoded_header: fragment.scale_encoded_header.clone(), // TODO: cloning :-/
                 chain_information_finality: ChainInformationFinality::Grandpa {
                     after_finalized_block_authorities_set_id: self.authorities_set_id,
                     finalized_triggered_authorities: self.authorities_list,
@@ -168,8 +205,19 @@ impl Verifier {
 
 pub enum Next {
     NotFinished(Verifier),
+    EmptyProof,
     Success {
-        header: Header,
+        scale_encoded_header: Vec<u8>,
         chain_information_finality: ChainInformationFinality,
     },
+}
+
+/// Fragment to be verified.
+#[derive(Debug)]
+pub struct WarpSyncFragment {
+    /// Header of a block in the chain.
+    pub scale_encoded_header: Vec<u8>,
+
+    /// Justification that proves the finality of [`WarpSyncFragment::scale_encoded_header`].
+    pub scale_encoded_justification: Vec<u8>,
 }

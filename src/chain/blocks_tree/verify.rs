@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -22,14 +22,18 @@
 
 use crate::{
     chain::{chain_information, fork_tree},
-    executor::host,
+    executor::{host, storage_diff},
     header,
     trie::calculate_root,
     verify,
 };
 
-use super::*;
+use super::{
+    best_block, fmt, Arc, Block, BlockAccess, BlockConsensus, BlockFinality, Duration, Finality,
+    FinalizedConsensus, NonFinalizedTree, NonFinalizedTreeInner, Vec,
+};
 
+use alloc::boxed::Box;
 use core::cmp::Ordering;
 
 impl<T> NonFinalizedTree<T> {
@@ -54,8 +58,8 @@ impl<T> NonFinalizedTree<T> {
                 self.inner = Some(self_inner);
                 Err(err)
             }
-            VerifyOut::HeaderOk(context, is_new_best, consensus) => {
-                let hash = context.header.hash();
+            VerifyOut::HeaderOk(context, is_new_best, consensus, finality) => {
+                let hash = context.header.hash(context.chain.block_number_bytes);
                 Ok(HeaderVerifySuccess::Insert {
                     block_height: context.header.number,
                     is_new_best,
@@ -65,6 +69,7 @@ impl<T> NonFinalizedTree<T> {
                         is_new_best,
                         hash,
                         consensus: Some(consensus),
+                        finality: Some(finality),
                     },
                 })
             }
@@ -113,12 +118,12 @@ impl<T> NonFinalizedTreeInner<T> {
     /// Common implementation for both [`NonFinalizedTree::verify_header`] and
     /// [`NonFinalizedTree::verify_body`].
     fn verify(
-        self,
+        self: Box<Self>,
         scale_encoded_header: Vec<u8>,
         now_from_unix_epoch: Duration,
         full: bool,
     ) -> VerifyOut<T> {
-        let decoded_header = match header::decode(&scale_encoded_header) {
+        let decoded_header = match header::decode(&scale_encoded_header, self.block_number_bytes) {
             Ok(h) => h,
             Err(err) => {
                 return if full {
@@ -135,7 +140,7 @@ impl<T> NonFinalizedTreeInner<T> {
         let hash = header::hash_from_scale_encoded_header(&scale_encoded_header);
 
         // Check for duplicates.
-        if self.blocks.find(|b| b.hash == hash).is_some() {
+        if self.blocks_by_hash.contains_key(&hash) {
             return if full {
                 VerifyOut::Body(BodyVerifyStep1::Duplicate(NonFinalizedTree {
                     inner: Some(self),
@@ -149,16 +154,13 @@ impl<T> NonFinalizedTreeInner<T> {
         // `Some` with an index of the parent within the tree of unfinalized blocks.
         // `None` means that the parent is the finalized block.
         let parent_tree_index = {
-            let parent_hash = *decoded_header.parent_hash;
-            match self.current_best {
-                // The parent hash is first checked against `self.current_best`, as it is most
-                // likely that new blocks are built on top of the current best.
-                Some(best) if parent_hash == self.blocks.get(best).unwrap().hash => Some(best),
-                _ if parent_hash == self.finalized_block_hash => None,
-                // O(n) search for the parent.
-                _ => match self.blocks.find(|b| b.hash == parent_hash) {
-                    Some(parent) => Some(parent),
+            if *decoded_header.parent_hash == self.finalized_block_hash {
+                None
+            } else {
+                match self.blocks_by_hash.get(decoded_header.parent_hash) {
+                    Some(parent) => Some(*parent),
                     None => {
+                        let parent_hash = *decoded_header.parent_hash;
                         return if full {
                             VerifyOut::Body(BodyVerifyStep1::BadParent {
                                 chain: NonFinalizedTree { inner: Some(self) },
@@ -166,52 +168,65 @@ impl<T> NonFinalizedTreeInner<T> {
                             })
                         } else {
                             VerifyOut::HeaderErr(self, HeaderVerifyError::BadParent { parent_hash })
-                        }
+                        };
                     }
-                },
+                }
             }
         };
 
         // Some consensus-specific information must be fetched from the tree of ancestry. The
         // information is found either in the parent block, or in the finalized block.
-        let consensus = if let Some(parent_tree_index) = parent_tree_index {
-            match &self.blocks.get(parent_tree_index).unwrap().consensus {
-                BlockConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
-                BlockConsensus::Aura { authorities_list } => VerifyConsensusSpecific::Aura {
-                    authorities_list: authorities_list.clone(),
-                },
-                BlockConsensus::Babe {
-                    current_epoch,
-                    next_epoch,
-                } => VerifyConsensusSpecific::Babe {
-                    current_epoch: current_epoch.clone(),
-                    next_epoch: next_epoch.clone(),
-                },
-            }
+        let (consensus, finality) = if let Some(parent_tree_index) = parent_tree_index {
+            let parent = self.blocks.get(parent_tree_index).unwrap();
+            (Some(parent.consensus.clone()), parent.finality.clone())
         } else {
-            match &self.finalized_consensus {
-                FinalizedConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
+            let consensus = match &self.finalized_consensus {
+                FinalizedConsensus::Unknown => None,
                 FinalizedConsensus::Aura {
                     authorities_list, ..
-                } => VerifyConsensusSpecific::Aura {
+                } => Some(BlockConsensus::Aura {
                     authorities_list: authorities_list.clone(),
-                },
+                }),
                 FinalizedConsensus::Babe {
                     block_epoch_information,
                     next_epoch_transition,
                     ..
-                } => VerifyConsensusSpecific::Babe {
+                } => Some(BlockConsensus::Babe {
                     current_epoch: block_epoch_information.clone(),
                     next_epoch: next_epoch_transition.clone(),
-                },
-            }
+                }),
+            };
+
+            let finality = match self.finality {
+                Finality::Outsourced => BlockFinality::Outsourced,
+                Finality::Grandpa {
+                    after_finalized_block_authorities_set_id,
+                    ref finalized_scheduled_change,
+                    ref finalized_triggered_authorities,
+                } => {
+                    debug_assert!(finalized_scheduled_change
+                        .as_ref()
+                        .map(|(n, _)| *n >= decoded_header.number)
+                        .unwrap_or(true));
+                    BlockFinality::Grandpa {
+                        prev_auth_change_trigger_number: None,
+                        triggers_change: false,
+                        scheduled_change: finalized_scheduled_change.clone(),
+                        after_block_authorities_set_id: after_finalized_block_authorities_set_id,
+                        triggered_authorities: finalized_triggered_authorities.clone(),
+                    }
+                }
+            };
+
+            (consensus, finality)
         };
 
         let mut context = VerifyContext {
             chain: self,
-            header: decoded_header.into(),
+            header: Box::new(decoded_header.into()),
             parent_tree_index,
             consensus,
+            finality,
         };
 
         if full {
@@ -232,10 +247,10 @@ impl<T> NonFinalizedTreeInner<T> {
                 consensus: match (&context.chain.finalized_consensus, &context.consensus) {
                     (
                         FinalizedConsensus::Aura { slot_duration, .. },
-                        VerifyConsensusSpecific::Aura { authorities_list },
+                        Some(BlockConsensus::Aura { authorities_list }),
                     ) => verify::header_only::ConfigConsensus::Aura {
                         current_authorities: header::AuraAuthoritiesIter::from_slice(
-                            &*authorities_list,
+                            authorities_list,
                         ),
                         now_from_unix_epoch,
                         slot_duration: *slot_duration,
@@ -244,18 +259,21 @@ impl<T> NonFinalizedTreeInner<T> {
                         FinalizedConsensus::Babe {
                             slots_per_epoch, ..
                         },
-                        VerifyConsensusSpecific::Babe {
+                        Some(BlockConsensus::Babe {
                             current_epoch,
                             next_epoch,
-                        },
+                        }),
                     ) => verify::header_only::ConfigConsensus::Babe {
                         parent_block_epoch: current_epoch.as_ref().map(|v| (&**v).into()),
                         parent_block_next_epoch: (&**next_epoch).into(),
                         slots_per_epoch: *slots_per_epoch,
                         now_from_unix_epoch,
                     },
-                    (FinalizedConsensus::AllAuthorized, VerifyConsensusSpecific::AllAuthorized) => {
-                        verify::header_only::ConfigConsensus::AllAuthorized
+                    (FinalizedConsensus::Unknown, None) => {
+                        return VerifyOut::HeaderErr(
+                            context.chain,
+                            HeaderVerifyError::UnknownConsensusEngine,
+                        )
                     }
                     _ => {
                         return VerifyOut::HeaderErr(
@@ -264,15 +282,21 @@ impl<T> NonFinalizedTreeInner<T> {
                         )
                     }
                 },
-                block_header: (&context.header).into(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
+                finality: match &context.finality {
+                    BlockFinality::Outsourced => verify::header_only::ConfigFinality::Outsourced,
+                    BlockFinality::Grandpa { .. } => verify::header_only::ConfigFinality::Grandpa,
+                },
+                allow_unknown_consensus_engines: context.chain.allow_unknown_consensus_engines,
+                block_header: (&*context.header).into(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
+                block_number_bytes: context.chain.block_number_bytes,
                 parent_block_header: parent_block_header.into(),
             })
             .map_err(HeaderVerifyError::VerificationFailed);
 
             match result {
                 Ok(success) => {
-                    let (is_new_best, consensus) = context.apply_success_header(success);
-                    VerifyOut::HeaderOk(context, is_new_best, consensus)
+                    let (is_new_best, consensus, finality) = context.apply_success_header(success);
+                    VerifyOut::HeaderOk(context, is_new_best, consensus, finality)
                 }
                 Err(err) => VerifyOut::HeaderErr(context.chain, err),
             }
@@ -281,28 +305,26 @@ impl<T> NonFinalizedTreeInner<T> {
 }
 
 enum VerifyOut<T> {
-    HeaderOk(VerifyContext<T>, bool, BlockConsensus),
-    HeaderErr(NonFinalizedTreeInner<T>, HeaderVerifyError),
-    HeaderDuplicate(NonFinalizedTreeInner<T>),
+    HeaderOk(VerifyContext<T>, bool, BlockConsensus, BlockFinality),
+    HeaderErr(Box<NonFinalizedTreeInner<T>>, HeaderVerifyError),
+    HeaderDuplicate(Box<NonFinalizedTreeInner<T>>),
     Body(BodyVerifyStep1<T>),
 }
 
 struct VerifyContext<T> {
-    chain: NonFinalizedTreeInner<T>,
+    chain: Box<NonFinalizedTreeInner<T>>,
     parent_tree_index: Option<fork_tree::NodeIndex>,
-    header: header::Header,
-    consensus: VerifyConsensusSpecific,
+    header: Box<header::Header>,
+    consensus: Option<BlockConsensus>,
+    finality: BlockFinality,
 }
 
 impl<T> VerifyContext<T> {
     fn apply_success_header(
         &mut self,
         success_consensus: verify::header_only::Success,
-    ) -> (bool, BlockConsensus) {
+    ) -> (bool, BlockConsensus, BlockFinality) {
         let success_consensus = match success_consensus {
-            verify::header_only::Success::AllAuthorized => {
-                verify::header_body::SuccessConsensus::AllAuthorized
-            }
             verify::header_only::Success::Aura { authorities_change } => {
                 verify::header_body::SuccessConsensus::Aura { authorities_change }
             }
@@ -321,13 +343,13 @@ impl<T> VerifyContext<T> {
     fn apply_success_body(
         &mut self,
         success_consensus: verify::header_body::SuccessConsensus,
-    ) -> (bool, BlockConsensus) {
+    ) -> (bool, BlockConsensus, BlockFinality) {
         let is_new_best = if let Some(current_best) = self.chain.current_best {
             best_block::is_better_block(
                 &self.chain.blocks,
                 current_best,
                 self.parent_tree_index,
-                (&self.header).into(),
+                (&*self.header).into(),
             ) == Ordering::Greater
         } else {
             true
@@ -341,16 +363,10 @@ impl<T> VerifyContext<T> {
                 .map(|idx| self.chain.blocks.get(idx).unwrap().consensus.clone()),
         ) {
             (
-                verify::header_body::SuccessConsensus::AllAuthorized,
-                VerifyConsensusSpecific::AllAuthorized,
-                FinalizedConsensus::AllAuthorized,
-                _,
-            ) => BlockConsensus::AllAuthorized,
-            (
                 verify::header_body::SuccessConsensus::Aura { authorities_change },
-                VerifyConsensusSpecific::Aura {
+                Some(BlockConsensus::Aura {
                     authorities_list: parent_authorities,
-                },
+                }),
                 FinalizedConsensus::Aura { .. },
                 _,
             ) => {
@@ -371,11 +387,32 @@ impl<T> VerifyContext<T> {
                     epoch_transition_target: Some(epoch_transition_target),
                     ..
                 },
-                VerifyConsensusSpecific::Babe { .. },
+                Some(BlockConsensus::Babe { .. }),
+                FinalizedConsensus::Babe { .. },
+                Some(BlockConsensus::Babe { next_epoch, .. }),
+            ) if next_epoch.start_slot_number.is_some() => BlockConsensus::Babe {
+                current_epoch: Some(next_epoch),
+                next_epoch: Arc::new(epoch_transition_target),
+            },
+
+            (
+                verify::header_body::SuccessConsensus::Babe {
+                    epoch_transition_target: Some(epoch_transition_target),
+                    slot_number,
+                    ..
+                },
+                Some(BlockConsensus::Babe { .. }),
                 FinalizedConsensus::Babe { .. },
                 Some(BlockConsensus::Babe { next_epoch, .. }),
             ) => BlockConsensus::Babe {
-                current_epoch: Some(next_epoch),
+                current_epoch: Some(Arc::new(chain_information::BabeEpochInformation {
+                    start_slot_number: Some(slot_number),
+                    allowed_slots: next_epoch.allowed_slots,
+                    epoch_index: next_epoch.epoch_index,
+                    authorities: next_epoch.authorities.clone(),
+                    c: next_epoch.c,
+                    randomness: next_epoch.randomness,
+                })),
                 next_epoch: Arc::new(epoch_transition_target),
             },
 
@@ -384,7 +421,7 @@ impl<T> VerifyContext<T> {
                     epoch_transition_target: None,
                     ..
                 },
-                VerifyConsensusSpecific::Babe { .. },
+                Some(BlockConsensus::Babe { .. }),
                 FinalizedConsensus::Babe { .. },
                 Some(BlockConsensus::Babe {
                     current_epoch,
@@ -400,14 +437,38 @@ impl<T> VerifyContext<T> {
                     epoch_transition_target: Some(epoch_transition_target),
                     ..
                 },
-                VerifyConsensusSpecific::Babe { .. },
+                Some(BlockConsensus::Babe { .. }),
+                FinalizedConsensus::Babe {
+                    next_epoch_transition,
+                    ..
+                },
+                None,
+            ) if next_epoch_transition.start_slot_number.is_some() => BlockConsensus::Babe {
+                current_epoch: Some(next_epoch_transition),
+                next_epoch: Arc::new(epoch_transition_target),
+            },
+
+            (
+                verify::header_body::SuccessConsensus::Babe {
+                    epoch_transition_target: Some(epoch_transition_target),
+                    slot_number,
+                    ..
+                },
+                Some(BlockConsensus::Babe { .. }),
                 FinalizedConsensus::Babe {
                     next_epoch_transition,
                     ..
                 },
                 None,
             ) => BlockConsensus::Babe {
-                current_epoch: Some(next_epoch_transition),
+                current_epoch: Some(Arc::new(chain_information::BabeEpochInformation {
+                    start_slot_number: Some(slot_number),
+                    allowed_slots: next_epoch_transition.allowed_slots,
+                    authorities: next_epoch_transition.authorities.clone(),
+                    c: next_epoch_transition.c,
+                    epoch_index: next_epoch_transition.epoch_index,
+                    randomness: next_epoch_transition.randomness,
+                })),
                 next_epoch: Arc::new(epoch_transition_target),
             },
 
@@ -416,7 +477,7 @@ impl<T> VerifyContext<T> {
                     epoch_transition_target: None,
                     ..
                 },
-                VerifyConsensusSpecific::Babe { .. },
+                Some(BlockConsensus::Babe { .. }),
                 FinalizedConsensus::Babe {
                     block_epoch_information,
                     next_epoch_transition,
@@ -433,7 +494,97 @@ impl<T> VerifyContext<T> {
             _ => unreachable!(),
         };
 
-        (is_new_best, consensus)
+        let finality = match &self.finality {
+            BlockFinality::Outsourced => BlockFinality::Outsourced,
+            BlockFinality::Grandpa {
+                prev_auth_change_trigger_number: parent_prev_auth_change_trigger_number,
+                after_block_authorities_set_id: parent_after_block_authorities_set_id,
+                scheduled_change: parent_scheduled_change,
+                triggered_authorities: parent_triggered_authorities,
+                triggers_change: parent_triggers_change,
+                ..
+            } => {
+                let mut triggered_authorities = parent_triggered_authorities.clone();
+                let mut triggers_change = false;
+                let mut scheduled_change = parent_scheduled_change.clone();
+
+                // Check whether the verified block schedules a change of authorities.
+                for grandpa_digest_item in self.header.digest.logs().filter_map(|d| match d {
+                    header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
+                    _ => None,
+                }) {
+                    match grandpa_digest_item {
+                        header::GrandpaConsensusLogRef::ScheduledChange(change) => {
+                            let trigger_block_height = self
+                                .header
+                                .number
+                                .checked_add(u64::from(change.delay))
+                                .unwrap();
+
+                            // It is forbidden to schedule a change while a change is already
+                            // scheduled, otherwise the block is invalid. This is verified during
+                            // the block verification.
+                            match scheduled_change {
+                                Some(_) => {
+                                    // Ignore any new change if a change is already in progress.
+                                    // Matches the behaviour here: <https://github.com/paritytech/substrate/blob/a357c29ebabb075235977edd5e3901c66575f995/client/finality-grandpa/src/authorities.rs#L479>
+                                }
+                                None => {
+                                    scheduled_change = Some((
+                                        trigger_block_height,
+                                        change.next_authorities.map(|a| a.into()).collect(),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {
+                            // TODO: unimplemented
+                            // TODO: when it comes to forced change, they take precedence over scheduled changes but only sheduled changes within the same block
+                        }
+                    }
+                }
+
+                // If the newly-verified block is one where Grandpa scheduled change are
+                // triggered, we need update the field values.
+                // Note that this is checked after we have potentially fetched `scheduled_change`
+                // from the block.
+                if let Some((trigger_height, new_list)) = &scheduled_change {
+                    if *trigger_height == self.header.number {
+                        triggers_change = true;
+                        triggered_authorities = new_list.clone();
+                        scheduled_change = None;
+                    }
+                }
+
+                // Some sanity checks.
+                debug_assert!(scheduled_change
+                    .as_ref()
+                    .map(|(n, _)| *n > self.header.number)
+                    .unwrap_or(true));
+                debug_assert!(parent_prev_auth_change_trigger_number
+                    .as_ref()
+                    .map(|n| *n < self.header.number)
+                    .unwrap_or(true));
+
+                BlockFinality::Grandpa {
+                    prev_auth_change_trigger_number: if *parent_triggers_change {
+                        Some(self.header.number - 1)
+                    } else {
+                        *parent_prev_auth_change_trigger_number
+                    },
+                    triggered_authorities,
+                    scheduled_change,
+                    triggers_change,
+                    after_block_authorities_set_id: if triggers_change {
+                        *parent_after_block_authorities_set_id + 1
+                    } else {
+                        *parent_after_block_authorities_set_id
+                    },
+                }
+            }
+        };
+
+        (is_new_best, consensus, finality)
     }
 
     fn with_body_verify(mut self, inner: verify::header_body::Verify) -> BodyVerifyStep2<T> {
@@ -442,8 +593,8 @@ impl<T> VerifyContext<T> {
                 // TODO: lots of code in common with header verification
 
                 // Block verification is successful!
-                let (is_new_best, consensus) = self.apply_success_body(success.consensus);
-                let hash = self.header.hash();
+                let (is_new_best, consensus, finality) = self.apply_success_body(success.consensus);
+                let hash = self.header.hash(self.chain.block_number_bytes);
 
                 BodyVerifyStep2::Finished {
                     parent_runtime: success.parent_runtime,
@@ -456,6 +607,7 @@ impl<T> VerifyContext<T> {
                         is_new_best,
                         hash,
                         consensus,
+                        finality,
                     },
                 }
             }
@@ -518,18 +670,6 @@ pub enum BodyVerifyStep1<T> {
     /// Verification is pending. In order to continue, a [`host::HostVmPrototype`] of the
     /// runtime of the parent block must be provided.
     ParentRuntimeRequired(BodyVerifyRuntimeRequired<T>),
-}
-
-#[derive(Debug)]
-enum VerifyConsensusSpecific {
-    AllAuthorized,
-    Aura {
-        authorities_list: Arc<Vec<header::AuraAuthority>>,
-    },
-    Babe {
-        current_epoch: Option<Arc<chain_information::BabeEpochInformation>>,
-        next_epoch: Arc<chain_information::BabeEpochInformation>,
-    },
 }
 
 /// Verification is pending. In order to continue, a [`host::HostVmPrototype`] of the runtime
@@ -619,30 +759,34 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             &self.context.chain.finalized_consensus,
             &self.context.consensus,
         ) {
-            (FinalizedConsensus::AllAuthorized, VerifyConsensusSpecific::AllAuthorized) => {
-                verify::header_body::ConfigConsensus::AllAuthorized
+            (FinalizedConsensus::Unknown, None) => {
+                return BodyVerifyStep2::Error {
+                    chain: NonFinalizedTree {
+                        inner: Some(self.context.chain),
+                    },
+                    error: BodyVerifyError::UnknownConsensusEngine,
+                    parent_runtime,
+                }
             }
             (
                 FinalizedConsensus::Aura { slot_duration, .. },
-                VerifyConsensusSpecific::Aura { authorities_list },
+                Some(BlockConsensus::Aura { authorities_list }),
             ) => verify::header_body::ConfigConsensus::Aura {
-                current_authorities: header::AuraAuthoritiesIter::from_slice(&*authorities_list),
-                now_from_unix_epoch: self.now_from_unix_epoch,
+                current_authorities: header::AuraAuthoritiesIter::from_slice(authorities_list),
                 slot_duration: *slot_duration,
             },
             (
                 FinalizedConsensus::Babe {
                     slots_per_epoch, ..
                 },
-                VerifyConsensusSpecific::Babe {
+                Some(BlockConsensus::Babe {
                     current_epoch,
                     next_epoch,
-                },
+                }),
             ) => verify::header_body::ConfigConsensus::Babe {
                 parent_block_epoch: current_epoch.as_ref().map(|v| (&**v).into()),
                 parent_block_next_epoch: (&**next_epoch).into(),
                 slots_per_epoch: *slots_per_epoch,
-                now_from_unix_epoch: self.now_from_unix_epoch,
             },
             _ => {
                 return BodyVerifyStep2::Error {
@@ -658,7 +802,10 @@ impl<T> BodyVerifyRuntimeRequired<T> {
         let process = verify::header_body::verify(verify::header_body::Config {
             parent_runtime,
             consensus: config_consensus,
-            block_header: (&self.context.header).into(),
+            allow_unknown_consensus_engines: self.context.chain.allow_unknown_consensus_engines,
+            now_from_unix_epoch: self.now_from_unix_epoch,
+            block_header: (&*self.context.header).into(),
+            block_number_bytes: self.context.chain.block_number_bytes,
             parent_block_header: parent_block_header.into(),
             block_body,
             top_trie_root_calculation_cache,
@@ -697,9 +844,9 @@ pub enum BodyVerifyStep2<T> {
         /// been modified. Contains the new runtime.
         new_runtime: Option<host::HostVmPrototype>,
         /// List of changes to the storage top trie that the block performs.
-        storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
-        /// List of changes to the offchain storage that this block performs.
-        offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+        storage_top_trie_changes: storage_diff::StorageDiff,
+        /// List of changes to the off-chain storage that this block performs.
+        offchain_storage_changes: storage_diff::StorageDiff,
         /// Cache of calculation for the storage trie of the best block.
         /// Pass this value to [`BodyVerifyRuntimeRequired::resume`] when verifying a children of
         /// this block in order to considerably speed up the verification.
@@ -733,7 +880,10 @@ pub enum BodyVerifyStep2<T> {
 #[derive(Debug, derive_more::Display)]
 pub enum BodyVerifyError {
     /// Error during the consensus-related check.
+    #[display(fmt = "{}", _0)]
     Consensus(verify::header_body::Error),
+    /// Block can't be verified as it uses an unknown consensus engine.
+    UnknownConsensusEngine,
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
 }
@@ -967,6 +1117,7 @@ pub struct HeaderInsert<'c, T> {
     hash: [u8; 32],
     is_new_best: bool,
     consensus: Option<BlockConsensus>,
+    finality: Option<BlockFinality>,
 }
 
 impl<'c, T> HeaderInsert<'c, T> {
@@ -974,15 +1125,28 @@ impl<'c, T> HeaderInsert<'c, T> {
     pub fn insert(mut self, user_data: T) {
         let mut context = self.context.take().unwrap();
 
+        debug_assert_eq!(
+            context.chain.blocks.len(),
+            context.chain.blocks_by_hash.len()
+        );
+
         let new_node_index = context.chain.blocks.insert(
             context.parent_tree_index,
             Block {
-                header: context.header,
+                header: *context.header,
                 hash: self.hash,
                 consensus: self.consensus.take().unwrap(),
+                finality: self.finality.take().unwrap(),
                 user_data,
             },
         );
+
+        let _prev_value = context
+            .chain
+            .blocks_by_hash
+            .insert(self.hash, new_node_index);
+        // A bug here would be serious enough that it is worth being an `assert!`
+        assert!(_prev_value.is_none());
 
         if self.is_new_best {
             context.chain.current_best = Some(new_node_index);
@@ -993,14 +1157,14 @@ impl<'c, T> HeaderInsert<'c, T> {
 
     /// Returns the block header about to be inserted.
     pub fn header(&self) -> header::HeaderRef {
-        From::from(&self.context.as_ref().unwrap().header)
+        From::from(&*self.context.as_ref().unwrap().header)
     }
 
     /// Destroys the object without inserting the block in the chain. Returns the block header.
     pub fn into_header(mut self) -> header::Header {
         let context = self.context.take().unwrap();
         self.chain.inner = Some(context.chain);
-        context.header
+        *context.header
     }
 }
 
@@ -1026,7 +1190,10 @@ impl<'c, T> Drop for HeaderInsert<'c, T> {
 #[derive(Debug, derive_more::Display)]
 pub enum HeaderVerifyError {
     /// Error while decoding the header.
+    #[display(fmt = "Error while decoding the header: {}", _0)]
     InvalidHeader(header::Error),
+    /// Block can't be verified as it uses an unknown consensus engine.
+    UnknownConsensusEngine,
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
     /// The parent of the block isn't known.
@@ -1036,6 +1203,7 @@ pub enum HeaderVerifyError {
         parent_hash: [u8; 32],
     },
     /// The block verification has failed. The block is invalid and should be thrown away.
+    #[display(fmt = "{}", _0)]
     VerificationFailed(verify::header_only::Error),
 }
 
@@ -1046,25 +1214,40 @@ pub struct BodyInsert<T> {
     hash: [u8; 32],
     is_new_best: bool,
     consensus: BlockConsensus,
+    finality: BlockFinality,
 }
 
 impl<T> BodyInsert<T> {
     /// Returns the header of the block about to be inserted.
     pub fn header(&self) -> header::HeaderRef {
-        (&self.context.header).into()
+        (&*self.context.header).into()
     }
 
     /// Inserts the block with the given user data.
     pub fn insert(mut self, user_data: T) -> NonFinalizedTree<T> {
+        debug_assert_eq!(
+            self.context.chain.blocks.len(),
+            self.context.chain.blocks_by_hash.len()
+        );
+
         let new_node_index = self.context.chain.blocks.insert(
             self.context.parent_tree_index,
             Block {
-                header: self.context.header,
+                header: *self.context.header,
                 hash: self.hash,
                 consensus: self.consensus,
+                finality: self.finality,
                 user_data,
             },
         );
+
+        let _prev_value = self
+            .context
+            .chain
+            .blocks_by_hash
+            .insert(self.hash, new_node_index);
+        // A bug here would be serious enough that it is worth being an `assert!`
+        assert!(_prev_value.is_none());
 
         if self.is_new_best {
             self.context.chain.current_best = Some(new_node_index);

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -36,21 +36,26 @@ pub struct Config<'a> {
     /// the other fields.
     pub block_header: header::HeaderRef<'a>,
 
+    /// Number of bytes used to encode the block number in the header.
+    pub block_number_bytes: usize,
+
     /// Configuration items related to the consensus engine.
     pub consensus: ConfigConsensus<'a>,
+
+    /// Configuration items related to the finality engine.
+    pub finality: ConfigFinality,
+
+    /// If `false`, digest items with an unknown consensus engine lead to an error.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
+    /// even if `true` is passed, a recognized consensus engine must always be present.
+    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
+    /// the network is bounded.
+    pub allow_unknown_consensus_engines: bool,
 }
 
 /// Extra items of [`Config`] that are dependant on the consensus engine of the chain.
 pub enum ConfigConsensus<'a> {
-    /// Any node on the chain is allowed to produce blocks.
-    ///
-    /// No seal must be present in the header.
-    ///
-    /// > **Note**: Be warned that this variant makes it possible for a huge number of blocks to
-    /// >           be produced. If this variant is used, the user is encouraged to limit, through
-    /// >           other means, the number of blocks being accepted.
-    AllAuthorized,
-
     /// Chain is using the Aura consensus engine.
     Aura {
         /// Aura authorities that must validate the block.
@@ -86,11 +91,21 @@ pub enum ConfigConsensus<'a> {
     },
 }
 
+/// Extra items of [`Config`] that are dependant on the finality engine of the chain.
+pub enum ConfigFinality {
+    /// Blocks themselves don't contain any information concerning finality. Finality is provided
+    /// by a mechanism that is entirely external to the chain.
+    ///
+    /// > **Note**: This is the mechanism used for parachains. Finality is provided entirely by
+    /// >           the relay chain.
+    Outsourced,
+
+    /// Chain uses the Grandpa finality algorithm.
+    Grandpa,
+}
+
 /// Block successfully verified.
 pub enum Success {
-    /// [`ConfigConsensus::AllAuthorized`] was passed to [`Config`].
-    AllAuthorized,
-
     /// Chain is using the Aura consensus engine.
     Aura {
         /// True if the list of authorities is modified by this block.
@@ -121,14 +136,24 @@ pub enum Error {
     NonSequentialBlockNumber,
     /// Hash of the parent block doesn't match the hash in the header to verify.
     BadParentHash,
+    /// Block header contains an unrecognized consensus engine.
+    #[display(
+        fmt = "Block header contains an unrecognized consensus engine: {:?}",
+        engine
+    )]
+    UnknownConsensusEngine { engine: [u8; 4] },
     /// Block header contains items relevant to multiple consensus engines at the same time.
     MultipleConsensusEngines,
+    /// Block header contains items that don't match the finality engine of the chain.
+    FinalityEngineMismatch,
     /// Failed to verify the authenticity of the block with the AURA algorithm.
     #[display(fmt = "{}", _0)]
     AuraVerification(aura::VerifyError),
     /// Failed to verify the authenticity of the block with the BABE algorithm.
     #[display(fmt = "{}", _0)]
     BabeVerification(babe::VerifyError),
+    /// Block schedules a Grandpa authorities change while another change is still in progress.
+    GrandpaChangesOverlap,
 }
 
 /// Verifies whether a block is valid.
@@ -139,7 +164,9 @@ pub fn verify(config: Config) -> Result<Success, Error> {
     // unnecessary and introduces an overhead.
     // However this check is performed anyway, as the consequences of a failure here could be
     // potentially quite high.
-    if config.parent_block_header.hash() != *config.block_header.parent_hash {
+    if config.parent_block_header.hash(config.block_number_bytes)
+        != *config.block_header.parent_hash
+    {
         return Err(Error::BadParentHash);
     }
 
@@ -154,21 +181,40 @@ pub fn verify(config: Config) -> Result<Success, Error> {
         return Err(Error::NonSequentialBlockNumber);
     }
 
-    // TODO: need to verify the changes trie stuff maybe?
-    // TODO: need to verify that there's no grandpa scheduled change header if there's already an active grandpa scheduled change
-    // TODO: verify that there's no grandpa header items if the chain doesn't use grandpa
+    // Fail verification if there is any digest log item with an unrecognized consensus engine.
+    if !config.allow_unknown_consensus_engines {
+        if let Some(engine) = config
+            .block_header
+            .digest
+            .logs()
+            .find_map(|item| match item {
+                header::DigestItemRef::UnknownConsensus { engine, .. }
+                | header::DigestItemRef::UnknownSeal { engine, .. }
+                | header::DigestItemRef::UnknownPreRuntime { engine, .. } => Some(engine),
+                _ => None,
+            })
+        {
+            return Err(Error::UnknownConsensusEngine { engine });
+        }
+    }
+
+    // Check whether the log items respect the finality engine.
+    match config.finality {
+        ConfigFinality::Grandpa => {}
+        ConfigFinality::Outsourced => {
+            // TODO: we iterate through the log items, which is O(n), is it worth optimizing this?
+            for item in config.block_header.digest.logs() {
+                match item {
+                    header::DigestItemRef::GrandpaConsensus(_) => {
+                        return Err(Error::FinalityEngineMismatch)
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 
     match config.consensus {
-        ConfigConsensus::AllAuthorized => {
-            // `has_any_aura()` and `has_any_babe()` also make sure that no seal is present.
-            if config.block_header.digest.has_any_aura()
-                || config.block_header.digest.has_any_babe()
-            {
-                return Err(Error::MultipleConsensusEngines);
-            }
-
-            Ok(Success::AllAuthorized)
-        }
         ConfigConsensus::Aura {
             current_authorities,
             slot_duration,
@@ -180,6 +226,7 @@ pub fn verify(config: Config) -> Result<Success, Error> {
 
             let result = aura::verify_header(aura::VerifyConfig {
                 header: config.block_header.clone(),
+                block_number_bytes: config.block_number_bytes,
                 parent_block_header: config.parent_block_header,
                 now_from_unix_epoch,
                 current_authorities,
@@ -205,6 +252,7 @@ pub fn verify(config: Config) -> Result<Success, Error> {
 
             let result = babe::verify_header(babe::VerifyConfig {
                 header: config.block_header.clone(),
+                block_number_bytes: config.block_number_bytes,
                 parent_block_header: config.parent_block_header,
                 parent_block_epoch,
                 parent_block_next_epoch,

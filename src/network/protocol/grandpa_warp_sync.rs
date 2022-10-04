@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -62,23 +62,29 @@ pub struct GrandpaWarpSyncResponseFragment {
     ///
     /// Must always contain a change in the list of authorities, except for the last fragment
     /// if [`GrandpaWarpSyncResponse::is_finished`] is `true`.
-    pub header: header::Header,
+    pub scale_encoded_header: Vec<u8>,
 
-    /// Justification that proofs the finality of [`GrandpaWarpSyncResponseFragment::header`].
-    pub justification: finality::justification::decode::GrandpaJustification,
+    /// Justification that proves the finality of
+    /// [`GrandpaWarpSyncResponseFragment::scale_encoded_header`].
+    pub scale_encoded_justification: Vec<u8>,
 }
 
 /// Error potentially returned by [`decode_grandpa_warp_sync_response`].
 #[derive(Debug, derive_more::Display)]
+#[display(fmt = "Failed to decode response")]
 pub struct DecodeGrandpaWarpSyncResponseError;
 
 /// Decodes a SCALE-encoded GrandPa warp sync response.
 // TODO: make this a zero-cost API
 pub fn decode_grandpa_warp_sync_response(
     encoded: &[u8],
+    block_number_bytes: usize,
 ) -> Result<GrandpaWarpSyncResponse, DecodeGrandpaWarpSyncResponseError> {
     nom::combinator::all_consuming(nom::combinator::map(
-        nom::sequence::tuple((decode_fragments, nom::number::complete::le_u8)),
+        nom::sequence::tuple((
+            decode_fragments(block_number_bytes),
+            nom::number::complete::le_u8,
+        )),
         |(fragments, is_finished)| GrandpaWarpSyncResponse {
             fragments,
             is_finished: is_finished != 0,
@@ -88,37 +94,37 @@ pub fn decode_grandpa_warp_sync_response(
     .map_err(|_| DecodeGrandpaWarpSyncResponseError)
 }
 
-fn decode_fragments(bytes: &[u8]) -> nom::IResult<&[u8], Vec<GrandpaWarpSyncResponseFragment>> {
-    nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-        nom::multi::many_m_n(
-            num_elems,
-            num_elems,
-            nom::combinator::map(
-                nom::sequence::tuple((
-                    |s| {
-                        header::decode_partial(s).map(|(a, b)| (b, a)).map_err(|_| {
-                            nom::Err::Failure(nom::error::make_error(
-                                s,
-                                nom::error::ErrorKind::Verify,
-                            ))
-                        })
-                    },
-                    |s| {
-                        finality::justification::decode::decode_partial_grandpa(s)
-                            .map(|(a, b)| (b, a))
-                            .map_err(|_| {
-                                nom::Err::Failure(nom::error::make_error(
-                                    s,
-                                    nom::error::ErrorKind::Verify,
-                                ))
-                            })
-                    },
-                )),
-                move |(header, justification)| GrandpaWarpSyncResponseFragment {
-                    header: header.into(),
-                    justification: justification.into(),
-                },
-            ),
-        )
-    })(bytes)
+fn decode_fragments<'a>(
+    block_number_bytes: usize,
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], Vec<GrandpaWarpSyncResponseFragment>> {
+    nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
+        nom::multi::many_m_n(num_elems, num_elems, decode_fragment(block_number_bytes))
+    })
+}
+
+fn decode_fragment<'a>(
+    block_number_bytes: usize,
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], GrandpaWarpSyncResponseFragment> {
+    nom::combinator::map(
+        nom::sequence::tuple((
+            nom::combinator::recognize(move |s| {
+                header::decode_partial(s, block_number_bytes)
+                    .map(|(a, b)| (b, a))
+                    .map_err(|_| {
+                        nom::Err::Failure(nom::error::make_error(s, nom::error::ErrorKind::Verify))
+                    })
+            }),
+            nom::combinator::recognize(move |s| {
+                finality::justification::decode::decode_partial_grandpa(s, block_number_bytes)
+                    .map(|(a, b)| (b, a))
+                    .map_err(|_| {
+                        nom::Err::Failure(nom::error::make_error(s, nom::error::ErrorKind::Verify))
+                    })
+            }),
+        )),
+        move |(header, justification)| GrandpaWarpSyncResponseFragment {
+            scale_encoded_header: header.into(),
+            scale_encoded_justification: justification.into(),
+        },
+    )
 }

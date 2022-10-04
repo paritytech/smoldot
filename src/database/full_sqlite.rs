@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -54,6 +54,16 @@
 //!
 //! The SQL schema of the database, with explanatory comments, can be found in `open.rs`.
 //!
+//! # About blocking behavior
+//!
+//! This implementation uses the SQLite library, which isn't Rust-asynchronous-compatible. Many
+//! functions will, with the help of the operating system, put the current thread to sleep while
+//! waiting for an I/O operation to finish. In the context of asynchronous Rust, this is
+//! undesirable.
+//!
+//! For this reason, you are encouraged to isolate the database in its own threads and never
+//! access it directly from an asynchronous context.
+//!
 
 // TODO: better docs
 
@@ -62,12 +72,7 @@
 
 use crate::{chain::chain_information, header, util};
 
-use core::{
-    convert::TryFrom,
-    fmt,
-    iter::{self, FromIterator},
-    num::NonZeroU64,
-};
+use core::{fmt, iter, num::NonZeroU64};
 use parking_lot::Mutex;
 
 pub use open::{open, Config, ConfigTy, DatabaseEmpty, DatabaseOpen};
@@ -83,6 +88,9 @@ pub struct SqliteFullDatabase {
     /// call `COMMIT; BEGIN_TRANSACTION` when deemed necessary. `COMMIT` is basically the
     /// equivalent of `fsync`, and must be called carefully in order to not lose too much speed.
     database: Mutex<sqlite::Connection>,
+
+    /// Number of bytes used to encode the block number.
+    block_number_bytes: usize,
 }
 
 impl SqliteFullDatabase {
@@ -121,8 +129,9 @@ impl SqliteFullDatabase {
         let mut statement = connection
             .prepare(r#"SELECT header FROM blocks WHERE hash = ?"#)
             .map_err(InternalError)
-            .map_err(CorruptedError::Internal)?;
-        statement.bind(1, &block_hash[..]).unwrap();
+            .map_err(CorruptedError::Internal)?
+            .bind(1, &block_hash[..])
+            .unwrap();
 
         if !matches!(statement.next().unwrap(), sqlite::State::Row) {
             return Ok(None);
@@ -151,11 +160,11 @@ impl SqliteFullDatabase {
         let mut statement = connection
             .prepare(r#"SELECT extrinsic FROM blocks_body WHERE hash = ? ORDER BY idx ASC"#)
             .map_err(InternalError)
-            .map_err(CorruptedError::Internal)?;
+            .map_err(CorruptedError::Internal)?
+            .bind(1, &block_hash[..])
+            .unwrap();
 
         // TODO: doesn't detect if block is absent
-
-        statement.bind(1, &block_hash[..]).unwrap();
 
         let mut out = Vec::new();
         while matches!(statement.next().unwrap(), sqlite::State::Row) {
@@ -183,8 +192,9 @@ impl SqliteFullDatabase {
         let mut statement = connection
             .prepare(r#"SELECT hash FROM blocks WHERE number = ?"#)
             .map_err(InternalError)
-            .map_err(CorruptedError::Internal)?;
-        statement.bind(1, block_number).unwrap();
+            .map_err(CorruptedError::Internal)?
+            .bind(1, block_number)
+            .unwrap();
 
         let mut out = Vec::new();
         while matches!(statement.next().unwrap(), sqlite::State::Row) {
@@ -216,8 +226,9 @@ impl SqliteFullDatabase {
             return Err(FinalizedAccessError::Obsolete);
         }
 
-        let finalized_block_header = block_header(&connection, finalized_block_hash)?
-            .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
+        let finalized_block_header =
+            block_header(&connection, finalized_block_hash, self.block_number_bytes)?
+                .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
 
         let finality = match (
             grandpa_authorities_set_id(&connection)?,
@@ -270,7 +281,7 @@ impl SqliteFullDatabase {
                     slot_duration,
                 }
             }
-            (None, None, None) => chain_information::ChainInformationConsensus::AllAuthorized,
+            (None, None, None) => chain_information::ChainInformationConsensus::Unknown,
             _ => {
                 return Err(FinalizedAccessError::Access(AccessError::Corrupted(
                     CorruptedError::ConsensusAlgorithmMix,
@@ -311,7 +322,8 @@ impl SqliteFullDatabase {
         let block_hash = header::hash_from_scale_encoded_header(scale_encoded_header);
 
         // Decode the header, as we will need various information from it.
-        let header = header::decode(scale_encoded_header).map_err(InsertError::BadHeader)?;
+        let header = header::decode(scale_encoded_header, self.block_number_bytes)
+            .map_err(InsertError::BadHeader)?;
 
         // Locking is performed as late as possible.
         let connection = self.database.lock();
@@ -337,23 +349,28 @@ impl SqliteFullDatabase {
             .prepare(
                 "INSERT INTO blocks(number, hash, header, justification) VALUES (?, ?, ?, NULL)",
             )
-            .unwrap();
-        statement
+            .unwrap()
             .bind(1, i64::try_from(header.number).unwrap())
+            .unwrap()
+            .bind(2, &block_hash[..])
+            .unwrap()
+            .bind(3, scale_encoded_header)
             .unwrap();
-        statement.bind(2, &block_hash[..]).unwrap();
-        statement.bind(3, scale_encoded_header).unwrap();
         statement.next().unwrap();
 
         let mut statement = connection
             .prepare("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES (?, ?, ?)")
             .unwrap();
         for (index, item) in body.enumerate() {
-            statement.bind(1, &block_hash[..]).unwrap();
-            statement.bind(2, i64::try_from(index).unwrap()).unwrap();
-            statement.bind(3, item.as_ref()).unwrap();
+            statement = statement
+                .bind(1, &block_hash[..])
+                .unwrap()
+                .bind(2, i64::try_from(index).unwrap())
+                .unwrap()
+                .bind(3, item.as_ref())
+                .unwrap();
             statement.next().unwrap();
-            statement.reset().unwrap();
+            statement = statement.reset().unwrap();
         }
 
         // Insert the storage changes.
@@ -361,16 +378,19 @@ impl SqliteFullDatabase {
             .prepare("INSERT INTO non_finalized_changes(hash, key, value) VALUES (?, ?, ?)")
             .unwrap();
         for (key, value) in storage_top_trie_changes {
-            statement.bind(1, &block_hash[..]).unwrap();
-            statement.bind(2, key.as_ref()).unwrap();
+            statement = statement
+                .bind(1, &block_hash[..])
+                .unwrap()
+                .bind(2, key.as_ref())
+                .unwrap();
             if let Some(value) = value {
-                statement.bind(3, value.as_ref()).unwrap();
+                statement = statement.bind(3, value.as_ref()).unwrap();
             } else {
                 // Binds NULL.
-                statement.bind(3, ()).unwrap();
+                statement = statement.bind(3, ()).unwrap();
             }
             statement.next().unwrap();
-            statement.reset().unwrap();
+            statement = statement.reset().unwrap();
         }
 
         // Various other updates.
@@ -399,8 +419,12 @@ impl SqliteFullDatabase {
         let connection = self.database.lock();
 
         // Fetch the header of the block to finalize.
-        let new_finalized_header = block_header(&connection, new_finalized_block_hash)?
-            .ok_or(SetFinalizedError::UnknownBlock)?;
+        let new_finalized_header = block_header(
+            &connection,
+            new_finalized_block_hash,
+            self.block_number_bytes,
+        )?
+        .ok_or(SetFinalizedError::UnknownBlock)?;
 
         // Fetch the current finalized block.
         let current_finalized = finalized_num(&connection)?;
@@ -457,11 +481,12 @@ impl SqliteFullDatabase {
                 // Update `expected_hash` to point to the parent of the current
                 // `expected_hash`.
                 expected_hash = {
-                    let header = block_header(&connection, &expected_hash)?.ok_or(
-                        SetFinalizedError::Access(AccessError::Corrupted(
-                            CorruptedError::BrokenChain,
-                        )),
-                    )?;
+                    let header =
+                        block_header(&connection, &expected_hash, self.block_number_bytes)?.ok_or(
+                            SetFinalizedError::Access(AccessError::Corrupted(
+                                CorruptedError::BrokenChain,
+                            )),
+                        )?;
                     header.parent_hash
                 };
             }
@@ -479,7 +504,7 @@ impl SqliteFullDatabase {
             }
 
             for block_hash in blocks_list {
-                let header = block_header(&connection, &block_hash)?
+                let header = block_header(&connection, &block_hash, self.block_number_bytes)?
                     .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
                 if allowed_parents.iter().any(|p| *p == header.parent_hash) {
                     next_iter_allowed_parents.push(block_hash);
@@ -503,10 +528,10 @@ impl SqliteFullDatabase {
                     ))?
                 };
 
-            let block_header =
-                block_header(&connection, &block_hash)?.ok_or(SetFinalizedError::Access(
-                    AccessError::Corrupted(CorruptedError::MissingBlockHeader),
-                ))?;
+            let block_header = block_header(&connection, &block_hash, self.block_number_bytes)?
+                .ok_or(SetFinalizedError::Access(AccessError::Corrupted(
+                    CorruptedError::MissingBlockHeader,
+                )))?;
 
             let mut statement = connection
                 .prepare(
@@ -515,8 +540,9 @@ impl SqliteFullDatabase {
                     SELECT key FROM non_finalized_changes WHERE hash = ? AND value IS NULL
                 );",
                 )
+                .unwrap()
+                .bind(1, &block_hash[..])
                 .unwrap();
-            statement.bind(1, &block_hash[..]).unwrap();
             statement.next().unwrap();
 
             let mut statement = connection
@@ -526,15 +552,17 @@ impl SqliteFullDatabase {
                 FROM non_finalized_changes 
                 WHERE non_finalized_changes.hash = ? AND non_finalized_changes.value IS NOT NULL",
                 )
+                .unwrap()
+                .bind(1, &block_hash[..])
                 .unwrap();
-            statement.bind(1, &block_hash[..]).unwrap();
             statement.next().unwrap();
 
             // Remove the entries from `non_finalized_changes` as they are now finalized.
             let mut statement = connection
                 .prepare("DELETE FROM non_finalized_changes WHERE hash = ?")
+                .unwrap()
+                .bind(1, &block_hash[..])
                 .unwrap();
-            statement.bind(1, &block_hash[..]).unwrap();
             statement.next().unwrap();
 
             // TODO: the code below is very verbose and redundant with other similar code in smoldot ; could be improved
@@ -608,15 +636,15 @@ impl SqliteFullDatabase {
 
                             let mut statement = connection.prepare("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)").unwrap();
                             for (index, item) in change.next_authorities.enumerate() {
-                                statement
-                                    .bind(1, i64::from_ne_bytes(index.to_ne_bytes()))
-                                    .unwrap();
-                                statement.bind(2, &item.public_key[..]).unwrap();
-                                statement
+                                statement = statement
+                                    .bind(1, i64::try_from(index).unwrap())
+                                    .unwrap()
+                                    .bind(2, &item.public_key[..])
+                                    .unwrap()
                                     .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
                                     .unwrap();
                                 statement.next().unwrap();
-                                statement.reset().unwrap();
+                                statement = statement.reset().unwrap();
                             }
 
                             connection.execute(r#"UPDATE meta SET value_number = value_number + 1 WHERE key = "grandpa_authorities_set_id""#).unwrap();
@@ -698,8 +726,9 @@ impl SqliteFullDatabase {
             .map_err(InternalError)
             .map_err(CorruptedError::Internal)
             .map_err(AccessError::Corrupted)
-            .map_err(FinalizedAccessError::Access)?;
-        statement.bind(1, key).unwrap();
+            .map_err(FinalizedAccessError::Access)?
+            .bind(1, key)
+            .unwrap();
 
         if !matches!(statement.next().unwrap(), sqlite::State::Row) {
             return Ok(None);
@@ -737,8 +766,7 @@ impl SqliteFullDatabase {
             .map_err(InternalError)
             .map_err(CorruptedError::Internal)
             .map_err(AccessError::Corrupted)
-            .map_err(FinalizedAccessError::Access)?;
-        statement.bind(1, key).unwrap();
+            .map_err(FinalizedAccessError::Access)?.bind(1, key).unwrap();
 
         if !matches!(statement.next().unwrap(), sqlite::State::Row) {
             return Ok(None);
@@ -776,8 +804,9 @@ impl SqliteFullDatabase {
             .map_err(InternalError)
             .map_err(CorruptedError::Internal)
             .map_err(AccessError::Corrupted)
-            .map_err(FinalizedAccessError::Access)?;
-        statement.bind(1, prefix).unwrap();
+            .map_err(FinalizedAccessError::Access)?
+            .bind(1, prefix)
+            .unwrap();
 
         let mut out = Vec::new();
         while matches!(statement.next().unwrap(), sqlite::State::Row) {
@@ -828,6 +857,7 @@ pub enum AccessError {
     ///
     /// While these corruption errors are probably unrecoverable, the inner error might however
     /// be useful for debugging purposes.
+    #[display(fmt = "Database corrupted: {}", _0)]
     Corrupted(CorruptedError),
 }
 
@@ -835,10 +865,12 @@ pub enum AccessError {
 #[derive(Debug, derive_more::Display, derive_more::From)]
 pub enum InsertError {
     /// Error accessing the database.
+    #[display(fmt = "{}", _0)]
     Access(AccessError),
     /// Block was already in the database.
     Duplicate,
     /// Error when decoding the header to import.
+    #[display(fmt = "Failed to decode header: {}", _0)]
     BadHeader(header::Error),
     /// Parent of the block to insert isn't in the database.
     MissingParent,
@@ -878,6 +910,7 @@ pub enum CorruptedError {
     /// A block hash is expected to be 32 bytes. This isn't the case.
     InvalidBlockHashLen,
     /// Values in the database are all well-formatted, but are incoherent.
+    #[display(fmt = "Invalid chain information: {}", _0)]
     InvalidChainInformation(chain_information::ValidityError),
     /// The parent of a block in the database couldn't be found in that same database.
     BrokenChain,
@@ -887,11 +920,13 @@ pub enum CorruptedError {
     /// couldn't be found.
     MissingBlockHeader,
     /// The header of a block in the database has failed to decode.
+    #[display(fmt = "Corrupted block header: {}", _0)]
     BlockHeaderCorrupted(header::Error),
     /// Multiple different consensus algorithms are mixed within the database.
     ConsensusAlgorithmMix,
     /// The information about a Babe epoch found in the database has failed to decode.
     InvalidBabeEpochInformation,
+    #[display(fmt = "Internal error: {}", _0)]
     Internal(InternalError),
 }
 
@@ -904,8 +939,9 @@ fn meta_get_blob(database: &sqlite::Connection, key: &str) -> Result<Option<Vec<
         .prepare(r#"SELECT value_blob FROM meta WHERE key = ?"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-    statement.bind(1, key).unwrap();
+        .map_err(AccessError::Corrupted)?
+        .bind(1, key)
+        .unwrap();
 
     if !matches!(statement.next().unwrap(), sqlite::State::Row) {
         return Ok(None);
@@ -924,8 +960,9 @@ fn meta_get_number(database: &sqlite::Connection, key: &str) -> Result<Option<u6
         .prepare(r#"SELECT value_number FROM meta WHERE key = ?"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-    statement.bind(1, key).unwrap();
+        .map_err(AccessError::Corrupted)?
+        .bind(1, key)
+        .unwrap();
 
     if !matches!(statement.next().unwrap(), sqlite::State::Row) {
         return Ok(None);
@@ -948,9 +985,11 @@ fn meta_set_blob(
         .prepare(r#"INSERT OR REPLACE INTO meta(key, value_blob) VALUES (?, ?)"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-    statement.bind(1, key).unwrap();
-    statement.bind(2, value).unwrap();
+        .map_err(AccessError::Corrupted)?
+        .bind(1, key)
+        .unwrap()
+        .bind(2, value)
+        .unwrap();
     statement.next().unwrap();
     Ok(())
 }
@@ -964,9 +1003,9 @@ fn meta_set_number(
         .prepare(r#"INSERT OR REPLACE INTO meta(key, value_number) VALUES (?, ?)"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-    statement.bind(1, key).unwrap();
-    statement
+        .map_err(AccessError::Corrupted)?
+        .bind(1, key)
+        .unwrap()
         .bind(2, i64::from_ne_bytes(value.to_ne_bytes()))
         .unwrap();
     statement.next().unwrap();
@@ -978,8 +1017,9 @@ fn has_block(database: &sqlite::Connection, hash: &[u8]) -> Result<bool, AccessE
         .prepare(r#"SELECT COUNT(*) FROM blocks WHERE hash = ?"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-    statement.bind(1, hash).unwrap();
+        .map_err(AccessError::Corrupted)?
+        .bind(1, hash)
+        .unwrap();
 
     if !matches!(statement.next().unwrap(), sqlite::State::Row) {
         panic!()
@@ -1033,8 +1073,9 @@ fn block_hashes_by_number(
         .prepare(r#"SELECT hash FROM blocks WHERE number = ?"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-    statement.bind(1, number).unwrap();
+        .map_err(AccessError::Corrupted)?
+        .bind(1, number)
+        .unwrap();
 
     let mut out = Vec::new();
     while matches!(statement.next().unwrap(), sqlite::State::Row) {
@@ -1056,13 +1097,15 @@ fn block_hashes_by_number(
 fn block_header(
     database: &sqlite::Connection,
     hash: &[u8; 32],
+    block_number_bytes: usize,
 ) -> Result<Option<header::Header>, AccessError> {
     let mut statement = database
         .prepare(r#"SELECT header FROM blocks WHERE hash = ?"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-    statement.bind(1, &hash[..]).unwrap();
+        .map_err(AccessError::Corrupted)?
+        .bind(1, &hash[..])
+        .unwrap();
 
     if !matches!(statement.next().unwrap(), sqlite::State::Row) {
         return Ok(None);
@@ -1074,7 +1117,7 @@ fn block_header(
         .map_err(CorruptedError::Internal)
         .map_err(AccessError::Corrupted)?;
 
-    match header::decode(&encoded) {
+    match header::decode(&encoded, block_number_bytes) {
         Ok(h) => Ok(Some(h.into())),
         Err(err) => Err(AccessError::Corrupted(
             CorruptedError::BlockHeaderCorrupted(err),
@@ -1094,8 +1137,9 @@ fn purge_block(database: &sqlite::Connection, hash: &[u8; 32]) -> Result<(), Acc
         DELETE FROM blocks_body WHERE hash = :hash;
         DELETE FROM blocks WHERE hash = :hash;",
         )
+        .unwrap()
+        .bind_by_name(":hash", &hash[..])
         .unwrap();
-    statement.bind_by_name(":hash", &hash[..]).unwrap();
     statement.next().unwrap();
 
     Ok(())
@@ -1292,6 +1336,11 @@ fn decode_babe_epoch_information(
     ))(value)
     .map(|(_, v)| v)
     .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ());
+
+    let result = match result {
+        Ok(r) if r.validate().is_ok() => Ok(r),
+        Ok(_) | Err(()) => Err(()),
+    };
 
     result
         .map_err(|()| CorruptedError::InvalidBabeEpochInformation)

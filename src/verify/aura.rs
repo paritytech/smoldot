@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -47,12 +47,15 @@
 
 use crate::header;
 
-use core::{convert::TryFrom as _, num::NonZeroU64, time::Duration};
+use core::{num::NonZeroU64, time::Duration};
 
 /// Configuration for [`verify_header`].
 pub struct VerifyConfig<'a, TAuthList> {
     /// Header of the block to verify.
     pub header: header::HeaderRef<'a>,
+
+    /// Number of bytes used to encode the block number in the header.
+    pub block_number_bytes: usize,
 
     /// Header of the parent of the block to verify.
     ///
@@ -99,7 +102,7 @@ pub enum VerifyError {
     TooFarInFuture,
     /// Block header signature is invalid.
     BadSignature,
-    /// Failed to parse ed25519 public key.
+    /// Failed to parse Ed25519 public key.
     BadPublicKey,
     /// List of authorities is empty.
     EmptyAuthorities,
@@ -170,7 +173,10 @@ pub fn verify_header<'a>(
             }
             _ => return Err(VerifyError::MissingSeal),
         };
-        (seal_signature, unsealed_header.hash())
+        (
+            seal_signature,
+            unsealed_header.hash(config.block_number_bytes),
+        )
     };
 
     // Fetch the authority that has supposedly signed the block.

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -46,13 +46,26 @@
 //! zstandard-compressed and must also export a global symbol named `__heap_base`.
 //! More details below.
 //!
-//! ## Zstandard compression
+//! ## `Zstandard` compression
 //!
 //! The runtime code passed as parameter to [`HostVmPrototype::new`] can be compressed using the
-//! [zstd](https://en.wikipedia.org/wiki/Zstandard) algorithm.
+//! [`zstd`](https://en.wikipedia.org/wiki/Zstandard) algorithm.
 //!
 //! If the code starts with the magic bytes `[82, 188, 83, 118, 70, 219, 142, 5]`, then it is
 //! assumed that the rest of the data is a zstandard-compressed WebAssembly module.
+//!
+//! ## Runtime version
+//!
+//! Wasm files can contain so-called custom sections. A runtime can contain two custom sections
+//! whose names are `"runtime_version"` and `"runtime_apis"`, in which case they must contain a
+//! so-called runtime version.
+//!
+//! The runtime version contains important field that identifies a runtime.
+//!
+//! If no `"runtime_version"` and `"runtime_apis"` custom sections can be found, the
+//! `Core_version` entry point is used as a fallback in order to obtain the runtime version. This
+//! fallback mechanism is maintained for backwards compatibility purposes, but is considered
+//! deprecated.
 //!
 //! ## Memory allocations
 //!
@@ -63,20 +76,17 @@
 //! WebAssembly code is normally intended to perform its own heap-management logic internally, and
 //! use the `memory.grow` instruction if more memory is needed.
 //!
-//! In order to minimize the size of the runtime binary, and in order to accomodate for the API of
+//! In order to minimize the size of the runtime binary, and in order to accommodate for the API of
 //! the host functions that return a buffer of variable length, the Substrate/Polkadot runtimes,
 //! however, do not perform their heap management internally. Instead, they use the
 //! `ext_allocator_malloc_version_1` and `ext_allocator_free_version_1` host functions for this
 //! purpose. Calling `memory.grow` is forbidden.
 //!
-//! Consequently, the size of the memory available to the WebAssembly virtual machine is always
-//! fixed, and is equal to the initial size of the memory plus the value of `heap_pages` that is
-//! passed as parameter to [`HostVmPrototype::new`].
-//!
-//! Additionally, the runtime code must export a global symbol named `__heap_base` of type `i32`.
-//! Any memory whose offset is below the value of `__heap_base` can be used at will by the
-//! program, while any memory above this value is available for use by the implementation of
-//! `ext_allocator_malloc_version_1`.
+//! The runtime code must export a global symbol named `__heap_base` of type `i32`. Any memory
+//! whose offset is below the value of `__heap_base` can be used at will by the program, while
+//! any memory above `__heap_base` but below `__heap_base + heap_pages` (where `heap_pages` is
+//! the value passed as parameter to [`HostVmPrototype::new`]) is available for use by the
+//! implementation of `ext_allocator_malloc_version_1`.
 //!
 //! ## Entry points
 //!
@@ -91,7 +101,7 @@
 //! parameters into the Wasm virtual machine's memory, then pass a pointer and length of this
 //! buffer as the parameters of the entry point.
 //!
-//! The function returns a 64bits number. The 32 less significant bits represent a pointer to the
+//! The function returns a 64 bits number. The 32 less significant bits represent a pointer to the
 //! Wasm virtual machine's memory, and the 32 most significant bits a length. This pointer and
 //! length designate a buffer containing the actual return value.
 //!
@@ -133,17 +143,18 @@
 //! ## Example
 //!
 //! ```
-//! use smoldot::executor::host::{HeapPages, HostVm, HostVmPrototype};
+//! use smoldot::executor::host::{Config, HeapPages, HostVm, HostVmPrototype};
 //!
 //! # let wasm_binary_code: &[u8] = return;
 //!
 //! // Start executing a function on the runtime.
 //! let mut vm: HostVm = {
-//!     let prototype = HostVmPrototype::new(
-//!         &wasm_binary_code,
-//!         HeapPages::from(2048),
-//!         smoldot::executor::vm::ExecHint::Oneshot
-//!     ).unwrap();
+//!     let prototype = HostVmPrototype::new(Config {
+//!         module: &wasm_binary_code,
+//!         heap_pages: HeapPages::from(2048),
+//!         exec_hint: smoldot::executor::vm::ExecHint::Oneshot,
+//!         allow_unresolved_imports: false
+//!     }).unwrap();
 //!     prototype.run_no_param("Core_version").unwrap().into()
 //! };
 //!
@@ -181,18 +192,42 @@
 //! ```
 
 use super::{allocator, vm};
-use crate::util;
+use crate::{trie, util};
 
-use alloc::{borrow::ToOwned as _, format, string::String, vec::Vec};
-use core::{convert::TryFrom as _, fmt, hash::Hasher as _, iter, str};
-use parity_scale_codec::DecodeAll as _;
+use alloc::{borrow::ToOwned as _, format, string::String, vec, vec::Vec};
+use core::{fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
 
+pub mod runtime_version;
+
+pub use runtime_version::{CoreVersion, CoreVersionError, CoreVersionRef};
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
 mod zstd;
+
+/// Configuration for [`HostVmPrototype::new`].
+pub struct Config<TModule> {
+    /// Bytes of the WebAssembly module.
+    ///
+    /// The module can be either directly Wasm bytecode, or zstandard-compressed.
+    pub module: TModule,
+
+    /// Number of pages of heap available to the virtual machine.
+    ///
+    /// See the module-level documentation for an explanation.
+    pub heap_pages: HeapPages,
+
+    /// Hint used by the implementation to decide which kind of virtual machine to use.
+    pub exec_hint: vm::ExecHint,
+
+    /// If `true`, no [`vm::NewErr::UnresolvedFunctionImport`] error will be returned if the
+    /// module trying to import functions that aren't recognized by the implementation. Instead,
+    /// a [`Error::UnresolvedFunctionCalled`] error will be generated if the module tries to call
+    /// an unresolved function.
+    pub allow_unresolved_imports: bool,
+}
 
 /// Prototype for an [`HostVm`].
 ///
@@ -204,6 +239,11 @@ pub struct HostVmPrototype {
     ///
     /// > **Note**: Cloning this object is cheap.
     module: vm::Module,
+
+    /// Runtime version of this runtime.
+    ///
+    /// Always `Some`, except at initialization.
+    runtime_version: Option<CoreVersion>,
 
     /// Inner virtual machine prototype.
     vm_proto: vm::VirtualMachinePrototype,
@@ -217,30 +257,43 @@ pub struct HostVmPrototype {
     /// The keys of this `Vec` (i.e. the `usize` indices) have been passed to the virtual machine
     /// executor. Whenever the Wasm code invokes a host function, we obtain its index, and look
     /// within this `Vec` to know what to do.
-    registered_functions: Vec<HostFunction>,
+    registered_functions: Vec<FunctionImport>,
 
     /// Value of `heap_pages` passed to [`HostVmPrototype::new`].
     heap_pages: HeapPages,
+
+    /// Values passed to [`HostVmPrototype::new`].
+    allow_unresolved_imports: bool,
+
+    /// Total number of pages of Wasm memory. This is equal to `heap_base / 64k` (rounded up) plus
+    /// `heap_pages`.
+    memory_total_pages: HeapPages,
 }
 
 impl HostVmPrototype {
     /// Creates a new [`HostVmPrototype`]. Parses and potentially JITs the module.
-    ///
-    /// The module can be either directly Wasm bytecode, or zstandard-compressed.
-    // TODO: document `heap_pages`; I know it comes from storage, but it's unclear what it means exactly
-    pub fn new(
-        module: impl AsRef<[u8]>,
-        heap_pages: HeapPages,
-        exec_hint: vm::ExecHint,
-    ) -> Result<Self, NewErr> {
+    pub fn new(config: Config<impl AsRef<[u8]>>) -> Result<Self, NewErr> {
         // TODO: configurable maximum allowed size? a uniform value is important for consensus
-        let module = zstd::zstd_decode_if_necessary(module.as_ref(), 50 * 1024 * 1024)
+        let module = zstd::zstd_decode_if_necessary(config.module.as_ref(), 50 * 1024 * 1024)
             .map_err(NewErr::BadFormat)?;
-        let module = vm::Module::new(module, exec_hint)?;
-        Self::from_module(module, heap_pages)
+        let runtime_version = runtime_version::find_embedded_runtime_version(&module)
+            .ok()
+            .flatten(); // TODO: return error instead of using `ok()`? unclear
+        let module = vm::Module::new(module, config.exec_hint).map_err(vm::NewErr::ModuleError)?;
+        Self::from_module(
+            module,
+            config.heap_pages,
+            config.allow_unresolved_imports,
+            runtime_version,
+        )
     }
 
-    fn from_module(module: vm::Module, heap_pages: HeapPages) -> Result<Self, NewErr> {
+    fn from_module(
+        module: vm::Module,
+        heap_pages: HeapPages,
+        allow_unresolved_imports: bool,
+        runtime_version: Option<CoreVersion>,
+    ) -> Result<Self, NewErr> {
         // Initialize the virtual machine.
         // Each symbol requested by the Wasm runtime will be put in `registered_functions`. Later,
         // when a function is invoked, the Wasm virtual machine will pass indices within that
@@ -249,7 +302,6 @@ impl HostVmPrototype {
             let mut registered_functions = Vec::new();
             let vm_proto = vm::VirtualMachinePrototype::new(
                 &module,
-                heap_pages,
                 // This closure is called back for each function that the runtime imports.
                 |mod_name, f_name, _signature| {
                     if mod_name != "env" {
@@ -258,8 +310,12 @@ impl HostVmPrototype {
 
                     let id = registered_functions.len();
                     registered_functions.push(match HostFunction::by_name(f_name) {
-                        Some(f) => f,
-                        None => return Err(()),
+                        Some(f) => FunctionImport::Resolved(f),
+                        None if !allow_unresolved_imports => return Err(()),
+                        None => FunctionImport::Unresolved {
+                            name: f_name.to_owned(),
+                            module: mod_name.to_owned(),
+                        },
                     });
                     Ok(id)
                 },
@@ -274,13 +330,74 @@ impl HostVmPrototype {
             .global_value("__heap_base")
             .map_err(|_| NewErr::HeapBaseNotFound)?;
 
-        Ok(HostVmPrototype {
+        let memory_total_pages = if heap_base == 0 {
+            heap_pages
+        } else {
+            HeapPages::new((heap_base - 1) / (64 * 1024)) + heap_pages + HeapPages::new(1)
+        };
+
+        if vm_proto
+            .memory_max_pages()
+            .map_or(false, |max| max < memory_total_pages)
+        {
+            return Err(NewErr::MemoryMaxSizeTooLow);
+        }
+
+        let mut host_vm_prototype = HostVmPrototype {
             module,
+            runtime_version,
             vm_proto,
             heap_base,
             registered_functions,
             heap_pages,
-        })
+            allow_unresolved_imports,
+            memory_total_pages,
+        };
+
+        // Call `Core_version` if no runtime version is known yet.
+        if host_vm_prototype.runtime_version.is_none() {
+            let mut vm: HostVm = match host_vm_prototype.run_no_param("Core_version") {
+                Ok(vm) => vm.into(),
+                Err((err, _)) => return Err(NewErr::CoreVersion(CoreVersionError::Start(err))),
+            };
+
+            loop {
+                match vm {
+                    HostVm::ReadyToRun(r) => vm = r.run(),
+                    HostVm::Finished(finished) => {
+                        let version =
+                            match CoreVersion::from_slice(finished.value().as_ref().to_vec()) {
+                                Ok(v) => v,
+                                Err(_) => {
+                                    return Err(NewErr::CoreVersion(CoreVersionError::Decode))
+                                }
+                            };
+
+                        host_vm_prototype = finished.into_prototype();
+                        host_vm_prototype.runtime_version = Some(version);
+                        break;
+                    }
+
+                    // Emitted log lines are ignored.
+                    HostVm::GetMaxLogLevel(resume) => {
+                        vm = resume.resume(0); // Off
+                    }
+                    HostVm::LogEmit(log) => vm = log.resume(),
+
+                    HostVm::Error { error, .. } => {
+                        return Err(NewErr::CoreVersion(CoreVersionError::Run(error)))
+                    }
+
+                    // Getting the runtime version is a very core operation, and very few
+                    // external calls are allowed.
+                    _ => return Err(NewErr::CoreVersion(CoreVersionError::ForbiddenHostFunction)),
+                }
+            }
+        }
+
+        // Success!
+        debug_assert!(host_vm_prototype.runtime_version.is_some());
+        Ok(host_vm_prototype)
     }
 
     /// Returns the number of heap pages that were passed to [`HostVmPrototype::new`].
@@ -288,12 +405,17 @@ impl HostVmPrototype {
         self.heap_pages
     }
 
+    /// Returns the runtime version found in the module.
+    pub fn runtime_version(&self) -> &CoreVersion {
+        self.runtime_version.as_ref().unwrap()
+    }
+
     /// Starts the VM, calling the function passed as parameter.
     pub fn run(self, function_to_call: &str, data: &[u8]) -> Result<ReadyToRun, (StartErr, Self)> {
         self.run_vectored(function_to_call, iter::once(data))
     }
 
-    /// Same as [`HostVmPrototype::run`], except that the function desn't need any parameter.
+    /// Same as [`HostVmPrototype::run`], except that the function doesn't need any parameter.
     pub fn run_no_param(self, function_to_call: &str) -> Result<ReadyToRun, (StartErr, Self)> {
         self.run_vectored(function_to_call, iter::empty::<Vec<u8>>())
     }
@@ -320,6 +442,7 @@ impl HostVmPrototype {
         // Now create the actual virtual machine. We pass as parameter `heap_base` as the location
         // of the input data.
         let mut vm = match self.vm_proto.start(
+            vm::HeapPages::new(1 + (data_len_u32 + self.heap_base) / (64 * 1024)), // TODO: `data_len_u32 + ` is a hack for the start value; solve with https://github.com/paritytech/smoldot/issues/132
             function_to_call,
             &[
                 vm::WasmValue::I32(i32::from_ne_bytes(self.heap_base.to_ne_bytes())),
@@ -351,9 +474,12 @@ impl HostVmPrototype {
             resume_value: None,
             inner: Inner {
                 module: self.module,
+                runtime_version: self.runtime_version,
                 vm,
                 heap_base: self.heap_base,
                 heap_pages: self.heap_pages,
+                allow_unresolved_imports: self.allow_unresolved_imports,
+                memory_total_pages: self.memory_total_pages,
                 registered_functions: self.registered_functions,
                 within_storage_transaction: false,
                 allocator,
@@ -367,7 +493,13 @@ impl Clone for HostVmPrototype {
         // The `from_module` function returns an error if the format of the module is invalid.
         // Since we have successfully called `from_module` with that same `module` earlier, it
         // is assumed that errors cannot happen.
-        Self::from_module(self.module.clone(), self.heap_pages).unwrap()
+        Self::from_module(
+            self.module.clone(),
+            self.heap_pages,
+            self.allow_unresolved_imports,
+            self.runtime_version.clone(),
+        )
+        .unwrap()
     }
 }
 
@@ -409,13 +541,10 @@ pub enum HostVm {
     /// Need to provide the trie root of the storage.
     #[from]
     ExternalStorageRoot(ExternalStorageRoot),
-    /// Need to provide the trie root of the changes trie.
-    #[from]
-    ExternalStorageChangesRoot(ExternalStorageChangesRoot),
     /// Need to provide the storage key that follows a specific one.
     #[from]
     ExternalStorageNextKey(ExternalStorageNextKey),
-    /// Must the set value of an offchain storage entry.
+    /// Must the set value of an off-chain storage entry.
     #[from]
     ExternalOffchainStorageSet(ExternalOffchainStorageSet),
     /// Need to call `Core_version` on the given Wasm code and return the raw output (i.e.
@@ -440,9 +569,11 @@ pub enum HostVm {
         /// Object used to resume execution.
         resume: EndStorageTransaction,
         /// If true, changes must be rolled back.
-        #[must_use]
         rollback: bool,
     },
+    /// Need to provide the maximum log level.
+    #[from]
+    GetMaxLogLevel(GetMaxLogLevel),
     /// Runtime has emitted a log entry.
     #[from]
     LogEmit(LogEmit),
@@ -460,12 +591,12 @@ impl HostVm {
             HostVm::ExternalStorageAppend(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageClearPrefix(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageRoot(inner) => inner.inner.into_prototype(),
-            HostVm::ExternalStorageChangesRoot(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageNextKey(inner) => inner.inner.into_prototype(),
             HostVm::ExternalOffchainStorageSet(inner) => inner.inner.into_prototype(),
             HostVm::CallRuntimeVersion(inner) => inner.inner.into_prototype(),
             HostVm::StartStorageTransaction(inner) => inner.inner.into_prototype(),
             HostVm::EndStorageTransaction { resume, .. } => resume.inner.into_prototype(),
+            HostVm::GetMaxLogLevel(inner) => inner.inner.into_prototype(),
             HostVm::LogEmit(inner) => inner.inner.into_prototype(),
         }
     }
@@ -515,26 +646,27 @@ impl ReadyToRun {
                 // consecutive I32s representing the length and size of the SCALE-encoded
                 // return value.
                 let value_size = u32::try_from(ret >> 32).unwrap();
-                let value_ptr = u32::try_from(ret & 0xffffffff).unwrap();
+                let value_ptr = u32::try_from(ret & 0xffff_ffff).unwrap();
 
-                if value_size.saturating_add(value_ptr) <= self.inner.vm.memory_size() {
+                if value_size.saturating_add(value_ptr)
+                    <= u32::from(self.inner.vm.memory_size()) * 64 * 1024
+                {
                     return HostVm::Finished(Finished {
                         inner: self.inner,
                         value_ptr,
                         value_size,
                     });
-                } else {
-                    let error = Error::ReturnedPtrOutOfRange {
-                        pointer: value_ptr,
-                        size: value_size,
-                        memory_size: self.inner.vm.memory_size(),
-                    };
-
-                    return HostVm::Error {
-                        prototype: self.inner.into_prototype(),
-                        error,
-                    };
                 }
+                let error = Error::ReturnedPtrOutOfRange {
+                    pointer: value_ptr,
+                    size: value_size,
+                    memory_size: u32::from(self.inner.vm.memory_size()) * 64 * 1024,
+                };
+
+                return HostVm::Error {
+                    prototype: self.inner.into_prototype(),
+                    error,
+                };
             }
 
             Ok(vm::ExecOutcome::Finished {
@@ -577,104 +709,24 @@ impl ReadyToRun {
 
         // The Wasm code has called an host_fn. The `id` is a value that we passed
         // at initialization, and corresponds to an index in `registered_functions`.
-        let host_fn = *self.inner.registered_functions.get_mut(id).unwrap();
+        let host_fn = match self.inner.registered_functions.get_mut(id) {
+            Some(FunctionImport::Resolved(f)) => *f,
+            Some(FunctionImport::Unresolved { name, module }) => {
+                debug_assert!(self.inner.allow_unresolved_imports);
+                return HostVm::Error {
+                    error: Error::UnresolvedFunctionCalled {
+                        function: name.clone(),
+                        module_name: module.clone(),
+                    },
+                    prototype: self.inner.into_prototype(),
+                };
+            }
+            None => unreachable!(),
+        };
 
         // Check that the actual number of parameters matches the expected number.
         // This is done ahead of time in order to not forget.
-        let expected_params_num = match host_fn {
-            HostFunction::ext_storage_set_version_1 => 2,
-            HostFunction::ext_storage_get_version_1 => 1,
-            HostFunction::ext_storage_read_version_1 => 3,
-            HostFunction::ext_storage_clear_version_1 => 1,
-            HostFunction::ext_storage_exists_version_1 => 1,
-            HostFunction::ext_storage_clear_prefix_version_1 => 1,
-            HostFunction::ext_storage_clear_prefix_version_2 => 2,
-            HostFunction::ext_storage_root_version_1 => 0,
-            HostFunction::ext_storage_changes_root_version_1 => 1,
-            HostFunction::ext_storage_next_key_version_1 => 1,
-            HostFunction::ext_storage_append_version_1 => 2,
-            HostFunction::ext_storage_child_set_version_1 => todo!(),
-            HostFunction::ext_storage_child_get_version_1 => todo!(),
-            HostFunction::ext_storage_child_read_version_1 => todo!(),
-            HostFunction::ext_storage_child_clear_version_1 => todo!(),
-            HostFunction::ext_storage_child_storage_kill_version_1 => todo!(),
-            HostFunction::ext_storage_child_exists_version_1 => todo!(),
-            HostFunction::ext_storage_child_clear_prefix_version_1 => todo!(),
-            HostFunction::ext_storage_child_root_version_1 => todo!(),
-            HostFunction::ext_storage_child_next_key_version_1 => todo!(),
-            HostFunction::ext_storage_start_transaction_version_1 => 0,
-            HostFunction::ext_storage_rollback_transaction_version_1 => 0,
-            HostFunction::ext_storage_commit_transaction_version_1 => 0,
-            HostFunction::ext_default_child_storage_get_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_read_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_storage_kill_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_storage_kill_version_2 => todo!(),
-            HostFunction::ext_default_child_storage_storage_kill_version_3 => todo!(),
-            HostFunction::ext_default_child_storage_clear_prefix_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_set_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_clear_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_exists_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_next_key_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_root_version_1 => todo!(),
-            HostFunction::ext_crypto_ed25519_public_keys_version_1 => todo!(),
-            HostFunction::ext_crypto_ed25519_generate_version_1 => todo!(),
-            HostFunction::ext_crypto_ed25519_sign_version_1 => todo!(),
-            HostFunction::ext_crypto_ed25519_verify_version_1 => 3,
-            HostFunction::ext_crypto_sr25519_public_keys_version_1 => todo!(),
-            HostFunction::ext_crypto_sr25519_generate_version_1 => todo!(),
-            HostFunction::ext_crypto_sr25519_sign_version_1 => todo!(),
-            HostFunction::ext_crypto_sr25519_verify_version_1 => 3,
-            HostFunction::ext_crypto_sr25519_verify_version_2 => 3,
-            HostFunction::ext_crypto_ecdsa_generate_version_1 => todo!(),
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1 => 2,
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1 => 2,
-            HostFunction::ext_crypto_start_batch_verify_version_1 => 0,
-            HostFunction::ext_crypto_finish_batch_verify_version_1 => 0,
-            HostFunction::ext_hashing_keccak_256_version_1 => 1,
-            HostFunction::ext_hashing_sha2_256_version_1 => todo!(),
-            HostFunction::ext_hashing_blake2_128_version_1 => 1,
-            HostFunction::ext_hashing_blake2_256_version_1 => 1,
-            HostFunction::ext_hashing_twox_64_version_1 => 1,
-            HostFunction::ext_hashing_twox_128_version_1 => 1,
-            HostFunction::ext_hashing_twox_256_version_1 => 1,
-            HostFunction::ext_offchain_index_set_version_1 => 2,
-            HostFunction::ext_offchain_index_clear_version_1 => 1,
-            HostFunction::ext_offchain_is_validator_version_1 => todo!(),
-            HostFunction::ext_offchain_submit_transaction_version_1 => todo!(),
-            HostFunction::ext_offchain_network_state_version_1 => todo!(),
-            HostFunction::ext_offchain_timestamp_version_1 => todo!(),
-            HostFunction::ext_offchain_sleep_until_version_1 => todo!(),
-            HostFunction::ext_offchain_random_seed_version_1 => todo!(),
-            HostFunction::ext_offchain_local_storage_set_version_1 => todo!(),
-            HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => todo!(),
-            HostFunction::ext_offchain_local_storage_get_version_1 => todo!(),
-            HostFunction::ext_offchain_local_storage_clear_version_1 => todo!(),
-            HostFunction::ext_offchain_http_request_start_version_1 => todo!(),
-            HostFunction::ext_offchain_http_request_add_header_version_1 => todo!(),
-            HostFunction::ext_offchain_http_request_write_body_version_1 => todo!(),
-            HostFunction::ext_offchain_http_response_wait_version_1 => todo!(),
-            HostFunction::ext_offchain_http_response_headers_version_1 => todo!(),
-            HostFunction::ext_offchain_http_response_read_body_version_1 => todo!(),
-            HostFunction::ext_sandbox_instantiate_version_1 => todo!(),
-            HostFunction::ext_sandbox_invoke_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_new_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_get_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_set_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_teardown_version_1 => todo!(),
-            HostFunction::ext_sandbox_instance_teardown_version_1 => todo!(),
-            HostFunction::ext_sandbox_get_global_val_version_1 => todo!(),
-            HostFunction::ext_trie_blake2_256_root_version_1 => 1,
-            HostFunction::ext_trie_blake2_256_ordered_root_version_1 => 1,
-            HostFunction::ext_trie_keccak_256_ordered_root_version_1 => todo!(),
-            HostFunction::ext_misc_print_num_version_1 => 1,
-            HostFunction::ext_misc_print_utf8_version_1 => 1,
-            HostFunction::ext_misc_print_hex_version_1 => 1,
-            HostFunction::ext_misc_runtime_version_version_1 => 1,
-            HostFunction::ext_allocator_malloc_version_1 => 1,
-            HostFunction::ext_allocator_free_version_1 => 1,
-            HostFunction::ext_logging_log_version_1 => 3,
-            HostFunction::ext_logging_max_level_version_1 => 0,
-        };
+        let expected_params_num = host_fn.num_parameters();
         if params.len() != expected_params_num {
             return HostVm::Error {
                 error: Error::ParamsCountMismatch {
@@ -746,7 +798,7 @@ impl ReadyToRun {
                 let len = u32::try_from(val >> 32).unwrap();
                 let ptr = u32::try_from(val & 0xffffffff).unwrap();
 
-                if len.saturating_add(ptr) > self.inner.vm.memory_size() {
+                if len.saturating_add(ptr) > u32::from(self.inner.vm.memory_size()) * 64 * 1024 {
                     return HostVm::Error {
                         error: Error::ParamOutOfRange {
                             function: host_fn.name(),
@@ -781,7 +833,7 @@ impl ReadyToRun {
 
                 let result = self.inner.vm.read_memory(ptr, $size);
                 match result {
-                    Ok(v) => v,
+                    Ok(v) => *<&[u8; $size]>::try_from(v.as_ref()).unwrap(),
                     Err(vm::OutOfBoundsError) => {
                         drop(result);
                         return HostVm::Error {
@@ -814,6 +866,44 @@ impl ReadyToRun {
                         }
                     }
                 }
+            }};
+        }
+
+        macro_rules! expect_state_version {
+            ($num:expr) => {{
+                match &params[$num] {
+                    vm::WasmValue::I32(0) => trie::TrieEntryVersion::V0,
+                    vm::WasmValue::I32(1) => trie::TrieEntryVersion::V1,
+                    vm::WasmValue::I32(_) => {
+                        return HostVm::Error {
+                            error: Error::ParamDecodeError,
+                            prototype: self.inner.into_prototype(),
+                        }
+                    }
+                    v => {
+                        return HostVm::Error {
+                            error: Error::WrongParamTy {
+                                function: host_fn.name(),
+                                param_num: $num,
+                                expected: vm::ValueType::I32,
+                                actual: v.ty(),
+                            },
+                            prototype: self.inner.into_prototype(),
+                        }
+                    }
+                }
+            }};
+        }
+
+        // TODO: implement all functions and remove this macro
+        macro_rules! host_fn_not_implemented {
+            () => {{
+                return HostVm::Error {
+                    error: Error::HostFunctionNotImplemented {
+                        function: host_fn.name(),
+                    },
+                    prototype: self.inner.into_prototype(),
+                };
             }};
         }
 
@@ -885,18 +975,31 @@ impl ReadyToRun {
                     prefix_size,
                     inner: self.inner,
                     max_keys_to_remove: None,
+                    is_v2: false,
                 })
             }
             HostFunction::ext_storage_clear_prefix_version_2 => {
                 let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(0);
 
-                let max_keys_to_remove =
-                    Option::<u32>::decode_all(expect_pointer_size!(1).as_ref());
+                let max_keys_to_remove = {
+                    let input = expect_pointer_size!(1);
+                    let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
+                        nom::combinator::all_consuming(util::nom_option_decode(
+                            nom::number::complete::le_u32,
+                        ))(input.as_ref())
+                        .map(|(_, parse_result)| parse_result);
+
+                    match parsing_result {
+                        Ok(val) => Ok(val),
+                        Err(_) => Err(()),
+                    }
+                };
+
                 let max_keys_to_remove = match max_keys_to_remove {
                     Ok(l) => l,
-                    Err(err) => {
+                    Err(()) => {
                         return HostVm::Error {
-                            error: Error::ParamDecodeError(err),
+                            error: Error::ParamDecodeError,
                             prototype: self.inner.into_prototype(),
                         };
                     }
@@ -907,14 +1010,35 @@ impl ReadyToRun {
                     prefix_size,
                     inner: self.inner,
                     max_keys_to_remove,
+                    is_v2: true,
                 })
             }
             HostFunction::ext_storage_root_version_1 => {
                 HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner })
             }
+            HostFunction::ext_storage_root_version_2 => {
+                let state_version = expect_state_version!(0);
+                match state_version {
+                    trie::TrieEntryVersion::V0 => {
+                        HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner })
+                    }
+                    trie::TrieEntryVersion::V1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
+                }
+            }
             HostFunction::ext_storage_changes_root_version_1 => {
-                // TODO: there's a parameter
-                HostVm::ExternalStorageChangesRoot(ExternalStorageChangesRoot { inner: self.inner })
+                // The changes trie is an obsolete attempt at having a second trie containing, for
+                // each storage item, the latest block height where this item has been modified.
+                // When this function returns `None`, it indicates that the changes trie is
+                // disabled. While this function used to be called by the runtimes of
+                // Westend/Polkadot/Kusama (and maybe others), it has never returned anything else
+                // but `None`. The entire changes trie mechanism was ultimately removed in
+                // October 2021.
+                // This function is no longer called by recent runtimes, but must be preserved for
+                // backwards compatibility.
+                self.inner.alloc_write_and_return_pointer_size(
+                    HostFunction::ext_storage_changes_root_version_1.name(),
+                    iter::once(&[0][..]),
+                )
             }
             HostFunction::ext_storage_next_key_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
@@ -935,15 +1059,15 @@ impl ReadyToRun {
                     inner: self.inner,
                 })
             }
-            HostFunction::ext_storage_child_set_version_1 => todo!(),
-            HostFunction::ext_storage_child_get_version_1 => todo!(),
-            HostFunction::ext_storage_child_read_version_1 => todo!(),
-            HostFunction::ext_storage_child_clear_version_1 => todo!(),
-            HostFunction::ext_storage_child_storage_kill_version_1 => todo!(),
-            HostFunction::ext_storage_child_exists_version_1 => todo!(),
-            HostFunction::ext_storage_child_clear_prefix_version_1 => todo!(),
-            HostFunction::ext_storage_child_root_version_1 => todo!(),
-            HostFunction::ext_storage_child_next_key_version_1 => todo!(),
+            HostFunction::ext_storage_child_set_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_get_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_read_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_clear_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_storage_kill_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_exists_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_clear_prefix_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_root_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_next_key_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_start_transaction_version_1 => {
                 if self.inner.within_storage_transaction {
                     return HostVm::Error {
@@ -983,34 +1107,44 @@ impl ReadyToRun {
                     rollback: false,
                 }
             }
-            HostFunction::ext_default_child_storage_get_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_read_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_storage_kill_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_storage_kill_version_2 => todo!(),
-            HostFunction::ext_default_child_storage_storage_kill_version_3 => todo!(),
-            HostFunction::ext_default_child_storage_clear_prefix_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_set_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_clear_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_exists_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_next_key_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_root_version_1 => todo!(),
-            HostFunction::ext_crypto_ed25519_public_keys_version_1 => todo!(),
-            HostFunction::ext_crypto_ed25519_generate_version_1 => todo!(),
-            HostFunction::ext_crypto_ed25519_sign_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_get_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_read_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_storage_kill_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_default_child_storage_storage_kill_version_2 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_default_child_storage_storage_kill_version_3 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_default_child_storage_clear_prefix_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_default_child_storage_clear_prefix_version_2 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_default_child_storage_set_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_clear_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_exists_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_next_key_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_default_child_storage_root_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_root_version_2 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_ed25519_public_keys_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_ed25519_generate_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_ed25519_sign_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_verify_version_1 => {
                 let success = {
-                    // TODO: copy overhead?
                     let public_key = ed25519_zebra::VerificationKey::try_from(
-                        expect_pointer_constant_size!(2, 32).as_ref(),
+                        expect_pointer_constant_size!(2, 32),
                     );
                     if let Ok(public_key) = public_key {
-                        // TODO: copy overhead?
-                        let signature = ed25519_zebra::Signature::from(
-                            <[u8; 64]>::try_from(expect_pointer_constant_size!(0, 64).as_ref())
-                                .unwrap(),
-                        );
-                        let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
-                        public_key.verify(&signature, &message).is_ok()
+                        let signature =
+                            ed25519_zebra::Signature::from(expect_pointer_constant_size!(0, 64));
+                        let message = expect_pointer_size!(1);
+                        public_key.verify(&signature, message.as_ref()).is_ok()
                     } else {
                         false
                     }
@@ -1021,24 +1155,26 @@ impl ReadyToRun {
                     inner: self.inner,
                 })
             }
-            HostFunction::ext_crypto_sr25519_public_keys_version_1 => todo!(),
-            HostFunction::ext_crypto_sr25519_generate_version_1 => todo!(),
-            HostFunction::ext_crypto_sr25519_sign_version_1 => todo!(),
+            HostFunction::ext_crypto_sr25519_public_keys_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_sr25519_generate_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_sr25519_sign_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_sr25519_verify_version_1 => {
                 let success = {
                     // The `unwrap()` below can only panic if the input is the wrong length, which
                     // we know can't happen.
-                    // TODO: copy overhead?
-                    let signing_public_key = schnorrkel::PublicKey::from_bytes(
-                        expect_pointer_constant_size!(2, 32).as_ref(),
-                    )
-                    .unwrap();
+                    let signing_public_key =
+                        schnorrkel::PublicKey::from_bytes(&expect_pointer_constant_size!(2, 32))
+                            .unwrap();
 
-                    let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
-                    let signature = expect_pointer_constant_size!(0, 64).as_ref().to_owned(); // TODO: to_owned() :-/
+                    let signature = expect_pointer_constant_size!(0, 64);
+                    let message = expect_pointer_size!(1);
 
                     signing_public_key
-                        .verify_simple_preaudit_deprecated(b"substrate", &message, &signature)
+                        .verify_simple_preaudit_deprecated(
+                            b"substrate",
+                            message.as_ref(),
+                            &signature,
+                        )
                         .is_ok()
                 };
 
@@ -1051,16 +1187,12 @@ impl ReadyToRun {
                 let success = {
                     // The two `unwrap()`s below can only panic if the input is the wrong
                     // length, which we know can't happen.
-                    // TODO: copy overhead?
-                    let signing_public_key = schnorrkel::PublicKey::from_bytes(
-                        expect_pointer_constant_size!(2, 32).as_ref(),
-                    )
-                    .unwrap();
-                    // TODO: copy overhead?
-                    let signature = schnorrkel::Signature::from_bytes(
-                        expect_pointer_constant_size!(0, 64).as_ref(),
-                    )
-                    .unwrap();
+                    let signing_public_key =
+                        schnorrkel::PublicKey::from_bytes(&expect_pointer_constant_size!(2, 32))
+                            .unwrap();
+                    let signature =
+                        schnorrkel::Signature::from_bytes(&expect_pointer_constant_size!(0, 64))
+                            .unwrap();
 
                     signing_public_key
                         .verify_simple(b"substrate", expect_pointer_size!(1).as_ref(), &signature)
@@ -1072,84 +1204,215 @@ impl ReadyToRun {
                     inner: self.inner,
                 })
             }
-            HostFunction::ext_crypto_ecdsa_generate_version_1 => todo!(),
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1 => {
-                // TODO: clean up
-                #[derive(parity_scale_codec::Encode)]
-                enum EcdsaVerifyError {
-                    RsError,
-                    VError,
-                    BadSignature,
-                }
-
-                // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
-                let sig = expect_pointer_constant_size!(0, 65).as_ref().to_owned();
-                // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
-                let msg = expect_pointer_constant_size!(1, 32).as_ref().to_owned();
-
-                let result = (|| -> Result<_, EcdsaVerifyError> {
-                    let rs = libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
-                        .map_err(|_| EcdsaVerifyError::RsError)?;
-                    let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
-                        sig[64] - 27
-                    } else {
-                        sig[64]
-                    } as u8)
-                    .map_err(|_| EcdsaVerifyError::VError)?;
-                    let pubkey = libsecp256k1::recover(
-                        &libsecp256k1::Message::parse_slice(&msg).unwrap(),
-                        &rs,
-                        &v,
-                    )
-                    .map_err(|_| EcdsaVerifyError::BadSignature)?;
-                    let mut res = [0u8; 64];
-                    res.copy_from_slice(&pubkey.serialize()[1..65]);
-                    Ok(res)
-                })();
-                let result_encoded = parity_scale_codec::Encode::encode(&result);
-
-                self.inner.alloc_write_and_return_pointer_size(
-                    host_fn.name(),
-                    iter::once(&result_encoded),
+            HostFunction::ext_crypto_ecdsa_generate_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_ecdsa_sign_version_1 => {
+                // NOTE: safe to unwrap here because we supply the nn to blake2b fn
+                let data = <[u8; 32]>::try_from(
+                    blake2_rfc::blake2b::blake2b(32, &[], expect_pointer_size!(0).as_ref())
+                        .as_bytes(),
                 )
+                .unwrap();
+                let message = libsecp256k1::Message::parse(&data);
+
+                if let Ok(sc) =
+                    libsecp256k1::SecretKey::parse(&expect_pointer_constant_size!(1, 32))
+                {
+                    let (sig, ri) = libsecp256k1::sign(&message, &sc);
+
+                    // NOTE: the function returns 2 slices: signature (64 bytes) and recovery ID (1 byte; AS A SLICE)
+                    self.inner.alloc_write_and_return_pointer(
+                        host_fn.name(),
+                        [&sig.serialize()[..], &[ri.serialize()]].into_iter(),
+                    )
+                } else {
+                    HostVm::Error {
+                        error: Error::ParamDecodeError,
+                        prototype: self.inner.into_prototype(),
+                    }
+                }
             }
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1 => {
-                // TODO: clean up
-                #[derive(parity_scale_codec::Encode)]
-                enum EcdsaVerifyError {
-                    RsError,
-                    VError,
-                    BadSignature,
-                }
-
-                // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
-                let sig = expect_pointer_constant_size!(0, 65).as_ref().to_owned();
-                // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
-                let msg = expect_pointer_constant_size!(1, 32).as_ref().to_owned();
-
-                let result = (|| -> Result<_, EcdsaVerifyError> {
-                    let rs = libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
-                        .map_err(|_| EcdsaVerifyError::RsError)?;
-                    let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
-                        sig[64] - 27
-                    } else {
-                        sig[64]
-                    } as u8)
-                    .map_err(|_| EcdsaVerifyError::VError)?;
-                    let pubkey = libsecp256k1::recover(
-                        &libsecp256k1::Message::parse_slice(&msg).unwrap(),
-                        &rs,
-                        &v,
+            HostFunction::ext_crypto_ecdsa_public_keys_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_ecdsa_verify_version_1 => {
+                let success = {
+                    // NOTE: safe to unwrap here because we supply the nn to blake2b fn
+                    let data = <[u8; 32]>::try_from(
+                        blake2_rfc::blake2b::blake2b(32, &[], expect_pointer_size!(0).as_ref())
+                            .as_bytes(),
                     )
-                    .map_err(|_| EcdsaVerifyError::BadSignature)?;
-                    Ok(pubkey.serialize_compressed())
-                })();
-                let result_encoded = parity_scale_codec::Encode::encode(&result);
+                    .unwrap();
+                    let message = libsecp256k1::Message::parse(&data);
 
-                self.inner.alloc_write_and_return_pointer_size(
-                    host_fn.name(),
-                    iter::once(&result_encoded),
-                )
+                    // signature (64 bytes) + recovery ID (1 byte)
+                    let sig_bytes = expect_pointer_constant_size!(0, 65);
+                    if let Ok(sig) = libsecp256k1::Signature::parse_standard_slice(&sig_bytes[..64])
+                    {
+                        if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes[64]) {
+                            if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
+                                expect_pointer_constant_size!(2, 33)[..]
+                                    == actual.serialize_compressed()[..]
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                HostVm::ReadyToRun(ReadyToRun {
+                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                    inner: self.inner,
+                })
+            }
+            HostFunction::ext_crypto_ecdsa_sign_prehashed_version_1 => {
+                let message = libsecp256k1::Message::parse(&expect_pointer_constant_size!(0, 32));
+
+                if let Ok(sc) =
+                    libsecp256k1::SecretKey::parse(&expect_pointer_constant_size!(1, 32))
+                {
+                    let (sig, ri) = libsecp256k1::sign(&message, &sc);
+
+                    // NOTE: the function returns 2 slices: signature (64 bytes) and recovery ID (1 byte; AS A SLICE)
+                    self.inner.alloc_write_and_return_pointer(
+                        host_fn.name(),
+                        [&sig.serialize()[..], &[ri.serialize()]].into_iter(),
+                    )
+                } else {
+                    HostVm::Error {
+                        error: Error::ParamDecodeError,
+                        prototype: self.inner.into_prototype(),
+                    }
+                }
+            }
+            HostFunction::ext_crypto_ecdsa_verify_prehashed_version_1 => {
+                let success = {
+                    let message =
+                        libsecp256k1::Message::parse(&expect_pointer_constant_size!(0, 32));
+
+                    // signature (64 bytes) + recovery ID (1 byte)
+                    let sig_bytes = expect_pointer_constant_size!(0, 65);
+                    if let Ok(sig) = libsecp256k1::Signature::parse_standard_slice(&sig_bytes[..64])
+                    {
+                        if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes[64]) {
+                            if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
+                                expect_pointer_constant_size!(2, 33)[..]
+                                    == actual.serialize_compressed()[..]
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                HostVm::ReadyToRun(ReadyToRun {
+                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                    inner: self.inner,
+                })
+            }
+
+            HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1
+            | HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => {
+                let sig = expect_pointer_constant_size!(0, 65);
+                let msg = expect_pointer_constant_size!(1, 32);
+                let is_v2 = matches!(
+                    host_fn,
+                    HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2
+                );
+
+                let result = {
+                    let rs = if is_v2 {
+                        libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
+                    } else {
+                        libsecp256k1::Signature::parse_overflowing_slice(&sig[0..64])
+                    };
+
+                    if let Ok(rs) = rs {
+                        let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
+                            sig[64] - 27
+                        } else {
+                            sig[64]
+                        } as u8);
+
+                        if let Ok(v) = v {
+                            let pubkey = libsecp256k1::recover(
+                                &libsecp256k1::Message::parse_slice(&msg).unwrap(),
+                                &rs,
+                                &v,
+                            );
+
+                            if let Ok(pubkey) = pubkey {
+                                let mut res = Vec::with_capacity(65);
+                                res.push(0);
+                                res.extend_from_slice(&pubkey.serialize()[1..65]);
+                                res
+                            } else {
+                                vec![1, 2]
+                            }
+                        } else {
+                            vec![1, 1]
+                        }
+                    } else {
+                        vec![1, 0]
+                    }
+                };
+
+                self.inner
+                    .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&result))
+            }
+            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1
+            | HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2 => {
+                let sig = expect_pointer_constant_size!(0, 65);
+                let msg = expect_pointer_constant_size!(1, 32);
+                let is_v2 = matches!(
+                    host_fn,
+                    HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2
+                );
+
+                let result = {
+                    let rs = if is_v2 {
+                        libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
+                    } else {
+                        libsecp256k1::Signature::parse_overflowing_slice(&sig[0..64])
+                    };
+
+                    if let Ok(rs) = rs {
+                        let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
+                            sig[64] - 27
+                        } else {
+                            sig[64]
+                        } as u8);
+
+                        if let Ok(v) = v {
+                            let pubkey = libsecp256k1::recover(
+                                &libsecp256k1::Message::parse_slice(&msg).unwrap(),
+                                &rs,
+                                &v,
+                            );
+
+                            if let Ok(pubkey) = pubkey {
+                                let mut res = Vec::with_capacity(34);
+                                res.push(0);
+                                res.extend_from_slice(&pubkey.serialize_compressed());
+                                res
+                            } else {
+                                vec![1, 2]
+                            }
+                        } else {
+                            vec![1, 1]
+                        }
+                    } else {
+                        vec![1, 0]
+                    }
+                };
+
+                self.inner
+                    .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&result))
             }
             HostFunction::ext_crypto_start_batch_verify_version_1 => {
                 HostVm::ReadyToRun(ReadyToRun {
@@ -1158,9 +1421,19 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_crypto_finish_batch_verify_version_1 => {
+                // This function is a dummy implementation. After `ext_crypto_start_batch_verify`
+                // has been called, the runtime is supposed to call
+                // `ext_crypto_ed25519_batch_verify`, `ext_crypto_sr25519_batch_verify`, or
+                // `ext_crypto_ecdsa_batch_verify`, then retrieve the result using
+                // `ext_crypto_finish_batch_verify`. However, none of the three
+                // `<algo>_batch_verify` functions is supported by smoldot at the moment.
+                // Thus, if the runtime calls `ext_crypto_finish_batch_verify`, then it
+                // necessarily means that the batch is empty, and thus we always return success.
+                // At the moment, batch signatures verification isn't enabled on any production
+                // chain.
+                // Once support for any of the `<algo>_batch_verify` function is added, this
+                // implementation should of course change.
                 HostVm::ReadyToRun(ReadyToRun {
-                    // TODO: wrong! this is a dummy implementation meaning that all
-                    // signature verifications are always successful
                     resume_value: Some(vm::WasmValue::I32(1)),
                     inner: self.inner,
                 })
@@ -1274,79 +1547,136 @@ impl ReadyToRun {
                     inner: self.inner,
                 })
             }
-            HostFunction::ext_offchain_is_validator_version_1 => todo!(),
-            HostFunction::ext_offchain_submit_transaction_version_1 => todo!(),
-            HostFunction::ext_offchain_network_state_version_1 => todo!(),
-            HostFunction::ext_offchain_timestamp_version_1 => todo!(),
-            HostFunction::ext_offchain_sleep_until_version_1 => todo!(),
-            HostFunction::ext_offchain_random_seed_version_1 => todo!(),
-            HostFunction::ext_offchain_local_storage_set_version_1 => todo!(),
-            HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => todo!(),
-            HostFunction::ext_offchain_local_storage_get_version_1 => todo!(),
-            HostFunction::ext_offchain_local_storage_clear_version_1 => todo!(),
-            HostFunction::ext_offchain_http_request_start_version_1 => todo!(),
-            HostFunction::ext_offchain_http_request_add_header_version_1 => todo!(),
-            HostFunction::ext_offchain_http_request_write_body_version_1 => todo!(),
-            HostFunction::ext_offchain_http_response_wait_version_1 => todo!(),
-            HostFunction::ext_offchain_http_response_headers_version_1 => todo!(),
-            HostFunction::ext_offchain_http_response_read_body_version_1 => todo!(),
-            HostFunction::ext_sandbox_instantiate_version_1 => todo!(),
-            HostFunction::ext_sandbox_invoke_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_new_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_get_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_set_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_teardown_version_1 => todo!(),
-            HostFunction::ext_sandbox_instance_teardown_version_1 => todo!(),
-            HostFunction::ext_sandbox_get_global_val_version_1 => todo!(),
-            HostFunction::ext_trie_blake2_256_root_version_1 => {
-                let decode_result =
-                    Vec::<(Vec<u8>, Vec<u8>)>::decode_all(expect_pointer_size!(0).as_ref());
+            HostFunction::ext_offchain_is_validator_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_submit_transaction_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_network_state_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_timestamp_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_sleep_until_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_random_seed_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_local_storage_set_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_offchain_local_storage_get_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_local_storage_clear_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_http_request_start_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_http_request_add_header_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_offchain_http_request_write_body_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_offchain_http_response_wait_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_http_response_headers_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_offchain_http_response_read_body_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_sandbox_instantiate_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_invoke_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_memory_new_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_memory_get_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_memory_set_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_memory_teardown_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_instance_teardown_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_get_global_val_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_trie_blake2_256_root_version_1
+            | HostFunction::ext_trie_blake2_256_root_version_2 => {
+                let state_version =
+                    if matches!(host_fn, HostFunction::ext_trie_blake2_256_root_version_2) {
+                        expect_state_version!(1)
+                    } else {
+                        trie::TrieEntryVersion::V0
+                    };
 
-                let elements = match decode_result {
-                    Ok(e) => e,
-                    Err(err) => {
-                        return HostVm::Error {
-                            error: Error::ParamDecodeError(err),
-                            prototype: self.inner.into_prototype(),
-                        }
+                let result = {
+                    let input = expect_pointer_size!(0);
+                    let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
+                        nom::combinator::all_consuming(nom::combinator::flat_map(
+                            crate::util::nom_scale_compact_usize,
+                            |num_elems| {
+                                nom::multi::many_m_n(
+                                    num_elems,
+                                    num_elems,
+                                    nom::sequence::tuple((
+                                        nom::combinator::flat_map(
+                                            crate::util::nom_scale_compact_usize,
+                                            nom::bytes::complete::take,
+                                        ),
+                                        nom::combinator::flat_map(
+                                            crate::util::nom_scale_compact_usize,
+                                            nom::bytes::complete::take,
+                                        ),
+                                    )),
+                                )
+                            },
+                        ))(input.as_ref())
+                        .map(|(_, parse_result)| parse_result);
+
+                    match parsing_result {
+                        Ok(elements) => Ok(trie::trie_root(state_version, &elements[..])),
+                        Err(_) => Err(()),
                     }
                 };
 
-                // TODO: optimize this
-                let mut trie = crate::trie::Trie::new();
-                for (key, value) in elements {
-                    trie.insert(&key, value);
+                match result {
+                    Ok(out) => self
+                        .inner
+                        .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out)),
+                    Err(()) => HostVm::Error {
+                        error: Error::ParamDecodeError,
+                        prototype: self.inner.into_prototype(),
+                    },
                 }
-                let out = trie.root_merkle_value(None);
-
-                self.inner
-                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
             }
-            HostFunction::ext_trie_blake2_256_ordered_root_version_1 => {
-                let decode_result = Vec::<Vec<u8>>::decode_all(expect_pointer_size!(0).as_ref());
+            HostFunction::ext_trie_blake2_256_ordered_root_version_1
+            | HostFunction::ext_trie_blake2_256_ordered_root_version_2 => {
+                let state_version = if matches!(
+                    host_fn,
+                    HostFunction::ext_trie_blake2_256_ordered_root_version_2
+                ) {
+                    expect_state_version!(1)
+                } else {
+                    trie::TrieEntryVersion::V0
+                };
 
-                let elements = match decode_result {
-                    Ok(e) => e,
-                    Err(err) => {
-                        return HostVm::Error {
-                            error: Error::ParamDecodeError(err),
-                            prototype: self.inner.into_prototype(),
-                        }
+                let result = {
+                    let input = expect_pointer_size!(0);
+                    let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
+                        nom::combinator::all_consuming(nom::combinator::flat_map(
+                            crate::util::nom_scale_compact_usize,
+                            |num_elems| {
+                                nom::multi::many_m_n(
+                                    num_elems,
+                                    num_elems,
+                                    nom::combinator::flat_map(
+                                        crate::util::nom_scale_compact_usize,
+                                        nom::bytes::complete::take,
+                                    ),
+                                )
+                            },
+                        ))(input.as_ref())
+                        .map(|(_, parse_result)| parse_result);
+
+                    match parsing_result {
+                        Ok(elements) => Ok(trie::ordered_root(state_version, &elements[..])),
+                        Err(_) => Err(()),
                     }
                 };
 
-                // TODO: optimize this
-                let mut trie = crate::trie::Trie::new();
-                for (idx, value) in elements.into_iter().enumerate() {
-                    let key = util::encode_scale_compact_usize(idx);
-                    trie.insert(key.as_ref(), value);
+                match result {
+                    Ok(out) => self
+                        .inner
+                        .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out)),
+                    Err(()) => HostVm::Error {
+                        error: Error::ParamDecodeError,
+                        prototype: self.inner.into_prototype(),
+                    },
                 }
-                let out = trie.root_merkle_value(None);
-
-                self.inner
-                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
             }
-            HostFunction::ext_trie_keccak_256_ordered_root_version_1 => todo!(),
+            HostFunction::ext_trie_keccak_256_ordered_root_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_trie_keccak_256_ordered_root_version_2 => host_fn_not_implemented!(),
             HostFunction::ext_misc_print_num_version_1 => {
                 let num = match params[0] {
                     vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
@@ -1408,18 +1738,11 @@ impl ReadyToRun {
             HostFunction::ext_allocator_malloc_version_1 => {
                 let size = expect_u32!(0);
 
-                let ptr = match self
-                    .inner
-                    .allocator
-                    .allocate(&mut MemAccess(&mut self.inner.vm), size)
-                {
+                let ptr = match self.inner.alloc(host_fn.name(), size) {
                     Ok(p) => p,
-                    Err(_) => {
+                    Err(error) => {
                         return HostVm::Error {
-                            error: Error::OutOfMemory {
-                                function: host_fn.name(),
-                                requested_size: size,
-                            },
+                            error,
                             prototype: self.inner.into_prototype(),
                         }
                     }
@@ -1433,11 +1756,13 @@ impl ReadyToRun {
             }
             HostFunction::ext_allocator_free_version_1 => {
                 let pointer = expect_u32!(0);
-                match self
-                    .inner
-                    .allocator
-                    .deallocate(&mut MemAccess(&mut self.inner.vm), pointer)
-                {
+                match self.inner.allocator.deallocate(
+                    &mut MemAccess {
+                        vm: &mut self.inner.vm,
+                        memory_total_pages: self.inner.memory_total_pages,
+                    },
+                    pointer,
+                ) {
                     Ok(()) => {}
                     Err(_) => {
                         return HostVm::Error {
@@ -1478,12 +1803,7 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_logging_max_level_version_1 => {
-                // TODO: always returns `0` at the moment (which means "Off"); make this configurable?
-                // see https://github.com/paritytech/substrate/blob/bb22414e9729fa6ffc3b3126c57d3a9f2b85a2ff/primitives/core/src/lib.rs#L341
-                HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(0)),
-                    inner: self.inner,
-                })
+                HostVm::GetMaxLogLevel(GetMaxLogLevel { inner: self.inner })
             }
         }
     }
@@ -1531,7 +1851,7 @@ pub struct ExternalStorageGet {
     inner: Inner,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`Inner::registered_functions`].
+    /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
     calling: usize,
 
     /// Used only for the `ext_storage_read_version_1` function. Stores the pointer where the
@@ -1630,7 +1950,11 @@ impl ExternalStorageGet {
         mut self,
         value: Option<(impl Iterator<Item = impl AsRef<[u8]>> + Clone, usize)>,
     ) -> HostVm {
-        let host_fn = self.inner.registered_functions[self.calling];
+        let host_fn = match self.inner.registered_functions[self.calling] {
+            FunctionImport::Resolved(f) => f,
+            FunctionImport::Unresolved { .. } => unreachable!(),
+        };
+
         match host_fn {
             HostFunction::ext_storage_get_version_1 => {
                 if let Some((value, value_total_len)) = value {
@@ -1672,10 +1996,16 @@ impl ExternalStorageGet {
                     None
                 };
 
-                let outcome_encoded = parity_scale_codec::Encode::encode(&outcome);
                 return self.inner.alloc_write_and_return_pointer_size(
                     host_fn.name(),
-                    iter::once(&outcome_encoded),
+                    if let Some(outcome) = outcome {
+                        either::Left(
+                            iter::once(either::Left([1u8]))
+                                .chain(iter::once(either::Right(outcome.to_le_bytes()))),
+                        )
+                    } else {
+                        either::Right(iter::once(either::Left([0u8])))
+                    },
                 );
             }
             HostFunction::ext_storage_exists_version_1 => HostVm::ReadyToRun(ReadyToRun {
@@ -1759,7 +2089,7 @@ impl fmt::Debug for ExternalStorageSet {
 ///
 /// This change consists in taking an existing value and assuming that it is a SCALE-encoded
 /// container. This can be done as decoding a SCALE-compact-encoded number at the start of
-/// the existing encoded value. One most then increment that number and puting `value` at the
+/// the existing encoded value. One most then increments that number and puts `value` at the
 /// end of the encoded value.
 ///
 /// It is not necessary to decode `value` as is assumed that is already encoded in the same
@@ -1823,6 +2153,9 @@ pub struct ExternalStorageClearPrefix {
 
     /// Maximum number of keys to remove.
     max_keys_to_remove: Option<u32>,
+
+    /// `true` if version 2 of the function is called, `false` for version 1.
+    is_v2: bool,
 }
 
 impl ExternalStorageClearPrefix {
@@ -1840,11 +2173,25 @@ impl ExternalStorageClearPrefix {
     }
 
     /// Resumes execution after having cleared the values.
-    pub fn resume(self) -> HostVm {
-        HostVm::ReadyToRun(ReadyToRun {
-            inner: self.inner,
-            resume_value: None,
-        })
+    ///
+    /// Must be passed how many keys have been cleared, and whether some keys remaining to be
+    /// cleared.
+    pub fn resume(self, num_cleared: u32, some_keys_remain: bool) -> HostVm {
+        if self.is_v2 {
+            self.inner.alloc_write_and_return_pointer_size(
+                HostFunction::ext_storage_clear_prefix_version_2.name(),
+                [
+                    either::Left(if some_keys_remain { [1u8] } else { [0u8] }),
+                    either::Right(num_cleared.to_le_bytes()),
+                ]
+                .into_iter(),
+            )
+        } else {
+            HostVm::ReadyToRun(ReadyToRun {
+                inner: self.inner,
+                resume_value: None,
+            })
+        }
     }
 }
 
@@ -1872,37 +2219,6 @@ impl ExternalStorageRoot {
 impl fmt::Debug for ExternalStorageRoot {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("ExternalStorageRoot").finish()
-    }
-}
-
-/// Must provide the trie root hash of the changes trie.
-pub struct ExternalStorageChangesRoot {
-    inner: Inner,
-}
-
-impl ExternalStorageChangesRoot {
-    /// Writes the trie root hash to the Wasm VM and prepares it for resume.
-    // TODO: document why it can be `None`
-    pub fn resume(self, hash: Option<&[u8; 32]>) -> HostVm {
-        if let Some(hash) = hash {
-            // Writing the `Some` of the SCALE-encoded `Option`.
-            self.inner.alloc_write_and_return_pointer_size(
-                HostFunction::ext_storage_changes_root_version_1.name(),
-                iter::once(&[1][..]).chain(iter::once(&hash[..])),
-            )
-        } else {
-            // Writing a SCALE-encoded `None`.
-            self.inner.alloc_write_and_return_pointer_size(
-                HostFunction::ext_storage_changes_root_version_1.name(),
-                iter::once(&[0][..]),
-            )
-        }
-    }
-}
-
-impl fmt::Debug for ExternalStorageChangesRoot {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("ExternalStorageChangesRoot").finish()
     }
 }
 
@@ -1978,13 +2294,23 @@ impl CallRuntimeVersion {
     /// If an error happened during the execution (such as an invalid Wasm binary code), pass
     /// an `Err`.
     pub fn resume(self, scale_encoded_runtime_version: Result<&[u8], ()>) -> HostVm {
-        // TODO: don't allocate a Vec here
-        let scale_encoded_runtime_version =
-            parity_scale_codec::Encode::encode(&scale_encoded_runtime_version.ok());
-        self.inner.alloc_write_and_return_pointer_size(
-            HostFunction::ext_misc_runtime_version_version_1.name(),
-            iter::once(scale_encoded_runtime_version),
-        )
+        if let Ok(scale_encoded_runtime_version) = scale_encoded_runtime_version {
+            self.inner.alloc_write_and_return_pointer_size(
+                HostFunction::ext_misc_runtime_version_version_1.name(),
+                iter::once(either::Left([1]))
+                    .chain(iter::once(either::Right(either::Left(
+                        util::encode_scale_compact_usize(scale_encoded_runtime_version.len()),
+                    ))))
+                    .chain(iter::once(either::Right(either::Right(
+                        scale_encoded_runtime_version,
+                    )))),
+            )
+        } else {
+            self.inner.alloc_write_and_return_pointer_size(
+                HostFunction::ext_misc_runtime_version_version_1.name(),
+                iter::once([0]),
+            )
+        }
     }
 }
 
@@ -1994,7 +2320,7 @@ impl fmt::Debug for CallRuntimeVersion {
     }
 }
 
-/// Must set the value of the offchain storage.
+/// Must set the value of the off-chain storage.
 pub struct ExternalOffchainStorageSet {
     inner: Inner,
 
@@ -2044,7 +2370,7 @@ impl fmt::Debug for ExternalOffchainStorageSet {
 
 /// Report about a log entry being emitted.
 ///
-/// Use the implementation of [`fmt::Display`] to obtain the log entry. For exmaple, you can
+/// Use the implementation of [`fmt::Display`] to obtain the log entry. For example, you can
 /// call [`alloc::string::ToString::to_string`] to turn it into a `String`.
 pub struct LogEmit {
     inner: Inner,
@@ -2072,6 +2398,25 @@ impl fmt::Debug for LogEmit {
         f.debug_struct("LogEmit")
             .field("message", &self.log_entry)
             .finish()
+    }
+}
+
+/// Queries the maximum log level.
+pub struct GetMaxLogLevel {
+    inner: Inner,
+}
+
+impl GetMaxLogLevel {
+    /// Resumes execution after indicating the maximum log level.
+    ///
+    /// 0 means off, 1 means error, 2 means warn, 3 means info, 4 means debug, 5 means trace.
+    pub fn resume(self, max_level: u32) -> HostVm {
+        HostVm::ReadyToRun(ReadyToRun {
+            inner: self.inner,
+            resume_value: Some(vm::WasmValue::I32(i32::from_ne_bytes(
+                max_level.to_ne_bytes(),
+            ))),
+        })
     }
 }
 
@@ -2105,10 +2450,18 @@ impl EndStorageTransaction {
     }
 }
 
+enum FunctionImport {
+    Resolved(HostFunction),
+    Unresolved { module: String, name: String },
+}
+
 /// Running virtual machine. Shared between all the variants in [`HostVm`].
 struct Inner {
     /// See [`HostVmPrototype::module`].
     module: vm::Module,
+
+    /// See [`HostVmPrototype::runtime_version`].
+    runtime_version: Option<CoreVersion>,
 
     /// Inner lower-level virtual machine.
     vm: vm::VirtualMachine,
@@ -2120,12 +2473,18 @@ struct Inner {
     /// Value of `heap_pages` passed to [`HostVmPrototype::new`].
     heap_pages: HeapPages,
 
+    /// See [`HostVmPrototype::memory_total_pages`].
+    memory_total_pages: HeapPages,
+
+    /// Value passed to [`HostVmPrototype::new`].
+    allow_unresolved_imports: bool,
+
     /// If true, a transaction has been started using `ext_storage_start_transaction_version_1`.
     /// No further transaction start is allowed before the current one ends.
     within_storage_transaction: bool,
 
     /// See [`HostVmPrototype::registered_functions`].
-    registered_functions: Vec<HostFunction>,
+    registered_functions: Vec<FunctionImport>,
 
     /// Memory allocator in order to answer the calls to `malloc` and `free`.
     allocator: allocator::FreeingBumpHeapAllocator,
@@ -2133,15 +2492,15 @@ struct Inner {
 
 impl Inner {
     /// Uses the memory allocator to allocate some memory for the given data, writes the data in
-    /// memory, and returns an [`HostVm`] ready for the Wasm host_fn return.
+    /// memory, and returns an [`HostVm`] ready for the Wasm `host_fn` return.
     ///
-    /// The data is passed as a list of chunks. These chunks will be laid out lineraly in memory.
+    /// The data is passed as a list of chunks. These chunks will be laid out linearly in memory.
     ///
     /// The function name passed as parameter is used for error-reporting reasons.
     ///
     /// # Panic
     ///
-    /// Must only be called while the Wasm is handling an host_fn.
+    /// Must only be called while the Wasm is handling an `host_fn`.
     ///
     fn alloc_write_and_return_pointer_size(
         mut self,
@@ -2154,17 +2513,11 @@ impl Inner {
                 .saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::max_value()));
         }
 
-        let dest_ptr = match self
-            .allocator
-            .allocate(&mut MemAccess(&mut self.vm), data_len)
-        {
+        let dest_ptr = match self.alloc(function_name, data_len) {
             Ok(p) => p,
-            Err(_) => {
+            Err(error) => {
                 return HostVm::Error {
-                    error: Error::OutOfMemory {
-                        function: function_name,
-                        requested_size: data_len,
-                    },
+                    error,
                     prototype: self.into_prototype(),
                 }
             }
@@ -2188,15 +2541,15 @@ impl Inner {
     }
 
     /// Uses the memory allocator to allocate some memory for the given data, writes the data in
-    /// memory, and returns an [`HostVm`] ready for the Wasm host_fn return.
+    /// memory, and returns an [`HostVm`] ready for the Wasm `host_fn` return.
     ///
-    /// The data is passed as a list of chunks. These chunks will be laid out lineraly in memory.
+    /// The data is passed as a list of chunks. These chunks will be laid out linearly in memory.
     ///
     /// The function name passed as parameter is used for error-reporting reasons.
     ///
     /// # Panic
     ///
-    /// Must only be called while the Wasm is handling an host_fn.
+    /// Must only be called while the Wasm is handling an `host_fn`.
     ///
     fn alloc_write_and_return_pointer(
         mut self,
@@ -2209,17 +2562,11 @@ impl Inner {
                 .saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::max_value()));
         }
 
-        let dest_ptr = match self
-            .allocator
-            .allocate(&mut MemAccess(&mut self.vm), data_len)
-        {
+        let dest_ptr = match self.alloc(function_name, data_len) {
             Ok(p) => p,
-            Err(_) => {
+            Err(error) => {
                 return HostVm::Error {
-                    error: Error::OutOfMemory {
-                        function: function_name,
-                        requested_size: data_len,
-                    },
+                    error,
                     prototype: self.into_prototype(),
                 }
             }
@@ -2240,14 +2587,72 @@ impl Inner {
         .into()
     }
 
+    /// Uses the memory allocator to allocate some memory.
+    ///
+    /// The function name passed as parameter is used for error-reporting reasons.
+    ///
+    /// # Panic
+    ///
+    /// Must only be called while the Wasm is handling an `host_fn`.
+    ///
+    fn alloc(&mut self, function_name: &'static str, size: u32) -> Result<u32, Error> {
+        // Use the allocator to decide where the value will be written.
+        let dest_ptr = match self.allocator.allocate(
+            &mut MemAccess {
+                vm: &mut self.vm,
+                memory_total_pages: self.memory_total_pages,
+            },
+            size,
+        ) {
+            Ok(p) => p,
+            Err(_) => {
+                return Err(Error::OutOfMemory {
+                    function: function_name,
+                    requested_size: size,
+                })
+            }
+        };
+
+        // Unfortunately this function doesn't stop here.
+        // We lie to the allocator. The allocator thinks that there are `self.memory_total_pages`
+        // allocated and available, while in reality it can be less.
+        // The allocator might thus allocate memory at a location above the current memory size.
+        // To handle this, we grow the memory.
+
+        // Offset of the memory page where the last allocated byte is found.
+        let last_byte_memory_page = HeapPages::new((dest_ptr + size - 1) / (64 * 1024));
+
+        // Grow the memory more if necessary.
+        // Please note the `=`. For example if we write to page 0, we want to have at least 1 page
+        // allocated.
+        let current_num_pages = self.vm.memory_size();
+        debug_assert!(current_num_pages <= self.memory_total_pages);
+        if current_num_pages <= last_byte_memory_page {
+            // For now, we grow the memory just enough to fit.
+            // TODO: do better
+            // Note the order of operations: we add 1 at the end to avoid a potential overflow
+            // in case `last_byte_memory_page` is the maximum possible value.
+            let to_grow = last_byte_memory_page - current_num_pages + HeapPages::new(1);
+
+            // We check at initialization that the virtual machine is capable of growing up to
+            // `memory_total_pages`, meaning that this `unwrap` can't panic.
+            self.vm.grow_memory(to_grow).unwrap();
+        }
+
+        Ok(dest_ptr)
+    }
+
     /// Turns the virtual machine back into a prototype.
     fn into_prototype(self) -> HostVmPrototype {
         HostVmPrototype {
             module: self.module,
+            runtime_version: self.runtime_version,
             vm_proto: self.vm.into_prototype(),
             heap_base: self.heap_base,
             registered_functions: self.registered_functions,
             heap_pages: self.heap_pages,
+            allow_unresolved_imports: self.allow_unresolved_imports,
+            memory_total_pages: self.memory_total_pages,
         }
     }
 }
@@ -2256,20 +2661,26 @@ impl Inner {
 #[derive(Debug, derive_more::From, derive_more::Display, Clone)]
 pub enum NewErr {
     /// Error while initializing the virtual machine.
-    #[display(fmt = "Error while initializing the virtual machine: {}", _0)]
+    #[display(fmt = "{}", _0)]
     VirtualMachine(vm::NewErr),
     /// Error in the format of the runtime code.
     #[display(fmt = "{}", _0)]
     BadFormat(ModuleFormatError),
+    /// Error while calling `Core_version` to determine the runtime version.
+    #[display(fmt = "Error while calling Core_version: {}", _0)]
+    CoreVersion(CoreVersionError),
     /// Couldn't find the `__heap_base` symbol in the Wasm code.
     HeapBaseNotFound,
+    /// Maximum size of the Wasm memory found in the module is too low to provide the requested
+    /// number of heap pages.
+    MemoryMaxSizeTooLow,
 }
 
 /// Error that can happen when starting a VM.
 #[derive(Debug, Clone, derive_more::From, derive_more::Display)]
 pub enum StartErr {
     /// Error while starting the virtual machine.
-    #[display(fmt = "Error while starting the virtual machine: {}", _0)]
+    #[display(fmt = "{}", _0)]
     VirtualMachine(vm::StartErr),
     /// The size of the input data is too large.
     DataSizeOverflow,
@@ -2297,9 +2708,19 @@ pub enum Error {
         /// Size of the virtual memory.
         memory_size: u32,
     },
-    /// An host_fn wants to returns a certain value, but the Wasm code expects a different one.
+    /// An `host_fn` wants to returns a certain value, but the Wasm code expects a different one.
     // TODO: indicate function and actual/expected types
     ReturnValueTypeMismatch,
+    /// Called a function that is unknown to the host.
+    ///
+    /// > **Note**: Can only happen if `allow_unresolved_imports` was `true`.
+    #[display(fmt = "Called unresolved function `{}`:`{}`", module_name, function)]
+    UnresolvedFunctionCalled {
+        /// Name of the function that was unresolved.
+        function: String,
+        /// Name of module associated with the unresolved function.
+        module_name: String,
+    },
     /// Mismatch between the number of parameters expected and the actual number.
     #[display(
         fmt = "Mismatch in parameters count: {}, expected = {}, actual = {}",
@@ -2316,11 +2737,10 @@ pub enum Error {
         actual: usize,
     },
     /// Failed to decode a SCALE-encoded parameter.
-    // TODO: refactor and/or remove
-    ParamDecodeError(parity_scale_codec::Error),
+    ParamDecodeError,
     /// The type of one of the parameters is wrong.
     #[display(
-        fmt = "Type mismatch in parameter #{}: {}, expected = {:?}, actual = {:?}",
+        fmt = "Type mismatch in parameter of index {}: {}, expected = {:?}, actual = {:?}",
         param_num,
         function,
         expected,
@@ -2339,7 +2759,7 @@ pub enum Error {
     /// One parameter is expected to point to a buffer, but the pointer is out
     /// of range of the memory of the Wasm VM.
     #[display(
-        fmt = "Bad pointer for parameter #{} of {}: 0x{:x}, len = 0x{:x}",
+        fmt = "Bad pointer for parameter of index {} of {}: 0x{:x}, len = 0x{:x}",
         param_num,
         function,
         pointer,
@@ -2361,7 +2781,7 @@ pub enum Error {
     /// One parameter is expected to point to a UTF-8 string, but the buffer
     /// isn't valid UTF-8.
     #[display(
-        fmt = "UTF-8 error for parameter #{} of {}: {}",
+        fmt = "UTF-8 error for parameter of index {} of {}: {}",
         param_num,
         function,
         error
@@ -2404,8 +2824,15 @@ pub enum Error {
         pointer
     )]
     FreeError {
-        /// Pointer that was expected to be free'd.
+        /// Pointer that was expected to be freed.
         pointer: u32,
+    },
+    /// The host function isn't implemented.
+    // TODO: this variant should eventually disappear as all functions are implemented
+    #[display(fmt = "Host function not implemented: {}", function)]
+    HostFunctionNotImplemented {
+        /// Name of the function being called.
+        function: &'static str,
     },
 }
 
@@ -2450,6 +2877,7 @@ externalities! {
     ext_storage_clear_prefix_version_1,
     ext_storage_clear_prefix_version_2,
     ext_storage_root_version_1,
+    ext_storage_root_version_2,
     ext_storage_changes_root_version_1,
     ext_storage_next_key_version_1,
     ext_storage_append_version_1,
@@ -2471,11 +2899,13 @@ externalities! {
     ext_default_child_storage_storage_kill_version_2,
     ext_default_child_storage_storage_kill_version_3,
     ext_default_child_storage_clear_prefix_version_1,
+    ext_default_child_storage_clear_prefix_version_2,
     ext_default_child_storage_set_version_1,
     ext_default_child_storage_clear_version_1,
     ext_default_child_storage_exists_version_1,
     ext_default_child_storage_next_key_version_1,
     ext_default_child_storage_root_version_1,
+    ext_default_child_storage_root_version_2,
     ext_crypto_ed25519_public_keys_version_1,
     ext_crypto_ed25519_generate_version_1,
     ext_crypto_ed25519_sign_version_1,
@@ -2486,8 +2916,15 @@ externalities! {
     ext_crypto_sr25519_verify_version_1,
     ext_crypto_sr25519_verify_version_2,
     ext_crypto_ecdsa_generate_version_1,
+    ext_crypto_ecdsa_sign_version_1,
+    ext_crypto_ecdsa_public_keys_version_1,
+    ext_crypto_ecdsa_verify_version_1,
+    ext_crypto_ecdsa_sign_prehashed_version_1,
+    ext_crypto_ecdsa_verify_prehashed_version_1,
     ext_crypto_secp256k1_ecdsa_recover_version_1,
+    ext_crypto_secp256k1_ecdsa_recover_version_2,
     ext_crypto_secp256k1_ecdsa_recover_compressed_version_1,
+    ext_crypto_secp256k1_ecdsa_recover_compressed_version_2,
     ext_crypto_start_batch_verify_version_1,
     ext_crypto_finish_batch_verify_version_1,
     ext_hashing_keccak_256_version_1,
@@ -2524,8 +2961,11 @@ externalities! {
     ext_sandbox_instance_teardown_version_1,
     ext_sandbox_get_global_val_version_1,
     ext_trie_blake2_256_root_version_1,
+    ext_trie_blake2_256_root_version_2,
     ext_trie_blake2_256_ordered_root_version_1,
+    ext_trie_blake2_256_ordered_root_version_2,
     ext_trie_keccak_256_ordered_root_version_1,
+    ext_trie_keccak_256_ordered_root_version_2,
     ext_misc_print_num_version_1,
     ext_misc_print_utf8_version_1,
     ext_misc_print_hex_version_1,
@@ -2536,24 +2976,209 @@ externalities! {
     ext_logging_max_level_version_1,
 }
 
+impl HostFunction {
+    fn num_parameters(&self) -> usize {
+        match *self {
+            HostFunction::ext_storage_set_version_1 => 2,
+            HostFunction::ext_storage_get_version_1 => 1,
+            HostFunction::ext_storage_read_version_1 => 3,
+            HostFunction::ext_storage_clear_version_1 => 1,
+            HostFunction::ext_storage_exists_version_1 => 1,
+            HostFunction::ext_storage_clear_prefix_version_1 => 1,
+            HostFunction::ext_storage_clear_prefix_version_2 => 2,
+            HostFunction::ext_storage_root_version_1 => 0,
+            HostFunction::ext_storage_root_version_2 => 1,
+            HostFunction::ext_storage_changes_root_version_1 => 1,
+            HostFunction::ext_storage_next_key_version_1 => 1,
+            HostFunction::ext_storage_append_version_1 => 2,
+            HostFunction::ext_storage_child_set_version_1 => todo!(),
+            HostFunction::ext_storage_child_get_version_1 => todo!(),
+            HostFunction::ext_storage_child_read_version_1 => todo!(),
+            HostFunction::ext_storage_child_clear_version_1 => todo!(),
+            HostFunction::ext_storage_child_storage_kill_version_1 => todo!(),
+            HostFunction::ext_storage_child_exists_version_1 => todo!(),
+            HostFunction::ext_storage_child_clear_prefix_version_1 => todo!(),
+            HostFunction::ext_storage_child_root_version_1 => todo!(),
+            HostFunction::ext_storage_child_next_key_version_1 => todo!(),
+            HostFunction::ext_storage_start_transaction_version_1 => 0,
+            HostFunction::ext_storage_rollback_transaction_version_1 => 0,
+            HostFunction::ext_storage_commit_transaction_version_1 => 0,
+            HostFunction::ext_default_child_storage_get_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_read_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_storage_kill_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_storage_kill_version_2 => todo!(),
+            HostFunction::ext_default_child_storage_storage_kill_version_3 => todo!(),
+            HostFunction::ext_default_child_storage_clear_prefix_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_clear_prefix_version_2 => todo!(),
+            HostFunction::ext_default_child_storage_set_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_clear_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_exists_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_next_key_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_root_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_root_version_2 => todo!(),
+            HostFunction::ext_crypto_ed25519_public_keys_version_1 => todo!(),
+            HostFunction::ext_crypto_ed25519_generate_version_1 => todo!(),
+            HostFunction::ext_crypto_ed25519_sign_version_1 => todo!(),
+            HostFunction::ext_crypto_ed25519_verify_version_1 => 3,
+            HostFunction::ext_crypto_sr25519_public_keys_version_1 => todo!(),
+            HostFunction::ext_crypto_sr25519_generate_version_1 => todo!(),
+            HostFunction::ext_crypto_sr25519_sign_version_1 => todo!(),
+            HostFunction::ext_crypto_sr25519_verify_version_1 => 3,
+            HostFunction::ext_crypto_sr25519_verify_version_2 => 3,
+            HostFunction::ext_crypto_ecdsa_generate_version_1 => todo!(),
+            HostFunction::ext_crypto_ecdsa_sign_version_1 => 2,
+            HostFunction::ext_crypto_ecdsa_public_keys_version_1 => todo!(),
+            HostFunction::ext_crypto_ecdsa_verify_version_1 => 3,
+            HostFunction::ext_crypto_ecdsa_sign_prehashed_version_1 => 2,
+            HostFunction::ext_crypto_ecdsa_verify_prehashed_version_1 => 3,
+            HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1 => 2,
+            HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => 2,
+            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1 => 2,
+            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2 => 2,
+            HostFunction::ext_crypto_start_batch_verify_version_1 => 0,
+            HostFunction::ext_crypto_finish_batch_verify_version_1 => 0,
+            HostFunction::ext_hashing_keccak_256_version_1 => 1,
+            HostFunction::ext_hashing_sha2_256_version_1 => todo!(),
+            HostFunction::ext_hashing_blake2_128_version_1 => 1,
+            HostFunction::ext_hashing_blake2_256_version_1 => 1,
+            HostFunction::ext_hashing_twox_64_version_1 => 1,
+            HostFunction::ext_hashing_twox_128_version_1 => 1,
+            HostFunction::ext_hashing_twox_256_version_1 => 1,
+            HostFunction::ext_offchain_index_set_version_1 => 2,
+            HostFunction::ext_offchain_index_clear_version_1 => 1,
+            HostFunction::ext_offchain_is_validator_version_1 => todo!(),
+            HostFunction::ext_offchain_submit_transaction_version_1 => todo!(),
+            HostFunction::ext_offchain_network_state_version_1 => todo!(),
+            HostFunction::ext_offchain_timestamp_version_1 => todo!(),
+            HostFunction::ext_offchain_sleep_until_version_1 => todo!(),
+            HostFunction::ext_offchain_random_seed_version_1 => todo!(),
+            HostFunction::ext_offchain_local_storage_set_version_1 => todo!(),
+            HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => todo!(),
+            HostFunction::ext_offchain_local_storage_get_version_1 => todo!(),
+            HostFunction::ext_offchain_local_storage_clear_version_1 => todo!(),
+            HostFunction::ext_offchain_http_request_start_version_1 => todo!(),
+            HostFunction::ext_offchain_http_request_add_header_version_1 => todo!(),
+            HostFunction::ext_offchain_http_request_write_body_version_1 => todo!(),
+            HostFunction::ext_offchain_http_response_wait_version_1 => todo!(),
+            HostFunction::ext_offchain_http_response_headers_version_1 => todo!(),
+            HostFunction::ext_offchain_http_response_read_body_version_1 => todo!(),
+            HostFunction::ext_sandbox_instantiate_version_1 => todo!(),
+            HostFunction::ext_sandbox_invoke_version_1 => todo!(),
+            HostFunction::ext_sandbox_memory_new_version_1 => todo!(),
+            HostFunction::ext_sandbox_memory_get_version_1 => todo!(),
+            HostFunction::ext_sandbox_memory_set_version_1 => todo!(),
+            HostFunction::ext_sandbox_memory_teardown_version_1 => todo!(),
+            HostFunction::ext_sandbox_instance_teardown_version_1 => todo!(),
+            HostFunction::ext_sandbox_get_global_val_version_1 => todo!(),
+            HostFunction::ext_trie_blake2_256_root_version_1 => 1,
+            HostFunction::ext_trie_blake2_256_root_version_2 => 2,
+            HostFunction::ext_trie_blake2_256_ordered_root_version_1 => 1,
+            HostFunction::ext_trie_blake2_256_ordered_root_version_2 => 2,
+            HostFunction::ext_trie_keccak_256_ordered_root_version_1 => todo!(),
+            HostFunction::ext_trie_keccak_256_ordered_root_version_2 => todo!(),
+            HostFunction::ext_misc_print_num_version_1 => 1,
+            HostFunction::ext_misc_print_utf8_version_1 => 1,
+            HostFunction::ext_misc_print_hex_version_1 => 1,
+            HostFunction::ext_misc_runtime_version_version_1 => 1,
+            HostFunction::ext_allocator_malloc_version_1 => 1,
+            HostFunction::ext_allocator_free_version_1 => 1,
+            HostFunction::ext_logging_log_version_1 => 3,
+            HostFunction::ext_logging_max_level_version_1 => 0,
+        }
+    }
+}
+
 // Glue between the `allocator` module and the `vm` module.
-struct MemAccess<'a>(&'a mut vm::VirtualMachine);
+//
+// The allocator believes that there are `memory_total_pages` pages available and allocated, where
+// `memory_total_pages` is equal to `heap_base + heap_pages`, while in reality, because we grow
+// memory lazily, there might be fewer.
+struct MemAccess<'a> {
+    vm: &'a mut vm::VirtualMachine,
+    memory_total_pages: HeapPages,
+}
+
 impl<'a> allocator::Memory for MemAccess<'a> {
     fn read_le_u64(&self, ptr: u32) -> Result<u64, allocator::Error> {
-        let bytes = self.0.read_memory(ptr, 8).unwrap(); // TODO: convert error
-        Ok(u64::from_le_bytes(
-            <[u8; 8]>::try_from(bytes.as_ref()).unwrap(),
-        ))
+        if (ptr + 8) > u32::from(self.memory_total_pages) * 64 * 1024 {
+            return Err(allocator::Error::Other("out of bounds access"));
+        }
+
+        // Note that this function (`read_le_u64`) really should take ̀`&mut self` but that is
+        // unfortunately not the case, meaning that we can't "just" grow the memory if trying
+        // to access an out of bound location.
+        //
+        // Additionally, the value being read can in theory overlap between an allocated and
+        // non-allocated parts of the memory, making this more complicated.
+
+        // Offset of the memory page where the first byte of the value will be read.
+        let accessed_memory_page_start = HeapPages::new(ptr / (64 * 1024));
+        // Offset of the memory page where the last byte of the value will be read.
+        let accessed_memory_page_end = HeapPages::new((ptr + 7) / (64 * 1024));
+        // Number of pages currently allocated.
+        let current_num_pages = self.vm.memory_size();
+        debug_assert!(current_num_pages <= self.memory_total_pages);
+
+        if accessed_memory_page_end < current_num_pages {
+            // This is the simple case: the memory access is in bounds.
+            let bytes = self.vm.read_memory(ptr, 8).unwrap();
+            Ok(u64::from_le_bytes(
+                <[u8; 8]>::try_from(bytes.as_ref()).unwrap(),
+            ))
+        } else if accessed_memory_page_start < current_num_pages {
+            // Memory access is partially in bounds. This is the most complicated situation.
+            let partial_bytes = self
+                .vm
+                .read_memory(ptr, u32::from(current_num_pages) * 64 * 1024 - ptr)
+                .unwrap();
+            let partial_bytes = partial_bytes.as_ref();
+            debug_assert!(partial_bytes.len() < 8);
+
+            let mut out = [0; 8];
+            out[..partial_bytes.len()].copy_from_slice(partial_bytes);
+            Ok(u64::from_le_bytes(out))
+        } else {
+            // Everything out bounds. Memory is zero.
+            Ok(0)
+        }
     }
 
     fn write_le_u64(&mut self, ptr: u32, val: u64) -> Result<(), allocator::Error> {
+        if (ptr + 8) > u32::from(self.memory_total_pages) * 64 * 1024 {
+            return Err(allocator::Error::Other("out of bounds access"));
+        }
+
         let bytes = val.to_le_bytes();
-        self.0.write_memory(ptr, &bytes).unwrap(); // TODO: convert error instead
+
+        // Offset of the memory page where the last byte of the value will be written.
+        let written_memory_page = HeapPages::new((ptr + 7) / (64 * 1024));
+
+        // Grow the memory more if necessary.
+        // Please note the `=`. For example if we write to page 0, we want to have at least 1 page
+        // allocated.
+        let current_num_pages = self.vm.memory_size();
+        debug_assert!(current_num_pages <= self.memory_total_pages);
+        if current_num_pages <= written_memory_page {
+            // For now, we grow the memory just enough to fit.
+            // TODO: do better
+            // Note the order of operations: we add 1 at the end to avoid a potential overflow
+            // in case `written_memory_page` is the maximum possible value.
+            let to_grow = written_memory_page - current_num_pages + HeapPages::new(1);
+
+            // We check at initialization that the virtual machine is capable of growing up to
+            // `memory_total_pages`, meaning that this `unwrap` can't panic.
+            self.vm.grow_memory(to_grow).unwrap();
+        }
+
+        self.vm.write_memory(ptr, &bytes).unwrap();
         Ok(())
     }
 
     fn size(&self) -> u32 {
-        self.0.memory_size()
+        // Lie to the allocator to pretend that `memory_total_pages` are available.
+        u32::from(self.memory_total_pages)
+            .saturating_mul(64)
+            .saturating_mul(1024)
     }
 }
 

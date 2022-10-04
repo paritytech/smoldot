@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -106,19 +106,18 @@
 //! number of clients (the complexity being `O(n)`).
 //!
 //! The single-threadedness can even be beneficial when the WebSocket server isn't the primary
-//! *raison d'être* of a certain program, which is what this module has been designed for. In the
+//! purpose of a certain program, which is what this module has been designed for. In the
 //! case of a (D)DoS attack on the WebSocket server, only up to one core of CPU processing power
 //! can be occupied by the attacker.
 
-// TODO: this guard against `unknown` is a hack because async_std doesn't provide TcpListener/TcpStream when target_os = "unknown"
-#![cfg(all(feature = "std", not(target_os = "unknown")))]
-#![cfg_attr(docsrs, doc(cfg(all(feature = "std", not(target_os = "unknown")))))]
+#![cfg(all(feature = "std"))]
+#![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
 
 #[cfg(test)]
 mod tests;
 
 use async_std::net::{TcpListener, TcpStream};
-use core::{fmt, str};
+use core::{fmt, ops, str};
 use futures::{channel::mpsc, prelude::*};
 use soketto::handshake::{server::Response, Server};
 use std::{io, net::SocketAddr};
@@ -149,7 +148,7 @@ pub struct Config {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct ConnectionId(usize);
 
-/// WebSockets listening socket and list of open connections.
+/// Listening socket and list of open connections.
 pub struct WsServer<T> {
     /// Value passed through [`Config::max_frame_size`].
     max_frame_size: usize,
@@ -166,13 +165,10 @@ pub struct WsServer<T> {
     /// List of TCP connections that are currently negotiating the WebSocket handshake.
     ///
     /// The output can be an error if the handshake fails.
-    negotiating: stream::FuturesUnordered<
-        future::BoxFuture<'static, (ConnectionId, u64, Result<Server<'static, TcpStream>, ()>)>,
-    >,
+    negotiating: stream::FuturesUnordered<future::BoxFuture<'static, NegotiatingConnection>>,
 
     /// List of streams of incoming messages for all connections.
-    incoming_messages:
-        stream::SelectAll<stream::BoxStream<'static, (ConnectionId, u64, Result<String, ()>)>>,
+    incoming_messages: stream::SelectAll<stream::BoxStream<'static, IncomingMessage>>,
 
     /// Tasks dedicated to sending messages on connections. One per healthy connection.
     sending_tasks: stream::FuturesUnordered<future::BoxFuture<'static, (ConnectionId, u64)>>,
@@ -203,6 +199,28 @@ struct Connection<T> {
     /// correspond to old connections with the same ID. For this reason, we additionally compare
     /// the expected unique ID with the actual one.
     unique_id: u64,
+}
+
+struct NegotiatingConnection {
+    /// Identifier of the connection being negotiated.
+    connection_id: ConnectionId,
+
+    /// Unique identifier for this connection. See [`Connection::unique_id`].
+    unique_id: u64,
+
+    /// Outcome of the negotiation. Can be `Err` if a problem happened.
+    outcome: Result<Server<'static, TcpStream>, ()>,
+}
+
+struct IncomingMessage {
+    /// Identifier of the connection the message comes from.
+    connection_id: ConnectionId,
+
+    /// Unique identifier for this connection. See [`Connection::unique_id`].
+    unique_id: u64,
+
+    /// Message that has been received, or `Err` if an error happened on the connection.
+    message: Result<String, ()>,
 }
 
 impl<T> WsServer<T> {
@@ -264,7 +282,13 @@ impl<T> WsServer<T> {
 
             let websocket_key = match server.receive_request().await {
                 Ok(req) => req.key(),
-                Err(_) => return (connection_id, unique_id, Err(())),
+                Err(_) => {
+                    return NegotiatingConnection {
+                        connection_id,
+                        unique_id,
+                        outcome: Err(()),
+                    }
+                }
             };
 
             match server
@@ -277,10 +301,20 @@ impl<T> WsServer<T> {
                 .await
             {
                 Ok(()) => {}
-                Err(_) => return (connection_id, unique_id, Err(())),
+                Err(_) => {
+                    return NegotiatingConnection {
+                        connection_id,
+                        unique_id,
+                        outcome: Err(()),
+                    }
+                }
             };
 
-            (connection_id, unique_id, Ok(server))
+            NegotiatingConnection {
+                connection_id,
+                unique_id,
+                outcome: Ok(server),
+            }
         }));
 
         connection_id
@@ -307,24 +341,6 @@ impl<T> WsServer<T> {
     /// Returns the number of active healthy connections.
     pub fn len(&self) -> usize {
         self.connections.len()
-    }
-
-    /// Returns the user data associated to a connection.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`ConnectionId`] is invalid.
-    pub fn connection_user_data(&self, id: ConnectionId) -> &T {
-        &self.connections.get(id.0).unwrap().user_data
-    }
-
-    /// Returns the user data associated to a connection.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`ConnectionId`] is invalid.
-    pub fn connection_mut_user_data(&mut self, id: ConnectionId) -> &mut T {
-        &mut self.connections.get_mut(id.0).unwrap().user_data
     }
 
     /// Destroys a connection.
@@ -381,21 +397,21 @@ impl<T> WsServer<T> {
                     return Event::ConnectionOpen { address };
                 },
 
-                (connection_id, unique_id, result) = self.negotiating.select_next_some() => {
+                negotiation = self.negotiating.select_next_some() => {
                     // Make sure that what is in `self.connections` matches the outcome of the
                     // negotiation. Otherwise, it means that the connection is already closed.
-                    if !self.connections.contains(connection_id.0) {
+                    if !self.connections.contains(negotiation.connection_id.0) {
                         continue;
                     }
-                    if self.connections[connection_id.0].unique_id != unique_id {
+                    if self.connections[negotiation.connection_id.0].unique_id != negotiation.unique_id {
                         continue;
                     }
 
-                    let server = match result {
+                    let server = match negotiation.outcome {
                         Ok(s) => s,
                         Err(()) => return Event::ConnectionError {
-                            connection_id,
-                            user_data: self.connections.remove(connection_id.0).user_data,
+                            connection_id: negotiation.connection_id,
+                            user_data: self.connections.remove(negotiation.connection_id.0).user_data,
                         },
                     };
 
@@ -418,12 +434,16 @@ impl<T> WsServer<T> {
                             Some((ret, (receiver, buf)))
                         });
 
-                        Box::pin(socket_packets.map(move |msg| (connection_id, unique_id, msg)))
+                        Box::pin(socket_packets.map(move |message| IncomingMessage {
+                            connection_id: negotiation.connection_id,
+                            unique_id: negotiation.unique_id,
+                            message
+                        }))
                     });
 
                     // Spawn a task dedicated to sending the messages buffered to be sent.
                     self.sending_tasks.push({
-                        let mut send_rx = self.connections[connection_id.0].send_rx.take().unwrap();
+                        let mut send_rx = self.connections[negotiation.connection_id.0].send_rx.take().unwrap();
                         Box::pin(async move {
                             while let Some(message) = send_rx.next().await {
                                 match sender.send_text_owned(message).await {
@@ -433,32 +453,32 @@ impl<T> WsServer<T> {
                             }
 
                             let _ = sender.close().await;
-                            (connection_id, unique_id)
+                            (negotiation.connection_id, negotiation.unique_id)
                         })
                     });
                 },
 
-                (connection_id, unique_id, result) = self.incoming_messages.select_next_some() => {
+                incoming = self.incoming_messages.select_next_some() => {
                     // Make sure that what is in `self.connections` matches the message. Otherwise,
                     // it means that the connection is already closed.
-                    if !self.connections.contains(connection_id.0) {
+                    if !self.connections.contains(incoming.connection_id.0) {
                         continue;
                     }
-                    if self.connections[connection_id.0].unique_id != unique_id {
+                    if self.connections[incoming.connection_id.0].unique_id != incoming.unique_id {
                         continue;
                     }
 
-                    let message = match result {
+                    let message = match incoming.message {
                         Ok(m) => m,
                         Err(()) => return Event::ConnectionError {
-                            connection_id,
-                            user_data: self.connections.remove(connection_id.0).user_data,
+                            connection_id: incoming.connection_id,
+                            user_data: self.connections.remove(incoming.connection_id.0).user_data,
                         },
                     };
 
                     return Event::TextFrame {
-                        connection_id,
-                        user_data: &mut self.connections[connection_id.0].user_data,
+                        connection_id: incoming.connection_id,
+                        user_data: &mut self.connections[incoming.connection_id.0].user_data,
                         message,
                     }
                 },
@@ -495,6 +515,22 @@ impl<T: fmt::Debug> fmt::Debug for WsServer<T> {
                     .map(|c| (ConnectionId(c.0), &c.1.user_data)),
             )
             .finish()
+    }
+}
+
+impl<T> ops::Index<ConnectionId> for WsServer<T> {
+    type Output = T;
+
+    #[track_caller]
+    fn index(&self, id: ConnectionId) -> &T {
+        &self.connections.get(id.0).unwrap().user_data
+    }
+}
+
+impl<T> ops::IndexMut<ConnectionId> for WsServer<T> {
+    #[track_caller]
+    fn index_mut(&mut self, id: ConnectionId) -> &mut T {
+        &mut self.connections.get_mut(id.0).unwrap().user_data
     }
 }
 

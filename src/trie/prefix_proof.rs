@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -26,8 +26,6 @@
 //! is `[1]`.
 
 // TODO: usage example
-
-// TODO: this code is entirely untested; no idea if it works
 
 use super::{nibble, proof_verify};
 
@@ -89,9 +87,10 @@ impl PrefixScan {
             // Controls whether we continue iterating.
             let mut any_successful_proof = false;
 
+            debug_assert!(!self.next_queries.is_empty());
             for query in &self.next_queries {
                 let info = match proof_verify::trie_node_info(proof_verify::TrieNodeInfoConfig {
-                    requested_key: query.iter().cloned(),
+                    requested_key: query.iter().copied(),
                     trie_root_hash: &self.trie_root_hash,
                     proof: proof.clone(),
                 }) {
@@ -102,7 +101,11 @@ impl PrefixScan {
 
                 any_successful_proof = true;
 
-                if info.storage_value.is_some() {
+                if matches!(
+                    info.storage_value,
+                    proof_verify::StorageValue::Known(_)
+                        | proof_verify::StorageValue::HashKnownValueMissing(_)
+                ) {
                     // Trie nodes with a value are always aligned to "bytes-keys". In other words,
                     // the number of nibbles is always even.
                     debug_assert_eq!(query.len() % 2, 0);
@@ -124,6 +127,14 @@ impl PrefixScan {
                 }
             }
 
+            // If we have failed to make any progress during this iteration, return `InProgress`.
+            if !any_successful_proof {
+                debug_assert!(next.is_empty());
+                // Errors are immediately returned if `is_first_iteration`.
+                debug_assert!(!is_first_iteration);
+                break;
+            }
+
             // Finished when nothing more to request.
             if next.is_empty() {
                 return Ok(ResumeOutcome::Success {
@@ -133,10 +144,6 @@ impl PrefixScan {
 
             // Update `next_queries` for the next iteration.
             self.next_queries = next;
-
-            if !any_successful_proof {
-                break;
-            }
         }
 
         Ok(ResumeOutcome::InProgress(self))

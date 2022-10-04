@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -15,18 +15,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::execute_block;
 use crate::{
     chain::chain_information,
-    executor::{self, host, vm},
+    executor::{self, host, runtime_host, storage_diff, vm},
     header,
     trie::calculate_root,
-    verify::{aura, babe},
+    util,
+    verify::{aura, babe, inherents},
 };
 
 use alloc::{string::String, vec::Vec};
-use core::{num::NonZeroU64, time::Duration};
-use hashbrown::HashMap;
+use core::{iter, num::NonZeroU64, time::Duration};
 
 /// Configuration for a block verification.
 pub struct Config<'a, TBody> {
@@ -42,11 +41,26 @@ pub struct Config<'a, TBody> {
     /// Configuration items related to the consensus engine.
     pub consensus: ConfigConsensus<'a>,
 
+    /// If `false`, digest items with an unknown consensus engine lead to an error.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
+    /// even if `true` is passed, a recognized consensus engine must always be present.
+    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
+    /// the network is bounded.
+    pub allow_unknown_consensus_engines: bool,
+
+    /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
+    /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
+    pub now_from_unix_epoch: Duration,
+
     /// Header of the block to verify.
     ///
     /// The `parent_hash` field is the hash of the parent whose storage can be accessed through
     /// the other fields.
     pub block_header: header::HeaderRef<'a>,
+
+    /// Number of bytes used to encode the block number in the header.
+    pub block_number_bytes: usize,
 
     /// Body of the block to verify.
     pub block_body: TBody,
@@ -58,15 +72,6 @@ pub struct Config<'a, TBody> {
 
 /// Extra items of [`Config`] that are dependant on the consensus engine of the chain.
 pub enum ConfigConsensus<'a> {
-    /// Any node on the chain is allowed to produce blocks.
-    ///
-    /// No seal must be present in the header.
-    ///
-    /// > **Note**: Be warned that this variant makes it possible for a huge number of blocks to
-    /// >           be produced. If this variant is used, the user is encouraged to limit, through
-    /// >           other means, the number of blocks being accepted.
-    AllAuthorized,
-
     /// Chain is using the Aura consensus engine.
     Aura {
         /// Aura authorities that must validate the block.
@@ -78,10 +83,6 @@ pub enum ConfigConsensus<'a> {
         /// Duration of a slot in milliseconds.
         /// Can be found by calling the `AuraApi_slot_duration` runtime function.
         slot_duration: NonZeroU64,
-
-        /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
-        /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
-        now_from_unix_epoch: Duration,
     },
 
     /// Chain is using the Babe consensus engine.
@@ -95,10 +96,6 @@ pub enum ConfigConsensus<'a> {
 
         /// Epoch that follows the epoch the parent block belongs to.
         parent_block_next_epoch: chain_information::BabeEpochInformationRef<'a>,
-
-        /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
-        /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
-        now_from_unix_epoch: Duration,
     },
 }
 
@@ -116,10 +113,10 @@ pub struct Success {
     pub consensus: SuccessConsensus,
 
     /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
 
-    /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    /// List of changes to the off-chain storage that this block performs.
+    pub offchain_storage_changes: storage_diff::StorageDiff,
 
     /// Cache used for calculating the top trie root.
     pub top_trie_root_calculation_cache: calculate_root::CalculationCache,
@@ -130,9 +127,6 @@ pub struct Success {
 
 /// Extra items in [`Success`] relevant to the consensus engine.
 pub enum SuccessConsensus {
-    /// [`ConfigConsensus::AllAuthorized`] was passed to [`Config`].
-    AllAuthorized,
-
     /// Chain is using the Aura consensus engine.
     Aura {
         /// True if the list of authorities is modified by this block.
@@ -159,10 +153,39 @@ pub enum SuccessConsensus {
 /// Error that can happen during the verification.
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
-    /// Error while verifying the unsealed block.
-    Unsealed(execute_block::Error),
+    /// Error while starting the Wasm virtual machine to execute the block.
+    #[display(fmt = "{}", _0)]
+    WasmStart(host::StartErr),
+    /// Error while running the Wasm virtual machine to execute the block.
+    #[display(fmt = "{}", _0)]
+    WasmVm(runtime_host::ErrorDetail),
+    /// Runtime has returned some errors when verifying inherents.
+    #[display(
+        fmt = "Runtime has returned some errors when verifying inherents: {:?}",
+        errors
+    )]
+    CheckInherentsError {
+        /// List of errors produced by the runtime.
+        ///
+        /// The first element of each tuple is an identifier of the module that produced the
+        /// error, while the second element is a SCALE-encoded piece of data.
+        ///
+        /// Due to the fact that errors are not supposed to happen, and that the format of errors
+        /// has changed depending on runtime versions, no utility is provided to decode them.
+        errors: Vec<([u8; 8], Vec<u8>)>,
+    },
+    /// Failed to parse the output of `BlockBuilder_check_inherents`.
+    CheckInherentsOutputParseFailure,
+    /// Output of `Core_execute_block` wasn't empty.
+    NonEmptyOutput,
     /// Block header contains items relevant to multiple consensus engines at the same time.
     MultipleConsensusEngines,
+    /// Block header contains an unrecognized consensus engine.
+    #[display(
+        fmt = "Block header contains an unrecognized consensus engine: {:?}",
+        engine
+    )]
+    UnknownConsensusEngine { engine: [u8; 4] },
     /// Failed to verify the authenticity of the block with the AURA algorithm.
     #[display(fmt = "{}", _0)]
     AuraVerification(aura::VerifyError),
@@ -174,6 +197,7 @@ pub enum Error {
     /// Block being verified has erased the `:code` key from the storage.
     CodeKeyErased,
     /// Block has modified the `:heappages` key in a way that fails to parse.
+    #[display(fmt = "Block has modified `:heappages` key in invalid way: {}", _0)]
     HeapPagesParseError(executor::InvalidHeapPagesError),
     /// Block has modified the `:heappages` key without modifying the `:code` key. This isn't
     /// supported by smoldot.
@@ -185,25 +209,31 @@ pub enum Error {
 pub fn verify(
     config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
 ) -> Verify {
-    // Start the consensus engine verification process.
-    let consensus_success = match config.consensus {
-        ConfigConsensus::AllAuthorized => {
-            // `has_any_aura()` and `has_any_babe()` also make sure that no seal is present.
-            if config.block_header.digest.has_any_aura()
-                || config.block_header.digest.has_any_babe()
-            {
-                return Verify::Finished(Err((
-                    Error::MultipleConsensusEngines,
-                    config.parent_runtime,
-                )));
-            }
-
-            SuccessConsensus::AllAuthorized
+    // Fail verification if there is any digest log item with an unrecognized consensus engine.
+    if !config.allow_unknown_consensus_engines {
+        if let Some(engine) = config
+            .block_header
+            .digest
+            .logs()
+            .find_map(|item| match item {
+                header::DigestItemRef::UnknownConsensus { engine, .. }
+                | header::DigestItemRef::UnknownSeal { engine, .. }
+                | header::DigestItemRef::UnknownPreRuntime { engine, .. } => Some(engine),
+                _ => None,
+            })
+        {
+            return Verify::Finished(Err((
+                Error::UnknownConsensusEngine { engine },
+                config.parent_runtime,
+            )));
         }
+    }
+
+    // Start the consensus engine verification process.
+    let consensus_success = match &config.consensus {
         ConfigConsensus::Aura {
             current_authorities,
             slot_duration,
-            now_from_unix_epoch,
         } => {
             if config.block_header.digest.has_any_babe() {
                 return Verify::Finished(Err((
@@ -214,10 +244,11 @@ pub fn verify(
 
             let result = aura::verify_header(aura::VerifyConfig {
                 header: config.block_header.clone(),
+                block_number_bytes: config.block_number_bytes,
                 parent_block_header: config.parent_block_header,
-                now_from_unix_epoch,
-                current_authorities,
-                slot_duration,
+                now_from_unix_epoch: config.now_from_unix_epoch,
+                current_authorities: current_authorities.clone(),
+                slot_duration: *slot_duration,
             });
 
             match result {
@@ -236,7 +267,6 @@ pub fn verify(
             parent_block_epoch,
             parent_block_next_epoch,
             slots_per_epoch,
-            now_from_unix_epoch,
         } => {
             if config.block_header.digest.has_any_aura() {
                 return Verify::Finished(Err((
@@ -247,11 +277,12 @@ pub fn verify(
 
             let result = babe::verify_header(babe::VerifyConfig {
                 header: config.block_header.clone(),
+                block_number_bytes: config.block_number_bytes,
                 parent_block_header: config.parent_block_header,
-                parent_block_next_epoch,
-                parent_block_epoch,
-                slots_per_epoch,
-                now_from_unix_epoch,
+                parent_block_next_epoch: parent_block_next_epoch.clone(),
+                parent_block_epoch: parent_block_epoch.clone(),
+                slots_per_epoch: *slots_per_epoch,
+                now_from_unix_epoch: config.now_from_unix_epoch,
             });
 
             match result {
@@ -269,22 +300,84 @@ pub fn verify(
         }
     };
 
-    // Consensus engines adds a seal at the end of the digest logs. This seal is guaranteed to be
-    // the last item. We need to remove it before we can verify the unsealed header.
-    let import_process = {
+    // Now that we have verified the header, we need to call two runtime functions:
+    //
+    // - `BlockBuilder_check_inherents`, which does some basic verification of the inherents
+    //   contained in the block.
+    // - `Core_execute_block`, which goes through transactions and makes sure that everything is
+    //   valid.
+    //
+    // The first parameter of these two runtime functions is the same: a SCALE-encoded
+    // `(header, body)` where `body` is a `Vec<Extrinsic>`. We perform the encoding ahead of time
+    // in order to re-use it later for the second call.
+    let block_parameter = {
+        // Consensus engines add a seal at the end of the digest logs. This seal is guaranteed to
+        // be the last item. We need to remove it before we can verify the unsealed header.
         let mut unsealed_header = config.block_header.clone();
         let _seal_log = unsealed_header.digest.pop_seal();
 
-        execute_block::execute_block(execute_block::Config {
-            parent_runtime: config.parent_runtime,
-            block_header: unsealed_header,
-            block_body: config.block_body,
+        let encoded_body_len = util::encode_scale_compact_usize(config.block_body.len());
+        unsealed_header
+            .scale_encoding(config.block_number_bytes)
+            .map(|b| either::Right(either::Left(b)))
+            .chain(iter::once(either::Right(either::Right(encoded_body_len))))
+            .chain(config.block_body.map(either::Left))
+            .fold(Vec::with_capacity(8192), |mut a, b| {
+                // TODO: better capacity ^ ?
+                a.extend_from_slice(AsRef::<[u8]>::as_ref(&b));
+                a
+            })
+    };
+
+    // Start the virtual machine with `BlockBuilder_check_inherents`.
+    let check_inherents_process = {
+        // The second parameter of `BlockBuilder_check_inherents` contains information such as
+        // the current timestamp.
+        // TODO: uncles?! it's a weird inherent as even in Substrate it's half implemented
+        let inherent_data = inherents::InherentData {
+            timestamp: u64::try_from(config.now_from_unix_epoch.as_millis())
+                .unwrap_or(u64::max_value()),
+        };
+
+        let vm = runtime_host::run(runtime_host::Config {
+            virtual_machine: config.parent_runtime,
+            function_to_call: "BlockBuilder_check_inherents",
+            parameter: {
+                // The `BlockBuilder_check_inherents` function expects a SCALE-encoded list of
+                // tuples containing an "inherent identifier" (`[u8; 8]`) and a value (`Vec<u8>`).
+                let list = inherent_data.as_raw_list();
+                let len = util::encode_scale_compact_usize(list.len());
+                let encoded_list = list.flat_map(|(id, value)| {
+                    let value_len = util::encode_scale_compact_usize(value.as_ref().len());
+                    let value_and_len = iter::once(value_len)
+                        .map(either::Left)
+                        .chain(iter::once(value).map(either::Right));
+                    iter::once(id)
+                        .map(either::Left)
+                        .chain(value_and_len.map(either::Right))
+                });
+
+                [either::Left(&block_parameter), either::Right(len)]
+                    .into_iter()
+                    .map(either::Left)
+                    .chain(encoded_list.map(either::Right))
+            },
             top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
-        })
+            storage_top_trie_changes: Default::default(),
+            offchain_storage_changes: Default::default(),
+        });
+
+        match vm {
+            Ok(vm) => vm,
+            Err((error, prototype)) => {
+                return Verify::Finished(Err((Error::WasmStart(error), prototype)))
+            }
+        }
     };
 
     VerifyInner {
-        inner: import_process,
+        inner: check_inherents_process,
+        execution_not_started: Some(block_parameter),
         consensus_success,
     }
     .run()
@@ -312,82 +405,151 @@ pub enum Verify {
 }
 
 struct VerifyInner {
-    inner: execute_block::Verify,
+    inner: runtime_host::RuntimeHostVm,
+    /// If `Some`, then we are currently checking inherents, and this field contains the parameter
+    /// to later pass when invoking `Core_execute_block`. If `None`, then we are currently
+    /// executing the block.
+    execution_not_started: Option<Vec<u8>>,
     consensus_success: SuccessConsensus,
 }
 
 impl VerifyInner {
-    fn run(self) -> Verify {
-        match self.inner {
-            execute_block::Verify::Finished(Err((err, prototype))) => {
-                Verify::Finished(Err((Error::Unsealed(err), prototype)))
-            }
-            execute_block::Verify::Finished(Ok(success)) => {
-                match (
-                    success.storage_top_trie_changes.get(&b":code"[..]),
-                    success.storage_top_trie_changes.get(&b":heappages"[..]),
-                ) {
-                    (None, None) => {}
-                    (Some(None), _) => {
+    fn run(mut self) -> Verify {
+        loop {
+            match self.inner {
+                runtime_host::RuntimeHostVm::Finished(Err(err)) => {
+                    break Verify::Finished(Err((Error::WasmVm(err.detail), err.prototype)))
+                }
+                runtime_host::RuntimeHostVm::Finished(Ok(success))
+                    if self.execution_not_started.is_some() =>
+                {
+                    // Check the output of the `BlockBuilder_check_inherents` runtime call.
+                    let check_inherents_result =
+                        check_check_inherents_output(success.virtual_machine.value().as_ref());
+                    if let Err(err) = check_inherents_result {
                         return Verify::Finished(Err((
-                            Error::CodeKeyErased,
-                            success.parent_runtime,
-                        )))
+                            err,
+                            success.virtual_machine.into_prototype(),
+                        )));
                     }
-                    (None, Some(_)) => {
+
+                    // Switch to phase 2: calling `Core_execute_block`.
+                    let import_process = {
+                        let vm = runtime_host::run(runtime_host::Config {
+                            virtual_machine: success.virtual_machine.into_prototype(),
+                            function_to_call: "Core_execute_block",
+                            parameter: iter::once(&self.execution_not_started.as_ref().unwrap()),
+                            top_trie_root_calculation_cache: Some(
+                                success.top_trie_root_calculation_cache,
+                            ),
+                            storage_top_trie_changes: success.storage_top_trie_changes,
+                            offchain_storage_changes: success.offchain_storage_changes,
+                        });
+
+                        match vm {
+                            Ok(vm) => vm,
+                            Err((error, prototype)) => {
+                                return Verify::Finished(Err((Error::WasmStart(error), prototype)))
+                            }
+                        }
+                    };
+
+                    self = VerifyInner {
+                        consensus_success: self.consensus_success,
+                        execution_not_started: None,
+                        inner: import_process,
+                    };
+                }
+                runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                    if !success.virtual_machine.value().as_ref().is_empty() {
                         return Verify::Finished(Err((
-                            Error::HeapPagesOnlyModification,
-                            success.parent_runtime,
-                        )))
+                            Error::NonEmptyOutput,
+                            success.virtual_machine.into_prototype(),
+                        )));
                     }
-                    (Some(Some(_code)), heap_pages) => {
-                        let heap_pages = match heap_pages {
-                            Some(heap_pages) => {
-                                match executor::storage_heap_pages_to_value(heap_pages.as_deref()) {
-                                    Ok(hp) => hp,
-                                    Err(err) => {
-                                        return Verify::Finished(Err((
-                                            Error::HeapPagesParseError(err),
-                                            success.parent_runtime,
-                                        )))
+
+                    match (
+                        success.storage_top_trie_changes.diff_get(&b":code"[..]),
+                        success
+                            .storage_top_trie_changes
+                            .diff_get(&b":heappages"[..]),
+                    ) {
+                        (None, None) => {}
+                        (Some(None), _) => {
+                            return Verify::Finished(Err((
+                                Error::CodeKeyErased,
+                                success.virtual_machine.into_prototype(),
+                            )))
+                        }
+                        (None, Some(_)) => {
+                            return Verify::Finished(Err((
+                                Error::HeapPagesOnlyModification,
+                                success.virtual_machine.into_prototype(),
+                            )))
+                        }
+                        (Some(Some(_code)), heap_pages) => {
+                            let parent_runtime = success.virtual_machine.into_prototype();
+
+                            let heap_pages = match heap_pages {
+                                Some(heap_pages) => {
+                                    match executor::storage_heap_pages_to_value(heap_pages) {
+                                        Ok(hp) => hp,
+                                        Err(err) => {
+                                            return Verify::Finished(Err((
+                                                Error::HeapPagesParseError(err),
+                                                parent_runtime,
+                                            )))
+                                        }
                                     }
                                 }
-                            }
-                            None => success.parent_runtime.heap_pages(),
-                        };
+                                None => parent_runtime.heap_pages(),
+                            };
 
-                        return Verify::RuntimeCompilation(RuntimeCompilation {
-                            consensus_success: self.consensus_success,
-                            heap_pages,
-                            success,
-                        });
+                            return Verify::RuntimeCompilation(RuntimeCompilation {
+                                consensus_success: self.consensus_success,
+                                parent_runtime,
+                                heap_pages,
+                                logs: success.logs,
+                                offchain_storage_changes: success.offchain_storage_changes,
+                                storage_top_trie_changes: success.storage_top_trie_changes,
+                                top_trie_root_calculation_cache: success
+                                    .top_trie_root_calculation_cache,
+                            });
+                        }
                     }
-                }
 
-                Verify::Finished(Ok(Success {
-                    parent_runtime: success.parent_runtime,
-                    new_runtime: None,
-                    consensus: self.consensus_success,
-                    storage_top_trie_changes: success.storage_top_trie_changes,
-                    offchain_storage_changes: success.offchain_storage_changes,
-                    top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
-                    logs: success.logs,
-                }))
+                    break Verify::Finished(Ok(Success {
+                        parent_runtime: success.virtual_machine.into_prototype(),
+                        new_runtime: None,
+                        consensus: self.consensus_success,
+                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        offchain_storage_changes: success.offchain_storage_changes,
+                        top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
+                        logs: success.logs,
+                    }));
+                }
+                runtime_host::RuntimeHostVm::StorageGet(inner) => {
+                    break Verify::StorageGet(StorageGet {
+                        inner,
+                        execution_not_started: self.execution_not_started,
+                        consensus_success: self.consensus_success,
+                    })
+                }
+                runtime_host::RuntimeHostVm::PrefixKeys(inner) => {
+                    break Verify::StoragePrefixKeys(StoragePrefixKeys {
+                        inner,
+                        execution_not_started: self.execution_not_started,
+                        consensus_success: self.consensus_success,
+                    })
+                }
+                runtime_host::RuntimeHostVm::NextKey(inner) => {
+                    break Verify::StorageNextKey(StorageNextKey {
+                        inner,
+                        execution_not_started: self.execution_not_started,
+                        consensus_success: self.consensus_success,
+                    })
+                }
             }
-            execute_block::Verify::StorageGet(inner) => Verify::StorageGet(StorageGet {
-                inner,
-                consensus_success: self.consensus_success,
-            }),
-            execute_block::Verify::PrefixKeys(inner) => {
-                Verify::StoragePrefixKeys(StoragePrefixKeys {
-                    inner,
-                    consensus_success: self.consensus_success,
-                })
-            }
-            execute_block::Verify::NextKey(inner) => Verify::StorageNextKey(StorageNextKey {
-                inner,
-                consensus_success: self.consensus_success,
-            }),
         }
     }
 }
@@ -395,7 +557,9 @@ impl VerifyInner {
 /// Loading a storage value is required in order to continue.
 #[must_use]
 pub struct StorageGet {
-    inner: execute_block::StorageGet,
+    inner: runtime_host::StorageGet,
+    /// See [`VerifyInner::execution_not_started`].
+    execution_not_started: Option<Vec<u8>>,
     consensus_success: SuccessConsensus,
 }
 
@@ -416,6 +580,7 @@ impl StorageGet {
     pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Verify {
         VerifyInner {
             inner: self.inner.inject_value(value),
+            execution_not_started: self.execution_not_started,
             consensus_success: self.consensus_success,
         }
         .run()
@@ -425,7 +590,9 @@ impl StorageGet {
 /// Fetching the list of keys with a given prefix is required in order to continue.
 #[must_use]
 pub struct StoragePrefixKeys {
-    inner: execute_block::PrefixKeys,
+    inner: runtime_host::PrefixKeys,
+    /// See [`VerifyInner::execution_not_started`].
+    execution_not_started: Option<Vec<u8>>,
     consensus_success: SuccessConsensus,
 }
 
@@ -439,6 +606,7 @@ impl StoragePrefixKeys {
     pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Verify {
         VerifyInner {
             inner: self.inner.inject_keys_ordered(keys),
+            execution_not_started: self.execution_not_started,
             consensus_success: self.consensus_success,
         }
         .run()
@@ -448,7 +616,9 @@ impl StoragePrefixKeys {
 /// Fetching the key that follows a given one is required in order to continue.
 #[must_use]
 pub struct StorageNextKey {
-    inner: execute_block::NextKey,
+    inner: runtime_host::NextKey,
+    /// See [`VerifyInner::execution_not_started`].
+    execution_not_started: Option<Vec<u8>>,
     consensus_success: SuccessConsensus,
 }
 
@@ -467,6 +637,7 @@ impl StorageNextKey {
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Verify {
         VerifyInner {
             inner: self.inner.inject_key(key),
+            execution_not_started: self.execution_not_started,
             consensus_success: self.consensus_success,
         }
         .run()
@@ -479,7 +650,11 @@ impl StorageNextKey {
 /// make it possible to benchmark the time it takes to compile runtimes.
 #[must_use]
 pub struct RuntimeCompilation {
-    success: execute_block::Success,
+    parent_runtime: host::HostVmPrototype,
+    storage_top_trie_changes: storage_diff::StorageDiff,
+    offchain_storage_changes: storage_diff::StorageDiff,
+    top_trie_root_calculation_cache: calculate_root::CalculationCache,
+    logs: String,
     heap_pages: vm::HeapPages,
     consensus_success: SuccessConsensus,
 }
@@ -490,35 +665,77 @@ impl RuntimeCompilation {
         // A `RuntimeCompilation` object is built only if `:code` has been modified and to a
         // specific value.
         let code = self
-            .success
             .storage_top_trie_changes
-            .get(&b":code"[..])
+            .diff_get(&b":code"[..])
             .unwrap()
-            .as_ref()
             .unwrap();
 
-        let new_runtime = match host::HostVmPrototype::new(
-            code,
-            self.heap_pages,
-            vm::ExecHint::CompileAheadOfTime,
-        ) {
+        let new_runtime = match host::HostVmPrototype::new(host::Config {
+            module: code,
+            heap_pages: self.heap_pages,
+            exec_hint: vm::ExecHint::CompileAheadOfTime,
+            allow_unresolved_imports: false,
+        }) {
             Ok(vm) => vm,
             Err(err) => {
                 return Verify::Finished(Err((
                     Error::NewRuntimeCompilationError(err),
-                    self.success.parent_runtime,
+                    self.parent_runtime,
                 )))
             }
         };
 
         Verify::Finished(Ok(Success {
-            parent_runtime: self.success.parent_runtime,
+            parent_runtime: self.parent_runtime,
             new_runtime: Some(new_runtime),
             consensus: self.consensus_success,
-            storage_top_trie_changes: self.success.storage_top_trie_changes,
-            offchain_storage_changes: self.success.offchain_storage_changes,
-            top_trie_root_calculation_cache: self.success.top_trie_root_calculation_cache,
-            logs: self.success.logs,
+            storage_top_trie_changes: self.storage_top_trie_changes,
+            offchain_storage_changes: self.offchain_storage_changes,
+            top_trie_root_calculation_cache: self.top_trie_root_calculation_cache,
+            logs: self.logs,
         }))
+    }
+}
+
+/// Checks the output of the `BlockBuilder_check_inherents` runtime call.
+fn check_check_inherents_output(output: &[u8]) -> Result<(), Error> {
+    // The format of the output of `check_inherents` consists of two booleans and a list of
+    // errors.
+    // We don't care about the value of the two booleans, and they are ignored during the parsing.
+    // Because we don't pass as parameter the `auraslot` or `babeslot`, errors will be generated
+    // on older runtimes that expect these values. For this reason, errors concerning `auraslot`
+    // and `babeslot` are ignored.
+    let parser = nom::sequence::preceded(
+        nom::sequence::tuple((crate::util::nom_bool_decode, crate::util::nom_bool_decode)),
+        nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+            nom::multi::fold_many_m_n(
+                num_elems,
+                num_elems,
+                nom::sequence::tuple((
+                    nom::combinator::map(nom::bytes::complete::take(8u8), |b| {
+                        <[u8; 8]>::try_from(b).unwrap()
+                    }),
+                    crate::util::nom_bytes_decode,
+                )),
+                Vec::new,
+                |mut errors, (module, error)| {
+                    if module != *b"auraslot" && module != *b"babeslot" {
+                        errors.push((module, error.to_vec()));
+                    }
+                    errors
+                },
+            )
+        }),
+    );
+
+    match nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(parser)(output) {
+        Err(_err) => Err(Error::CheckInherentsOutputParseFailure),
+        Ok((_, errors)) => {
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(Error::CheckInherentsError { errors })
+            }
+        }
     }
 }

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -20,7 +20,7 @@
 //! This module contains the [`encode_chain_storage`] and [`decode_chain`] functions that can turn
 //! a [`chain_information::ChainInformation`] into a string and back, with optionally the state of
 //! the finalized block.
-//! With no finalized block storage, the string is expected to be in the order of magniture of a
+//! With no finalized block storage, the string is expected to be in the order of magnitude of a
 //! few dozens kilobytes.
 //!
 //! The string format designed to be stable even if the structure of
@@ -32,25 +32,36 @@
 use crate::chain::chain_information;
 
 use alloc::{string::String, vec::Vec};
-use core::{convert::TryFrom, iter};
+use core::iter;
 use hashbrown::HashMap;
 
 mod defs;
 
-/// Serializes the given chain information as a string.
+/// Serializes the given chain information as a JSON string.
 ///
 /// This is a shortcut for [`encode_chain_storage`] with no `finalized_storage`.
-pub fn encode_chain(information: chain_information::ValidChainInformationRef<'_>) -> String {
-    encode_chain_storage(information, None::<iter::Empty<(Vec<u8>, Vec<u8>)>>)
+pub fn encode_chain<'a>(
+    information: impl Into<chain_information::ValidChainInformationRef<'a>>,
+    block_number_bytes: usize,
+) -> String {
+    encode_chain_storage(
+        information,
+        block_number_bytes,
+        None::<iter::Empty<(Vec<u8>, Vec<u8>)>>,
+    )
 }
 
 /// Serializes the given chain information and finalized block storage as a string.
-pub fn encode_chain_storage(
-    information: chain_information::ValidChainInformationRef<'_>,
+pub fn encode_chain_storage<'a>(
+    information: impl Into<chain_information::ValidChainInformationRef<'a>>,
+    block_number_bytes: usize,
     finalized_storage: Option<impl Iterator<Item = (impl AsRef<[u8]>, impl AsRef<[u8]>)>>,
 ) -> String {
+    let information = information.into();
+
     let decoded = defs::SerializedChainInformation::V1(defs::SerializedChainInformationV1::new(
         information.as_ref(),
+        block_number_bytes,
         finalized_storage,
     ));
 
@@ -62,6 +73,7 @@ pub fn encode_chain_storage(
 /// This is the invert operation of [`encode_chain_storage`].
 pub fn decode_chain(
     encoded: &str,
+    block_number_bytes: usize,
 ) -> Result<
     (
         chain_information::ValidChainInformation,
@@ -73,7 +85,7 @@ pub fn decode_chain(
         serde_json::from_str(encoded).map_err(|e| CorruptedError(CorruptedErrorInner::Serde(e)))?;
 
     let (chain_info, storage) = encoded
-        .decode()
+        .decode(block_number_bytes)
         .map_err(|err| CorruptedError(CorruptedErrorInner::Deserialize(err)))?;
 
     let chain_info = chain_information::ValidChainInformation::try_from(chain_info)
@@ -94,5 +106,6 @@ enum CorruptedErrorInner {
     Serde(serde_json::Error),
     #[display(fmt = "{}", _0)]
     Deserialize(defs::DeserializeError),
+    #[display(fmt = "Invalid chain information: {}", _0)]
     InvalidChain(chain_information::ValidityError),
 }

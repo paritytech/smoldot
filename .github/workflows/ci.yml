@@ -1,5 +1,5 @@
 # Smoldot
-# Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+# Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 # SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 #
 # This program is free software: you can redistribute it and/or modify
@@ -19,85 +19,165 @@ name: continuous-integration
 
 on:
   pull_request:
+  push:
+    branches:
+      - main   # Running the CI on the main branch is important in order to fill the caches that pull requests will pick up.
 
 jobs:
-  test:
-    name: Build and test
+  test-64bits:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.61
     steps:
-    - uses: actions/checkout@v2.3.4
+    - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
-    - name: Run tests, with all features
-      run: cargo test --locked --workspace --all-features
+    - run: RUSTFLAGS=-Dwarnings cargo test --locked --workspace --all-features
+
+  test-32bits:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.61
+    steps:
+    - run: apt-get update && apt install -y libc6-dev-i386
+    - uses: actions/checkout@v3
+    - uses: Swatinem/rust-cache@v1
+    - run: rustup target add i686-unknown-linux-gnu
+    - run: RUSTFLAGS=-Dwarnings cargo test --target i686-unknown-linux-gnu --locked --workspace --all-features
 
   wasm-node-check:
-    name: Check javascript node
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.61
     steps:
-    - uses: actions/checkout@v2.3.4
-    - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v2.4.0
-      with:
-        node-version: '12'
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
-    - run: cd bin/wasm-node/javascript && npm install-ci-test
+    - uses: actions/checkout@v3
+    - uses: Swatinem/rust-cache@v1
+    - uses: actions/setup-node@v3.5.0
+      with:
+        node-version: '12'  # An old version is used to ensure compatibility
+    - uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.x
+    - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
+
+  wasm-node-size-diff:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.61
+    steps:
+    - run: apt-get update && apt install -y cmake # TODO: remove; temporarily needed to build the `prost-build` library in the "before" comparison
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # Necessary to fetch pull request base below
+    - uses: Swatinem/rust-cache@v1
+    - uses: actions/setup-node@v3.5.0
+      with:
+        node-version: '14'  # Because this step doesn't actually check anything, we use a more liberal version
+    - uses: baptiste0928/cargo-install@v1  # This action ensures that the twiggy compilation is cached.
+      with:
+        crate: twiggy
+        version: 0.6
+    - run: git checkout ${{ github.event.pull_request.base.sha }}
+    - run: cd bin/wasm-node/javascript && npm ci && npm run-script build
+    - run: cp ./target/wasm32-wasi/min-size-release/smoldot_light_wasm.wasm ./.ci-parent-build.wasm  # TODO: maybe get the path from the `npm build` output or something?
+    - run: git checkout ${{ github.event.pull_request.head.sha }}
+    - run: cd bin/wasm-node/javascript && npm ci && npm run-script build
+    - run: twiggy diff ./.ci-parent-build.wasm ./target/wasm32-wasi/min-size-release/smoldot_light_wasm.wasm > ./twiggy-diff  # TODO: maybe get the path from the `npm build` output or something?
+    # Now that we've generated the diff in a `./twiggy-diff` file, the next step is to upload
+    # the PR number and diff content as an artifact that will then be picked up by a
+    # `workflow_run` action that does the actual commenting.
+    - run: |
+        mkdir -p ./pr
+        echo ${{ github.event.pull_request.number }} > ./pr/number
+        cp ./twiggy-diff ./pr
+    - uses: actions/upload-artifact@v3
+      with:
+        name: pr
+        path: pr/
 
   check-features:
-    name: Check that combination of features compiles
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.61
     steps:
-    - uses: actions/checkout@v2.3.4
+    - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
-    - run: cargo check --package smoldot --locked --no-default-features
-    - run: cargo check --package smoldot --locked --no-default-features --features database-sqlite
-    - run: cargo check --package smoldot --locked --no-default-features --features std
-    - run: cargo check --package smoldot --locked --no-default-features --features database-sqlite --features std
+    - run: apt-get update && apt install -y libc6-dev-i386
+    - run: rustup target add i686-unknown-linux-gnu
+    # We test for both x86_64 and i686 because there is some `cfg(target_arch = "x86_64")`
+    # conditional compilation within the source code.
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot-light --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot-light --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features std
+
+  fuzzing-binaries-compile:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions-rs/toolchain@v1
+      with:
+        # Since build artifacts are specific to a nightly version, we pin the specific nightly
+        # version to use in order to not invalidate the build cache every day. The exact version
+        # is completely arbitrary.
+        toolchain: nightly-2022-06-05
+        override: true
+    - uses: baptiste0928/cargo-install@v1  # This action ensures that the compilation is cached.
+      with:
+        crate: cargo-fuzz
+    - uses: Swatinem/rust-cache@v1
+      with:
+        working-directory: ./bin/fuzz
+    - run: cargo fuzz build --fuzz-dir ./bin/fuzz
 
   check-rustdoc-links:
-    name: Check rustdoc intra-doc links
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.61
     steps:
-    - uses: actions/checkout@v2.3.4
-    - name: Check rustdoc links
-      run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
+    - uses: actions/checkout@v3
+    - uses: Swatinem/rust-cache@v1
+    - run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
 
   fmt:
-    name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout sources
-        uses: actions/checkout@v2.3.4
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+      # Checks `rustfmt` formatting
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           override: true
-      - name: Install rustfmt
-        run: rustup component add rustfmt
-      - name: Run cargo fmt
-        uses: actions-rs/cargo@v1
+      - run: rustup component add rustfmt
+      - uses: actions-rs/cargo@v1
         with:
           command: fmt
           args: --all -- --check
+      - uses: actions-rs/cargo@v1
+        # The fuzzing targets are in a different package and thus need to be checked separately.
+        with:
+          command: fmt
+          args: --manifest-path ./bin/fuzz/Cargo.toml --all -- --check
 
   # TODO: as explained in the official repo (https://github.com/actions-rs/clippy), this action uses unstable GH actions features, but has the huge advantage of not requiring `GITHUB_TOKEN` and working on PRs from forked repositories ; should eventually replace `actions-rs/clippy@master` with a specific version
   clippy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v3
       - uses: actions-rs/toolchain@v1
         with:
             toolchain: nightly
             components: clippy
             override: true
+      - uses: Swatinem/rust-cache@v1  # Note that this is done after switching the compiler version to nightly
       - uses: actions-rs/clippy@master
         with:
           args: --all-features --all-targets
@@ -111,19 +191,27 @@ jobs:
         checks:
           - bans licenses sources
     steps:
-    - uses: actions/checkout@v2.3.4
+    - uses: actions/checkout@v3
     - uses: EmbarkStudios/cargo-deny-action@v1
       with:
         command: check --config .github/cargo-deny.toml ${{ matrix.checks }}
         arguments: --workspace --all-features
 
+  cargo-spellcheck:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: baptiste0928/cargo-install@v1  # This action ensures that the compilation is cached.
+      with:
+        crate: cargo-spellcheck
+        version: 0.11.2
+    - run: cargo spellcheck -m 99
+
   wasm-node-versions-match:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout sources
-        uses: actions/checkout@v2.3.4
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           override: true
@@ -140,7 +228,7 @@ jobs:
   all-ci:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [test, wasm-node-check, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, wasm-node-versions-match]
+    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, fuzzing-binaries-compile, check-rustdoc-links, fmt, clippy, cargo-deny, cargo-spellcheck, wasm-node-versions-match]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success

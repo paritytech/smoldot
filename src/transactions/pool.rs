@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -83,7 +83,7 @@
 use super::validate::{TransactionValidityError, ValidTransaction};
 
 use alloc::{collections::BTreeSet, vec::Vec};
-use core::{convert::TryFrom as _, fmt};
+use core::fmt;
 use hashbrown::HashSet;
 
 /// Identifier of a transaction stored within the [`Pool`].
@@ -125,7 +125,7 @@ pub struct Pool<TTx> {
     /// is "not validated".
     not_validated: HashSet<TransactionId, fnv::FnvBuildHasher>,
 
-    /// Transaction ids (i.e. indices within [`Pool::transactions`]) indexed by the blake2 hash
+    /// Transaction ids (i.e. indices within [`Pool::transactions`]) indexed by the BLAKE2 hash
     /// of the bytes of the transaction.
     by_hash: BTreeSet<([u8; 32], TransactionId)>,
 
@@ -149,17 +149,6 @@ impl<TTx> Pool<TTx> {
         }
     }
 
-    /// Removes all transactions from the pool, and sets the current best block height to the
-    /// value passed as parameter.
-    pub fn clear_and_reset(&mut self, new_best_block_height: u64) {
-        self.transactions.clear();
-        self.not_validated.clear();
-        self.by_hash.clear();
-        self.by_height.clear();
-
-        self.best_block_height = new_best_block_height;
-    }
-
     /// Returns true if the pool is empty.
     pub fn is_empty(&self) -> bool {
         self.transactions.is_empty()
@@ -170,26 +159,22 @@ impl<TTx> Pool<TTx> {
         self.transactions.len()
     }
 
-    /// Inserts a new unvalidated transaction in the pool.
-    pub fn add_unvalidated(
-        &mut self,
-        double_scale_encoded: Vec<u8>,
-        user_data: TTx,
-    ) -> TransactionId {
-        self.add_unvalidated_inner(double_scale_encoded, None, user_data)
+    /// Inserts a new unverified transaction in the pool.
+    pub fn add_unvalidated(&mut self, scale_encoded: Vec<u8>, user_data: TTx) -> TransactionId {
+        self.add_unvalidated_inner(scale_encoded, None, user_data)
     }
 
-    /// Inserts a new unvalidated transaction in the pool.
+    /// Inserts a new unverified transaction in the pool.
     fn add_unvalidated_inner(
         &mut self,
-        double_scale_encoded: impl AsRef<[u8]> + Into<Vec<u8>>,
+        scale_encoded: impl AsRef<[u8]> + Into<Vec<u8>>,
         included_block_height: Option<u64>,
         user_data: TTx,
     ) -> TransactionId {
-        let hash = blake2_hash(double_scale_encoded.as_ref());
+        let hash = blake2_hash(scale_encoded.as_ref());
 
         let tx_id = TransactionId(self.transactions.insert(Transaction {
-            double_scale_encoded: double_scale_encoded.into(),
+            scale_encoded: scale_encoded.into(),
             validation: None,
             included_block_height,
             user_data,
@@ -229,9 +214,7 @@ impl<TTx> Pool<TTx> {
             debug_assert!(_removed);
         }
 
-        let _removed = self
-            .by_hash
-            .remove(&(blake2_hash(&tx.double_scale_encoded), id));
+        let _removed = self.by_hash.remove(&(blake2_hash(&tx.scale_encoded), id));
         debug_assert!(_removed);
 
         tx.user_data
@@ -273,7 +256,7 @@ impl<TTx> Pool<TTx> {
 
             let _removed = self
                 .by_hash
-                .remove(&(blake2_hash(&tx.double_scale_encoded), tx_id));
+                .remove(&(blake2_hash(&tx.scale_encoded), tx_id));
             debug_assert!(_removed);
         }
 
@@ -304,6 +287,7 @@ impl<TTx> Pool<TTx> {
     pub fn inclusion_order(&'_ self) -> impl Iterator<Item = TransactionId> + '_ {
         // FIXME: /!\
         // TODO: /!\
+        #![allow(unreachable_code)]
         let _i: core::iter::Empty<_> = todo!();
         _i
     }
@@ -350,13 +334,13 @@ impl<TTx> Pool<TTx> {
     /// Returns the bytes associated with a given transaction.
     ///
     /// Returns `None` if the identifier is invalid.
-    pub fn double_scale_encoding(&self, id: TransactionId) -> Option<&[u8]> {
-        Some(&self.transactions.get(id.0)?.double_scale_encoded)
+    pub fn scale_encoding(&self, id: TransactionId) -> Option<&[u8]> {
+        Some(&self.transactions.get(id.0)?.scale_encoded)
     }
 
-    /// Tries to find a transaction in the pool whose bytes are `double_scale_encoded`.
-    pub fn find(&'_ self, double_scale_encoded: &[u8]) -> impl Iterator<Item = TransactionId> + '_ {
-        let hash = blake2_hash(double_scale_encoded);
+    /// Tries to find a transaction in the pool whose bytes are `scale_encoded`.
+    pub fn find(&'_ self, scale_encoded: &[u8]) -> impl Iterator<Item = TransactionId> + '_ {
+        let hash = blake2_hash(scale_encoded);
         self.by_hash
             .range(
                 (hash, TransactionId(usize::min_value()))
@@ -404,7 +388,7 @@ impl<TTx> Pool<TTx> {
 
     /// Pop a certain number of blocks from the list of blocks.
     ///
-    /// Transations that were included in these blocks remain in the transactions pool.
+    /// Transactions that were included in these blocks remain in the transactions pool.
     ///
     /// Returns the list of transactions that were in blocks that have been retracted, with the
     /// height of the block at which they were.
@@ -560,7 +544,7 @@ impl<TTx> AppendBlock<TTx> {
             .transactions
             .get(id.0)
             .unwrap()
-            .double_scale_encoded
+            .scale_encoded
             == bytes));
 
         match non_included {
@@ -640,8 +624,8 @@ impl<'a, 'b, TTx: fmt::Debug> fmt::Debug for Vacant<'a, 'b, TTx> {
 
 /// Entry in [`Pool::transactions`].
 struct Transaction<TTx> {
-    /// Bytes corresponding to the double-SCALE-encoded transaction.
-    double_scale_encoded: Vec<u8>,
+    /// Bytes corresponding to the SCALE-encoded transaction.
+    scale_encoded: Vec<u8>,
 
     /// If `Some`, contains the outcome of the validation of this transaction and the block height
     /// it was validated against.
@@ -654,7 +638,7 @@ struct Transaction<TTx> {
     user_data: TTx,
 }
 
-/// Utility. Calculates the blake2 hash of the given bytes.
+/// Utility. Calculates the BLAKE2 hash of the given bytes.
 fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
     <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
 }

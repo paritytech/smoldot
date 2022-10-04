@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -48,6 +48,7 @@
 //! blocks, the *best block* is the one that will be voted for finalization. If there isn't any
 //! non-finalized block, the latest finalized block is also the best block.
 
+pub mod async_tree;
 pub mod blocks_tree;
 pub mod chain_information;
 pub mod fork_tree;

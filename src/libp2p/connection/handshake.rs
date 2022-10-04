@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -23,13 +23,14 @@
 //! protocol is supported at the moment.
 //! - A noise protocol handshake, where public keys are exchanged and symmetric encryption is
 //! initialized.
-//! - A multistream-select negotiation to negotiate the yamux protocol. Only the yamux protocol is
+//! - A multistream-select negotiation to negotiate the Yamux protocol. Only the Yamux protocol is
 //! supported at the moment. This negotiation is performed on top of the noise cipher.
 //!
 //! This entire handshake requires in total either three or five TCP packets (not including the
 //! TCP handshake), depending on the strategy used for the multistream-select protocol.
 
 // TODO: finish commenting on the number of round trips
+// TODO: this module's name ("handshake") is a bit vague considering that there are multiple different handshakes based on the protocol
 
 use super::{
     super::peer_id::PeerId,
@@ -84,7 +85,7 @@ enum NegotiationState {
     },
     Multiplexing {
         peer_id: PeerId,
-        encryption: noise::Noise,
+        encryption: Box<noise::Noise>,
         negotiation: multistream_select::InProgress<iter::Once<&'static str>, &'static str>,
     },
 }
@@ -133,7 +134,7 @@ impl HealthyHandshake {
                     // Delegating read/write to the negotiation.
                     let updated = negotiation
                         .read_write(read_write)
-                        .map_err(HandshakeError::MultistreamSelect)?;
+                        .map_err(HandshakeError::EncryptionMultistreamSelect)?;
 
                     return match updated {
                         multistream_select::Negotiation::InProgress(updated) => {
@@ -159,9 +160,10 @@ impl HealthyHandshake {
 
                 NegotiationState::Encryption { handshake } => {
                     // Delegating read/write to the Noise handshake state machine.
-                    let updated = handshake
-                        .read_write(read_write)
-                        .map_err(HandshakeError::NoiseHandshake)?;
+                    let updated = handshake.read_write(read_write).map_err(|err| {
+                        debug_assert!(!matches!(err, noise::HandshakeError::WriteClosed));
+                        HandshakeError::NoiseHandshake(err)
+                    })?;
 
                     match updated {
                         noise::NoiseHandshake::Success {
@@ -183,7 +185,7 @@ impl HealthyHandshake {
 
                             self.state = NegotiationState::Multiplexing {
                                 peer_id: remote_peer_id,
-                                encryption: cipher,
+                                encryption: Box::new(cipher),
                                 negotiation,
                             };
 
@@ -207,11 +209,20 @@ impl HealthyHandshake {
                     // During the multiplexing protocol negotiation, all exchanges have to go
                     // through the Noise cipher.
 
+                    if read_write.incoming_buffer.is_none() {
+                        return Err(HandshakeError::MultiplexingMultistreamSelect(
+                            multistream_select::Error::ReadClosed,
+                        ));
+                    }
+                    if read_write.outgoing_buffer.is_none() {
+                        return Err(HandshakeError::MultiplexingMultistreamSelect(
+                            multistream_select::Error::WriteClosed,
+                        ));
+                    }
+
                     // TODO: explain
                     let num_read = encryption
-                        .inject_inbound_data(
-                            read_write.incoming_buffer.as_ref().unwrap_or(&&[][..]),
-                        )
+                        .inject_inbound_data(read_write.incoming_buffer.unwrap())
                         .map_err(HandshakeError::Noise)?;
                     assert_eq!(num_read, read_write.incoming_buffer_available()); // TODO: not necessarily true; situation is a bit complicated; see noise module
                     read_write.advance_read(num_read);
@@ -235,11 +246,10 @@ impl HealthyHandshake {
                             read_bytes: 0,
                             written_bytes: 0,
                             wake_up_after: None,
-                            wake_up_future: None,
                         };
                         let updated = negotiation
                             .read_write(&mut interm_read_write)
-                            .map_err(HandshakeError::MultistreamSelect)?;
+                            .map_err(HandshakeError::MultiplexingMultistreamSelect)?;
                         (
                             updated,
                             interm_read_write.read_bytes,
@@ -277,7 +287,7 @@ impl HealthyHandshake {
                             }))
                         }
                         multistream_select::Negotiation::Success(_) => Ok(Handshake::Success {
-                            connection: ConnectionPrototype::from_noise_yamux(encryption),
+                            connection: ConnectionPrototype::from_noise_yamux(*encryption),
                             remote_peer_id: peer_id,
                         }),
                         multistream_select::Negotiation::NotAvailable => {
@@ -307,10 +317,11 @@ impl NoiseKeyRequired {
     pub fn resume(self, noise_key: &NoiseKey) -> HealthyHandshake {
         HealthyHandshake {
             state: NegotiationState::Encryption {
-                handshake: Box::new(noise::HandshakeInProgress::new(
-                    noise_key,
-                    self.is_initiator,
-                )),
+                handshake: Box::new(noise::HandshakeInProgress::new(noise::Config {
+                    key: noise_key,
+                    is_initiator: self.is_initiator,
+                    prologue: &[],
+                })),
             },
         }
     }
@@ -325,9 +336,14 @@ impl fmt::Debug for NoiseKeyRequired {
 /// Error during a connection handshake. The connection should be shut down.
 #[derive(Debug, derive_more::Display)]
 pub enum HandshakeError {
-    /// Protocol error during a multistream-select negotiation.
-    MultistreamSelect(multistream_select::Error),
+    /// Protocol error during the multistream-select negotiation of the encryption protocol.
+    #[display(fmt = "Encryption protocol selection error: {}", _0)]
+    EncryptionMultistreamSelect(multistream_select::Error),
+    /// Protocol error during the multistream-select negotiation of the multiplexing protocol.
+    #[display(fmt = "Multiplexing protocol selection error: {}", _0)]
+    MultiplexingMultistreamSelect(multistream_select::Error),
     /// Protocol error during the noise handshake.
+    #[display(fmt = "Noise handshake error: {}", _0)]
     NoiseHandshake(noise::HandshakeError),
     /// No encryption protocol in common with the remote.
     ///
@@ -338,5 +354,6 @@ pub enum HandshakeError {
     /// The remote is behaving correctly but isn't compatible with the local node.
     NoMultiplexingProtocol,
     /// Error in the noise cipher. Data has most likely been corrupted.
+    #[display(fmt = "Noise cipher error: {}", _0)]
     Noise(noise::CipherError),
 }

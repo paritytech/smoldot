@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -19,7 +19,7 @@ use super::Error;
 use crate::util;
 
 use alloc::vec::Vec;
-use core::{cmp, convert::TryFrom, fmt, iter, slice};
+use core::{cmp, fmt, iter, slice};
 
 /// A consensus log item for BABE.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +38,7 @@ pub enum BabeConsensusLogRef<'a> {
 impl<'a> BabeConsensusLogRef<'a> {
     /// Decodes a [`BabeConsensusLogRef`] from a slice of bytes.
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, Error> {
-        Ok(match slice.get(0) {
+        Ok(match slice.first() {
             Some(1) => {
                 BabeConsensusLogRef::NextEpochData(BabeNextEpochRef::from_slice(&slice[1..])?)
             }
@@ -290,9 +290,8 @@ impl<'a> BabeAuthorityRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        iter::once(either::Right(self.public_key)).chain(iter::once(either::Left(
-            parity_scale_codec::Encode::encode(&self.weight),
-        )))
+        iter::once(either::Right(self.public_key))
+            .chain(iter::once(either::Left(self.weight.to_le_bytes())))
     }
 }
 
@@ -381,7 +380,7 @@ pub enum BabeAllowedSlots {
 impl BabeAllowedSlots {
     /// Decodes a [`BabeAllowedSlots`] from a slice of bytes.
     pub fn from_slice(slice: &[u8]) -> Result<Self, Error> {
-        Ok(match slice.get(0) {
+        Ok(match slice.first() {
             Some(0) => BabeAllowedSlots::PrimarySlots,
             Some(1) => BabeAllowedSlots::PrimaryAndSecondaryPlainSlots,
             Some(2) => BabeAllowedSlots::PrimaryAndSecondaryVrfSlots,
@@ -416,7 +415,7 @@ pub enum BabePreDigestRef<'a> {
 impl<'a> BabePreDigestRef<'a> {
     /// Decodes a [`BabePreDigestRef`] from a slice of bytes.
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, Error> {
-        Ok(match slice.get(0) {
+        Ok(match slice.first() {
             Some(1) => BabePreDigestRef::Primary(BabePrimaryPreDigestRef::from_slice(&slice[1..])?),
             Some(2) => BabePreDigestRef::SecondaryPlain(BabeSecondaryPlainPreDigest::from_slice(
                 &slice[1..],

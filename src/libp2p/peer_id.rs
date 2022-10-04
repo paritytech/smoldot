@@ -1,75 +1,101 @@
-// Copyright 2019-2021 Parity Technologies (UK) Ltd.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a
-// copy of this software and associated documentation files (the "Software"),
-// to deal in the Software without restriction, including without limitation
-// the rights to use, copy, modify, merge, publish, distribute, sublicense,
-// and/or sell copies of the Software, and to permit persons to whom the
-// Software is furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-// DEALINGS IN THE SOFTWARE.
+// Smoldot
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use alloc::{string::String, vec::Vec};
-use core::{cmp, convert::TryFrom, fmt, hash, str::FromStr};
-use prost::Message as _;
+use core::{cmp, fmt, hash, str::FromStr};
+use sha2::Digest as _;
 
-mod keys_proto {
-    include!(concat!(env!("OUT_DIR"), "/keys_proto.rs"));
-}
+use super::multihash;
+use crate::util::protobuf;
 
 /// Public key of a node's identity.
 ///
-/// Libp2p specifies multiple different possible algorithms, but only ed25519 support is
+/// Libp2p specifies multiple different possible algorithms, but only Ed25519 support is
 /// mandatory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PublicKey {
-    /// An ed25519 public key.
+    /// An Ed25519 public key.
     Ed25519([u8; 32]),
 }
 
 impl PublicKey {
-    /// Encode the public key into a protobuf structure for storage or
-    /// exchange with other nodes.
+    /// Encode the public key into a Protobuf structure for exchange with other nodes.
+    ///
+    /// As indicated in the libp2p specification, the encoding is done deterministically despite
+    /// the fact that the Protobuf format isn't deterministic.
+    ///
+    /// See https://github.com/libp2p/specs/blob/master/peer-ids/peer-ids.md#keys.
     pub fn to_protobuf_encoding(&self) -> Vec<u8> {
-        let public_key = match self {
-            PublicKey::Ed25519(key) => keys_proto::PublicKey {
-                r#type: keys_proto::KeyType::Ed25519 as i32,
-                data: key.to_vec(),
-            },
-        };
-
-        let mut buf = Vec::with_capacity(public_key.encoded_len());
-        public_key.encode(&mut buf).unwrap();
-        buf
+        match self {
+            PublicKey::Ed25519(key) => {
+                const CAPACITY: usize = 32 + 4;
+                let mut out = Vec::with_capacity(CAPACITY);
+                for slice in protobuf::enum_tag_encode(1, 1) {
+                    out.extend_from_slice(slice.as_ref());
+                }
+                for slice in protobuf::bytes_tag_encode(2, key) {
+                    out.extend_from_slice(slice.as_ref());
+                }
+                debug_assert_eq!(out.len(), CAPACITY);
+                out
+            }
+        }
     }
 
-    /// Decode a public key from a protobuf structure, e.g. read from storage
-    /// or received from another node.
+    /// Decode a public key from a Protobuf structure, e.g. read from storage or received from
+    /// another node.
     pub fn from_protobuf_encoding(bytes: &[u8]) -> Result<PublicKey, FromProtobufEncodingError> {
-        let pubkey = keys_proto::PublicKey::decode(bytes)
-            .map_err(|_| FromProtobufEncodingError::ProtobufDecodeError)?;
-
-        let key_type = keys_proto::KeyType::from_i32(pubkey.r#type)
-            .ok_or(FromProtobufEncodingError::UnknownAlgorithm)?;
-
-        match key_type {
-            keys_proto::KeyType::Ed25519 => {
-                let pubkey = <&[u8; 32]>::try_from(&pubkey.data[..])
-                    .map_err(|_| FromProtobufEncodingError::BadEd25519Key)?;
-                Ok(PublicKey::Ed25519(*pubkey))
+        struct ErrorWrapper(FromProtobufEncodingError);
+        impl<'a> nom::error::ParseError<&'a [u8]> for ErrorWrapper {
+            fn from_error_kind(_: &'a [u8], _: nom::error::ErrorKind) -> Self {
+                ErrorWrapper(FromProtobufEncodingError::ProtobufDecodeError)
             }
-            keys_proto::KeyType::Rsa
-            | keys_proto::KeyType::Secp256k1
-            | keys_proto::KeyType::Ecdsa => Err(FromProtobufEncodingError::UnsupportedAlgorithm),
+            fn append(_: &'a [u8], _: nom::error::ErrorKind, other: Self) -> Self {
+                other
+            }
+        }
+        impl<'a> nom::error::FromExternalError<&'a [u8], FromProtobufEncodingError> for ErrorWrapper {
+            fn from_external_error(
+                _: &'a [u8],
+                _: nom::error::ErrorKind,
+                e: FromProtobufEncodingError,
+            ) -> Self {
+                ErrorWrapper(e)
+            }
+        }
+
+        // As indicated in the libp2p specification, the public key must be encoded
+        // deterministically, and thus the fields are decoded deterministically in a precise order.
+        let mut parser = nom::combinator::all_consuming::<_, _, ErrorWrapper, _>(
+            nom::combinator::complete(nom::sequence::tuple((
+                nom::combinator::map_res(protobuf::enum_tag_decode(1), |val| match val {
+                    0 | 1 | 2 | 3 => Ok(val),
+                    _ => Err(FromProtobufEncodingError::UnknownAlgorithm),
+                }),
+                nom::combinator::map_res(protobuf::bytes_tag_decode(2), |d| {
+                    <[u8; 32]>::try_from(d).map_err(|_| FromProtobufEncodingError::BadEd25519Key)
+                }),
+            ))),
+        );
+
+        match nom::Finish::finish(parser(bytes)) {
+            Ok((_, (1, key))) => Ok(PublicKey::Ed25519(key)),
+            Ok((_, (_, _))) => Err(FromProtobufEncodingError::UnsupportedAlgorithm),
+            Err(err) => Err(err.0),
         }
     }
 
@@ -80,11 +106,15 @@ impl PublicKey {
 
     /// Verifies whether the given signature is valid for the given message using `self` as the
     /// public key.
-    pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), ()> {
+    pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), SignatureVerifyFailed> {
         let PublicKey::Ed25519(public_key) = self;
-        let public_key = ed25519_zebra::VerificationKey::try_from(*public_key).map_err(|_| ())?;
-        let signature = ed25519_zebra::Signature::try_from(signature).map_err(|_| ())?;
-        public_key.verify(&signature, message).map_err(|_| ())?;
+        let public_key = ed25519_zebra::VerificationKey::try_from(*public_key)
+            .map_err(|_| SignatureVerifyFailed())?;
+        let signature =
+            ed25519_zebra::Signature::try_from(signature).map_err(|_| SignatureVerifyFailed())?;
+        public_key
+            .verify(&signature, message)
+            .map_err(|_| SignatureVerifyFailed())?;
         Ok(())
     }
 }
@@ -92,15 +122,19 @@ impl PublicKey {
 /// Error potentially returned by [`PublicKey::from_protobuf_encoding`].
 #[derive(Debug, derive_more::Display)]
 pub enum FromProtobufEncodingError {
-    /// Error decoding the protobuf message.
+    /// Error decoding the Protobuf message.
     ProtobufDecodeError,
     /// Public key algorithm unknown.
     UnknownAlgorithm,
     /// Ed25519 key doesn't have a correct length.
     BadEd25519Key,
-    /// Algorithms other than ed25519 aren't supported.
+    /// Algorithms other than Ed25519 aren't supported.
     UnsupportedAlgorithm,
 }
+
+/// Call to [`PublicKey::verify`] has failed. No reason is provided for security reasons.
+#[derive(Debug, derive_more::Display)]
+pub struct SignatureVerifyFailed();
 
 /// Public keys with byte-lengths smaller than `MAX_INLINE_KEY_LENGTH` will be
 /// automatically used as the peer id using an identity multihash.
@@ -111,7 +145,8 @@ const MAX_INLINE_KEY_LENGTH: usize = 42;
 /// The data is a multihash of the public key of the peer.
 #[derive(Clone, Eq)]
 pub struct PeerId {
-    multihash: multihash::Multihash,
+    /// Always contains a valid multihash.
+    multihash: Vec<u8>,
 }
 
 impl PeerId {
@@ -119,72 +154,69 @@ impl PeerId {
     pub fn from_public_key(key: &PublicKey) -> PeerId {
         let key_enc = key.to_protobuf_encoding();
 
-        let hash_algorithm = if key_enc.len() <= MAX_INLINE_KEY_LENGTH {
-            multihash::Code::Identity
+        let out = if key_enc.len() <= MAX_INLINE_KEY_LENGTH {
+            let mut out = Vec::with_capacity(key_enc.len() + 8);
+            for slice in multihash::MultihashRef::identity(&key_enc).as_bytes() {
+                out.extend_from_slice(slice.as_ref())
+            }
+            out
         } else {
-            multihash::Code::Sha2_256
+            let mut out = Vec::with_capacity(34);
+            out.push(0x12);
+            out.push(0x32);
+
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&key_enc);
+            out.extend_from_slice(hasher.finalize().as_slice());
+
+            out
         };
 
-        let multihash = hash_algorithm.digest(&key_enc);
-        PeerId { multihash }
+        PeerId { multihash: out }
     }
 
     /// Checks whether `data` is a valid [`PeerId`].
     ///
     /// In case of error, returns the bytes passed as parameter in addition to the error.
     pub fn from_bytes(data: Vec<u8>) -> Result<PeerId, (FromBytesError, Vec<u8>)> {
-        match multihash::Multihash::from_bytes(data) {
-            Ok(multihash) => match Self::from_multihash(multihash) {
-                Ok(p) => Ok(p),
-                Err((err, mh)) => Err((FromBytesError::InvalidMultihash(err), mh.into_bytes())),
-            },
-            Err(err) => Err((FromBytesError::DecodeError(err.error), err.data)),
-        }
-    }
+        let result = match multihash::MultihashRef::from_bytes(&data) {
+            Ok(hash) => {
+                // For a PeerId to be valid, it must use either the "identity" multihash code (0x0)
+                // or the "sha256" multihash code (0x12).
+                if hash.hash_algorithm_code() == 0 {
+                    if let Err(err) = PublicKey::from_protobuf_encoding(hash.data()) {
+                        Err(FromBytesError::InvalidPublicKey(err))
+                    } else {
+                        Ok(())
+                    }
+                } else if hash.hash_algorithm_code() == 0x12 {
+                    Ok(())
+                } else {
+                    Err(FromBytesError::InvalidMultihashAlgorithm)
+                }
+            }
+            Err(err) => Err(FromBytesError::DecodeError(err)),
+        };
 
-    /// Turns a `Multihash` into a `PeerId`. If the multihash doesn't use the correct algorithm,
-    /// returns back the data in addition to the error.
-    pub fn from_multihash(
-        data: multihash::Multihash,
-    ) -> Result<PeerId, (FromMultihashError, multihash::Multihash)> {
-        if data.algorithm() == multihash::Code::Sha2_256 {
-            Ok(PeerId { multihash: data })
-        } else if data.algorithm() == multihash::Code::Identity {
-            if data.digest().len() > MAX_INLINE_KEY_LENGTH {
-                return Err((FromMultihashError::BadAlgorithm, data));
-            }
-            if let Err(err) = PublicKey::from_protobuf_encoding(data.digest()) {
-                return Err((FromMultihashError::InvalidPublicKey(err), data));
-            }
-            Ok(PeerId { multihash: data })
-        } else {
-            Err((FromMultihashError::BadAlgorithm, data))
+        match result {
+            Ok(()) => Ok(PeerId { multihash: data }),
+            Err(err) => Err((err, data)),
         }
     }
 
     /// Returns a raw bytes representation of this `PeerId`.
     pub fn into_bytes(self) -> Vec<u8> {
-        self.multihash.into_bytes()
+        self.multihash
     }
 
     /// Returns a raw bytes representation of this `PeerId`.
     pub fn as_bytes(&self) -> &[u8] {
-        self.multihash.as_bytes()
+        &self.multihash
     }
 
     /// Returns a base-58 encoded string of this `PeerId`.
     pub fn to_base58(&self) -> String {
         bs58::encode(self.as_bytes()).into_string()
-    }
-
-    /// Checks whether the public key passed as parameter matches the public key of this `PeerId`.
-    ///
-    /// Returns `None` if this `PeerId`s hash algorithm is not supported when encoding the
-    /// given public key, otherwise `Some` boolean as the result of an equality check.
-    pub fn is_public_key(&self, public_key: &PublicKey) -> Option<bool> {
-        let alg = self.multihash.algorithm();
-        let enc = public_key.to_protobuf_encoding();
-        Some(alg.digest(&enc) == self.multihash)
     }
 }
 
@@ -202,7 +234,7 @@ impl From<PublicKey> for PeerId {
 
 impl fmt::Debug for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("PeerId").field(&self.to_base58()).finish()
+        fmt::Display::fmt(self, f)
     }
 }
 
@@ -232,7 +264,7 @@ impl hash::Hash for PeerId {
         H: hash::Hasher,
     {
         let digest = self.as_ref() as &[u8];
-        hash::Hash::hash(digest, state)
+        hash::Hash::hash(digest, state);
     }
 }
 
@@ -241,14 +273,6 @@ impl TryFrom<Vec<u8>> for PeerId {
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         PeerId::from_bytes(value).map_err(|(err, _)| err)
-    }
-}
-
-impl TryFrom<multihash::Multihash> for PeerId {
-    type Error = FromMultihashError;
-
-    fn try_from(value: multihash::Multihash) -> Result<Self, Self::Error> {
-        PeerId::from_multihash(value).map_err(|(err, _)| err)
     }
 }
 
@@ -266,12 +290,6 @@ impl AsRef<[u8]> for PeerId {
     }
 }
 
-impl From<PeerId> for multihash::Multihash {
-    fn from(peer_id: PeerId) -> Self {
-        peer_id.multihash
-    }
-}
-
 impl FromStr for PeerId {
     type Err = ParseError;
 
@@ -280,7 +298,7 @@ impl FromStr for PeerId {
             .into_vec()
             .map_err(Bs58DecodeError)
             .map_err(ParseError::Bs58)?;
-        PeerId::from_bytes(bytes).map_err(|(err, _)| ParseError::Multihash(err))
+        PeerId::from_bytes(bytes).map_err(|(err, _)| ParseError::NotPeerId(err))
     }
 }
 
@@ -288,29 +306,38 @@ impl FromStr for PeerId {
 #[derive(Debug, derive_more::Display)]
 pub enum FromBytesError {
     /// Failed to decode bytes into a multihash.
-    DecodeError(multihash::DecodeError),
-    /// Multihash isn't a valid [`PeerId`].
-    InvalidMultihash(FromMultihashError),
-}
-
-/// Error when turning a mulithash into a [`PeerId`].
-#[derive(Debug, derive_more::Display)]
-pub enum FromMultihashError {
-    /// Algorithm used into the multihash isn't correct.
-    BadAlgorithm,
+    DecodeError(multihash::FromBytesError),
+    /// The algorithm used in the multihash isn't identity or SHA-256.
+    InvalidMultihashAlgorithm,
     /// Multihash uses the identity algorithm, but the data isn't a valid public key.
+    #[display(fmt = "Failed to decode public key protobuf: {}", _0)]
     InvalidPublicKey(FromProtobufEncodingError),
 }
 
 /// Error when parsing a string to a [`PeerId`].
 #[derive(Debug, derive_more::Display)]
 pub enum ParseError {
-    /// Error decoding the base58 encoding.
+    /// Error decoding the Base58 encoding.
+    #[display(fmt = "Base58 decoding error: {}", _0)]
     Bs58(Bs58DecodeError),
     /// Decoded bytes aren't a valid [`PeerId`].
-    Multihash(FromBytesError),
+    #[display(fmt = "{}", _0)]
+    NotPeerId(FromBytesError),
 }
 
-/// Error when decoding base58 encoding.
+/// Error when decoding Base58 encoding.
 #[derive(Debug, derive_more::Display, derive_more::From)]
 pub struct Bs58DecodeError(bs58::decode::Error);
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn encode_decode_pubkey() {
+        let pub_key = super::PublicKey::Ed25519(rand::random());
+        let protobuf = pub_key.to_protobuf_encoding();
+        assert_eq!(
+            super::PublicKey::from_protobuf_encoding(&protobuf).unwrap(),
+            pub_key
+        );
+    }
+}

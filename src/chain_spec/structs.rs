@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -35,18 +35,35 @@ pub(super) struct ClientSpec {
     pub(super) id: String,
     #[serde(default)]
     pub(super) chain_type: ChainType,
+
+    /// Mapping from a block number to a hex-encoded wasm runtime code (normally found in the
+    /// `:code` storage key).
+    ///
+    /// The given runtime code will be used to substitute the on-chain runtime code starting with
+    /// the given block number until the `spec_version`
+    /// ([`crate::executor::host::CoreVersionRef::spec_version`]) on chain changes.
     #[serde(default)]
     // TODO: make use of this
-    pub(super) code_substitutes: HashMap<String, HexString, fnv::FnvBuildHasher>,
+    pub(super) code_substitutes: HashMap<u64, HexString, fnv::FnvBuildHasher>,
     pub(super) boot_nodes: Vec<String>,
     pub(super) telemetry_endpoints: Option<Vec<(String, u8)>>,
     pub(super) protocol_id: Option<String>,
+    #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
+    pub(super) fork_id: Option<String>,
+    /// The `blockNumberBytes` field is (at the time of writing of this comment) a custom addition
+    /// to the format of smoldot chain specs compared to Substrate. It is necessary because,
+    /// contrary to Substrate, smoldot has no way to know the size of the block number field of
+    /// various data structures. If the field is missing, a value of 4 is assumed.
+    // TODO: revisit this field in the future to maybe bring compatibility with Substrate
+    #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
+    pub(super) block_number_bytes: Option<u8>,
     pub(super) properties: Option<Box<serde_json::value::RawValue>>,
     // TODO: make use of this
     pub(super) fork_blocks: Option<Vec<(u64, HashHexString)>>,
-    // TODO: make use of this
     pub(super) bad_blocks: Option<HashSet<HashHexString, FnvBuildHasher>>,
     // Unused but for some reason still part of the chain specs.
+    #[serde(default, skip_serializing)]
+    #[allow(unused)]
     pub(super) consensus_engine: (),
     pub(super) genesis: Genesis,
     pub(super) light_sync_state: Option<LightSyncState>,
@@ -57,7 +74,14 @@ pub(super) struct ClientSpec {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ChainSpecParachain {
+    // Note that in Substrate/Cumulus this field is only named `relay_chain` and `relayChain` is
+    // not accepted (as of 2022-06-09). This seems to be an oversight, as there are only two
+    // fields that use snake_case while the rest uses camelCase. For this reason, smoldot
+    // supports both.
+    #[serde(alias = "relayChain")]
     pub(super) relay_chain: String,
+    // Same remark concerning the name as `relay_chain`
+    #[serde(alias = "paraId")]
     pub(super) para_id: u32,
 }
 
@@ -80,6 +104,7 @@ impl Default for ChainType {
 #[serde(deny_unknown_fields)]
 pub(super) enum Genesis {
     Raw(RawGenesis),
+    StateRootHash(HashHexString),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,7 +115,7 @@ pub(super) struct RawGenesis {
     pub(super) children_default: BTreeMap<HexString, ChildRawStorage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct HexString(pub(super) Vec<u8>);
 
 impl core::borrow::Borrow<[u8]> for HexString {
@@ -115,14 +140,14 @@ impl<'a> serde::Deserialize<'a> for HexString {
     {
         let string = String::deserialize(deserializer)?;
 
-        if !string.starts_with("0x") {
-            return Err(serde::de::Error::custom(
-                "hexadecimal string doesn't start with 0x",
-            ));
+        if let Some(hex) = string.strip_prefix("0x") {
+            let bytes = hex::decode(&hex).map_err(serde::de::Error::custom)?;
+            return Ok(HexString(bytes));
         }
 
-        let bytes = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
-        Ok(HexString(bytes))
+        Err(serde::de::Error::custom(
+            "hexadecimal string doesn't start with 0x",
+        ))
     }
 }
 

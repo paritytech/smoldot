@@ -1,20 +1,22 @@
 [package]
 name = "smoldot"
-version = "0.1.1"
+version = "0.4.0"
 authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krieger1708@gmail.com>"]
 description = "Primitives to build a client for Substrate-based blockchains"
 repository = "https://github.com/paritytech/smoldot"
+documentation = "https://docs.rs/smoldot"
 license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
-edition = "2018"
+edition = "2021"
 readme = "README.md"
 keywords = ["blockchain", "peer-to-peer"]
+exclude = [".github", "bin"]  # TODO: we might need to reorganize the repo to avoid including unwanted files
 
 [workspace]
-resolver = "2"
 default-members = [".", "bin/full-node"]
 members = [
     ".",
     "bin/full-node",
+    "bin/light-base",
     "bin/wasm-node/rust",
 ]
 
@@ -28,6 +30,8 @@ database-sqlite = [
 std = [
     "async-std",
     "futures/thread-pool",
+    "pin-project",
+    "schnorrkel/getrandom", # TODO: necessary for signing; clarify in docs and in source code
     "soketto",
     "wasmtime",
 ]
@@ -38,72 +42,74 @@ std = [
 # Before adding a crate here, please make sure that it is `no_std`-compatible. If a crate should
 # theoretically be `no_std`-compatible (i.e. doesn't need the help of the operating system) but is
 # not, or if things are sketchy, please leave a comment next to it.
-ahash = { version = "0.6.2", default-features = false }
-arrayvec = { version = "0.7.1", default-features = false }
+arrayvec = { version = "0.7.2", default-features = false }
+atomic = { version = "0.5.1", default-features = false }
+base64 = { version = "0.13.0", default-features = false, features = ["alloc"] }
+bip39 = { version = "1.0.1", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
-derive_more = "0.99.16"
-ed25519-zebra = { version = "2.2.0", default-features = false }
-either = { version = "1.6.1", default-features = false }
+crossbeam-queue = { version = "0.3.6", default-features = false, features = ["alloc"] }
+derive_more = "0.99.17"
+ed25519-zebra = { version = "3.0.0", default-features = false }
+either = { version = "1.8.0", default-features = false }
+event-listener = { version = "2.5.3" }  # TODO: no-std-ize
 fnv = { version = "1.0.7", default-features = false }
-futures = "0.3.15"   # TODO: no-std-ize
-hashbrown = { version = "0.11.2", default-features = false, features = ["serde"] }   # TODO: remove serde feature
+futures = "0.3.24"   # TODO: no-std-ize
+hashbrown = { version = "0.12.3", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.3", default-features = false }
-# TODO: don't activate `static-context` by default; see https://github.com/paritytech/libsecp256k1/issues/77
-libsecp256k1 = { version = "0.6.0", default-features = false, features = ["static-context"] }
+hmac = { version = "0.12.1", default-features = false }
+itertools = { version = "0.10.5", default-features = false }
+libsecp256k1 = { version = "0.7.1", default-features = false, features = ["static-context", "hmac"] }
 # Reminder: `log` is forbidden
 merlin = { version = "3.0", default-features = false }
-multihash = "0.11.4"  # TODO: waiting for a crates.io publication of https://github.com/multiformats/rust-multihash/pull/82 that adds no_std support
-nom = { version = "6.1.2", default-features = false, features = ["alloc"] }
-num-bigint = { version = "0.4.0", default-features = false }
-num-rational = { version = "0.4.0", default-features = false, features = ["num-bigint"] }
-num-traits = { version = "0.2.14", default-features = false }
-parity-multiaddr = "0.9.6" # TODO: doesn't support no_std
-pin-project = "1.0.7"
-prost = { version = "0.7.0", default-features = false, features = ["prost-derive"] }
-rand7 = { package = "rand", version = "0.7.3", default-features = false, features = ["std"] }  # TODO: rand is used in hack-y ways at the moment ; these features should be removed
-rand = { version = "0.8.3", default-features = false, features = ["std", "std_rng"] }  # TODO: rand is used in hack-y ways at the moment ; these features should be removed
+nom = { version = "7.1.1", default-features = false, features = ["alloc"] }
+no-std-net = { version = "0.6.0", default-features = false }
+num-bigint = { version = "0.4.3", default-features = false }
+num-rational = { version = "0.4.1", default-features = false, features = ["num-bigint"] }
+num-traits = { version = "0.2.15", default-features = false }
+pbkdf2 = { version = "0.11.0", default-features = false }
+rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }  # TODO: rand is used in hack-y ways at the moment ; these features should be removed
 rand_chacha = { version = "0.3.1", default-features = false }
-ruzstd = { version = "0.2.2" }  # TODO: doesn't support no_std :-/
-schnorrkel = { version = "0.10.1", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
-serde = { version = "1.0.126", default-features = false, features = ["alloc", "derive"] }
-serde_json = { version = "1.0.64", default-features = false, features = ["alloc", "raw_value"] }
-sha2 = { version = "0.9.5", default-features = false }
-slab = { version = "0.4.3", default-features = false }
-smallvec = "1.6.1"
-snow = { version = "0.8.0", default-features = false, features = ["default-resolver"] }
+ruzstd = { version = "0.3.0" }  # TODO: doesn't support no_std :-/
+schnorrkel = { version = "0.10.2", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
+serde = { version = "1.0.145", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1.0.85", default-features = false, features = ["alloc", "raw_value"] }
+sha2 = { version = "0.10.6", default-features = false }
+siphasher = { version = "0.3.10", default-features = false }
+slab = { version = "0.4.7", default-features = false }
+smallvec = "1.10.0"
+snow = { version = "0.9.0", default-features = false, features = ["default-resolver"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
-twox-hash = "1.6.0"
-wasmi = { version = "0.9.0", default-features = false, features = ["core"] }  # TODO: having to add `core` is sketchy; maybe report this
+twox-hash = { version = "1.6.3", default-features = false }
+wasmi = { version = "0.9.1", default-features = false, features = ["core"] }  # TODO: having to add `core` is sketchy; maybe report this
 
 # `database-sqlite` feature
-parking_lot = { version = "0.11.1", optional = true }
-sqlite = { version = "0.26.0", optional = true, default-features = false, features = ["linkage"] }
+sqlite = { version = "0.27.0", optional = true, default-features = false, features = ["linkage"] }
 
 # `std` feature
 # Add here the crates that cannot function without the help of the operating system or environment.
-async-std = { version = "1.9.0", optional = true }
-soketto = { version = "0.6.0", optional = true }
+async-std = { version = "1.12.0", optional = true }
+parking_lot = { version = "0.12.1", optional = true }
+pin-project = { version = "1.0.12", optional = true }
+soketto = { version = "0.7.1", optional = true }
 
 # BELOW: DEPENDENCIES TO REMOVE
 # TODO:
-parity-scale-codec = { version = "2.2.0", features = ["derive"] } # TODO: a lot of unnecessary overhead in terms of memory allocations
+parity-scale-codec = { version = "3.2.1", features = ["derive"], default-features = false } # TODO: a lot of unnecessary overhead in terms of memory allocations
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
-wasmtime = { version = "0.27.0", default-features = false, features = ["async"], optional = true }
-
-[build-dependencies]
-prost-build = "0.7.0"
+wasmtime = { version = "1.0.1", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
-async-std = "1.9.0"
-criterion = "0.3.4"
+async-std = "1.12.0"
+criterion = "0.4.0"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
 
 [profile.dev]
+debug = 1    # Default value is `2`, which contains the full debug info. `1` is enough for stack traces.
 opt-level = 2
 panic = "abort"
 [profile.dev.package."*"]
@@ -118,7 +124,17 @@ opt-level = 3
 [profile.release]
 panic = "abort"
 lto = true
+# codegen-units set to 1 to avoid performance regressions when combined with LTO
+# See https://github.com/rust-lang/rust/issues/47745
+# https://doc.rust-lang.org/rustc/codegen-options/index.html#codegen-units
+codegen-units = 1
+incremental = false
 #strip = "symbols"      # TODO: uncomment once stable
+
+[profile.min-size-release]
+inherits = "release"
+opt-level = "z"
+incremental = false
 
 [[bench]]
 name = "header"

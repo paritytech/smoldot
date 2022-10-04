@@ -48,18 +48,21 @@
 mod tests;
 
 use crate::{
-    executor::{host, runtime_host},
+    executor::{host, runtime_host, storage_diff},
     header,
     trie::calculate_root,
     util,
+    verify::inherents,
 };
 
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::{iter, mem};
-use hashbrown::HashMap;
 
 /// Configuration for a block generation.
 pub struct Config<'a> {
+    /// Number of bytes used to encode block numbers in the header.
+    pub block_number_bytes: usize,
+
     /// Hash of the parent of the block to generate.
     ///
     /// Used to populate the header of the new block.
@@ -82,6 +85,10 @@ pub struct Config<'a> {
     /// Optional cache corresponding to the storage trie root hash calculation coming from the
     /// parent block verification.
     pub top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+
+    /// Capacity to reserve for the number of extrinsics. Should be higher than the approximate
+    /// number of extrinsics that are going to be applied.
+    pub block_body_capacity: usize,
 }
 
 /// Extra configuration depending on the consensus algorithm.
@@ -102,9 +109,9 @@ pub struct Success {
     /// Runtime that was passed by [`Config`].
     pub parent_runtime: host::HostVmPrototype,
     /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
-    /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
+    /// List of changes to the off-chain storage that this block performs.
+    pub offchain_storage_changes: storage_diff::StorageDiff,
     /// Cache used for calculating the top trie root of the new block.
     pub top_trie_root_calculation_cache: calculate_root::CalculationCache,
     /// Concatenation of all the log messages printed by the runtime.
@@ -176,7 +183,7 @@ pub fn build_block(config: Config) -> BlockBuild {
                 }])
                 .unwrap(),
             }
-            .scale_encoding()
+            .scale_encoding(config.block_number_bytes)
         },
         top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
         storage_top_trie_changes: Default::default(),
@@ -190,7 +197,7 @@ pub fn build_block(config: Config) -> BlockBuild {
 
     let shared = Shared {
         stage: Stage::InitializeBlock,
-        block_body: Vec::new(), // TODO: with_capacity?
+        block_body: Vec::with_capacity(config.block_body_capacity),
         logs: String::new(),
     };
 
@@ -312,14 +319,7 @@ impl BlockBuild {
                     let init_result = runtime_host::run(runtime_host::Config {
                         virtual_machine: success.virtual_machine.into_prototype(),
                         function_to_call: "BlockBuilder_apply_extrinsic",
-                        parameter: {
-                            // The `BlockBuilder_apply_extrinsic` function expects a SCALE-encoded
-                            // `Vec<u8>`.
-                            let len = util::encode_scale_compact_usize(extrinsic.len());
-                            iter::once(len)
-                                .map(either::Left)
-                                .chain(iter::once(extrinsic).map(either::Right))
-                        },
+                        parameter: iter::once(extrinsic),
                         top_trie_root_calculation_cache: Some(
                             success.top_trie_root_calculation_cache,
                         ),
@@ -377,7 +377,6 @@ impl BlockBuild {
                         Err(err) => return BlockBuild::Finished(Err(err)),
                     }
 
-                    // TODO: probably wrong because of double-SCALE-encoding issue
                     shared.block_body.push(extrinsic);
 
                     inner = Inner::Transition(success);
@@ -395,9 +394,8 @@ impl BlockBuild {
                     };
 
                     if result.is_ok() {
-                        // TODO: probably wrong because of double-SCALE-encoding issue
                         shared.block_body.push(match &mut shared.stage {
-                            Stage::ApplyExtrinsic(ext) => mem::replace(ext, Vec::new()),
+                            Stage::ApplyExtrinsic(ext) => mem::take(ext),
                             _ => unreachable!(),
                         });
                     }
@@ -472,8 +470,8 @@ enum Stage {
 pub struct InherentExtrinsics {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
-    offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    storage_top_trie_changes: storage_diff::StorageDiff,
+    offchain_storage_changes: storage_diff::StorageDiff,
     top_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 
@@ -481,22 +479,8 @@ impl InherentExtrinsics {
     /// Injects the inherents extrinsics and resumes execution.
     ///
     /// See the module-level documentation for more information.
-    pub fn inject_inherents(self, inherents: InherentData) -> BlockBuild {
-        self.inject_raw_inherents_list(
-            [
-                (*b"timstap0", inherents.timestamp.to_le_bytes()),
-                match inherents.consensus {
-                    InherentDataConsensus::Aura { slot_number } => {
-                        (*b"auraslot", slot_number.to_le_bytes())
-                    }
-                    InherentDataConsensus::Babe { slot_number } => {
-                        (*b"babeslot", slot_number.to_le_bytes())
-                    }
-                },
-            ]
-            .iter()
-            .cloned(),
-        )
+    pub fn inject_inherents(self, inherents: inherents::InherentData) -> BlockBuild {
+        self.inject_raw_inherents_list(inherents.as_raw_list())
     }
 
     /// Injects a raw list of inherents and resumes execution.
@@ -544,64 +528,13 @@ impl InherentExtrinsics {
     }
 }
 
-/// Values of the inherents to pass to the runtime.
-#[derive(Debug)]
-pub struct InherentData {
-    /// Number of milliseconds since the UNIX epoch when the block is generated, ignoring leap
-    /// seconds.
-    ///
-    /// Its identifier passed to the runtime is: `timstap0`.
-    pub timestamp: u64,
-
-    /// Consensus-specific fields.
-    pub consensus: InherentDataConsensus,
-    // TODO: figure out uncles
-    /*/// List of valid block headers that have the same height as the parent of the one being
-    /// generated.
-    ///
-    /// Its identifier passed to the runtime is: `uncles00`.
-    ///
-    /// `TUnc` must be an iterator yielding SCALE-encoded headers.
-    pub uncles: TUnc,*/
-
-    // TODO: parachain-related inherents are missing
-}
-
-/// Extra consensus-specific items in [`InherentData`].
-#[derive(Debug)]
-pub enum InherentDataConsensus {
-    /// Aura-specific items.
-    Aura {
-        /// Number of the Aura slot being claimed to generate this block.
-        ///
-        /// Its identifier passed to the runtime is: `auraslot`.
-        ///
-        /// > **Note**: This is redundant with the value passed through
-        /// >           [`ConfigPreRuntime::Aura`]. This redundancy is considered as a wart in the
-        /// >           runtime environment and is kept for backwards compatibility.
-        slot_number: u64,
-    },
-
-    /// Babe-specific items.
-    Babe {
-        /// Number of the Babe slot being claimed to generate this block.
-        ///
-        /// Its identifier passed to the runtime is: `babeslot`.
-        ///
-        /// > **Note**: This is redundant with the value passed through
-        /// >           [`ConfigPreRuntime::Babe`]. This redundancy is considered as a wart in the
-        /// >           runtime environment and is kept for backwards compatibility.
-        slot_number: u64,
-    },
-}
-
 /// More transactions can be added.
 #[must_use]
 pub struct ApplyExtrinsic {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
-    offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    storage_top_trie_changes: storage_diff::StorageDiff,
+    offchain_storage_changes: storage_diff::StorageDiff,
     top_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 
@@ -613,13 +546,7 @@ impl ApplyExtrinsic {
         let init_result = runtime_host::run(runtime_host::Config {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_apply_extrinsic",
-            parameter: {
-                // The `BlockBuilder_apply_extrinsic` function expects a SCALE-encoded `Vec<u8>`.
-                let len = util::encode_scale_compact_usize(extrinsic.len());
-                iter::once(len)
-                    .map(either::Left)
-                    .chain(iter::once(&extrinsic).map(either::Right))
-            },
+            parameter: iter::once(&extrinsic),
             top_trie_root_calculation_cache: Some(self.top_trie_root_calculation_cache),
             storage_top_trie_changes: self.storage_top_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
@@ -721,15 +648,28 @@ impl NextKey {
 
 /// Analyzes the output of a call to `BlockBuilder_inherent_extrinsics`, and returns the resulting
 /// extrinsics.
+// TODO: this method implementation is hacky ; the `BlockBuilder_inherent_extrinsics` function
+//       returns a `Vec<Extrinsic>`, where `Extrinsic` is opaque and depends on the chain. Because
+//       we don't know the type of `Extrinsic`, a `Vec<Extrinsic>` is undecodable. However, most
+//       Substrate chains use `type Extrinsic = OpaqueExtrinsic;` where
+//       `type OpaqueExtrinsic = Vec<u8>;` here, which happens to start with a length prefix
+//       containing its remaining size; this length prefix is fully part of the `Extrinsic` though.
+//       In other words, this function might succeed or fail depending on the Substrate chain.
 fn parse_inherent_extrinsics_output(output: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
     nom::combinator::all_consuming(nom::combinator::flat_map(
         crate::util::nom_scale_compact_usize,
         |num_elems| {
-            nom::multi::many_m_n(num_elems, num_elems, |s| {
-                nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |n| {
-                    nom::combinator::map(nom::bytes::complete::take(n), |v: &[u8]| v.to_vec())
-                })(s)
-            })
+            nom::multi::many_m_n(
+                num_elems,
+                num_elems,
+                nom::combinator::map(
+                    nom::combinator::recognize(nom::combinator::flat_map(
+                        crate::util::nom_scale_compact_usize,
+                        nom::bytes::complete::take,
+                    )),
+                    |v: &[u8]| v.to_vec(),
+                ),
+            )
         },
     ))(output)
     .map(|(_, parse_result)| parse_result)
@@ -751,8 +691,10 @@ fn parse_apply_extrinsic_output(
 #[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
 pub enum TransactionValidityError {
     /// The transaction is invalid.
+    #[display(fmt = "Transaction is invalid: {}", _0)]
     Invalid(InvalidTransaction),
     /// Transaction validity can't be determined.
+    #[display(fmt = "Transaction validity couldn't be determined: {}", _0)]
     Unknown(UnknownTransaction),
 }
 
@@ -785,6 +727,7 @@ pub enum InvalidTransaction {
     /// left in the current block.
     ExhaustsResources,
     /// Any other custom invalid validity that is not covered by this enum.
+    #[display(fmt = "Other reason (code: {})", _0)]
     Custom(u8),
     /// An extrinsic with a Mandatory dispatch resulted in Error. This is indicative of either a
     /// malicious validator or a buggy `provide_inherent`. In any case, it can result in dangerously
@@ -803,6 +746,7 @@ pub enum UnknownTransaction {
     /// No validator found for the given unsigned transaction.
     NoUnsignedValidator,
     /// Any other custom unknown validity that is not covered by this enum.
+    #[display(fmt = "Other reason (code: {})", _0)]
     Custom(u8),
 }
 

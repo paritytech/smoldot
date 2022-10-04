@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -18,41 +18,82 @@
 //! Provides the [`CliOptions`] struct that contains all the CLI options that can be passed to the
 //! binary.
 //!
-//! See the documentation of the [`structopt`] crate in order to learn more.
+//! See the documentation of the [`clap`] crate in order to learn more.
 //!
 //! # Example
 //!
 //! ```no_run
-//! use structopt::StructOpt as _;
+//! use clap::StructOpt as _;
 //! let cli_options = full_node::CliOptions::from_args();
 //! println!("Quiet: {:?}", cli_options.quiet);
 //! ```
 //!
 // TODO: I believe this example isn't tested ^ which kills the point of having it
 
-use core::convert::TryFrom as _;
-use std::path::PathBuf;
+use smoldot::{
+    identity::seed_phrase,
+    libp2p::{
+        multiaddr::{Multiaddr, ProtocolRef},
+        PeerId,
+    },
+};
+use std::{net::SocketAddr, path::PathBuf};
 
 // Note: the doc-comments applied to this struct and its field are visible when the binary is
 // started with `--help`.
 
-#[derive(Debug, structopt::StructOpt)]
-pub struct CliOptions {
-    /// Chain to connect to ("polkadot", "kusama", "westend", or a file path).
+#[derive(Debug, clap::StructOpt)]
+#[clap(about, author, version)]
+pub enum CliOptions {
+    /// Connects to the chain and synchronizes the local database with the network.
+    Run(Box<CliOptionsRun>),
+    /// Computes the 64 bits BLAKE2 hash of a string payload and prints the hexadecimal-encoded hash.
+    #[structopt(name = "blake2-64bits-hash")]
+    Blake264BitsHash(CliOptionsBlake264Hash),
+}
+
+#[derive(Debug, clap::StructOpt)]
+pub struct CliOptionsRun {
+    /// Chain to connect to ("Polkadot", "Kusama", "Westend", or a file path).
     #[structopt(long, default_value = "polkadot")]
     pub chain: CliChain,
     /// Output to stdout: auto, none, informant, logs, logs-json.
     #[structopt(long, default_value = "auto")]
     pub output: Output,
+    /// Log filter. Example: `foo=trace`
+    #[structopt(long)]
+    pub log: Vec<tracing_subscriber::filter::Directive>,
     /// Coloring: auto, always, never
     #[structopt(long, default_value = "auto")]
     pub color: ColorChoice,
-    /// Ed25519 private key of network identity (32 bytes hexadecimal).
+    /// Ed25519 private key of network identity (as a seed phrase).
+    #[structopt(long, parse(try_from_str = decode_ed25519_private_key))]
+    pub libp2p_key: Option<[u8; 32]>,
+    /// `Multiaddr` to listen on.
+    #[structopt(long, parse(try_from_str = decode_multiaddr))]
+    pub listen_addr: Vec<Multiaddr>,
+    /// `Multiaddr` of an additional node to try to connect to on startup.
+    #[structopt(long, parse(try_from_str = parse_bootnode))]
+    pub additional_bootnode: Vec<Bootnode>,
+    /// Bind point of the JSON-RPC server ("none" or <ip>:<port>).
+    #[structopt(long, default_value = "127.0.0.1:9944", parse(try_from_str = parse_json_rpc_address))]
+    pub json_rpc_address: JsonRpcAddress,
+    /// List of secret phrases to insert in the keystore of the node. Used to author blocks.
+    #[structopt(long, parse(try_from_str = decode_sr25519_private_key))]
+    // TODO: also automatically add the same keys through ed25519?
+    pub keystore_memory: Vec<[u8; 64]>,
+    /// Address of a Jaeger agent to send traces to (hint: port is typically 6831).
     #[structopt(long)]
-    pub node_key: Option<NodeKey>,
+    pub jaeger: Option<SocketAddr>,
     /// Do not load or store anything on disk.
     #[structopt(long)]
     pub tmp: bool,
+}
+
+#[derive(Debug, clap::StructOpt)]
+pub struct CliOptionsBlake264Hash {
+    /// Payload whose hash to compute.
+    pub payload: String,
 }
 
 #[derive(Debug)]
@@ -105,12 +146,13 @@ impl core::str::FromStr for ColorChoice {
     }
 }
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 #[display(fmt = "Color must be one of: always, auto, never")]
 pub struct ColorChoiceParseError;
 
 #[derive(Debug)]
 pub enum Output {
+    Auto,
     None,
     Informant,
     Logs,
@@ -122,11 +164,7 @@ impl core::str::FromStr for Output {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "auto" {
-            if atty::is(atty::Stream::Stderr) {
-                Ok(Output::Informant)
-            } else {
-                Ok(Output::Logs)
-            }
+            Ok(Output::Auto)
         } else if s == "none" {
             Ok(Output::None)
         } else if s == "informant" {
@@ -141,51 +179,51 @@ impl core::str::FromStr for Output {
     }
 }
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 #[display(fmt = "Output must be one of: auto, none, informant, logs, logs-json")]
 pub struct OutputParseError;
 
-// Note: while it is tempting to zero-ize the content of `NodeKey` on Drop, since the node key is
-// passed through the CLI, it is going to be present at several other locations in memory, plus on
-// the system. Any zero-ing here would be completely superfluous.
 #[derive(Debug)]
-pub struct NodeKey([u8; 32]);
+pub struct JsonRpcAddress(pub Option<SocketAddr>);
 
-impl core::str::FromStr for NodeKey {
-    type Err = NodeKeyParseError;
+fn parse_json_rpc_address(string: &str) -> Result<JsonRpcAddress, String> {
+    if string == "none" {
+        return Ok(JsonRpcAddress(None));
+    }
 
-    fn from_str(mut s: &str) -> Result<Self, Self::Err> {
-        if s.starts_with("0x") {
-            s = &s[2..];
-        }
+    if let Ok(addr) = string.parse::<SocketAddr>() {
+        return Ok(JsonRpcAddress(Some(addr)));
+    }
 
-        if s.len() != 64 {
-            return Err(NodeKeyParseError::BadLength);
-        }
+    Err("Failed to parse JSON-RPC server address".into())
+}
 
-        let bytes = hex::decode(s).map_err(NodeKeyParseError::FromHex)?;
+#[derive(Debug)]
+pub struct Bootnode {
+    pub address: Multiaddr,
+    pub peer_id: PeerId,
+}
 
-        let mut out = [0; 32];
-        out.copy_from_slice(&bytes);
-
-        ed25519_zebra::SigningKey::try_from(out).map_err(|_| NodeKeyParseError::BadKey)?;
-
-        Ok(NodeKey(out))
+fn parse_bootnode(string: &str) -> Result<Bootnode, String> {
+    let mut address = string.parse::<Multiaddr>().map_err(|err| err.to_string())?;
+    if let Some(ProtocolRef::P2p(peer_id)) = address.iter().last() {
+        let peer_id = PeerId::from_bytes(peer_id.to_vec())
+            .map_err(|(err, _)| format!("Failed to parse PeerId in bootnode: {}", err))?;
+        address.pop();
+        Ok(Bootnode { address, peer_id })
+    } else {
+        Err("Bootnode address must end with /p2p/...".into())
     }
 }
 
-impl AsRef<[u8; 32]> for NodeKey {
-    fn as_ref(&self) -> &[u8; 32] {
-        &self.0
-    }
+// `clap` requires error types to implement the `std::error::Error` trait.
+// For this reason, we locally define some wrappers.
+fn decode_ed25519_private_key(phrase: &str) -> Result<[u8; 32], String> {
+    seed_phrase::decode_ed25519_private_key(phrase).map_err(|err| err.to_string())
 }
-
-#[derive(Debug, derive_more::Display)]
-pub enum NodeKeyParseError {
-    #[display(fmt = "Expected 64 hexadecimal digits")]
-    BadLength,
-    #[display(fmt = "{}", _0)]
-    FromHex(hex::FromHexError),
-    #[display(fmt = "Invalid ed25519 private key")]
-    BadKey,
+fn decode_sr25519_private_key(phrase: &str) -> Result<[u8; 64], String> {
+    seed_phrase::decode_sr25519_private_key(phrase).map_err(|err| err.to_string())
+}
+fn decode_multiaddr(addr: &str) -> Result<Multiaddr, String> {
+    addr.parse::<Multiaddr>().map_err(|err| err.to_string())
 }

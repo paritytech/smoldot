@@ -1,25 +1,22 @@
-// Copyright 2019-2021 Parity Technologies (UK) Ltd.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a
-// copy of this software and associated documentation files (the "Software"),
-// to deal in the Software without restriction, including without limitation
-// the rights to use, copy, modify, merge, publish, distribute, sublicense,
-// and/or sell copies of the Software, and to permit persons to whom the
-// Software is furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-// DEALINGS IN THE SOFTWARE.
+// Smoldot
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use alloc::collections::VecDeque;
 use core::{cmp, mem};
-use futures::future::{self, BoxFuture, Future, FutureExt as _};
 
 // TODO: documentation
 
@@ -50,9 +47,6 @@ pub struct ReadWrite<'a, TNow> {
 
     /// If `Some`, the socket must be waken up after the given `TNow` is reached.
     pub wake_up_after: Option<TNow>,
-
-    /// If `Some`, the socket must be waken up after the given future is ready.
-    pub wake_up_future: Option<BoxFuture<'static, ()>>,
 }
 
 impl<'a, TNow> ReadWrite<'a, TNow> {
@@ -92,7 +86,7 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
             let out_buf_0_len = outgoing_buffer.0.len();
             advance_buf(&mut outgoing_buffer.0, cmp::min(num, out_buf_0_len));
             advance_buf(&mut outgoing_buffer.1, num.saturating_sub(out_buf_0_len));
-            if outgoing_buffer.0.is_empty() {
+            if outgoing_buffer.0.is_empty() && !outgoing_buffer.1.is_empty() {
                 mem::swap::<&mut [u8]>(&mut outgoing_buffer.0, &mut outgoing_buffer.1);
             }
         } else {
@@ -109,10 +103,14 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
 
     /// Returns the size of the data available in the incoming buffer.
     pub fn incoming_buffer_available(&self) -> usize {
-        self.incoming_buffer
-            .as_ref()
-            .map(|buf| buf.len())
-            .unwrap_or(0)
+        self.incoming_buffer.as_ref().map_or(0, |buf| buf.len())
+    }
+
+    /// Shortcut to [`ReadWrite::advance_read`], passing as parameter the value of
+    /// [`ReadWrite::incoming_buffer_available`]. This discards all the incoming data.
+    pub fn discard_all_incoming(&mut self) {
+        let len = self.incoming_buffer_available();
+        self.advance_read(len);
     }
 
     /// Returns an iterator that pops bytes from [`ReadWrite::incoming_buffer`]. Whenever the
@@ -145,8 +143,7 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
     pub fn outgoing_buffer_available(&self) -> usize {
         self.outgoing_buffer
             .as_ref()
-            .map(|(a, b)| a.len() + b.len())
-            .unwrap_or(0)
+            .map_or(0, |(a, b)| a.len() + b.len())
     }
 
     /// Copies the content of `data` to [`ReadWrite::outgoing_buffer`] and increases
@@ -177,6 +174,28 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
         self.advance_write(data.len());
     }
 
+    /// Copies as much as possible from the content of `data` to [`ReadWrite::outgoing_buffer`]
+    /// and increases [`ReadWrite::written_bytes`]. The bytes that have been written are removed
+    /// from `data`.
+    pub fn write_from_vec_deque(&mut self, data: &mut VecDeque<u8>) {
+        let (slice1, slice2) = data.as_slices();
+
+        let outgoing_available = self.outgoing_buffer_available();
+        let to_copy1 = cmp::min(slice1.len(), outgoing_available);
+        let to_copy2 = if to_copy1 == slice1.len() {
+            cmp::min(slice2.len(), outgoing_available - to_copy1)
+        } else {
+            0
+        };
+
+        self.write_out(&slice1[..to_copy1]);
+        self.write_out(&slice2[..to_copy2]);
+
+        for _ in 0..(to_copy1 + to_copy2) {
+            data.pop_front();
+        }
+    }
+
     /// Sets [`ReadWrite::wake_up_after`] to `min(wake_up_after, after)`.
     pub fn wake_up_after(&mut self, after: &TNow)
     where
@@ -187,25 +206,6 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
             Some(ref mut t) => *t = after.clone(),
             ref mut t @ None => *t = Some(after.clone()),
         }
-    }
-
-    /// Sets [`ReadWrite::wake_up_future`] to `select(wake_up_future, when)`.
-    pub fn wake_up_when(&mut self, when: impl Future<Output = ()> + Send + 'static) {
-        let current = match self.wake_up_future.take() {
-            Some(f) => f,
-            None => {
-                self.wake_up_future = Some(when.boxed());
-                return;
-            }
-        };
-
-        self.wake_up_future = Some(
-            async move {
-                futures::pin_mut!(when);
-                future::select(current, when).await;
-            }
-            .boxed(),
-        );
     }
 }
 
@@ -234,7 +234,7 @@ impl<'a, 'b, TNow> Iterator for IncomingBytes<'a, 'b, TNow> {
                 self.me.read_bytes += 1;
                 Some(byte)
             }
-            None => return None,
+            None => None,
         }
     }
 
@@ -247,3 +247,153 @@ impl<'a, 'b, TNow> Iterator for IncomingBytes<'a, 'b, TNow> {
 }
 
 impl<'a, 'b, TNow> ExactSizeIterator for IncomingBytes<'a, 'b, TNow> {}
+
+#[cfg(test)]
+mod tests {
+    use super::ReadWrite;
+
+    #[test]
+    fn incoming_bytes_iter() {
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: Some(&[1, 2, 3]),
+            outgoing_buffer: None,
+            read_bytes: 2,
+            written_bytes: 0,
+            wake_up_after: None,
+        };
+
+        let mut iter = rw.incoming_bytes_iter();
+        assert_eq!(iter.len(), 3);
+        assert_eq!(iter.next(), Some(1));
+        assert_eq!(iter.len(), 2);
+
+        assert_eq!(rw.read_bytes, 3);
+
+        let mut iter = rw.incoming_bytes_iter();
+        assert_eq!(iter.len(), 2);
+        assert_eq!(iter.next(), Some(2));
+        assert_eq!(iter.len(), 1);
+        assert_eq!(iter.next(), Some(3));
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+
+        assert_eq!(rw.read_bytes, 5);
+        let mut iter = rw.incoming_bytes_iter();
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn advance_read() {
+        let buf = [1, 2, 3];
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: Some(&buf),
+            outgoing_buffer: None,
+            read_bytes: 5,
+            written_bytes: 0,
+            wake_up_after: None,
+        };
+
+        rw.advance_read(1);
+        assert_eq!(rw.incoming_buffer.as_ref().unwrap(), &[2, 3]);
+        assert_eq!(rw.read_bytes, 6);
+
+        rw.advance_read(2);
+        assert!(rw.incoming_buffer.as_ref().unwrap().is_empty());
+        assert_eq!(rw.read_bytes, 8);
+    }
+
+    #[test]
+    fn advance_write() {
+        let mut buf1 = [1, 2, 3];
+        let mut buf2 = [4, 5];
+
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: None,
+            outgoing_buffer: Some((&mut buf1, &mut buf2)),
+            read_bytes: 0,
+            written_bytes: 5,
+            wake_up_after: None,
+        };
+
+        rw.advance_write(1);
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[2, 3]);
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().1, &[4, 5]);
+        assert_eq!(rw.written_bytes, 6);
+
+        rw.advance_write(2);
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[4, 5]);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 8);
+
+        rw.advance_write(2);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().0.is_empty());
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 10);
+
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: None,
+            outgoing_buffer: Some((&mut buf1, &mut buf2)),
+            read_bytes: 0,
+            written_bytes: 5,
+            wake_up_after: None,
+        };
+
+        rw.advance_write(4);
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[5]);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 9);
+    }
+
+    #[test]
+    fn write_from_vec_deque_smaller() {
+        let mut buf1 = [0, 0, 0];
+        let mut buf2 = [0, 0];
+        let mut input = [1, 2, 3, 4].iter().cloned().collect();
+
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: None,
+            outgoing_buffer: Some((&mut buf1, &mut buf2)),
+            read_bytes: 0,
+            written_bytes: 5,
+            wake_up_after: None,
+        };
+
+        rw.write_from_vec_deque(&mut input);
+        assert!(input.is_empty());
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[0]);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 9);
+        assert_eq!(&buf1, &[1, 2, 3]);
+        assert_eq!(&buf2, &[4, 0]);
+    }
+
+    #[test]
+    fn write_from_vec_deque_larger() {
+        let mut buf1 = [0, 0, 0];
+        let mut buf2 = [0, 0];
+        let mut input = [1, 2, 3, 4, 5, 6].iter().cloned().collect();
+
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: None,
+            outgoing_buffer: Some((&mut buf1, &mut buf2)),
+            read_bytes: 0,
+            written_bytes: 5,
+            wake_up_after: None,
+        };
+
+        rw.write_from_vec_deque(&mut input);
+        assert_eq!(input.into_iter().collect::<Vec<_>>(), &[6]);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().0.is_empty());
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 10);
+        assert_eq!(&buf1, &[1, 2, 3]);
+        assert_eq!(&buf2, &[4, 5]);
+    }
+}

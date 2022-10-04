@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -25,7 +25,7 @@
 //! follows:
 //!
 //! - The transaction gets built, in other words the bytes that encode the transaction are
-//! generated. This can be done for example through a UI, through an offchain worker, or other. A
+//! generated. This can be done for example through a UI, through an off-chain worker, or other. A
 //! transaction can be either signed (i.e. have a signature attached to it) or unsigned, depending
 //! on the action to be performed. A balance transfer, for example, generally always requires a
 //! signature.
@@ -76,7 +76,7 @@
 //! >           in the best chain, without even attempting to re-validate it (but re-inserts
 //! >           transactions in the pool if a block gets reverted).
 //!
-//! However, this is in theory not the correct behaviour. A legitimate (but in practice very
+//! However, this is in theory not the correct behavior. A legitimate (but in practice very
 //! uncommon) use-case for runtimes is to consider a transaction as invalid right after it has
 //! been included, but then valid again some time in the future.
 //!
@@ -84,23 +84,6 @@
 //! account. The client considers that once a transaction has been considered invalid against a
 //! certain block B, it will forever remain considered as invalid on any descendant of B, but a
 //! client also attempts to not cache that information for *too long* through heuristics.
-//!
-//! ## About length prefixes
-//!
-//! The meaning of the bytes that a transaction consists of depends on the runtime. It is typically
-//! some sort of `enum`, and the first byte consists in a discriminant.
-//!
-//! Similar objects, such as the block header, are typically passed as to the runtime in their
-//! SCALE encoding. Transactions, however, for historical reasons, are passed in their
-//! double-SCALE-encoding. In other words, transactions are first encoded in SCALE, then prepended
-//! with a SCALE-compact-encoded integer containing their length.
-//!
-//! Transactions are similarly passed over the network in their double-SCALE-encoding.
-//!
-//! A block body consists in a SCALE-encoded `Vec<Vec<u8>>`, where each of the inner `Vec<u8>` is
-//! a (single) SCALE-encoded transaction. A block body is therefore the concatenation of all the
-//! double-SCALE-encoded transactions.
-//!
 
 pub mod light_pool;
 pub mod pool;

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -44,7 +44,7 @@
 //!
 //! - A parent block, referred to by its hash.
 //! - An ordered list of **extrinsics**, representing a state change about the storage. An
-//! extrinsic can be either a **transaction** or an **intrisic**.
+//! extrinsic can be either a **transaction** or an **intrinsic**.
 //! - A list of **digest log items**, which include information necessary to verify the
 //! authenticity of the block, such as a cryptographic signature of the block made by its author.
 //!
@@ -96,14 +96,14 @@
 //! extrinsics of the block.
 //! - The list of digest log items.
 //!
-//! The hash of a block consists in the blake2 hash of its header.
+//! The hash of a block consists in the `blake2` hash of its header.
 //!
 //! See the [`header`] module for more information.
 //!
 //! ## Runtime
 //!
 //! The state of the storage of each block is mostly opaque from the client's perspective. There
-//! exists, however, a few hardcoded keys, the most important one being
+//! exists, however, a few hard coded keys, the most important one being
 //! `[0x3a, 0x63, 0x6f, 0x64, 0x65]` (which is the ASCII encoding of the string `:code`). The
 //! value associated with this key must always be a [WebAssembly](https://webassembly.org/) binary
 //! code called the **runtime**.
@@ -117,7 +117,7 @@
 //! - Generating the header of newly-created blocks.
 //! - Validating transactions received from third-parties, in order to later be potentially
 //! included in a block.
-//! - Providing the tools necessary to create transactions. See the [`metadata`] module.
+//! - Providing the tools necessary to create transactions.
 //!
 //! In other words, the runtime is responsible for all the actual *logic* behind the chain being
 //! run. For instance, when performing a transfer of tokens between one account and another, it is
@@ -187,7 +187,7 @@
 // The library part of `smoldot` should as pure as possible and shouldn't rely on any environment
 // such as a file system, environment variables, time, randomness, etc.
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
-#![deny(broken_intra_doc_links)]
+#![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
 extern crate alloc;
@@ -203,10 +203,10 @@ pub mod database;
 pub mod executor;
 pub mod finality;
 pub mod header;
+pub mod identity;
 pub mod informant;
 pub mod json_rpc;
 pub mod libp2p;
-pub mod metadata;
 pub mod network;
 pub mod sync;
 pub mod transactions;
@@ -215,45 +215,20 @@ pub mod verify;
 
 mod util;
 
-/// Builds the header of the genesis block, from the values in storage.
+/// Removes the length prefix at the beginning of `metadata`. Returns an error if there is no
+/// valid length prefix.
 ///
-/// # Example
-///
-/// ```no_run
-/// # let chain_spec_json: &[u8] = b"";
-/// let chain_spec = smoldot::chain_spec::ChainSpec::from_json_bytes(chain_spec_json)
-///     .unwrap();
-/// let genesis_block_header =
-///     smoldot::calculate_genesis_block_header(&chain_spec);
-/// println!("{:?}", genesis_block_header);
-/// ```
-pub fn calculate_genesis_block_header(chain_spec: &chain_spec::ChainSpec) -> header::Header {
-    let state_root = {
-        let mut calculation = trie::calculate_root::root_merkle_value(None);
+/// See the module-level documentation for more information.
+// TODO: it is unclear where to put this function; it has to be in the smoldot crate because it uses `crate::util`, so at the moment it is public but hidden
+#[doc(hidden)]
+pub fn remove_metadata_length_prefix(metadata: &[u8]) -> Result<&[u8], ()> {
+    let (after_prefix, length) = crate::util::nom_scale_compact_usize(metadata)
+        .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ())?;
 
-        loop {
-            match calculation {
-                trie::calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
-                    break hash
-                }
-                trie::calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                    calculation =
-                        keys.inject(chain_spec.genesis_storage().map(|(k, _)| k.iter().cloned()));
-                }
-                trie::calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
-                    let key: alloc::vec::Vec<u8> = val.key().collect();
-                    let value = chain_spec.genesis_storage_value(&key[..]);
-                    calculation = val.inject(value);
-                }
-            }
-        }
-    };
-
-    header::Header {
-        parent_hash: [0; 32],
-        number: 0,
-        state_root,
-        extrinsics_root: trie::empty_trie_merkle_value(),
-        digest: header::DigestRef::empty().into(),
+    // Verify that the length prefix indeed matches the metadata's length.
+    if length != after_prefix.len() {
+        return Err(());
     }
+
+    Ok(after_prefix)
 }

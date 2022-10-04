@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -72,8 +72,8 @@
 //! not, unresponsive.
 //!
 //! After the handshake is successful, use [`established::ConnectionPrototype::into_connection`]
-//! to obtain an [`established::Established`]. Similar to the handshake, use
-//! [`established::Established::read_write`] to update the state machine.
+//! to obtain an [`established::SingleStream`]. Similar to the handshake, use
+//! [`established::SingleStream::read_write`] to update the state machine.
 //!
 
 pub use noise::{NoiseKey, UnsignedNoiseKey};
