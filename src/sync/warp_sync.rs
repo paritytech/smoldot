@@ -23,7 +23,7 @@
 //!
 //! # Long range attack vulnerability
 //!
-//! Warp syncing is particularly vulnerablt to what is called long range attacks.
+//! Warp syncing is particularly vulnerable to what is called long range attacks.
 //!
 //! The authorities allowed to finalize blocks can generate multiple proofs of finality for
 //! multiple different blocks of the same height. In other words, they can finalize more than one
@@ -39,10 +39,10 @@
 //! detected, the punishment might not be enforceable because validators have moved all their
 //! funds.
 //!
-//! In other words, it is possible for 2/3rds of the validators that were active at a certain past
-//! block N to collude and decide to finalize a different block N, even when N has been finalized
-//! for the first time several weeks or months in the past. When a client then warp syncs, it can
-//! be tricked to consider this alternative block N as the finalized one.
+//! In other words, it is possible for two thirds of the validators that were active at a certain
+//! past block N to collude and decide to finalize a different block N, even when N has been
+//! finalized for the first time several weeks or months in the past. When a client then warp
+//! syncs, it can be tricked to consider this alternative block N as the finalized one.
 //!
 //! There is no fool-proof defense against this attack. However, consider the extremely high
 //! investment and high risk for the malicious validators, and the difficulty of pulling off this
@@ -293,7 +293,8 @@ enum Phase {
         /// words that the last fragment corresponds to the current finalized block of the chain.
         final_set_of_fragments: bool,
         /// Contains the downloaded fragments.
-        /// Always `Some`, but wrapped within an `Option` in order to be extractable temporarily.
+        /// Always `Some`, but wrapped within an `Option` in order to permit extracting
+        /// temporarily.
         verifier: Option<warp_sync::Verifier>,
     },
     /// All warp sync fragments have been verified, and we are now at the current finalized block
