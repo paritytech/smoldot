@@ -138,7 +138,7 @@ pub struct TrieNodeInfoConfig<'a, K, I> {
 /// >           Only the minimum amount of information required is fetched from `proof`, and an
 /// >           error is returned if a problem happens during this process.
 pub fn trie_node_info<'a, 'b>(
-    mut config: TrieNodeInfoConfig<
+    config: TrieNodeInfoConfig<
         'a,
         impl Iterator<Item = nibble::Nibble> + Clone,
         impl Iterator<Item = &'b [u8]> + Clone,
