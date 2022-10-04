@@ -102,15 +102,9 @@ pub fn verify_proof<'a, 'b>(
         StorageValue::None => Ok(None),
         StorageValue::Known(v) => Ok(Some(v)),
         StorageValue::HashKnownValueMissing(_) => {
-            // Considering that this function is specifically about obtaining the storage value
-            // of an item, if this storage item is missing we indicate that the proof is
-            // incomplete.
-            Err(Error::MissingProofEntry {
-                closest_ancestor_nibbles: {
-                    // Length of the requested key, in nibbles.
-                    config.requested_key.len() * 2
-                },
-            })
+            // Considering that this function is about obtaining the storage value of a specific
+            // item, if this storage item is missing we indicate that the proof is incomplete.
+            Err(Error::MissingProofEntry)
         }
     }
 }
@@ -161,7 +155,7 @@ pub fn trie_node_info<'a, 'b>(
 
 /// Similar to [`trie_node_info`], but only accepts non-compact trie proofs.
 pub fn trie_node_info_non_compact<'a, 'b>(
-    config: TrieNodeInfoConfig<
+    mut config: TrieNodeInfoConfig<
         'a,
         impl Iterator<Item = nibble::Nibble>,
         impl Iterator<Item = &'b [u8]> + Clone,
@@ -254,9 +248,23 @@ pub fn trie_node_info_non_compact<'a, 'b>(
                 node_value = config.proof.clone().nth(proof_iter).unwrap();
             }
         } else {
-            // The current node (as per `proof_iter`) exactly matches the requested key.
+            // The current node (i.e. `node_value`) exactly matches the requested key.
             return Ok(TrieNodeInfo {
-                storage_value: decoded_node_value.storage_value,
+                storage_value: match decoded_node_value.storage_value {
+                    proof_node_decode::StorageValue::Hashed(hash) => {
+                        // If the node contains a hash, the un-hashed value should also be found
+                        // in the proof as a standalone item.
+                        match merkle_values.iter().position(|v| v[..] == *hash) {
+                            None => StorageValue::HashKnownValueMissing(hash),
+                            Some(idx) => {
+                                let value = config.proof.nth(idx).unwrap();
+                                StorageValue::Known(value)
+                            }
+                        }
+                    }
+                    proof_node_decode::StorageValue::Unhashed(v) => StorageValue::Known(v),
+                    proof_node_decode::StorageValue::None => StorageValue::None,
+                },
                 children: Children::Multiple {
                     children_bitmap: decoded_node_value.children_bitmap(),
                 },
@@ -294,13 +302,13 @@ pub fn trie_node_info_compact<'a, 'b>(
             match expected_nibbles_iter.next() {
                 None => {
                     return Ok(TrieNodeInfo {
-                        storage_value: None,
+                        storage_value: StorageValue::None,
                         children: Children::One(nibble),
                     });
                 }
                 Some(n) if n != nibble => {
                     return Ok(TrieNodeInfo {
-                        storage_value: None,
+                        storage_value: StorageValue::None,
                         children: Children::None,
                     });
                 }
@@ -340,7 +348,7 @@ pub fn trie_node_info_compact<'a, 'b>(
                 None => {
                     // No child with the requested index exists.
                     return Ok(TrieNodeInfo {
-                        storage_value: None,
+                        storage_value: StorageValue::None,
                         children: Children::None,
                     });
                 }
@@ -352,28 +360,6 @@ pub fn trie_node_info_compact<'a, 'b>(
                 // TODO: is this correct? aren't all children 0 size?
                 node_value = child;
             }
-        } else {
-            // The current node (i.e. `node_value`) exactly matches the requested key.
-            return Ok(TrieNodeInfo {
-                storage_value: match decoded_node_value.storage_value {
-                    proof_node_decode::StorageValue::Hashed(hash) => {
-                        // If the node contains a hash, the un-hashed value should also be found
-                        // in the proof as a standalone item.
-                        match merkle_values.iter().position(|v| v[..] == *hash) {
-                            None => StorageValue::HashKnownValueMissing(hash),
-                            Some(idx) => {
-                                let value = config.proof.nth(idx).unwrap();
-                                StorageValue::Known(value)
-                            }
-                        }
-                    }
-                    proof_node_decode::StorageValue::Unhashed(v) => StorageValue::Known(v),
-                    proof_node_decode::StorageValue::None => StorageValue::None,
-                },
-                children: Children::Multiple {
-                    children_bitmap: decoded_node_value.children_bitmap(),
-                },
-            });
         }
     }
 }
