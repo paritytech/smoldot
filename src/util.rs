@@ -149,7 +149,7 @@ macro_rules! decode_scale_compact {
                         return Err(nom::Err::Error(nom::error::make_error(
                             bytes,
                             nom::error::ErrorKind::Satisfy,
-                        )))
+                        )));
                     }
 
                     let value = (byte1 << 6) | byte0;
@@ -178,7 +178,7 @@ macro_rules! decode_scale_compact {
                         return Err(nom::Err::Error(nom::error::make_error(
                             bytes,
                             nom::error::ErrorKind::Satisfy,
-                        )))
+                        )));
                     }
 
                     let value = byte3 | byte2 | byte1 | byte0;
