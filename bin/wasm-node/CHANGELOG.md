@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Syncing no longer stalls if the gap between the finalized and latest block is more than 100 blocks. ([#2801](https://github.com/paritytech/smoldot/pull/2801))
 - CPU-heavy operations such as verifying finality proofs or compiling the runtime will now better respect the CPU rate limit. ([#2803](https://github.com/paritytech/smoldot/pull/2803))
 
 ## 0.7.0 - 2022-09-28
