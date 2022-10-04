@@ -595,7 +595,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                         // We yield once between each request in order to politely let other tasks
                         // do some work and not monopolize the CPU.
-                        crate::util::yield_once().await;
+                        crate::util::yield_twice().await;
                     }
                 }
                 .boxed(),

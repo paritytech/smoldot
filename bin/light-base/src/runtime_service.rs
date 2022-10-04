@@ -2017,7 +2017,7 @@ impl SuccessfulRuntime {
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
         // Since compiling the runtime is a CPU-intensive operation, we yield once before.
-        crate::util::yield_once().await;
+        crate::util::yield_twice().await;
 
         // Parameters for `HostVmPrototype::new`.
         let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;

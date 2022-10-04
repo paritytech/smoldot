@@ -628,9 +628,9 @@ pub enum FollowEvent<'a> {
     },
     #[serde(rename = "finalized")]
     Finalized {
-        #[serde(rename = "finalizedBlocksHashes")]
+        #[serde(rename = "finalizedBlockHashes")]
         finalized_blocks_hashes: Vec<HashHexString>,
-        #[serde(rename = "prunedBlocksHashes")]
+        #[serde(rename = "prunedBlockHashes")]
         pruned_blocks_hashes: Vec<HashHexString>,
     },
     #[serde(rename = "stop")]

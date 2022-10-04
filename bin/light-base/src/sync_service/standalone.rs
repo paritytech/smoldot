@@ -135,7 +135,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 // in a row would prevent all the other tasks in the background from running.
                 // In order to provide a better granularity, we force a yield after each
                 // verification.
-                crate::util::yield_once().await;
+                crate::util::yield_twice().await;
             }
 
             queue_empty
