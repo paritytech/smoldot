@@ -891,19 +891,13 @@ impl<TPlat: Platform> Background<TPlat> {
             return;
         }
 
-        // Determine whether the requested block hash is valid, and if so its state trie root
-        // and number.
-        let block_storage_root_number = {
+        // Obtain the header of the requested block.
+        // Contains `None` if the subscription is disjoint.
+        let block_scale_encoded_header = {
             let lock = self.subscriptions.lock().await;
             if let Some(subscription) = lock.chain_head_follow.get(follow_subscription) {
                 if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
-                    if let Ok(decoded) =
-                        header::decode(&header, self.sync_service.block_number_bytes())
-                    {
-                        Some((*decoded.state_root, decoded.number))
-                    } else {
-                        None // TODO: what to return?!
-                    }
+                    Some(header.clone())
                 } else {
                     self.requests_subscriptions
                         .respond(
@@ -972,15 +966,18 @@ impl<TPlat: Platform> Background<TPlat> {
         let task = {
             let me = self.clone();
             async move {
-                let response =
-                    if let Some((block_storage_root, block_number)) = block_storage_root_number {
+                let response = match block_scale_encoded_header
+                    .as_ref()
+                    .map(|h| header::decode(&h, me.sync_service.block_number_bytes()))
+                {
+                    Some(Ok(decoded_header)) => {
                         let response = me
                             .sync_service
                             .clone()
                             .storage_query(
-                                block_number,
+                                decoded_header.number,
                                 &hash.0,
-                                &block_storage_root,
+                                &decoded_header.state_root,
                                 iter::once(&key.0),
                                 cmp::min(10, network_config.total_attempts),
                                 Duration::from_millis(u64::from(cmp::min(
@@ -1010,13 +1007,20 @@ impl<TPlat: Platform> Background<TPlat> {
                             }
                             .to_json_call_object_parameters(None),
                         }
-                    } else {
-                        methods::ServerToClient::chainHead_unstable_storageEvent {
-                            subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadStorageEvent::Disjoint {},
-                        }
-                        .to_json_call_object_parameters(None)
-                    };
+                    }
+                    Some(Err(err)) => methods::ServerToClient::chainHead_unstable_storageEvent {
+                        subscription: (&subscription_id).into(),
+                        result: methods::ChainHeadStorageEvent::Error {
+                            error: err.to_string().into(),
+                        },
+                    }
+                    .to_json_call_object_parameters(None),
+                    None => methods::ServerToClient::chainHead_unstable_storageEvent {
+                        subscription: (&subscription_id).into(),
+                        result: methods::ChainHeadStorageEvent::Disjoint {},
+                    }
+                    .to_json_call_object_parameters(None),
+                };
 
                 me.requests_subscriptions
                     .set_queued_notification(&state_machine_subscription, 0, response)
