@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Syncing no longer stalls if the gap between the finalized and latest block is more than 100 blocks. ([#2801](https://github.com/paritytech/smoldot/pull/2801))
+- No longer silently discard justifications when receive a block from the network that was already known locally. ([#2800](https://github.com/paritytech/smoldot/pull/2800))
+- CPU-heavy operations such as verifying finality proofs or compiling the runtime will now better respect the CPU rate limit. ([#2803](https://github.com/paritytech/smoldot/pull/2803))
 - Fix the `finalizedBlockHashes` and `prunedBlockHashes` fields having wrong names in `chainHead_unstable_followEvent` events. ([#2812](https://github.com/paritytech/smoldot/pull/2812))
 
 ## 0.7.0 - 2022-09-28
