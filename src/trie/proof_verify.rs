@@ -57,7 +57,7 @@
 //! parent in the proof. The hash of the first node in the proof must always match the trie root.
 //!
 
-use super::{nibble, proof_node_decode};
+use super::{nibble, proof_node_codec};
 
 use alloc::vec::Vec;
 
@@ -196,7 +196,7 @@ pub fn trie_node_info_non_compact<'a, 'b>(
     loop {
         // Decodes `node_value` into its components.
         let decoded_node_value =
-            proof_node_decode::decode(node_value).map_err(Error::InvalidNodeValue)?;
+            proof_node_codec::decode(node_value).map_err(Error::InvalidNodeValue)?;
 
         // Iterating over this partial key, checking if it matches `expected_nibbles_iter`.
         for nibble in decoded_node_value.partial_key.clone() {
@@ -251,7 +251,7 @@ pub fn trie_node_info_non_compact<'a, 'b>(
             // The current node (i.e. `node_value`) exactly matches the requested key.
             return Ok(TrieNodeInfo {
                 storage_value: match decoded_node_value.storage_value {
-                    proof_node_decode::StorageValue::Hashed(hash) => {
+                    proof_node_codec::StorageValue::Hashed(hash) => {
                         // If the node contains a hash, the un-hashed value should also be found
                         // in the proof as a standalone item.
                         match merkle_values.iter().position(|v| v[..] == *hash) {
@@ -262,8 +262,8 @@ pub fn trie_node_info_non_compact<'a, 'b>(
                             }
                         }
                     }
-                    proof_node_decode::StorageValue::Unhashed(v) => StorageValue::Known(v),
-                    proof_node_decode::StorageValue::None => StorageValue::None,
+                    proof_node_codec::StorageValue::Unhashed(v) => StorageValue::Known(v),
+                    proof_node_codec::StorageValue::None => StorageValue::None,
                 },
                 children: Children::Multiple {
                     children_bitmap: decoded_node_value.children_bitmap(),
@@ -422,7 +422,7 @@ pub enum Error {
     /// One of the node values in the proof has an invalid format.
     // TODO: indicate which one? complicated because of inline nodes
     #[display(fmt = "A node of the proof has an invalid format: {}", _0)]
-    InvalidNodeValue(proof_node_decode::Error),
+    InvalidNodeValue(proof_node_codec::Error),
     /// Missing an entry in the proof.
     MissingProofEntry,
 }

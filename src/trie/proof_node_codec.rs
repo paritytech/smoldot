@@ -16,7 +16,107 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::nibble;
-use core::{fmt, iter, slice};
+use alloc::vec::Vec;
+use core::{cmp, fmt, iter, slice};
+
+/// Encodes the components of a node value into the node value itself.
+///
+/// This function returns an iterator of buffers. The actual node value is the concatenation of
+/// these buffers put together.
+///
+/// > **Note**: The returned iterator might contain a reference to the storage value and children
+/// >           values in the [`Decoded`]. By returning an iterator of buffers, we avoid copying
+/// >           these storage value and children values.
+///
+/// This encoding is independent of the trie version.
+pub fn encode(
+    decoded: Decoded<'_>,
+) -> impl Iterator<Item = impl AsRef<[u8]> + '_ + Clone> + Clone + '_ {
+    // The return value is composed of three parts:
+    // - Before the storage value.
+    // - The storage value (which can be empty).
+    // - The children nodes.
+
+    // Contains the encoding before the storage value.
+    let mut before_storage_value: Vec<u8> = Vec::with_capacity(decoded.partial_key.len() / 2 + 32);
+
+    let has_children = decoded.children.iter().any(Option::is_some);
+
+    // We first push the node header.
+    // See https://spec.polkadot.network/#defn-node-header
+    {
+        let (first_byte_msb, pk_len_first_byte_bits): (u8, _) =
+            match (has_children, decoded.storage_value) {
+                (false, StorageValue::Unhashed(_)) => (0b01, 6),
+                (true, StorageValue::None) => (0b10, 6),
+                (true, StorageValue::Unhashed(_)) => (0b11, 6),
+                (false, StorageValue::Hashed(_)) => (0b001, 5),
+                (true, StorageValue::Hashed(_)) => (0b0001, 4),
+                // TODO: it's invalid to have a non-empty partial key in that situation; this isn't problematic in practice
+                (false, StorageValue::None) => (0, 6),
+            };
+
+        let max_representable_in_first_byte = (1 << pk_len_first_byte_bits) - 1;
+        let first_byte = (first_byte_msb << pk_len_first_byte_bits)
+            | u8::try_from(cmp::min(
+                decoded.partial_key.len(),
+                max_representable_in_first_byte,
+            ))
+            .unwrap();
+        before_storage_value.push(first_byte);
+
+        // Note that if the partial key length is exactly equal to `pk_len_first_byte_bits`, we
+        // need to push a `0` afterwards in order to avoid an ambiguity. Similarly, if
+        // `remain_pk_len` is at any point equal to 255, we must push an additional `0`
+        // afterwards.
+        let mut remain_pk_len = decoded
+            .partial_key
+            .len()
+            .checked_sub(max_representable_in_first_byte);
+        while let Some(pk_len_inner) = remain_pk_len {
+            before_storage_value.push(u8::try_from(cmp::min(pk_len_inner, 255)).unwrap());
+            remain_pk_len = pk_len_inner.checked_sub(255);
+        }
+    }
+
+    // We then push the partial key.
+    before_storage_value.extend(nibble::nibbles_to_bytes_prefix_extend(
+        decoded.partial_key.clone(),
+    ));
+
+    // After the partial key, the node value optionally contains a bitfield of child nodes.
+    if has_children {
+        before_storage_value.extend_from_slice(&decoded.children_bitmap().to_le_bytes());
+    }
+
+    // Then, the storage value.
+    let storage_value = match decoded.storage_value {
+        StorageValue::Hashed(hash) => &hash[..],
+        StorageValue::None => &[][..],
+        StorageValue::Unhashed(storage_value) => {
+            before_storage_value.extend_from_slice(
+                crate::util::encode_scale_compact_usize(storage_value.len()).as_ref(),
+            );
+            storage_value
+        }
+    };
+
+    // Finally, the children node values.
+    let children_nodes = decoded
+        .children
+        .into_iter()
+        .filter_map(|c| c)
+        .flat_map(|child_value| {
+            let size = crate::util::encode_scale_compact_usize(child_value.len());
+            [either::Left(size), either::Right(child_value)].into_iter()
+        });
+
+    // The return value is the combination of these components.
+    iter::once(either::Left(before_storage_value))
+        .chain(iter::once(either::Right(storage_value)))
+        .map(either::Left)
+        .chain(children_nodes.map(either::Right))
+}
 
 /// Decodes a node value found in a trie proof into its components.
 ///
@@ -66,6 +166,12 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
         accumulator
     };
 
+    // No children and no storage value can only indicate the root of an empty trie, in which case
+    // a non-empty partial key is invalid.
+    if pk_len != 0 && !has_children && storage_value_hashed.is_none() {
+        return Err(Error::EmptyTrieWithPartialKey);
+    }
+
     // Iterator to the partial key found in the node value of `proof_iter`.
     let partial_key = {
         // Length of the partial key, in bytes.
@@ -94,6 +200,9 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
             return Err(Error::ChildrenBitmapTooShort);
         }
         let val = u16::from_le_bytes(<[u8; 2]>::try_from(&node_value[..2]).unwrap());
+        if val == 0 {
+            return Err(Error::ZeroChildrenBitmap);
+        }
         node_value = &node_value[2..];
         val
     } else {
@@ -156,8 +265,8 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
     })
 }
 
-/// Decoded node value. Returned by [`decode`].
-#[derive(Debug)]
+/// Decoded node value. Returned by [`decode`] or passed as parameter to [`encode`].
+#[derive(Debug, Clone)]
 pub struct Decoded<'a> {
     /// Iterator to the nibbles of the partial key of the node.
     pub partial_key: PartialKey<'a>,
@@ -263,6 +372,8 @@ pub enum Error {
     InvalidPartialKeyPadding,
     /// End of data within the children bitmap.
     ChildrenBitmapTooShort,
+    /// The children bitmap is equal to 0 despite the header indicating the presence of children.
+    ZeroChildrenBitmap,
     /// Error while decoding length of child.
     ChildLenDecode,
     /// Node value ends within a child value.
@@ -273,6 +384,9 @@ pub enum Error {
     StorageValueTooShort,
     /// Node value is longer than expected.
     TooLong,
+    /// Node value indicates that it is the root of an empty trie but contains a non-empty partial
+    /// key.
+    EmptyTrieWithPartialKey,
 }
 
 #[cfg(test)]
@@ -281,14 +395,22 @@ mod tests {
 
     #[test]
     fn basic() {
-        let decoded = super::decode(&[
+        let encoded_bytes = &[
             194, 99, 192, 0, 0, 128, 129, 254, 111, 21, 39, 188, 215, 18, 139, 76, 128, 157, 108,
             33, 139, 232, 34, 73, 0, 21, 202, 54, 18, 71, 145, 117, 47, 222, 189, 93, 119, 68, 128,
             108, 211, 105, 98, 122, 206, 246, 73, 77, 237, 51, 77, 26, 166, 1, 52, 179, 173, 43,
             89, 219, 104, 196, 190, 208, 128, 135, 177, 13, 185, 111, 175,
-        ])
-        .unwrap();
+        ];
 
+        let decoded = super::decode(encoded_bytes).unwrap();
+
+        assert_eq!(
+            super::encode(decoded.clone()).fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            }),
+            encoded_bytes
+        );
         assert_eq!(
             decoded.partial_key.collect::<Vec<_>>(),
             vec![
