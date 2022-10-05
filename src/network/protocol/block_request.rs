@@ -196,11 +196,15 @@ pub fn decode_block_request(
             1 => BlocksRequestDirection::Descending,
             _ => return Err(DecodeBlockRequestError::InvalidDirection),
         },
-        // TODO: should detect and error if unknown field bit
-        fields: BlocksRequestFields {
-            header: (fields & (1 << 24)) != 0,
-            body: (fields & (1 << 25)) != 0,
-            justifications: (fields & (1 << 28)) != 0,
+        fields: {
+            if (fields & !(1 << 24 | 1 << 25 | 1 << 28)) != 0 {
+                return Err(DecodeBlockRequestError::UnknownFieldBits);
+            }
+            BlocksRequestFields {
+                header: (fields & (1 << 24)) != 0,
+                body: (fields & (1 << 25)) != 0,
+                justifications: (fields & (1 << 28)) != 0,
+            }
         },
     })
 }
@@ -369,6 +373,8 @@ pub enum DecodeBlockRequestError {
     InvalidBlockNumber,
     /// Block hash length isn't correct.
     InvalidBlockHashLength,
+    /// Requested fields contains bits that are unknown.
+    UnknownFieldBits,
 }
 
 /// Error potentially returned by [`decode_block_response`].
