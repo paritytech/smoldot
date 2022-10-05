@@ -57,7 +57,7 @@
 //! parent in the proof. The hash of the first node in the proof must always match the trie root.
 //!
 
-use super::{nibble, proof_node_codec};
+use super::{nibble, node_value::HashOrInline, proof_node_codec};
 
 use alloc::vec::Vec;
 
@@ -274,6 +274,13 @@ pub fn trie_node_info_non_compact<'a, 'b>(
 }
 
 /// Similar to [`trie_node_info`], but only accepts compact trie proofs.
+///
+/// In the compact trie proof format, the order of the elements of the proof is important, with
+/// the root first. Each node can be prefixed with a `1` byte, in which case its header must
+/// specify a storage value of length 0 that is actually found right after the node in the proof.
+/// In each node, a child value can be replaced with an empty value, which indicates that the
+/// child is found immediately after the node (and after the storage value, in case of a `1` byte
+/// prefix).
 pub fn trie_node_info_compact<'a, 'b>(
     mut config: TrieNodeInfoConfig<
         'a,
@@ -281,21 +288,103 @@ pub fn trie_node_info_compact<'a, 'b>(
         impl Iterator<Item = &'b [u8]>,
     >,
 ) -> Result<TrieNodeInfo<'b>, Error> {
+    // The first node in the proof must always match the trie root. But because nodes in a compact
+    // proof don't necessarily contain their children, we can't just hash the item.
+    // In order to check whether the proof is correct, we must thus recombine the node items
+    // properly.
+    {
+        // To do so, we iterating over the proof starting from the end and maintain a stack of the
+        // calculated hashes. The maximum size of the stack will be the maximum depth of the proof.
+        let mut stack: Vec<arrayvec::ArrayVec<u8, 32>> = Vec::with_capacity(16);
+        // TODO: meh for collecting into a Vec
+        for node in config.proof.collect::<Vec<_>>().into_iter().rev() {
+            // TODO: handle prefix
+            let mut decoded_node =
+                proof_node_codec::decode(node).map_err(Error::InvalidNodeValue)?;
+
+            // Modify `decoded_node` and replace each missing child with the value of that child
+            // found in `stack`.
+            let mut num_extracted_children = 0;
+            for child in decoded_node.children.iter_mut().rev() {
+                if child.map_or(true, |c| !c.is_empty()) {
+                    // No child or child is already in the node.
+                    continue;
+                }
+
+                if stack
+                    .len()
+                    .checked_sub(num_extracted_children)
+                    .map_or(true, |l| l == 0)
+                {
+                    return Err(Error::MissingProofEntry);
+                }
+
+                *child = Some(&stack[stack.len() - 1 - num_extracted_children]);
+                num_extracted_children += 1;
+            }
+
+            // Now that `decoded_node` is updated to include the children again, we calculate
+            // the node value (i.e. either the hash of the node or its inline value).
+            let recomposed_node_value = proof_node_codec::encode(decoded_node)
+                .fold(
+                    HashOrInline::Inline(arrayvec::ArrayVec::new()),
+                    |mut h, s| {
+                        h.update(s.as_ref());
+                        h
+                    },
+                )
+                .finalize();
+
+            // Update the stack for the next iteration.
+            debug_assert!(recomposed_node_value.as_ref().len() <= 32);
+            // TODO: must also skip node storage value if any
+            for _ in 0..num_extracted_children {
+                stack.pop();
+            }
+            stack.push(arrayvec::ArrayVec::try_from(recomposed_node_value.as_ref()).unwrap());
+        }
+
+        // The stack should now contain exactly one value. It can contain zero or more than one
+        // if the proof is invalid.
+        if stack.is_empty() {
+            return Err(Error::TrieRootNotFound);
+        } else if stack.len() != 1 {
+            return Err(Error::TooManyEntries);
+        }
+
+        // Now check that the root matches the trie root.
+        if blake2_rfc::blake2b::blake2b(32, &[], &stack[0]).as_bytes() != config.trie_root_hash {
+            return Err(Error::TrieRootNotFound);
+        }
+    }
+
     // Start iterating at the first node in the proof.
     // `node_value` is updated as the decoding progresses.
     let mut node_value = config.proof.next().ok_or(Error::TrieRootNotFound)?;
-
-    // The first node in the proof must always match the trie root.
-    if blake2_rfc::blake2b::blake2b(32, &[], node_value).as_bytes() != config.trie_root_hash {
-        return Err(Error::TrieRootNotFound);
-    }
 
     // The verification consists in iterating using `expected_nibbles_iter` and `node_value`.
     let mut expected_nibbles_iter = config.requested_key;
     loop {
         // Decodes `node_value` into its components.
-        let decoded_node_value =
-            proof_node_decode::decode(node_value).map_err(Error::InvalidNodeValue)?;
+        // Each node can be prefixed with a `1` special prefix that indicates that the storage
+        // value is included separately in the proof.
+        let (has_compact_prefix, decoded_node_value) = if node_value.first() == Some(&1) {
+            debug_assert!(proof_node_codec::decode(node_value).is_err());
+            node_value = &node_value[1..];
+            let decoded = proof_node_codec::decode(node_value).map_err(Error::InvalidNodeValue)?;
+            if !matches!(
+                decoded.storage_value,
+                proof_node_codec::StorageValue::Unhashed(&[])
+            ) {
+                return Err(Error::CompactPrefixInvalidCombination);
+            }
+            (true, decoded)
+        } else {
+            (
+                false,
+                proof_node_codec::decode(node_value).map_err(Error::InvalidNodeValue)?,
+            )
+        };
 
         // Iterating over this partial key, checking if it matches `expected_nibbles_iter`.
         for nibble in decoded_node_value.partial_key.clone() {
@@ -326,11 +415,14 @@ pub fn trie_node_info_compact<'a, 'b>(
                 .take(usize::from(u8::from(expected_nibble)))
                 .filter(|c| c.map_or(false, |c| c.is_empty()))
                 .count();
+            if has_compact_prefix {
+                num_nodes_to_skip += 1;
+            }
             while num_nodes_to_skip > 0 {
                 num_nodes_to_skip -= 1;
 
                 let uninteresting_node = config.proof.next().ok_or(Error::MissingProofEntry)?;
-                let decoded_uninteresting = proof_node_decode::decode(uninteresting_node)
+                let decoded_uninteresting = proof_node_codec::decode(uninteresting_node)
                     .map_err(Error::InvalidNodeValue)?;
                 num_nodes_to_skip += decoded_uninteresting
                     .children
@@ -360,6 +452,28 @@ pub fn trie_node_info_compact<'a, 'b>(
                 // TODO: is this correct? aren't all children 0 size?
                 node_value = child;
             }
+        } else {
+            // The current node (i.e. `node_value`) exactly matches the requested key.
+            return Ok(TrieNodeInfo {
+                storage_value: match decoded_node_value.storage_value {
+                    proof_node_codec::StorageValue::Hashed(hash) => {
+                        // If the node contains a hash, the un-hashed value should also be found
+                        // in the proof as a standalone item.
+                        match merkle_values.iter().position(|v| v[..] == *hash) {
+                            None => StorageValue::HashKnownValueMissing(hash),
+                            Some(idx) => {
+                                let value = config.proof.nth(idx).unwrap();
+                                StorageValue::Known(value)
+                            }
+                        }
+                    }
+                    proof_node_codec::StorageValue::Unhashed(v) => StorageValue::Known(v),
+                    proof_node_codec::StorageValue::None => StorageValue::None,
+                },
+                children: Children::Multiple {
+                    children_bitmap: decoded_node_value.children_bitmap(),
+                },
+            });
         }
     }
 }
@@ -425,6 +539,10 @@ pub enum Error {
     InvalidNodeValue(proof_node_codec::Error),
     /// Missing an entry in the proof.
     MissingProofEntry,
+    /// Some entries aren't used in the proof.
+    TooManyEntries,
+    /// Compact prefix found in front of a node without an unhashed empty storage value.
+    CompactPrefixInvalidCombination,
 }
 
 #[cfg(test)]
