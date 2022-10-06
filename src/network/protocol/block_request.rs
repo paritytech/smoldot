@@ -498,6 +498,9 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(matches!(decoded.direction, super::BlocksRequestDirection::Ascending));
+        assert!(matches!(
+            decoded.direction,
+            super::BlocksRequestDirection::Ascending
+        ));
     }
 }
