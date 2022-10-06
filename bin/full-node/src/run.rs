@@ -159,9 +159,9 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             Some(base.data_dir().to_owned())
         } else {
             tracing::warn!(
-                "Failed to fetch $HOME directory. Falling back to a temporary directory. \
-                If this is intended, please make this explicit by passing the `--tmp` flag \
-                instead."
+                "Failed to fetch $HOME directory. Falling back to storing everything in memory, \
+                meaning that everything will be lost when the node stops. If this is intended, \
+                please make this explicit by passing the `--tmp` flag instead."
             );
             None
         };
