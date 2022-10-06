@@ -135,7 +135,7 @@ pub fn decode_block_request(
 ) -> Result<BlocksRequestConfig, DecodeBlockRequestError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode::<
-            ((_,), Option<_>, Option<_>, (_,), Option<_>),
+            ((_,), Option<_>, Option<_>, Option<_>, Option<_>),
             _,
             _,
         >((
@@ -147,7 +147,7 @@ pub fn decode_block_request(
         ))),
     );
 
-    let ((fields,), hash, number, (direction,), max_blocks) =
+    let ((fields,), hash, number, direction, max_blocks) =
         match nom::Finish::finish(parser(request_bytes)) {
             Ok((_, rq)) => rq,
             Err(_) => return Err(DecodeBlockRequestError::ProtobufDecode),
@@ -192,9 +192,9 @@ pub fn decode_block_request(
         desired_count: NonZeroU32::new(max_blocks.unwrap_or(u32::max_value()))
             .ok_or(DecodeBlockRequestError::ZeroBlocksRequested)?,
         direction: match direction {
-            0 => BlocksRequestDirection::Ascending,
-            1 => BlocksRequestDirection::Descending,
-            _ => return Err(DecodeBlockRequestError::InvalidDirection),
+            None | Some(0) => BlocksRequestDirection::Ascending,
+            Some(1) => BlocksRequestDirection::Descending,
+            Some(_) => return Err(DecodeBlockRequestError::InvalidDirection),
         },
         fields: {
             if (fields & !(1 << 24 | 1 << 25 | 1 << 28)) != 0 {
@@ -486,5 +486,18 @@ mod tests {
             1, 8, 105, 105, 105, 105, 105, 105, 97, 105, 105, 105, 88, 88, 88, 88, 88, 88, 2, 0, 0,
             0, 0, 1, 255, 2, 105, 88, 88, 88, 88, 88, 88, 88, 88, 88, 88, 88,
         ]);
+    }
+
+    #[test]
+    fn regression_2833() {
+        // Regression test for https://github.com/paritytech/smoldot/issues/2833.
+        let decoded = super::decode_block_request(
+            4,
+            &[
+                8, 128, 128, 128, 136, 1, 26, 4, 237, 91, 33, 0, 48, 1, 56, 1,
+            ],
+        )
+        .unwrap();
+        assert!(matches!(decoded.direction, super::BlocksRequestDirection::Ascending));
     }
 }
