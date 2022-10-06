@@ -152,21 +152,58 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         .create()
         .unwrap();
 
-    let (database, database_existed) = open_database(
-        &chain_spec,
-        &genesis_chain_information,
-        cli_options.tmp,
-        matches!(cli_output, cli::Output::Informant),
-    )
-    .await;
-    let database = Arc::new(database_thread::DatabaseThread::from(database));
+    let (database, database_existed) = {
+        // Directory supposed to contain the database.
+        let db_path = if !cli_options.tmp {
+            if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
+                Some(base.data_dir().join(chain_spec.id()).join("database"))
+            } else {
+                tracing::warn!(
+                    "Failed to fetch $HOME directory. Falling back to a temporary database. \
+                        If this is intended, please make this explicit by passing the `--tmp` flag \
+                        instead."
+                );
+                None
+            }
+        } else {
+            None
+        };
+
+        let (db, existed) = open_database(
+            &chain_spec,
+            &genesis_chain_information,
+            db_path,
+            matches!(cli_output, cli::Output::Informant),
+        )
+        .await;
+
+        (
+            Arc::new(database_thread::DatabaseThread::from(db)),
+            existed,
+        )
+    };
 
     let relay_chain_database = if let Some(relay_chain_spec) = &relay_chain_spec {
+        let relay_db_path = if !cli_options.tmp {
+            if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
+                Some(base.data_dir().join(relay_chain_spec.id()).join("database"))
+            } else {
+                tracing::warn!(
+                    "Failed to fetch $HOME directory. Falling back to a temporary database. \
+                        If this is intended, please make this explicit by passing the `--tmp` flag \
+                        instead."
+                );
+                None
+            }
+        } else {
+            None
+        };
+
         Some(Arc::new(database_thread::DatabaseThread::from(
             open_database(
                 relay_chain_spec,
                 relay_genesis_chain_information.as_ref().unwrap(),
-                cli_options.tmp,
+                relay_db_path,
                 matches!(cli_output, cli::Output::Informant),
             )
             .await
@@ -595,7 +632,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
 /// Opens the database from the file system, or create a new database if none is found.
 ///
-/// If `tmp` is `true`, open the database in memory instead.
+/// If `db_path` is `None`, open the database in memory instead.
 ///
 /// The returned boolean is `true` if the database existed before.
 ///
@@ -608,25 +645,9 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
     genesis_chain_information: &chain::chain_information::ChainInformation,
-    tmp: bool,
+    db_path: Option<PathBuf>,
     show_progress: bool,
 ) -> (full_sqlite::SqliteFullDatabase, bool) {
-    // Directory supposed to contain the database.
-    let db_path = if !tmp {
-        if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
-            Some(base.data_dir().join(chain_spec.id()).join("database"))
-        } else {
-            tracing::warn!(
-                "Failed to fetch $HOME directory. Falling back to a temporary database. \
-                    If this is intended, please make this explicit by passing the `--tmp` flag \
-                    instead."
-            );
-            None
-        }
-    } else {
-        None
-    };
-
     // The `unwrap()` here can panic for example in case of access denied.
     match background_open_database(
         db_path.clone(),
