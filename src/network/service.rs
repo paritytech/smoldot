@@ -1901,10 +1901,10 @@ where
                 // Remote wants to open a block announces substream.
                 // The block announces substream is the main substream that determines whether
                 // a "chain" is open.
-                peers::Event::DesiredInNotification {
+                peers::Event::NotificationsInOpen {
                     peer_id,
                     handshake,
-                    id: desired_in_notification_id,
+                    id: substream_id,
                     notifications_protocol_index,
                 } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 => {
                     let chain_index =
@@ -1915,8 +1915,7 @@ where
                         self.chains[chain_index].chain_config.block_number_bytes,
                         &handshake,
                     ) {
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
 
                         break Some(Event::ProtocolError {
                             error: ProtocolError::BadBlockAnnouncesHandshake(err),
@@ -1933,8 +1932,7 @@ where
                                 .unwrap_or(usize::max_value())
                     {
                         // All in slots are occupied. Refuse the substream.
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
                         continue;
                     }
 
@@ -1958,12 +1956,9 @@ where
                         })
                     };
 
-                    if self
-                        .inner
-                        .in_notification_accept(desired_in_notification_id, handshake)
-                        .is_ok()
-                        && !has_out_slot
-                    {
+                    self.inner.in_notification_accept(substream_id, handshake);
+
+                    if !has_out_slot {
                         // TODO: future cancellation issue; if this future is cancelled, then trying to do the `in_notification_accept` again next time will panic
                         self.inner.set_peer_notifications_out_desired(
                             &peer_id,
@@ -1985,9 +1980,9 @@ where
                 }
 
                 // Remote wants to open a transactions substream.
-                peers::Event::DesiredInNotification {
+                peers::Event::NotificationsInOpen {
                     peer_id,
-                    id: desired_in_notification_id,
+                    id: substream_id,
                     notifications_protocol_index,
                     ..
                 } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 1 => {
@@ -1999,20 +1994,16 @@ where
                         .open_chains // TODO: clone :-/
                         .contains(&(peer_id.clone(), chain_index))
                     {
-                        // It doesn't matter if the substream is obsolete.
-                        let _ = self
-                            .inner
-                            .in_notification_accept(desired_in_notification_id, Vec::new());
+                        self.inner.in_notification_accept(substream_id, Vec::new());
                     } else {
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
                     }
                 }
 
                 // Remote wants to open a grandpa substream.
-                peers::Event::DesiredInNotification {
+                peers::Event::NotificationsInOpen {
                     peer_id,
-                    id: desired_in_notification_id,
+                    id: substream_id,
                     notifications_protocol_index,
                     ..
                 } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 => {
@@ -2024,8 +2015,7 @@ where
                         .open_chains // TODO: clone :-/
                         .contains(&(peer_id.clone(), chain_index))
                     {
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
                         continue;
                     }
 
@@ -2040,18 +2030,15 @@ where
                             .to_vec()
                     };
 
-                    // It doesn't matter if the substream is obsolete.
-                    let _ = self
-                        .inner
-                        .in_notification_accept(desired_in_notification_id, handshake);
+                    self.inner.in_notification_accept(substream_id, handshake);
                 }
 
-                peers::Event::DesiredInNotification { .. } => {
+                peers::Event::NotificationsInOpen { .. } => {
                     // Unrecognized notifications protocol.
                     unreachable!();
                 }
 
-                peers::Event::DesiredInNotificationCancel { .. } => {
+                peers::Event::NotificationsInOpenCancel { .. } => {
                     // TODO: do something
                 }
             }

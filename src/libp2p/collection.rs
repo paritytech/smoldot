@@ -1278,14 +1278,20 @@ where
                         .ingoing_notification_substreams_by_connection
                         .remove(&(connection_id, inner_substream_id))
                     {
-                        let _was_in = self.ingoing_notification_substreams.remove(&substream_id);
-                        debug_assert!(_was_in.is_some());
-
-                        Event::NotificationsInClose {
-                            substream_id,
-                            outcome: Err(NotificationsInClosedErr::Substream(
-                                established::NotificationsInClosedErr::SubstreamReset,
-                            )),
+                        let (_, state, _) = self
+                            .ingoing_notification_substreams
+                            .remove(&substream_id)
+                            .unwrap();
+                        match state {
+                            SubstreamState::Open => Event::NotificationsInClose {
+                                substream_id,
+                                outcome: Err(NotificationsInClosedErr::Substream(
+                                    established::NotificationsInClosedErr::SubstreamReset,
+                                )),
+                            },
+                            SubstreamState::Pending => {
+                                Event::NotificationsInOpenCancel { substream_id }
+                            }
                         }
                     } else {
                         // Substream was refused. As documented, we must confirm the reception of
@@ -1783,6 +1789,15 @@ pub enum Event<TConn> {
         remote_handshake: Vec<u8>,
     },
 
+    /// The remote has canceled the opening an incoming notifications substream.
+    ///
+    /// This can only happen before the notification substream has been accepted or refused.
+    NotificationsInOpenCancel {
+        /// Substream that has been closed. Guaranteed to match a substream that was earlier
+        /// reported with a [`Event::NotificationsInOpen`].
+        substream_id: SubstreamId,
+    },
+
     /// Received a notification on a notifications substream of a connection.
     NotificationsIn {
         /// Substream on which the notification has been received. Guaranteed to be a substream
@@ -1795,9 +1810,7 @@ pub enum Event<TConn> {
 
     /// The remote has closed an incoming notifications substream.
     ///
-    /// This can happen both before or after the notification substream has been accepted. If it
-    /// happens before the substream has been accepted, this event should be interpreted as
-    /// canceling the opening.
+    /// This can only happen after the notification substream has been accepted.
     NotificationsInClose {
         /// Substream that has been closed. Guaranteed to match a substream that was earlier
         /// reported with a [`Event::NotificationsInOpen`].
