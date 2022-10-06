@@ -24,23 +24,24 @@ use alloc::vec::Vec;
 
 /// Description of a state request that can be sent to a peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StateRequestConfig {
+pub struct StateRequest<'a> {
     /// Hash of the block to make the request against.
-    pub block_hash: [u8; 32],
+    pub block_hash: &'a [u8; 32],
 
     /// Response shouldn't contain any key lexicographically inferior to this key.
     ///
     /// > **Note**: Because a response has a limited size, this value lets you send additional
     /// >           requests that start where the previous response has ended.
-    // TODO: use a slice, maybe?
-    pub start_key: Vec<u8>,
+    pub start_key: &'a [u8],
 }
 
 // See https://github.com/paritytech/substrate/blob/c8653447fc8ef8d95a92fe164c96dffb37919e85/client/network/light/src/schema/light.v1.proto
 // for protocol definition.
 
 /// Builds the bytes corresponding to a state request.
-pub fn build_state_request(config: StateRequestConfig) -> impl Iterator<Item = impl AsRef<[u8]>> {
+pub fn build_state_request(
+    config: StateRequest<'_>,
+) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
     protobuf::bytes_tag_encode(1, config.block_hash)
         .map(either::Right)
         .map(either::Right)
@@ -52,8 +53,7 @@ pub fn build_state_request(config: StateRequestConfig) -> impl Iterator<Item = i
         .chain(protobuf::bool_tag_encode(3, true).map(either::Left))
 }
 
-/// Decodes a response to a state request.
-// TODO: should have a more zero-cost API
+/// Decodes a response into a state request response.
 pub fn decode_state_response(
     response_bytes: &[u8],
 ) -> Result<Vec<StateResponseEntry>, DecodeStateResponseError> {
@@ -83,10 +83,7 @@ pub fn decode_state_response(
     let entries = entries
         .into_iter()
         .flat_map(|(_, entries, _)| entries.into_iter())
-        .map(|((key,), (value,))| StateResponseEntry {
-            key: key.to_vec(),
-            value: value.to_vec(),
-        })
+        .map(|((key,), (value,))| StateResponseEntry { key, value })
         .collect();
 
     Ok(entries)
@@ -97,11 +94,11 @@ pub fn decode_state_response(
 /// > **Note**: Assuming that this response comes from the network, the information in this struct
 /// >           can be erroneous and shouldn't be trusted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StateResponseEntry {
+pub struct StateResponseEntry<'a> {
     /// Storage key concerned by the entry.
-    pub key: Vec<u8>,
+    pub key: &'a [u8],
     /// Storage value concerned by the entry.
-    pub value: Vec<u8>,
+    pub value: &'a [u8],
 }
 
 /// Error potentially returned by [`decode_state_response`].
