@@ -171,7 +171,7 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         protocol_index: usize,
     },
     /// A request has been sent by the remote. API user must now send back the response.
-    RequestInApiWait,
+    RequestInApiWait { has_length_prefix: bool },
     /// A request has been sent by the remote. Sending back the response.
     RequestInRespond {
         /// Response being sent back.
@@ -751,7 +751,9 @@ where
                     Ok((num_read, leb128::Framed::Finished(request))) => {
                         read_write.advance_read(num_read);
                         (
-                            Some(SubstreamInner::RequestInApiWait),
+                            Some(SubstreamInner::RequestInApiWait {
+                                has_length_prefix: true,
+                            }),
                             Some(Event::RequestIn {
                                 protocol_index,
                                 request,
@@ -784,7 +786,9 @@ where
                     None => {
                         // Success.
                         return (
-                            Some(SubstreamInner::RequestInApiWait),
+                            Some(SubstreamInner::RequestInApiWait {
+                                has_length_prefix: false,
+                            }),
                             Some(Event::RequestIn {
                                 protocol_index,
                                 request,
@@ -814,7 +818,10 @@ where
                     None,
                 )
             }
-            SubstreamInner::RequestInApiWait => (Some(SubstreamInner::RequestInApiWait), None),
+            SubstreamInner::RequestInApiWait { has_length_prefix } => (
+                Some(SubstreamInner::RequestInApiWait { has_length_prefix }),
+                None,
+            ),
             SubstreamInner::RequestInRespond { mut response } => {
                 read_write.write_from_vec_deque(&mut response);
                 if response.is_empty() {
@@ -1165,7 +1172,7 @@ where
             SubstreamInner::PingIn { .. } => None,
             SubstreamInner::RequestInRecv { .. } => None,
             SubstreamInner::RequestInRecvNoLengthPrefix { .. } => None,
-            SubstreamInner::RequestInApiWait => None,
+            SubstreamInner::RequestInApiWait { .. } => None,
             SubstreamInner::RequestInRespond { .. } => None,
             SubstreamInner::PingOut { queued_pings, .. }
             | SubstreamInner::PingOutNegotiating { queued_pings, .. }
@@ -1335,13 +1342,17 @@ where
         response: Result<Vec<u8>, ()>,
     ) -> Result<(), RespondInRequestError> {
         match &mut self.inner {
-            SubstreamInner::RequestInApiWait => {
+            SubstreamInner::RequestInApiWait { has_length_prefix } => {
                 self.inner = SubstreamInner::RequestInRespond {
                     response: if let Ok(response) = response {
-                        let response_len = response.len();
-                        leb128::encode_usize(response_len)
-                            .chain(response.into_iter())
-                            .collect()
+                        if *has_length_prefix {
+                            let response_len = response.len();
+                            leb128::encode_usize(response_len)
+                                .chain(response.into_iter())
+                                .collect()
+                        } else {
+                            response.into_iter().collect()
+                        }
                     } else {
                         // An error is indicated by closing the substream without even sending
                         // back the length of the response.
@@ -1454,7 +1465,7 @@ where
                 f.debug_tuple("request-in").field(protocol_index).finish()
             }
             SubstreamInner::RequestInRespond { .. } => f.debug_tuple("request-in-respond").finish(),
-            SubstreamInner::RequestInApiWait => f.debug_tuple("request-in").finish(),
+            SubstreamInner::RequestInApiWait { .. } => f.debug_tuple("request-in").finish(),
             SubstreamInner::PingIn { .. } => f.debug_tuple("ping-in").finish(),
             SubstreamInner::PingOutNegotiating { .. } => {
                 f.debug_tuple("ping-out-negotiating").finish()
