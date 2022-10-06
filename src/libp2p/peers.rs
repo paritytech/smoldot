@@ -379,7 +379,23 @@ where
                     });
                 }
 
-                collection::Event::StartShutdown { id, reason } => {
+                collection::Event::StartShutdown { id, .. }
+                | collection::Event::PingOutFailed { id } => {
+                    // We react to ougoing ping failures by shutting down the connection. For this
+                    // reason, a shutdown initiated by the remote and an outgoing ping failure
+                    // share almost the same code.
+                    let reason = match event {
+                        collection::Event::StartShutdown { reason, .. } => reason,
+                        collection::Event::PingOutFailed { .. } => {
+                            // A `PingOutFailed` doesn't by itself cause a disconnect. The reason
+                            // why it's handled the same way as `StartShutdown` is because we
+                            // voluntarily call `start_shutdown` here.
+                            self.inner.start_shutdown(id);
+                            ShutdownCause::RemoteReset // TODO: no
+                        },
+                        _ => unreachable!(),
+                    };
+
                     let connection_state = self.inner.connection_state(id);
                     debug_assert!(connection_state.shutting_down);
 
@@ -761,78 +777,6 @@ where
 
                 collection::Event::PingOutSuccess { .. } => {
                     // We don't care about or report successful pings at the moment.
-                }
-
-                collection::Event::PingOutFailed { id } => {
-                    // A failed ping leads to a disconnect.
-                    self.inner.start_shutdown(id);
-
-                    // TODO: DRY with StartShutdown event
-                    let connection_state = self.inner.connection_state(id);
-                    debug_assert!(connection_state.shutting_down);
-
-                    let peer = if let Some(peer_index) = self.inner[id].peer_index {
-                        let peer_id = self.peers[peer_index].peer_id.clone();
-
-                        // We might have to insert the peer back in `unfulfilled_desired_peers` if
-                        // it is desired.
-                        if (self.peers[peer_index].desired
-                            || self
-                                .peers_notifications_out
-                                .range(
-                                    (peer_index, usize::min_value())
-                                        ..=(peer_index, usize::max_value()),
-                                )
-                                .any(|(_, state)| state.desired))
-                            && !self
-                                .connections_by_peer
-                                .range(
-                                    (peer_index, ConnectionId::min_value())
-                                        ..=(peer_index, ConnectionId::max_value()),
-                                )
-                                .map(|(_, connection_id)| *connection_id)
-                                .any(|connection_id| {
-                                    !self.inner.connection_state(connection_id).shutting_down
-                                })
-                        {
-                            self.unfulfilled_desired_peers.insert(peer_index);
-                        }
-
-                        if connection_state.established {
-                            let num_healthy_peer_connections = {
-                                let num = self
-                                    .connections_by_peer
-                                    .range(
-                                        (peer_index, collection::ConnectionId::min_value())
-                                            ..=(peer_index, collection::ConnectionId::max_value()),
-                                    )
-                                    .filter(|(_, connection_id)| {
-                                        let state = self.inner.connection_state(*connection_id);
-                                        state.established && !state.shutting_down
-                                    })
-                                    .count();
-                                u32::try_from(num).unwrap()
-                            };
-
-                            ShutdownPeer::Established {
-                                peer_id,
-                                num_healthy_peer_connections,
-                            }
-                        } else {
-                            ShutdownPeer::OutgoingHandshake {
-                                expected_peer_id: peer_id,
-                            }
-                        }
-                    } else {
-                        debug_assert!(!connection_state.established);
-                        ShutdownPeer::IngoingHandshake
-                    };
-
-                    return Some(Event::StartShutdown {
-                        connection_id: id,
-                        peer,
-                        reason: ShutdownCause::RemoteReset, // TODO: no
-                    });
                 }
             }
         }
