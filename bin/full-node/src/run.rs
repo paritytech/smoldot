@@ -233,10 +233,33 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         smoldot::metadata::decode(&metadata).unwrap()
     );*/
 
+    // Determine which networking key to use.
+    //
+    // This is either passed as a CLI option, loaded from disk, or generated randomly.
     let noise_key = if let Some(node_key) = cli_options.libp2p_key {
         connection::NoiseKey::new(&node_key)
+    } else if let Some(dir) = base_storage_directory {
+        let path = dir.join("libp2p_ed25519_secret_key.secret");
+        let noise_key = if path.exists() {
+            let file_content =
+                fs::read_to_string(&path).expect("failed to read libp2p secret key file content");
+            let hex_decoded =
+                hex::decode(file_content).expect("invalid libp2p secret key file content");
+            let actual_key =
+                <[u8; 32]>::try_from(hex_decoded).expect("invalid libp2p secret key file content");
+            connection::NoiseKey::new(&actual_key)
+        } else {
+            let actual_key: [u8; 32] = rand::random();
+            fs::write(&path, hex::encode(actual_key))
+                .expect("failed to write libp2p secret key file");
+            connection::NoiseKey::new(&actual_key)
+        };
+        // On Unix platforms, set the permission as 0o400 (only reading and by owner is permitted).
+        // TODO: do something equivalent on Windows
+        #[cfg(unix)]
+        let _ = fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o400));
+        noise_key
     } else {
-        // TODO: load from disk or something instead
         connection::NoiseKey::new(&rand::random())
     };
 
