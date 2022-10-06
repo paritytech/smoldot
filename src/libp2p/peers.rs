@@ -61,8 +61,7 @@ pub use collection::{
     ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
     CoordinatorToConnection, InboundError, MultiStreamConnectionTask, MultiStreamHandshakeKind,
     NotificationProtocolConfig, NotificationsInClosedErr, NotificationsOutErr, ReadWrite,
-    RequestError, ShutdownCause, SingleStreamConnectionTask, SingleStreamHandshakeKind,
-    SubstreamId,
+    RequestError, SingleStreamConnectionTask, SingleStreamHandshakeKind, SubstreamId,
 };
 
 /// Configuration for a [`Peers`].
@@ -385,14 +384,16 @@ where
                     // reason, a shutdown initiated by the remote and an outgoing ping failure
                     // share almost the same code.
                     let reason = match event {
-                        collection::Event::StartShutdown { reason, .. } => reason,
+                        collection::Event::StartShutdown { reason, .. } => {
+                            ShutdownCause::Connection(reason)
+                        }
                         collection::Event::PingOutFailed { .. } => {
                             // A `PingOutFailed` doesn't by itself cause a disconnect. The reason
                             // why it's handled the same way as `StartShutdown` is because we
                             // voluntarily call `start_shutdown` here.
                             self.inner.start_shutdown(id);
-                            ShutdownCause::RemoteReset // TODO: no
-                        },
+                            ShutdownCause::OutPingTimeout
+                        }
                         _ => unreachable!(),
                     };
 
@@ -1762,6 +1763,16 @@ pub enum ShutdownPeer {
         /// Identity of the peer that was expected to be reached after the handshake.
         expected_peer_id: PeerId,
     },
+}
+
+/// Reason why a connection is shutting down. See [`Event::StartShutdown`].
+#[derive(Debug, derive_more::Display)]
+pub enum ShutdownCause {
+    /// Problem on the connection level.
+    #[display(fmt = "{}", _0)]
+    Connection(collection::ShutdownCause),
+    /// Remote hasn't reponded in time to a ping.
+    OutPingTimeout,
 }
 
 /// See [`Peers::set_peer_notifications_out_desired`].
