@@ -152,22 +152,25 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         .create()
         .unwrap();
 
-    let (database, database_existed) = {
-        // Directory supposed to contain the database.
-        let db_path = if !cli_options.tmp {
-            if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
-                Some(base.data_dir().join(chain_spec.id()).join("database"))
-            } else {
-                tracing::warn!(
-                    "Failed to fetch $HOME directory. Falling back to a temporary database. \
-                        If this is intended, please make this explicit by passing the `--tmp` flag \
-                        instead."
-                );
-                None
-            }
+    // Directory where we will store everything on the disk, such as the database, secret keys,
+    // etc.
+    let base_storage_directory =
+        if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
+            Some(base.data_dir().to_owned())
         } else {
+            tracing::warn!(
+                "Failed to fetch $HOME directory. Falling back to a temporary directory. \
+                If this is intended, please make this explicit by passing the `--tmp` flag \
+                instead."
+            );
             None
         };
+
+    let (database, database_existed) = {
+        // Directory supposed to contain the database.
+        let db_path = base_storage_directory
+            .as_ref()
+            .map(|d| d.join(chain_spec.id()).join("database").to_owned());
 
         let (db, existed) = open_database(
             &chain_spec,
@@ -177,27 +180,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         )
         .await;
 
-        (
-            Arc::new(database_thread::DatabaseThread::from(db)),
-            existed,
-        )
+        (Arc::new(database_thread::DatabaseThread::from(db)), existed)
     };
 
     let relay_chain_database = if let Some(relay_chain_spec) = &relay_chain_spec {
-        let relay_db_path = if !cli_options.tmp {
-            if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
-                Some(base.data_dir().join(relay_chain_spec.id()).join("database"))
-            } else {
-                tracing::warn!(
-                    "Failed to fetch $HOME directory. Falling back to a temporary database. \
-                        If this is intended, please make this explicit by passing the `--tmp` flag \
-                        instead."
-                );
-                None
-            }
-        } else {
-            None
-        };
+        let relay_db_path = base_storage_directory
+            .as_ref()
+            .map(|d| d.join(relay_chain_spec.id()).join("database").to_owned());
 
         Some(Arc::new(database_thread::DatabaseThread::from(
             open_database(
