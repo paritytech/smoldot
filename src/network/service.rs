@@ -1783,9 +1783,27 @@ where
                     }
                 }
 
-                // Remote closes a substream.
-                // There isn't anything to do as long as the remote doesn't close our local
-                // outbound substream.
+                // Remote closes a block announce substream.
+                peers::Event::NotificationsInClose {
+                    peer_id,
+                    notifications_protocol_index,
+                    ..
+                } if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
+                    let chain_index =
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    // We unassign the inbound slot of the peer if it had one.
+                    // If the peer had an outbound slot, then this does nothing.
+                    if self.chains[chain_index].in_peers.remove(&peer_id) {
+                        self.inner.set_peer_notifications_out_desired(
+                            &peer_id,
+                            notifications_protocol_index,
+                            peers::DesiredState::NotDesired,
+                        );
+                    }
+                }
+
+                // Remote closes another substream.
                 peers::Event::NotificationsInClose { .. } => {}
 
                 // Received a block announce.
@@ -2039,7 +2057,9 @@ where
                 }
 
                 peers::Event::NotificationsInOpenCancel { .. } => {
-                    // TODO: do something
+                    // Because we always accept/refuse incoming notification substreams instantly,
+                    // there's no possibility for a cancellation to happen.
+                    unreachable!()
                 }
             }
         };
