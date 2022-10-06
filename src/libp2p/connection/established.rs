@@ -217,28 +217,15 @@ pub struct ConfigRequestResponse {
     /// Name of the protocol transferred on the wire.
     pub name: String,
 
-    /// Configuration related to sending out requests through this protocol.
-    ///
-    /// > **Note**: This is used even if `inbound_allowed` is `false` when performing outgoing
-    /// >           requests.
-    pub inbound_config: ConfigRequestResponseIn,
+    /// If `true`, .
+    pub has_length_prefixes: bool,
+
+    pub max_request_size: usize,
 
     pub max_response_size: usize,
 
     /// If true, incoming substreams are allowed to negotiate this protocol.
     pub inbound_allowed: bool,
-}
-
-/// See [`ConfigRequestResponse::inbound_config`].
-#[derive(Debug, Clone)]
-pub enum ConfigRequestResponseIn {
-    /// Request must be completely empty, not even a length prefix.
-    Empty,
-    /// Request must contain a length prefix plus a potentially empty payload.
-    Payload {
-        /// Maximum allowed size for the payload in bytes.
-        max_size: usize,
-    },
 }
 
 /// Configuration for a notifications protocol.

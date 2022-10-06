@@ -58,11 +58,10 @@ use core::{
 use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
-    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
-    CoordinatorToConnection, InboundError, MultiStreamConnectionTask, MultiStreamHandshakeKind,
-    NotificationProtocolConfig, NotificationsInClosedErr, NotificationsOutErr, ReadWrite,
-    RequestError, ShutdownCause, SingleStreamConnectionTask, SingleStreamHandshakeKind,
-    SubstreamId,
+    ConfigRequestResponse, ConnectionId, ConnectionToCoordinator, CoordinatorToConnection,
+    InboundError, MultiStreamConnectionTask, MultiStreamHandshakeKind, NotificationProtocolConfig,
+    NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError, ShutdownCause,
+    SingleStreamConnectionTask, SingleStreamHandshakeKind, SubstreamId,
 };
 
 /// Configuration for a [`Peers`].

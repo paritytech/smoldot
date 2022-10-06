@@ -31,6 +31,7 @@ use alloc::{
     string::String,
     vec::{self, Vec},
 };
+use core::cmp;
 use core::{fmt, num::NonZeroUsize};
 
 /// State machine containing the state of a single substream of an established connection.
@@ -133,10 +134,7 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         /// State of the protocol negotiation.
         negotiation: multistream_select::InProgress<vec::IntoIter<String>, String>,
         /// Bytes of the request to send after the substream is open.
-        ///
-        /// If `None`, nothing should be sent on the substream at all, not even the length prefix.
-        /// This contrasts with `Some(empty_vec)` where a `0` length prefix must be sent.
-        request: Option<Vec<u8>>,
+        request: VecDeque<u8>,
         /// Maximum allowed size for the response.
         max_response_size: usize,
         /// Data passed by the user to [`Substream::request_out`].
@@ -163,9 +161,12 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         /// Protocol that was negotiated.
         protocol_index: usize,
     },
-    /// Similar to [`SubstreamInner::RequestInRecv`], but doesn't expect any request body.
-    /// Immediately reports an event and switches to [`SubstreamInner::RequestInApiWait`].
-    RequestInRecvEmpty {
+    /// Similar to [`SubstreamInner::RequestInRecv`], but doesn't expect any length prefix.
+    RequestInRecvNoLengthPrefix {
+        /// Buffer for the incoming request.
+        request: Vec<u8>,
+        /// Maxium allowed size for the request.
+        max_request_size: usize,
         /// Protocol that was negotiated.
         protocol_index: usize,
     },
@@ -293,13 +294,12 @@ where
     /// After the remote has sent back a response or after an error occurred, an [`Event::Response`]
     /// event will be generated locally. The `user_data` parameter will be passed back.
     ///
-    /// If the `request` is `None`, then nothing at all will be written out, not even a length
-    /// prefix. If the `request` is `Some`, then a length prefix will be written out. Consequently,
-    /// `Some(&[])` writes a single `0` for the request.
+    /// If `has_length_prefix` is `true`, then the request is prefixed by its length as an LEB128.
     pub fn request_out(
         requested_protocol: String,
         timeout: TNow,
-        request: Option<Vec<u8>>,
+        has_length_prefix: bool,
+        request: Vec<u8>,
         max_response_size: usize,
         user_data: TRqUd,
     ) -> Self {
@@ -307,11 +307,19 @@ where
             requested_protocol,
         });
 
+        let request_payload = if has_length_prefix {
+            leb128::encode_usize(request.len())
+                .chain(request.into_iter())
+                .collect::<VecDeque<_>>()
+        } else {
+            request.into_iter().collect()
+        };
+
         Substream {
             inner: SubstreamInner::RequestOutNegotiating {
                 timeout,
                 negotiation,
-                request,
+                request: request_payload,
                 max_response_size,
                 user_data,
             },
@@ -624,26 +632,15 @@ where
                         }),
                         None,
                     ),
-                    Ok(multistream_select::Negotiation::Success(_)) => {
-                        let request_payload = if let Some(request) = request {
-                            let request_len = request.len();
-                            leb128::encode_usize(request_len)
-                                .chain(request.into_iter())
-                                .collect::<VecDeque<_>>()
-                        } else {
-                            VecDeque::new()
-                        };
-
-                        (
-                            Some(SubstreamInner::RequestOut {
-                                timeout,
-                                request: request_payload,
-                                user_data,
-                                response: leb128::FramedInProgress::new(max_response_size),
-                            }),
-                            None,
-                        )
-                    }
+                    Ok(multistream_select::Negotiation::Success(_)) => (
+                        Some(SubstreamInner::RequestOut {
+                            timeout,
+                            request,
+                            user_data,
+                            response: leb128::FramedInProgress::new(max_response_size),
+                        }),
+                        None,
+                    ),
                     Ok(multistream_select::Negotiation::NotAvailable) => (
                         None,
                         Some(Event::Response {
@@ -777,13 +774,46 @@ where
                     ),
                 }
             }
-            SubstreamInner::RequestInRecvEmpty { protocol_index } => (
-                Some(SubstreamInner::RequestInApiWait),
-                Some(Event::RequestIn {
-                    protocol_index,
-                    request: Vec::new(),
-                }),
-            ),
+            SubstreamInner::RequestInRecvNoLengthPrefix {
+                mut request,
+                protocol_index,
+                max_request_size,
+            } => {
+                let incoming_buffer = match read_write.incoming_buffer {
+                    Some(buf) => buf,
+                    None => {
+                        // Success.
+                        return (
+                            Some(SubstreamInner::RequestInApiWait),
+                            Some(Event::RequestIn {
+                                protocol_index,
+                                request,
+                            }),
+                        );
+                    }
+                };
+
+                if request.len().saturating_add(incoming_buffer.len()) > max_request_size {
+                    return (
+                        None,
+                        Some(Event::InboundError(
+                            InboundError::RequestInNoLenPrefixTooLarge,
+                        )),
+                    );
+                }
+
+                request.extend_from_slice(incoming_buffer);
+                read_write.advance_read(incoming_buffer.len());
+
+                (
+                    Some(SubstreamInner::RequestInRecvNoLengthPrefix {
+                        request,
+                        protocol_index,
+                        max_request_size,
+                    }),
+                    None,
+                )
+            }
             SubstreamInner::RequestInApiWait => (Some(SubstreamInner::RequestInApiWait), None),
             SubstreamInner::RequestInRespond { mut response } => {
                 read_write.write_from_vec_deque(&mut response);
@@ -1134,7 +1164,7 @@ where
             SubstreamInner::NotificationsOutClosed { .. } => None,
             SubstreamInner::PingIn { .. } => None,
             SubstreamInner::RequestInRecv { .. } => None,
-            SubstreamInner::RequestInRecvEmpty { .. } => None,
+            SubstreamInner::RequestInRecvNoLengthPrefix { .. } => None,
             SubstreamInner::RequestInApiWait => None,
             SubstreamInner::RequestInRespond { .. } => None,
             SubstreamInner::PingOut { queued_pings, .. }
@@ -1358,14 +1388,19 @@ where
             InboundTy::Request {
                 protocol_index,
                 request_max_size,
+                has_length_prefix,
             } => {
-                if let Some(request_max_size) = request_max_size {
+                if has_length_prefix {
                     self.inner = SubstreamInner::RequestInRecv {
                         protocol_index,
                         request: leb128::FramedInProgress::new(request_max_size),
                     };
                 } else {
-                    self.inner = SubstreamInner::RequestInRecvEmpty { protocol_index };
+                    self.inner = SubstreamInner::RequestInRecvNoLengthPrefix {
+                        protocol_index,
+                        request: Vec::with_capacity(cmp::min(request_max_size, 1024)),
+                        max_request_size: request_max_size,
+                    };
                 }
             }
         }
@@ -1415,7 +1450,7 @@ where
                 f.debug_tuple("request-out").field(&user_data).finish()
             }
             SubstreamInner::RequestInRecv { protocol_index, .. }
-            | SubstreamInner::RequestInRecvEmpty { protocol_index, .. } => {
+            | SubstreamInner::RequestInRecvNoLengthPrefix { protocol_index, .. } => {
                 f.debug_tuple("request-in").field(protocol_index).finish()
             }
             SubstreamInner::RequestInRespond { .. } => f.debug_tuple("request-in-respond").finish(),
@@ -1521,10 +1556,11 @@ pub enum InboundTy {
     Ping,
     Request {
         protocol_index: usize,
+        /// Whether the incoming request is prefixed by its length as a LEB128.
+        has_length_prefix: bool,
         /// Maximum allowed size of the request.
-        /// If `None`, then no data is expected on the substream, not even the length of the
-        /// request.
-        request_max_size: Option<usize>,
+        /// Does not include the length prefix, if any.
+        request_max_size: usize,
     },
     Notifications {
         protocol_index: usize,
@@ -1543,6 +1579,8 @@ pub enum InboundError {
     RequestInLebError(leb128::FramedError),
     /// Unexpected end of file while receiving an inbound request.
     RequestInExpectedEof,
+    /// Inbound request with no length prefix is too large.
+    RequestInNoLenPrefixTooLarge,
     /// Error while receiving an inbound notifications substream handshake.
     #[display(
         fmt = "Error while receiving an inbound notifications substream handshake: {}",

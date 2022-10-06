@@ -53,8 +53,7 @@
 use super::{
     super::{super::read_write::ReadWrite, noise, yamux},
     substream::{self, RespondInRequestError},
-    Config, ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn, Event,
-    SubstreamId, SubstreamIdInner,
+    Config, ConfigNotifications, ConfigRequestResponse, Event, SubstreamId, SubstreamIdInner,
 };
 
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
@@ -576,13 +575,10 @@ where
                     {
                         substream.set_inbound_ty(substream::InboundTy::Request {
                             protocol_index,
-                            request_max_size: if let ConfigRequestResponseIn::Payload { max_size } =
-                                inner.request_protocols[protocol_index].inbound_config
-                            {
-                                Some(max_size)
-                            } else {
-                                None
-                            },
+                            request_max_size: inner.request_protocols[protocol_index]
+                                .max_request_size,
+                            has_length_prefix: inner.request_protocols[protocol_index]
+                                .has_length_prefixes,
                         });
                     } else if let Some(protocol_index) = inner
                         .notifications_protocols
@@ -725,18 +721,8 @@ where
         timeout: TNow,
         user_data: TRqUd,
     ) -> SubstreamId {
-        let has_length_prefix = match self.inner.request_protocols[protocol_index].inbound_config {
-            ConfigRequestResponseIn::Payload { max_size } => {
-                // TODO: turn this assert into something that can't panic?
-                assert!(request.len() <= max_size);
-                true
-            }
-            ConfigRequestResponseIn::Empty => {
-                // TODO: turn this assert into something that can't panic?
-                assert!(request.is_empty());
-                false
-            }
-        };
+        // TODO: turn this assert into something that can't panic?
+        assert!(request.len() <= self.inner.request_protocols[protocol_index].max_request_size);
 
         let mut substream =
             self.inner
@@ -744,11 +730,8 @@ where
                 .open_substream(Some(substream::Substream::request_out(
                     self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
                     timeout,
-                    if has_length_prefix {
-                        Some(request)
-                    } else {
-                        None
-                    },
+                    self.inner.request_protocols[protocol_index].has_length_prefixes,
+                    request,
                     self.inner.request_protocols[protocol_index].max_response_size,
                     user_data,
                 )));

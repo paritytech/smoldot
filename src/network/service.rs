@@ -307,45 +307,49 @@ where
         // to pass to libp2p or that libp2p produces.
         let request_response_protocols = iter::once(peers::ConfigRequestResponse {
             name: "/ipfs/id/1.0.0".into(),
-            inbound_config: peers::ConfigRequestResponseIn::Empty,
+            max_request_size: 0,
             max_response_size: 4096,
+            has_length_prefixes: false,
             inbound_allowed: true,
         })
         .chain(config.chains.iter().flat_map(|chain| {
             // TODO: limits are arbitrary
             iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/sync/2", chain.protocol_id),
-                inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
+                max_request_size: 1024,
                 max_response_size: 16 * 1024 * 1024,
+                has_length_prefixes: true,
                 inbound_allowed: chain.allow_inbound_block_requests,
             })
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/light/2", chain.protocol_id),
-                inbound_config: peers::ConfigRequestResponseIn::Payload {
-                    max_size: 1024 * 512,
-                },
+                max_request_size: 1024 * 512,
                 max_response_size: 10 * 1024 * 1024,
+                has_length_prefixes: true,
                 // TODO: make this configurable
                 inbound_allowed: false,
             }))
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/kad", chain.protocol_id),
-                inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
+                max_request_size: 1024,
                 max_response_size: 1024 * 1024,
+                has_length_prefixes: true,
                 // TODO: `false` here means we don't insert ourselves in the DHT, which is the polite thing to do for as long as Kad isn't implemented
                 inbound_allowed: false,
             }))
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/sync/warp", chain.protocol_id),
-                inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 32 },
+                max_request_size: 32,
                 max_response_size: 16 * 1024 * 1024,
+                has_length_prefixes: true,
                 // We don't support inbound warp sync requests (yet).
                 inbound_allowed: false,
             }))
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/state/2", chain.protocol_id),
-                inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
+                max_request_size: 1024,
                 max_response_size: 16 * 1024 * 1024,
+                has_length_prefixes: true,
                 // We don't support inbound state requests (yet).
                 inbound_allowed: false,
             }))

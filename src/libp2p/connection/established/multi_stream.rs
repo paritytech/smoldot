@@ -19,7 +19,7 @@
 
 use super::{
     super::super::read_write::ReadWrite, substream, Config, ConfigNotifications,
-    ConfigRequestResponse, ConfigRequestResponseIn, Event, SubstreamId, SubstreamIdInner,
+    ConfigRequestResponse, Event, SubstreamId, SubstreamIdInner,
 };
 use crate::util;
 
@@ -337,13 +337,10 @@ where
                     {
                         substream.set_inbound_ty(substream::InboundTy::Request {
                             protocol_index,
-                            request_max_size: if let ConfigRequestResponseIn::Payload { max_size } =
-                                self.request_protocols[protocol_index].inbound_config
-                            {
-                                Some(max_size)
-                            } else {
-                                None
-                            },
+                            request_max_size: self.request_protocols[protocol_index]
+                                .max_request_size,
+                            has_length_prefix: self.request_protocols[protocol_index]
+                                .has_length_prefixes,
                         });
                     } else if let Some(protocol_index) = self
                         .notifications_protocols
@@ -473,18 +470,8 @@ where
         timeout: TNow,
         user_data: TRqUd,
     ) -> SubstreamId {
-        let has_length_prefix = match self.request_protocols[protocol_index].inbound_config {
-            ConfigRequestResponseIn::Payload { max_size } => {
-                // TODO: turn this assert into something that can't panic?
-                assert!(request.len() <= max_size);
-                true
-            }
-            ConfigRequestResponseIn::Empty => {
-                // TODO: turn this assert into something that can't panic?
-                assert!(request.is_empty());
-                false
-            }
-        };
+        // TODO: turn this assert into something that can't panic?
+        assert!(request.len() <= self.request_protocols[protocol_index].max_request_size);
 
         let substream_id = self.next_out_substream_id;
         self.next_out_substream_id += 1;
@@ -493,11 +480,8 @@ where
             substream::Substream::request_out(
                 self.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
                 timeout,
-                if has_length_prefix {
-                    Some(request)
-                } else {
-                    None
-                },
+                self.request_protocols[protocol_index].has_length_prefixes,
+                request,
                 self.request_protocols[protocol_index].max_response_size,
                 user_data,
             ),
