@@ -96,9 +96,16 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
 
     /// Sets the writing side of the connection to closed.
     ///
-    /// This is simply a shortcut for setting [`ReadWrite::outgoing_buffer`] to `None`.
-    pub fn close_write(&mut self) {
-        self.outgoing_buffer = None;
+    /// This is simply a shortcut for setting [`ReadWrite::outgoing_buffer`] to `None` if it
+    /// doesn't contain any data.
+    pub fn close_write_if_empty(&mut self) {
+        if self
+            .outgoing_buffer
+            .as_ref()
+            .map_or(false, |b| b.0.is_empty() && b.1.is_empty())
+        {
+            self.outgoing_buffer = None;
+        }
     }
 
     /// Returns the size of the data available in the incoming buffer.
