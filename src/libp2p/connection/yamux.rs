@@ -648,7 +648,12 @@ impl<T> Yamux<T> {
                     substream_id,
                     ref mut remaining_bytes,
                     ..
-                } => {
+                } if !data.is_empty() => {
+                    // We only enter this block if `data` isn't empty, as we don't want to
+                    // generate a `DataFrame` event if there's no data.
+
+                    debug_assert_ne!(*remaining_bytes, 0);
+
                     let pulled_data = cmp::min(
                         *remaining_bytes,
                         u32::try_from(data.len()).unwrap_or(u32::max_value()),
@@ -690,6 +695,15 @@ impl<T> Yamux<T> {
                     // Also note that we don't switch back `self.incoming` to `Header`. Instead,
                     // the next iteration will pick up `DataFrame` again and transition again.
                     // This is necessary to handle the `fin` flag elegantly.
+                }
+
+                Incoming::DataFrame {
+                    ref mut remaining_bytes,
+                    ..
+                } => {
+                    debug_assert_ne!(*remaining_bytes, 0);
+                    debug_assert!(data.is_empty());
+                    break;
                 }
 
                 Incoming::Header(ref mut incoming_header) => {
@@ -1044,38 +1058,26 @@ impl<T> Yamux<T> {
                             // id is discarded and doesn't result in an error, under the
                             // presumption that we are in this situation.
                             if let Some(Substream {
-                                state:
-                                    SubstreamState::Healthy {
-                                        allowed_window,
-                                        remote_write_closed,
-                                        ..
-                                    },
+                                state: SubstreamState::Healthy { allowed_window, .. },
                                 ..
                             }) = self.substreams.get_mut(&stream_id)
                             {
                                 *allowed_window = allowed_window
                                     .checked_add(u64::from(length))
                                     .ok_or(Error::LocalCreditsOverflow)?;
-
-                                self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
-
-                                // Note that the specs are a unclear about whether the remote
-                                // can or should continue sending FIN flags on window size
-                                // frames after their side of the substream has already been
-                                // closed before.
-                                if fin {
-                                    *remote_write_closed = true;
-                                    return Ok(IncomingDataOutcome {
-                                        yamux: self,
-                                        bytes_read: total_read,
-                                        detail: Some(IncomingDataDetail::StreamClosed {
-                                            substream_id: SubstreamId(stream_id),
-                                        }),
-                                    });
-                                }
                             }
 
-                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                            // Note that the specs are unclear about whether the remote can or
+                            // should continue sending FIN flags on window size frames after
+                            // their side of the substream has already been closed before.
+
+                            // We transition to `DataFrame` to make the handling a bit more
+                            // elegant.
+                            self.incoming = Incoming::DataFrame {
+                                substream_id: SubstreamId(stream_id),
+                                remaining_bytes: 0,
+                                fin,
+                            };
                         }
                     }
                 }
