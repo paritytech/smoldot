@@ -135,6 +135,8 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         negotiation: multistream_select::InProgress<vec::IntoIter<String>, String>,
         /// Bytes of the request to send after the substream is open.
         request: VecDeque<u8>,
+        /// Whether the response expects a length prefix.
+        has_length_prefix: bool,
         /// Maximum allowed size for the response.
         max_response_size: usize,
         /// Data passed by the user to [`Substream::request_out`].
@@ -151,6 +153,20 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         user_data: TRqUd,
         /// Buffer for the incoming response.
         response: leb128::FramedInProgress,
+    },
+    /// Outgoing request has been sent out or is queued for send out, and a response from the
+    /// remote is now expected. Substream has been closed.
+    RequestOutNoLengthPrefix {
+        /// When the request will time out in the absence of response.
+        timeout: TNow,
+        /// Request payload to write out.
+        request: VecDeque<u8>,
+        /// Data passed by the user to [`Substream::request_out`].
+        user_data: TRqUd,
+        /// Buffer for the incoming response.
+        response: Vec<u8>,
+        /// Maxium allowed size for the response.
+        max_response_size: usize,
     },
 
     /// A request-response protocol has been negotiated on an inbound substream. A request is now
@@ -320,6 +336,7 @@ where
                 timeout,
                 negotiation,
                 request: request_payload,
+                has_length_prefix,
                 max_response_size,
                 user_data,
             },
@@ -602,6 +619,7 @@ where
                 negotiation,
                 timeout,
                 request,
+                has_length_prefix,
                 max_response_size,
                 user_data,
             } => {
@@ -627,20 +645,36 @@ where
                             negotiation: nego,
                             timeout,
                             request,
+                            has_length_prefix,
                             max_response_size,
                             user_data,
                         }),
                         None,
                     ),
-                    Ok(multistream_select::Negotiation::Success(_)) => (
-                        Some(SubstreamInner::RequestOut {
-                            timeout,
-                            request,
-                            user_data,
-                            response: leb128::FramedInProgress::new(max_response_size),
-                        }),
-                        None,
-                    ),
+                    Ok(multistream_select::Negotiation::Success(_)) => {
+                        if has_length_prefix {
+                            (
+                                Some(SubstreamInner::RequestOutNoLengthPrefix {
+                                    timeout,
+                                    request,
+                                    user_data,
+                                    response: Vec::with_capacity(cmp::min(4096, max_response_size)),
+                                    max_response_size,
+                                }),
+                                None,
+                            )
+                        } else {
+                            (
+                                Some(SubstreamInner::RequestOut {
+                                    timeout,
+                                    request,
+                                    user_data,
+                                    response: leb128::FramedInProgress::new(max_response_size),
+                                }),
+                                None,
+                            )
+                        }
+                    }
                     Ok(multistream_select::Negotiation::NotAvailable) => (
                         None,
                         Some(Event::Response {
@@ -731,6 +765,73 @@ where
                         }),
                     ),
                 }
+            }
+            SubstreamInner::RequestOutNoLengthPrefix {
+                timeout,
+                mut request,
+                user_data,
+                mut response,
+                max_response_size,
+            } => {
+                // Note that this might trigger timeouts for requests whose response is available
+                // in `incoming_buffer`. This is intentional, as from the perspective of
+                // `read_write` the response arrived after the timeout. It is the responsibility
+                // of the user to call `read_write` in an appropriate way for this to not happen.
+                if timeout < read_write.now {
+                    read_write.close_write();
+                    return (
+                        None,
+                        Some(Event::Response {
+                            response: Err(RequestError::Timeout),
+                            user_data,
+                        }),
+                    );
+                }
+
+                read_write.wake_up_after(&timeout);
+
+                read_write.write_from_vec_deque(&mut request);
+                if request.is_empty() {
+                    read_write.close_write();
+                }
+
+                let incoming_buffer = match read_write.incoming_buffer {
+                    Some(buf) => buf,
+                    None => {
+                        // Success.
+                        read_write.close_write();
+                        return (
+                            None,
+                            Some(Event::Response {
+                                user_data,
+                                response: Ok(response),
+                            }),
+                        );
+                    }
+                };
+
+                if response.len().saturating_add(incoming_buffer.len()) > max_response_size {
+                    return (
+                        None,
+                        Some(Event::InboundError(
+                            InboundError::RequestOutNoLenPrefixTooLarge,
+                        )),
+                    );
+                }
+
+                response.extend_from_slice(incoming_buffer);
+                read_write.advance_read(incoming_buffer.len());
+
+                (
+                    Some(SubstreamInner::RequestOutNoLengthPrefix {
+                        timeout,
+                        request,
+                        user_data,
+                        response,
+                        max_response_size,
+                    }),
+                    None,
+                )
             }
 
             SubstreamInner::RequestInRecv {
@@ -1147,7 +1248,8 @@ where
             SubstreamInner::InboundNegotiatingApiWait => None,
             SubstreamInner::InboundFailed => None,
             SubstreamInner::RequestOutNegotiating { user_data, .. }
-            | SubstreamInner::RequestOut { user_data, .. } => Some(Event::Response {
+            | SubstreamInner::RequestOut { user_data, .. }
+            | SubstreamInner::RequestOutNoLengthPrefix { user_data, .. } => Some(Event::Response {
                 user_data,
                 response: Err(RequestError::SubstreamReset),
             }),
@@ -1457,7 +1559,8 @@ where
                 f.debug_tuple("notifications-in-closed").finish()
             }
             SubstreamInner::RequestOutNegotiating { user_data, .. }
-            | SubstreamInner::RequestOut { user_data, .. } => {
+            | SubstreamInner::RequestOut { user_data, .. }
+            | SubstreamInner::RequestOutNoLengthPrefix { user_data, .. } => {
                 f.debug_tuple("request-out").field(&user_data).finish()
             }
             SubstreamInner::RequestInRecv { protocol_index, .. }
@@ -1592,6 +1695,8 @@ pub enum InboundError {
     RequestInExpectedEof,
     /// Inbound request with no length prefix is too large.
     RequestInNoLenPrefixTooLarge,
+    /// Response to an outbound request with no length prefix is too large.
+    RequestOutNoLenPrefixTooLarge,
     /// Error while receiving an inbound notifications substream handshake.
     #[display(
         fmt = "Error while receiving an inbound notifications substream handshake: {}",
