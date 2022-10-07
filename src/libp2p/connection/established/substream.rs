@@ -683,9 +683,10 @@ where
 
                 read_write.wake_up_after(&timeout);
 
-                read_write.write_from_vec_deque(&mut request);
                 if request.is_empty() {
                     read_write.close_write();
+                } else {
+                    read_write.write_from_vec_deque(&mut request);
                 }
 
                 let incoming_buffer = match read_write.incoming_buffer {
@@ -786,11 +787,11 @@ where
             ),
             SubstreamInner::RequestInApiWait => (Some(SubstreamInner::RequestInApiWait), None),
             SubstreamInner::RequestInRespond { mut response } => {
-                read_write.write_from_vec_deque(&mut response);
                 if response.is_empty() {
                     read_write.close_write();
                     (None, None)
                 } else {
+                    read_write.write_from_vec_deque(&mut response);
                     (Some(SubstreamInner::RequestInRespond { response }), None)
                 }
             }

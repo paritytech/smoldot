@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fix the responses to libp2p identify requests being wrongly empty.
 - Fix some Merkle proofs and SCALE-encoded structures being accepted as correct when they are actually invalid. This is a very minor fix that can presumably not be used as an attack vector. ([#2819](https://github.com/paritytech/smoldot/pull/2819))
 
 ## 0.7.1 - 2022-10-04
