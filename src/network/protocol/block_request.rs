@@ -189,8 +189,11 @@ pub fn decode_block_request(
             (Some(_), Some(_)) => return Err(DecodeBlockRequestError::ProtobufDecode),
             (None, None) => return Err(DecodeBlockRequestError::MissingStartBlock),
         },
-        desired_count: NonZeroU32::new(max_blocks.unwrap_or(u32::max_value()))
-            .ok_or(DecodeBlockRequestError::ZeroBlocksRequested)?,
+        desired_count: {
+            // A missing field or a `0` field are both interpreted as "no limit".
+            NonZeroU32::new(max_blocks.unwrap_or(u32::max_value()))
+                .unwrap_or(NonZeroU32::new(u32::max_value()).unwrap())
+        },
         direction: match direction {
             None | Some(0) => BlocksRequestDirection::Ascending,
             Some(1) => BlocksRequestDirection::Descending,
