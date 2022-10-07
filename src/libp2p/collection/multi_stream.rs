@@ -818,7 +818,7 @@ where
                         // that the substream is dead. If the reading side is still open, we
                         // indicate that it's not dead and store it in the state machine while
                         // waiting for it to be closed by the remote.
-                        read_write.close_write();
+                        read_write.close_write_if_empty();
                         let handshake_substream_still_open = read_write.incoming_buffer.is_some();
 
                         let mut established = established.take().unwrap();
@@ -860,7 +860,7 @@ where
                 // substream is dead. If the reading side is still open, we indicate that it's not
                 // dead and simply wait for the remote to close it.
                 // TODO: kill the connection if the remote sends more data?
-                read_write.close_write();
+                read_write.close_write_if_empty();
                 if read_write.incoming_buffer.is_none() {
                     *handshake_substream = None;
                     true

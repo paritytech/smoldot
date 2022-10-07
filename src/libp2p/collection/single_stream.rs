@@ -803,7 +803,7 @@ where
 
                 // This might have been done already during the shutdown process, but we do it
                 // again just in case.
-                read_write.close_write();
+                read_write.close_write_if_empty();
             }
 
             SingleStreamConnectionTaskInner::ShutdownWaitingAck {
