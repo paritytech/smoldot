@@ -606,7 +606,7 @@ impl<T> Yamux<T> {
     pub fn incoming_data(mut self, mut data: &[u8]) -> Result<IncomingDataOutcome<T>, Error> {
         let mut total_read: usize = 0;
 
-        while !data.is_empty() {
+        loop {
             match self.incoming {
                 Incoming::PendingIncomingSubstream { .. } => break,
 
@@ -620,7 +620,7 @@ impl<T> Yamux<T> {
                     if let Some(Substream {
                         state:
                             SubstreamState::Healthy {
-                                remote_write_closed,
+                                remote_write_closed: remote_write_closed @ false,
                                 ..
                             },
                         ..
@@ -637,9 +637,17 @@ impl<T> Yamux<T> {
                 }
 
                 Incoming::DataFrame {
+                    remaining_bytes: 0,
+                    fin: false,
+                    ..
+                } => {
+                    self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                }
+
+                Incoming::DataFrame {
                     substream_id,
                     ref mut remaining_bytes,
-                    fin,
+                    ..
                 } => {
                     let pulled_data = cmp::min(
                         *remaining_bytes,
@@ -669,18 +677,6 @@ impl<T> Yamux<T> {
                     }) = self.substreams.get_mut(&substream_id.0)
                     {
                         debug_assert!(!*remote_write_closed);
-                        if *remaining_bytes == 0 {
-                            if fin {
-                                // If `fin`, leave `incoming` as `DataFrame`, so that it gets
-                                // picked at the next iteration and a `StreamClosed` gets
-                                // returned.
-                                // TODO: hack ^ fix
-                                *remote_write_closed = true;
-                            } else {
-                                self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
-                            }
-                        }
-
                         return Ok(IncomingDataOutcome {
                             yamux: self,
                             bytes_read: total_read,
@@ -691,9 +687,9 @@ impl<T> Yamux<T> {
                         });
                     }
 
-                    if *remaining_bytes == 0 {
-                        self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
-                    }
+                    // Also note that we don't switch back `self.incoming` to `Header`. Instead,
+                    // the next iteration will pick up `DataFrame` again and transition again.
+                    // This is necessary to handle the `fin` flag elegantly.
                 }
 
                 Incoming::Header(ref mut incoming_header) => {
