@@ -17,7 +17,8 @@
 
 //! Build the chain information of a chain given its runtime.
 //!
-//! This module contains the [`ChainInfoBuild`], a state machine that .
+//! This module contains the [`ChainInformationBuild`] struct, a state machine that drives the
+//! process of building the chain information of a cetain finalized point of a chain.
 
 use alloc::vec::Vec;
 use core::{fmt, iter, num::NonZeroU64};
