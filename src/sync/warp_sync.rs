@@ -120,6 +120,9 @@ pub enum Error {
     /// The storage item at `:heappages` is in an incorrect format.
     #[display(fmt = "Invalid heap pages value: {}", _0)]
     InvalidHeapPages(executor::InvalidHeapPagesError),
+    /// Error building the runtime of the chain.
+    #[display(fmt = "Error building the runtime: {}", _0)]
+    RuntimeBuild(executor::host::NewErr),
     /// Error building the chain information.
     #[display(fmt = "Error building the chain information: {}", _0)]
     ChainInformationBuild(chain_information::build::Error),
@@ -294,6 +297,8 @@ enum Phase {
         /// Source we downloaded the last fragments from. Assuming that the source isn't malicious,
         /// it is guaranteed to have access to the storage of the finalized block.
         warp_sync_source_id: SourceId,
+        /// Runtime that was downloaded, or `None` if it was not downloaded yet.
+        downloaded_runtime: Option<DownloadedRuntime>,
     },
     /// All warp sync fragments have been verified, we have dowloaded the runtime of the finalized
     /// block, and we are now downloading and computing the information of the chain.
@@ -684,100 +689,13 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         };
 
         if let Phase::RuntimeDownload {
-            header,
-            chain_information_finality,
-            warp_sync_source_id,
-            ..
-        } = &self.phase
+            downloaded_runtime, ..
+        } = &mut self.phase
         {
-            // TODO: this should be done as the result of a call to process_one instead
-            let finalized_storage_code = match code {
-                Some(code) => code,
-                None => {
-                    self.phase = Phase::DownloadFragments {
-                        previous_verifier_values: Some((
-                            header.clone(),
-                            chain_information_finality.clone(),
-                        )),
-                    };
-                    return user_data;
-                }
-            };
-
-            let decoded_heap_pages = match executor::storage_heap_pages_to_value(
-                heap_pages.as_ref().map(|p| p.as_ref()),
-            ) {
-                Ok(hp) => hp,
-                Err(_) => {
-                    self.phase = Phase::DownloadFragments {
-                        previous_verifier_values: Some((
-                            header.clone(),
-                            chain_information_finality.clone(),
-                        )),
-                    };
-                    return user_data;
-                }
-            };
-
-            let runtime = match HostVmPrototype::new(host::Config {
-                module: &finalized_storage_code,
-                heap_pages: decoded_heap_pages,
-                exec_hint: ExecHint::CompileAheadOfTime, // TODO: no, make this configurable
-                allow_unresolved_imports: false,         // TODO: no, make this configurable
-            }) {
-                Ok(runtime) => runtime,
-                Err(_) => {
-                    self.phase = Phase::DownloadFragments {
-                        previous_verifier_values: Some((
-                            header.clone(),
-                            chain_information_finality.clone(),
-                        )),
-                    };
-                    return user_data;
-                }
-            };
-
-            let chain_info_builder =
-                chain_information::build::Query::new(chain_information::build::Config {
-                    finalized_block_header:
-                        chain_information::build::ConfigFinalizedBlockHeader::NonGenesis {
-                            header: header.clone(),
-                            known_finality: Some(chain_information_finality.clone()),
-                        },
-                    runtime,
-                });
-
-            let (calls, chain_info_builder) = match chain_info_builder {
-                chain_information::build::Query::Finished { result: Ok(_), .. } => todo!(), // TODO: after this is moved to process_one, this will be easy to implement
-                chain_information::build::Query::Finished { result: Err(_), .. } => {
-                    self.phase = Phase::DownloadFragments {
-                        previous_verifier_values: Some((
-                            header.clone(),
-                            chain_information_finality.clone(),
-                        )),
-                    };
-                    return user_data;
-                }
-                chain_information::build::Query::InProgress(in_progress) => {
-                    let calls = in_progress
-                        .remaining_calls()
-                        .map(|call| (call, None))
-                        .collect();
-                    (calls, in_progress)
-                }
-            };
-
-            self.phase = Phase::ChainInformationDownload {
-                header: header.clone(),
-                chain_information_finality: chain_information_finality.clone(),
-                warp_sync_source_id: *warp_sync_source_id,
-                downloaded_runtime: Some(DownloadedRuntime {
-                    storage_code: Some(finalized_storage_code.as_ref().to_vec()),
-                    storage_heap_pages: heap_pages.map(|hp| hp.as_ref().to_vec()),
-                }),
-                chain_info_builder: Some(chain_info_builder),
-                calls,
-            };
+            *downloaded_runtime = Some(DownloadedRuntime {
+                storage_code: code.map(|c| c.as_ref().to_vec()),
+                storage_heap_pages: heap_pages.map(|c| c.as_ref().to_vec()),
+            });
         } else {
             // This is checked at the beginning of this function.
             unreachable!()
@@ -928,6 +846,14 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             }
         }
 
+        if let Phase::RuntimeDownload {
+            downloaded_runtime: Some(_),
+            ..
+        } = &self.phase
+        {
+            return ProcessOne::BuildRuntime(BuildRuntime { inner: self });
+        }
+
         if let Phase::PendingVerify { .. } = &self.phase {
             return ProcessOne::VerifyWarpSyncFragment(VerifyWarpSyncFragment { inner: self });
         }
@@ -1009,6 +935,8 @@ pub enum ProcessOne<TSrc, TRq> {
     Idle(InProgressWarpSync<TSrc, TRq>),
     /// Ready to verify a warp sync fragment.
     VerifyWarpSyncFragment(VerifyWarpSyncFragment<TSrc, TRq>),
+    /// Ready to build the runtime of the chain..
+    BuildRuntime(BuildRuntime<TSrc, TRq>),
     /// Ready to verify the parameters of the chain against the finalized block.
     BuildChainInformation(BuildChainInformation<TSrc, TRq>),
 }
@@ -1070,6 +998,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                             .finality
                             .into(),
                         warp_sync_source_id: *downloaded_source,
+                        downloaded_runtime: None,
                     };
                 }
                 Ok(warp_sync::Next::Success {
@@ -1088,6 +1017,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                             header,
                             chain_information_finality,
                             warp_sync_source_id: *downloaded_source,
+                            downloaded_runtime: None,
                         };
                     } else {
                         self.inner.phase = Phase::DownloadFragments {
@@ -1110,6 +1040,166 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
     }
 }
 
+/// Ready to build the runtime of the finalized chain.
+pub struct BuildRuntime<TSrc, TRq> {
+    inner: InProgressWarpSync<TSrc, TRq>,
+}
+
+impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
+    /// Build the runtime of the chain.
+    ///
+    /// This function might return a [`WarpSync::Finished`], indicating the end of the warp sync.
+    ///
+    /// Must be passed parameters used for the construction of the runtime: a hint as to whether
+    /// the runtime is trusted and/or will be executed again, and whether unresolved function
+    /// imports are allowed.
+    // TODO: refactor this error or explain what it is
+    pub fn build(
+        mut self,
+        exec_hint: ExecHint,
+        allow_unresolved_imports: bool,
+    ) -> (WarpSync<TSrc, TRq>, Option<Error>) {
+        if let Phase::RuntimeDownload {
+            header,
+            downloaded_runtime,
+            chain_information_finality,
+            warp_sync_source_id,
+            ..
+        } = &mut self.inner.phase
+        {
+            let downloaded_runtime = downloaded_runtime.take().unwrap();
+
+            let finalized_storage_code = match downloaded_runtime.storage_code {
+                Some(code) => code,
+                None => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                }
+            };
+
+            let decoded_heap_pages = match executor::storage_heap_pages_to_value(
+                downloaded_runtime.storage_heap_pages.as_deref(),
+            ) {
+                Ok(hp) => hp,
+                Err(err) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::InvalidHeapPages(err)),
+                    );
+                }
+            };
+
+            let runtime = match HostVmPrototype::new(host::Config {
+                module: &finalized_storage_code,
+                heap_pages: decoded_heap_pages,
+                exec_hint,
+                allow_unresolved_imports,
+            }) {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::RuntimeBuild(err)),
+                    );
+                }
+            };
+
+            let chain_info_builder =
+                chain_information::build::Query::new(chain_information::build::Config {
+                    finalized_block_header:
+                        chain_information::build::ConfigFinalizedBlockHeader::NonGenesis {
+                            header: header.clone(),
+                            known_finality: Some(chain_information_finality.clone()),
+                        },
+                    runtime,
+                });
+
+            let (calls, chain_info_builder) = match chain_info_builder {
+                chain_information::build::Query::Finished {
+                    result: Ok(chain_information),
+                    virtual_machine,
+                } => {
+                    return (
+                        WarpSync::Finished(Success {
+                            chain_information,
+                            finalized_runtime: virtual_machine,
+                            finalized_storage_code: Some(finalized_storage_code),
+                            finalized_storage_heap_pages: downloaded_runtime.storage_heap_pages,
+                            sources: self
+                                .inner
+                                .sources
+                                .drain()
+                                .map(|source| source.user_data)
+                                .collect(),
+                            in_progress_requests: mem::take(&mut self.inner.in_progress_requests)
+                                .into_iter()
+                                .map(|(id, (src_id, user_data, detail))| {
+                                    (src_id, RequestId(id), user_data, detail)
+                                })
+                                .collect(),
+                        }),
+                        None,
+                    );
+                }
+                chain_information::build::Query::Finished {
+                    result: Err(err), ..
+                } => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::ChainInformationBuild(err)),
+                    );
+                }
+                chain_information::build::Query::InProgress(in_progress) => {
+                    let calls = in_progress
+                        .remaining_calls()
+                        .map(|call| (call, None))
+                        .collect();
+                    (calls, in_progress)
+                }
+            };
+
+            self.inner.phase = Phase::ChainInformationDownload {
+                header: header.clone(),
+                chain_information_finality: chain_information_finality.clone(),
+                warp_sync_source_id: *warp_sync_source_id,
+                downloaded_runtime: Some(DownloadedRuntime {
+                    storage_code: Some(finalized_storage_code),
+                    storage_heap_pages: downloaded_runtime.storage_heap_pages,
+                }),
+                chain_info_builder: Some(chain_info_builder),
+                calls,
+            };
+
+            (WarpSync::InProgress(self.inner), None)
+        } else {
+            unreachable!()
+        }
+    }
+}
+
 /// Ready to verify the parameters of the chain against the finalized block.
 pub struct BuildChainInformation<TSrc, TRq> {
     inner: InProgressWarpSync<TSrc, TRq>,
@@ -1119,10 +1209,6 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
     /// Build the information about the chain.
     ///
     /// This function might return a [`WarpSync::Finished`], indicating the end of the warp sync.
-    ///
-    /// Must be passed parameters used for the construction of the runtime: a hint as to whether
-    /// the runtime is trusted and/or will be executed again, and whether unresolved function
-    /// imports are allowed.
     // TODO: refactor this error or explain what it is
     pub fn build(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
         if let Phase::ChainInformationDownload {
@@ -1201,8 +1287,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                 );
                             }
                             chain_information::build::Query::Finished {
-                                result: Err(err),
-                                virtual_machine,
+                                result: Err(err), ..
                             } => {
                                 self.inner.phase = Phase::DownloadFragments {
                                     previous_verifier_values: Some((
