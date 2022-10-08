@@ -1094,8 +1094,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         })
                     }
                     warp_sync::ProcessOne::BuildChainInformation(inner) => {
-                        // TODO: make these parameters configurable
-                        match inner.build(ExecHint::CompileAheadOfTime, false).0 {
+                        // TODO: restore `build(ExecHint::CompileAheadOfTime, false)` and make these parameters configurable
+                        match inner.build().0 {
                             // TODO: errors not reported to upper layer
                             warp_sync::WarpSync::InProgress(inner) => {
                                 self.inner = AllSyncInner::GrandpaWarpSync { inner };

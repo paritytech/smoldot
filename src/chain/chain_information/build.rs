@@ -146,7 +146,7 @@ impl RuntimeCall {
         }
     }
 
-    pub fn parameter(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
+    pub fn parameter_vectored(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
         iter::empty::<Vec<u8>>()
     }
 }
@@ -200,6 +200,8 @@ impl Query {
 impl InProgress {
     /// Returns the list of runtime calls that will be performed. Always includes the value
     /// returned by [`InProgress::call_in_progress`].
+    ///
+    /// This list never changes, except for the fact that it gets shorter over time.
     pub fn remaining_calls(&self) -> impl Iterator<Item = RuntimeCall> {
         let inner = match self {
             InProgress::StorageGet(StorageGet(_, shared)) => shared,
@@ -241,6 +243,11 @@ impl StorageGet {
     pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Query {
         Query::from_call_in_progress(self.0.inject_value(value), self.1)
     }
+
+    /// Returns the runtime call currently being made.
+    pub fn call_in_progress(&self) -> RuntimeCall {
+        self.1.call_in_progress.unwrap()
+    }
 }
 
 /// Fetching the key that follows a given one is required in order to continue.
@@ -261,6 +268,11 @@ impl NextKey {
     ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Query {
         Query::from_call_in_progress(self.0.inject_key(key), self.1)
+    }
+
+    /// Returns the runtime call currently being made.
+    pub fn call_in_progress(&self) -> RuntimeCall {
+        self.1.call_in_progress.unwrap()
     }
 }
 
@@ -360,7 +372,7 @@ impl Query {
         if let Some(call) = Query::necessary_calls(&inner).next() {
             let vm_start_result = read_only_runtime_host::run(read_only_runtime_host::Config {
                 function_to_call: call.function_name(),
-                parameter: call.parameter(),
+                parameter: call.parameter_vectored(),
                 virtual_machine: inner.virtual_machine.take().unwrap(),
             });
 
