@@ -108,7 +108,7 @@ impl ChainSpec {
         })
         .map_err(FromGenesisStorageError::VmInitialization)?;
 
-        let mut chain_information_build = build::Query::new(build::Config {
+        let mut chain_information_build = build::ChainInformationBuild::new(build::Config {
             finalized_block_header: build::ConfigFinalizedBlockHeader::Genesis {
                 state_trie_root_hash: {
                     let state_version = match vm_prototype.runtime_version().decode().state_version
@@ -152,20 +152,20 @@ impl ChainSpec {
 
         let (chain_info, vm_prototype) = loop {
             match chain_information_build {
-                build::Query::InProgress(build::InProgress::StorageGet(get)) => {
+                build::ChainInformationBuild::InProgress(build::InProgress::StorageGet(get)) => {
                     let key = get.key_as_vec();
                     chain_information_build =
                         get.inject_value(genesis_storage.value(&key).map(iter::once));
                 }
-                build::Query::InProgress(build::InProgress::NextKey(_nk)) => {
+                build::ChainInformationBuild::InProgress(build::InProgress::NextKey(_nk)) => {
                     todo!() // TODO:
                 }
-                build::Query::Finished {
+                build::ChainInformationBuild::Finished {
                     result: Err(err), ..
                 } => {
                     return Err(FromGenesisStorageError::BuildChainInformation(err));
                 }
-                build::Query::Finished {
+                build::ChainInformationBuild::Finished {
                     result: Ok(chain_info),
                     virtual_machine,
                 } => {

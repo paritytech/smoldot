@@ -1122,7 +1122,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             };
 
             let chain_info_builder =
-                chain_information::build::Query::new(chain_information::build::Config {
+                chain_information::build::ChainInformationBuild::new(chain_information::build::Config {
                     finalized_block_header:
                         chain_information::build::ConfigFinalizedBlockHeader::NonGenesis {
                             header: header.clone(),
@@ -1132,7 +1132,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 });
 
             let (calls, chain_info_builder) = match chain_info_builder {
-                chain_information::build::Query::Finished {
+                chain_information::build::ChainInformationBuild::Finished {
                     result: Ok(chain_information),
                     virtual_machine,
                 } => {
@@ -1158,7 +1158,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                         None,
                     );
                 }
-                chain_information::build::Query::Finished {
+                chain_information::build::ChainInformationBuild::Finished {
                     result: Err(err), ..
                 } => {
                     self.inner.phase = Phase::DownloadFragments {
@@ -1172,7 +1172,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                         Some(Error::ChainInformationBuild(err)),
                     );
                 }
-                chain_information::build::Query::InProgress(in_progress) => {
+                chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
                     let calls = in_progress
                         .remaining_calls()
                         .map(|call| (call, None))
@@ -1255,7 +1255,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                             };
 
                         match get.inject_value(value.map(iter::once)) {
-                            chain_information::build::Query::Finished {
+                            chain_information::build::ChainInformationBuild::Finished {
                                 result: Ok(chain_information),
                                 virtual_machine,
                             } => {
@@ -1286,7 +1286,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                     None,
                                 );
                             }
-                            chain_information::build::Query::Finished {
+                            chain_information::build::ChainInformationBuild::Finished {
                                 result: Err(err), ..
                             } => {
                                 self.inner.phase = Phase::DownloadFragments {
@@ -1300,7 +1300,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                     Some(Error::ChainInformationBuild(err)),
                                 );
                             }
-                            chain_information::build::Query::InProgress(in_progress) => {
+                            chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
                                 chain_info_builder = in_progress;
                             }
                         }

@@ -28,8 +28,9 @@ use crate::{
     header, trie,
 };
 
+/// Configuration to provide to [`ChainInformationBuild::new`].
 pub struct Config {
-    /// Header of the finalized block.
+    /// Header of the finalized block, whose chain information is to retrieve.
     ///
     /// Stored within the chain information at the end.
     pub finalized_block_header: ConfigFinalizedBlockHeader,
@@ -39,24 +40,25 @@ pub struct Config {
     pub runtime: host::HostVmPrototype,
 }
 
+/// See [`Config::finalized_block_header`].
 pub enum ConfigFinalizedBlockHeader {
+    /// The block is the genesis block of the chain.
     Genesis {
+        /// Hash of the root of the state trie of the genesis.
         state_trie_root_hash: [u8; 32],
     },
+    /// The block is not the genesis block of the chain.
     NonGenesis {
+        /// Header of the block.
         header: header::Header,
+        /// Can be used to pass information about the finality of the chain, if already known.
         known_finality: Option<chain_information::ChainInformationFinality>,
     },
 }
 
-pub struct DesiredRequest {
-    pub function_name: &'static str,
-    pub parameters: &'static str,
-}
-
 /// Current state of the operation.
 #[must_use]
-pub enum Query {
+pub enum ChainInformationBuild {
     /// Fetching the chain information is over.
     Finished {
         /// The result of the computation.
@@ -71,7 +73,7 @@ pub enum Query {
     InProgress(InProgress),
 }
 
-/// Current state of the operation.
+/// Chain information building is still in progress.
 #[must_use]
 pub enum InProgress {
     /// Loading a storage value is required in order to continue.
@@ -80,7 +82,7 @@ pub enum InProgress {
     NextKey(NextKey),
 }
 
-/// Problem encountered during a call to [`babe_fetch_epoch`].
+/// Problem encountered during the chain biulding process.
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     /// Error while starting the Wasm virtual machine.
@@ -116,6 +118,7 @@ pub enum Error {
     AmbiguousConsensusAlgorithm,
 }
 
+/// Function call to perform or being performed.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum RuntimeCall {
     AuraApiSlotDuration,
@@ -127,13 +130,8 @@ pub enum RuntimeCall {
     GrandpaApiCurrentSetId,
 }
 
-impl fmt::Debug for RuntimeCall {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(&self.function_name(), f)
-    }
-}
-
 impl RuntimeCall {
+    /// Name of the runtime function corresponding to this call.
     pub fn function_name(&self) -> &'static str {
         match self {
             RuntimeCall::AuraApiSlotDuration => "AuraApi_slot_duration",
@@ -146,16 +144,37 @@ impl RuntimeCall {
         }
     }
 
-    pub fn parameter_vectored(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
+    /// Returns the list of parameters to pass when making the call.
+    ///
+    /// The actual parameters are obtained by putting together all the returned buffers together.
+    pub fn parameter_vectored(
+        &'_ self,
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
         iter::empty::<Vec<u8>>()
     }
 
+    /// Returns the list of parameters to pass when making the call.
+    ///
+    /// This function is a convenience around [`RuntimeCall::parameter_vectored`].
     pub fn parameter_vectored_vec(&self) -> Vec<u8> {
         Vec::new()
     }
 }
 
-impl Query {
+impl fmt::Debug for RuntimeCall {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.function_name(), f)
+    }
+}
+
+impl ChainInformationBuild {
+    /// Starts a new chain information build process.
+    ///
+    /// # Panic
+    ///
+    /// Panics if a [`ConfigFinalizedBlockHeader::NonGenesis`] is provided, and the header has
+    /// number 0.
+    ///
     pub fn new(config: Config) -> Self {
         // TODO: document
         if let ConfigFinalizedBlockHeader::NonGenesis { header, .. } =
@@ -181,7 +200,7 @@ impl Query {
             }
         }
 
-        let query_inner = QueryInner {
+        let inner = ChainInformationBuildInner {
             finalized_block_header: config.finalized_block_header,
             call_in_progress: None,
             virtual_machine: Some(config.runtime),
@@ -197,7 +216,7 @@ impl Query {
             grandpa_current_set_id_call_output: None,
         };
 
-        Query::start_next_call(query_inner)
+        ChainInformationBuild::start_next_call(inner)
     }
 }
 
@@ -212,7 +231,7 @@ impl InProgress {
             InProgress::NextKey(NextKey(_, shared)) => shared,
         };
 
-        Query::necessary_calls(inner)
+        ChainInformationBuild::necessary_calls(inner)
     }
 
     /// Returns the runtime call currently being made.
@@ -228,7 +247,10 @@ impl InProgress {
 
 /// Loading a storage value is required in order to continue.
 #[must_use]
-pub struct StorageGet(read_only_runtime_host::StorageGet, QueryInner);
+pub struct StorageGet(
+    read_only_runtime_host::StorageGet,
+    ChainInformationBuildInner,
+);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
@@ -244,8 +266,11 @@ impl StorageGet {
     }
 
     /// Injects the corresponding storage value.
-    pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Query {
-        Query::from_call_in_progress(self.0.inject_value(value), self.1)
+    pub fn inject_value(
+        self,
+        value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
+    ) -> ChainInformationBuild {
+        ChainInformationBuild::from_call_in_progress(self.0.inject_value(value), self.1)
     }
 
     /// Returns the runtime call currently being made.
@@ -256,7 +281,7 @@ impl StorageGet {
 
 /// Fetching the key that follows a given one is required in order to continue.
 #[must_use]
-pub struct NextKey(read_only_runtime_host::NextKey, QueryInner);
+pub struct NextKey(read_only_runtime_host::NextKey, ChainInformationBuildInner);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
@@ -270,8 +295,8 @@ impl NextKey {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Query {
-        Query::from_call_in_progress(self.0.inject_key(key), self.1)
+    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> ChainInformationBuild {
+        ChainInformationBuild::from_call_in_progress(self.0.inject_key(key), self.1)
     }
 
     /// Returns the runtime call currently being made.
@@ -280,8 +305,8 @@ impl NextKey {
     }
 }
 
-impl Query {
-    fn necessary_calls(inner: &QueryInner) -> impl Iterator<Item = RuntimeCall> {
+impl ChainInformationBuild {
+    fn necessary_calls(inner: &ChainInformationBuildInner) -> impl Iterator<Item = RuntimeCall> {
         let aura_api_authorities =
             if inner.runtime_has_aura && inner.aura_autorities_call_output.is_none() {
                 Some(RuntimeCall::AuraApiAuthorities)
@@ -369,11 +394,11 @@ impl Query {
         .filter_map(|c| c)
     }
 
-    fn start_next_call(mut inner: QueryInner) -> Self {
+    fn start_next_call(mut inner: ChainInformationBuildInner) -> Self {
         debug_assert!(inner.call_in_progress.is_none());
         debug_assert!(inner.virtual_machine.is_some());
 
-        if let Some(call) = Query::necessary_calls(&inner).next() {
+        if let Some(call) = ChainInformationBuild::necessary_calls(&inner).next() {
             let vm_start_result = read_only_runtime_host::run(read_only_runtime_host::Config {
                 function_to_call: call.function_name(),
                 parameter: call.parameter_vectored(),
@@ -383,7 +408,7 @@ impl Query {
             let vm = match vm_start_result {
                 Ok(vm) => vm,
                 Err((error, virtual_machine)) => {
-                    return Query::Finished {
+                    return ChainInformationBuild::Finished {
                         result: Err(Error::WasmStart { call, error }),
                         virtual_machine,
                     }
@@ -391,7 +416,7 @@ impl Query {
             };
 
             inner.call_in_progress = Some(call);
-            Query::from_call_in_progress(vm, inner)
+            ChainInformationBuild::from_call_in_progress(vm, inner)
         } else {
             // If the logic of this module is correct, all the information that we need has been
             // retrieved at this point.
@@ -402,7 +427,7 @@ impl Query {
                 &inner.finalized_block_header,
             ) {
                 (true, true, _) | (false, false, _) => {
-                    return Query::Finished {
+                    return ChainInformationBuild::Finished {
                         result: Err(Error::AmbiguousConsensusAlgorithm),
                         virtual_machine: inner.virtual_machine.take().unwrap(),
                     }
@@ -501,14 +526,14 @@ impl Query {
             ) {
                 Ok(ci) => ci,
                 Err(err) => {
-                    return Query::Finished {
+                    return ChainInformationBuild::Finished {
                         result: Err(Error::InvalidChainInformation(err)),
                         virtual_machine: inner.virtual_machine.take().unwrap(),
                     }
                 }
             };
 
-            Query::Finished {
+            ChainInformationBuild::Finished {
                 result: Ok(chain_information),
                 virtual_machine: inner.virtual_machine.take().unwrap(),
             }
@@ -517,7 +542,7 @@ impl Query {
 
     fn from_call_in_progress(
         mut call: read_only_runtime_host::RuntimeHostVm,
-        mut inner: QueryInner,
+        mut inner: ChainInformationBuildInner,
     ) -> Self {
         loop {
             debug_assert!(inner.call_in_progress.is_some());
@@ -534,7 +559,7 @@ impl Query {
                             match result {
                                 Ok(output) => inner.aura_slot_duration_call_output = Some(output),
                                 Err(err) => {
-                                    return Query::Finished {
+                                    return ChainInformationBuild::Finished {
                                         result: Err(err),
                                         virtual_machine,
                                     };
@@ -550,7 +575,7 @@ impl Query {
                             match result {
                                 Ok(output) => inner.aura_autorities_call_output = Some(output),
                                 Err(err) => {
-                                    return Query::Finished {
+                                    return ChainInformationBuild::Finished {
                                         result: Err(err),
                                         virtual_machine,
                                     };
@@ -567,7 +592,7 @@ impl Query {
                             match result {
                                 Ok(output) => inner.babe_current_epoch_call_output = Some(output),
                                 Err(err) => {
-                                    return Query::Finished {
+                                    return ChainInformationBuild::Finished {
                                         result: Err(err),
                                         virtual_machine,
                                     };
@@ -584,7 +609,7 @@ impl Query {
                             match result {
                                 Ok(output) => inner.babe_next_epoch_call_output = Some(output),
                                 Err(err) => {
-                                    return Query::Finished {
+                                    return ChainInformationBuild::Finished {
                                         result: Err(err),
                                         virtual_machine,
                                     };
@@ -600,7 +625,7 @@ impl Query {
                             match result {
                                 Ok(output) => inner.babe_configuration_call_output = Some(output),
                                 Err(err) => {
-                                    return Query::Finished {
+                                    return ChainInformationBuild::Finished {
                                         result: Err(err),
                                         virtual_machine,
                                     };
@@ -616,7 +641,7 @@ impl Query {
                             match result {
                                 Ok(output) => inner.grandpa_autorities_call_output = Some(output),
                                 Err(err) => {
-                                    return Query::Finished {
+                                    return ChainInformationBuild::Finished {
                                         result: Err(err),
                                         virtual_machine,
                                     };
@@ -634,7 +659,7 @@ impl Query {
                                     inner.grandpa_current_set_id_call_output = Some(output)
                                 }
                                 Err(err) => {
-                                    return Query::Finished {
+                                    return ChainInformationBuild::Finished {
                                         result: Err(err),
                                         virtual_machine,
                                     };
@@ -644,10 +669,10 @@ impl Query {
                         }
                     });
 
-                    break Query::start_next_call(inner);
+                    break ChainInformationBuild::start_next_call(inner);
                 }
                 read_only_runtime_host::RuntimeHostVm::Finished(Err(err)) => {
-                    break Query::Finished {
+                    break ChainInformationBuild::Finished {
                         result: Err(Error::WasmVm {
                             call: inner.call_in_progress.unwrap(),
                             error: err.detail,
@@ -656,7 +681,9 @@ impl Query {
                     }
                 }
                 read_only_runtime_host::RuntimeHostVm::StorageGet(call) => {
-                    break Query::InProgress(InProgress::StorageGet(StorageGet(call, inner)))
+                    break ChainInformationBuild::InProgress(InProgress::StorageGet(StorageGet(
+                        call, inner,
+                    )))
                 }
                 read_only_runtime_host::RuntimeHostVm::StorageRoot(get_root) => {
                     call = get_root.resume(match &inner.finalized_block_header {
@@ -667,16 +694,18 @@ impl Query {
                     })
                 }
                 read_only_runtime_host::RuntimeHostVm::NextKey(call) => {
-                    break Query::InProgress(InProgress::NextKey(NextKey(call, inner)))
+                    break ChainInformationBuild::InProgress(InProgress::NextKey(NextKey(
+                        call, inner,
+                    )))
                 }
             }
         }
     }
 }
 
-/// Struct shared by all the variants of the [`Query`] enum. Contains the actual progress of the
-/// building.
-struct QueryInner {
+/// Struct shared by all the variants of the [`ChainInformationBuild`] enum. Contains the actual
+/// progress of the building.
+struct ChainInformationBuildInner {
     /// See [`Config::finalized_block_header`].
     finalized_block_header: ConfigFinalizedBlockHeader,
 
@@ -684,9 +713,10 @@ struct QueryInner {
     call_in_progress: Option<RuntimeCall>,
     /// Runtime to use to start the calls.
     ///
-    /// [`QueryInner::call_in_progress`] and [`QueryInner::virtual_machine`] are never `Some` at
-    /// the same time. However, using an enum wouldn't make the code cleaner because we need to
-    /// be able to extract the values temporarily.
+    /// [`ChainInformationBuildInner::call_in_progress`] and
+    /// [`ChainInformationBuildInner::virtual_machine`] are never `Some` at the same time. However,
+    /// using an enum wouldn't make the code cleaner because we need to be able to extract the
+    /// values temporarily.
     virtual_machine: Option<host::HostVmPrototype>,
 
     /// If ̀`true`, the runtime supports `AuraApi` functions.
