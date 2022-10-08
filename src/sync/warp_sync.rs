@@ -1121,15 +1121,16 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 }
             };
 
-            let chain_info_builder =
-                chain_information::build::ChainInformationBuild::new(chain_information::build::Config {
+            let chain_info_builder = chain_information::build::ChainInformationBuild::new(
+                chain_information::build::Config {
                     finalized_block_header:
                         chain_information::build::ConfigFinalizedBlockHeader::NonGenesis {
                             header: header.clone(),
                             known_finality: Some(chain_information_finality.clone()),
                         },
                     runtime,
-                });
+                },
+            );
 
             let (calls, chain_info_builder) = match chain_info_builder {
                 chain_information::build::ChainInformationBuild::Finished {
@@ -1159,7 +1160,8 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     );
                 }
                 chain_information::build::ChainInformationBuild::Finished {
-                    result: Err(err), ..
+                    result: Err(err),
+                    ..
                 } => {
                     self.inner.phase = Phase::DownloadFragments {
                         previous_verifier_values: Some((
@@ -1287,7 +1289,8 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                 );
                             }
                             chain_information::build::ChainInformationBuild::Finished {
-                                result: Err(err), ..
+                                result: Err(err),
+                                ..
                             } => {
                                 self.inner.phase = Phase::DownloadFragments {
                                     previous_verifier_values: Some((
@@ -1300,7 +1303,9 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                     Some(Error::ChainInformationBuild(err)),
                                 );
                             }
-                            chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
+                            chain_information::build::ChainInformationBuild::InProgress(
+                                in_progress,
+                            ) => {
                                 chain_info_builder = in_progress;
                             }
                         }
