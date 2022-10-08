@@ -70,9 +70,9 @@
 #![cfg(feature = "database-sqlite")]
 #![cfg_attr(docsrs, doc(cfg(feature = "database-sqlite")))]
 
-use crate::{chain::chain_information, header, util};
+use crate::{chain::chain_information, chain_spec, executor, header};
 
-use core::{fmt, iter, num::NonZeroU64};
+use core::{fmt, iter};
 use parking_lot::Mutex;
 
 pub use open::{open, Config, ConfigTy, DatabaseEmpty, DatabaseOpen};
@@ -230,75 +230,14 @@ impl SqliteFullDatabase {
             block_header(&connection, finalized_block_hash, self.block_number_bytes)?
                 .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
 
-        let finality = match (
-            grandpa_authorities_set_id(&connection)?,
-            grandpa_finalized_triggered_authorities(&connection)?,
-            grandpa_finalized_scheduled_change(&connection)?,
-        ) {
-            (
-                Some(after_finalized_block_authorities_set_id),
-                finalized_triggered_authorities,
-                finalized_scheduled_change,
-            ) => chain_information::ChainInformationFinality::Grandpa {
-                after_finalized_block_authorities_set_id,
-                finalized_triggered_authorities,
-                finalized_scheduled_change,
-            },
-            (None, auth, None) if auth.is_empty() => {
-                chain_information::ChainInformationFinality::Outsourced
-            }
-            _ => {
-                return Err(FinalizedAccessError::Access(AccessError::Corrupted(
-                    CorruptedError::ConsensusAlgorithmMix,
-                )))
-            }
-        };
+        // TODO:
 
-        let consensus = match (
-            meta_get_number(&connection, "aura_slot_duration")?,
-            meta_get_number(&connection, "babe_slots_per_epoch")?,
-            meta_get_blob(&connection, "babe_finalized_next_epoch")?,
-        ) {
-            (None, Some(slots_per_epoch), Some(finalized_next_epoch)) => {
-                let slots_per_epoch = expect_nz_u64(slots_per_epoch)?;
-                let finalized_next_epoch_transition =
-                    decode_babe_epoch_information(&finalized_next_epoch)?;
-                let finalized_block_epoch_information =
-                    meta_get_blob(&connection, "babe_finalized_epoch")?
-                        .map(|v| decode_babe_epoch_information(&v))
-                        .transpose()?;
-                chain_information::ChainInformationConsensus::Babe {
-                    finalized_block_epoch_information,
-                    finalized_next_epoch_transition,
-                    slots_per_epoch,
-                }
-            }
-            (Some(slot_duration), None, None) => {
-                let slot_duration = expect_nz_u64(slot_duration)?;
-                let finalized_authorities_list = aura_finalized_authorities(&connection)?;
-                chain_information::ChainInformationConsensus::Aura {
-                    finalized_authorities_list,
-                    slot_duration,
-                }
-            }
-            (None, None, None) => chain_information::ChainInformationConsensus::Unknown,
-            _ => {
-                return Err(FinalizedAccessError::Access(AccessError::Corrupted(
-                    CorruptedError::ConsensusAlgorithmMix,
-                )))
-            }
-        };
-
-        match chain_information::ValidChainInformation::try_from(
-            chain_information::ChainInformation {
-                finalized_block_header,
-                consensus,
-                finality,
-            },
-        ) {
+        match chain_information::ValidChainInformation::try_from(chain_info) {
             Ok(ci) => Ok(ci),
             Err(err) => Err(FinalizedAccessError::Access(AccessError::Corrupted(
-                CorruptedError::InvalidChainInformation(err),
+                CorruptedError::InvalidChainInformation(InvalidChainInformationError::Validity(
+                    err,
+                )),
             ))),
         }
     }
@@ -528,11 +467,6 @@ impl SqliteFullDatabase {
                     ))?
                 };
 
-            let block_header = block_header(&connection, &block_hash, self.block_number_bytes)?
-                .ok_or(SetFinalizedError::Access(AccessError::Corrupted(
-                    CorruptedError::MissingBlockHeader,
-                )))?;
-
             let mut statement = connection
                 .prepare(
                     "DELETE FROM finalized_storage_top_trie
@@ -564,95 +498,6 @@ impl SqliteFullDatabase {
                 .bind(1, &block_hash[..])
                 .unwrap();
             statement.next().unwrap();
-
-            // TODO: the code below is very verbose and redundant with other similar code in smoldot ; could be improved
-
-            if let Some((new_epoch, next_config)) = block_header.digest.babe_epoch_information() {
-                let epoch = meta_get_blob(&connection, "babe_finalized_next_epoch")?.unwrap(); // TODO: don't unwrap
-                let decoded_epoch = decode_babe_epoch_information(&epoch)?;
-                connection.execute(r#"INSERT OR REPLACE INTO meta(key, value_blob) SELECT "babe_finalized_epoch", value_blob FROM meta WHERE key = "babe_finalized_next_epoch""#).unwrap();
-
-                let slot_number = block_header
-                    .digest
-                    .babe_pre_runtime()
-                    .unwrap()
-                    .slot_number();
-                let slots_per_epoch =
-                    expect_nz_u64(meta_get_number(&connection, "babe_slots_per_epoch")?.unwrap())?; // TODO: don't unwrap
-
-                let new_epoch = if let Some(next_config) = next_config {
-                    chain_information::BabeEpochInformation {
-                        epoch_index: decoded_epoch.epoch_index.checked_add(1).unwrap(),
-                        start_slot_number: Some(
-                            decoded_epoch
-                                .start_slot_number
-                                .unwrap_or(slot_number)
-                                .checked_add(slots_per_epoch.get())
-                                .unwrap(),
-                        ),
-                        authorities: new_epoch.authorities.map(Into::into).collect(),
-                        randomness: *new_epoch.randomness,
-                        c: next_config.c,
-                        allowed_slots: next_config.allowed_slots,
-                    }
-                } else {
-                    chain_information::BabeEpochInformation {
-                        epoch_index: decoded_epoch.epoch_index.checked_add(1).unwrap(),
-                        start_slot_number: Some(
-                            decoded_epoch
-                                .start_slot_number
-                                .unwrap_or(slot_number)
-                                .checked_add(slots_per_epoch.get())
-                                .unwrap(),
-                        ),
-                        authorities: new_epoch.authorities.map(Into::into).collect(),
-                        randomness: *new_epoch.randomness,
-                        c: decoded_epoch.c,
-                        allowed_slots: decoded_epoch.allowed_slots,
-                    }
-                };
-
-                meta_set_blob(
-                    &connection,
-                    "babe_finalized_next_epoch",
-                    &encode_babe_epoch_information(From::from(&new_epoch)),
-                )?;
-            }
-
-            // TODO: implement Aura
-
-            if grandpa_authorities_set_id(&connection)?.is_some() {
-                for grandpa_digest_item in block_header.digest.logs().filter_map(|d| match d {
-                    header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
-                    _ => None,
-                }) {
-                    match grandpa_digest_item {
-                        header::GrandpaConsensusLogRef::ScheduledChange(change) => {
-                            assert_eq!(change.delay, 0); // TODO: not implemented if != 0
-
-                            connection
-                                .execute("DELETE FROM grandpa_triggered_authorities")
-                                .unwrap();
-
-                            let mut statement = connection.prepare("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)").unwrap();
-                            for (index, item) in change.next_authorities.enumerate() {
-                                statement = statement
-                                    .bind(1, i64::try_from(index).unwrap())
-                                    .unwrap()
-                                    .bind(2, &item.public_key[..])
-                                    .unwrap()
-                                    .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
-                                    .unwrap();
-                                statement.next().unwrap();
-                                statement = statement.reset().unwrap();
-                            }
-
-                            connection.execute(r#"UPDATE meta SET value_number = value_number + 1 WHERE key = "grandpa_authorities_set_id""#).unwrap();
-                        }
-                        _ => {} // TODO: unimplemented
-                    }
-                }
-            }
         }
 
         // It is possible that the best block has been pruned.
@@ -721,26 +566,7 @@ impl SqliteFullDatabase {
             return Err(FinalizedAccessError::Obsolete);
         }
 
-        let mut statement = connection
-            .prepare(r#"SELECT value FROM finalized_storage_top_trie WHERE key = ?"#)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)
-            .map_err(FinalizedAccessError::Access)?
-            .bind(1, key)
-            .unwrap();
-
-        if !matches!(statement.next().unwrap(), sqlite::State::Row) {
-            return Ok(None);
-        }
-
-        let value = statement
-            .read::<Vec<u8>>(0)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)
-            .map_err(FinalizedAccessError::Access)?;
-        Ok(Some(value))
+        finalized_block_storage_top_trie(&connection, key).map_err(FinalizedAccessError::Access)
     }
 
     /// Returns the key in the storage of the finalized block that immediately follows the key
@@ -799,33 +625,8 @@ impl SqliteFullDatabase {
             return Err(FinalizedAccessError::Obsolete);
         }
 
-        let mut statement = connection
-            .prepare(r#"SELECT key FROM finalized_storage_top_trie WHERE key >= ?"#)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)
-            .map_err(FinalizedAccessError::Access)?
-            .bind(1, prefix)
-            .unwrap();
-
-        let mut out = Vec::new();
-        while matches!(statement.next().unwrap(), sqlite::State::Row) {
-            let key = statement
-                .read::<Vec<u8>>(0)
-                .map_err(InternalError)
-                .map_err(CorruptedError::Internal)
-                .map_err(AccessError::Corrupted)
-                .map_err(FinalizedAccessError::Access)?;
-
-            // TODO: hack because I don't know how to ask sqlite to do that
-            if !(key.starts_with(prefix)) {
-                continue;
-            }
-
-            out.push(key);
-        }
-
-        Ok(out)
+        finalized_block_storage_top_trie_keys(&connection, prefix)
+            .map_err(FinalizedAccessError::Access)
     }
 }
 
@@ -911,7 +712,7 @@ pub enum CorruptedError {
     InvalidBlockHashLen,
     /// Values in the database are all well-formatted, but are incoherent.
     #[display(fmt = "Invalid chain information: {}", _0)]
-    InvalidChainInformation(chain_information::ValidityError),
+    InvalidChainInformation(InvalidChainInformationError),
     /// The parent of a block in the database couldn't be found in that same database.
     BrokenChain,
     /// Missing a key in the `meta` table.
@@ -928,6 +729,16 @@ pub enum CorruptedError {
     InvalidBabeEpochInformation,
     #[display(fmt = "Internal error: {}", _0)]
     Internal(InternalError),
+}
+
+// TODO: document and see if any entry is unused
+#[derive(Debug, derive_more::Display)]
+pub enum InvalidChainInformationError {
+    /// Values in the database are incoherent together.
+    #[display(fmt = "{}", _0)]
+    Validity(chain_information::ValidityError),
+    // TODO: that error enum punches through abstraction layers; find a better solution
+    Build(chain_spec::FromGenesisStorageError),
 }
 
 /// Low-level database error, such as an error while accessing the file system.
@@ -1125,6 +936,61 @@ fn block_header(
     }
 }
 
+fn finalized_block_storage_top_trie(
+    database: &sqlite::Connection,
+    key: &[u8],
+) -> Result<Option<Vec<u8>>, AccessError> {
+    let mut statement = database
+        .prepare(r#"SELECT value FROM finalized_storage_top_trie WHERE key = ?"#)
+        .map_err(InternalError)
+        .map_err(CorruptedError::Internal)
+        .map_err(AccessError::Corrupted)?
+        .bind(1, key)
+        .unwrap();
+
+    if !matches!(statement.next().unwrap(), sqlite::State::Row) {
+        return Ok(None);
+    }
+
+    let value = statement
+        .read::<Vec<u8>>(0)
+        .map_err(InternalError)
+        .map_err(CorruptedError::Internal)
+        .map_err(AccessError::Corrupted)?;
+    Ok(Some(value))
+}
+
+fn finalized_block_storage_top_trie_keys(
+    database: &sqlite::Connection,
+    prefix: &[u8],
+) -> Result<Vec<Vec<u8>>, AccessError> {
+    let mut statement = database
+        .prepare(r#"SELECT key FROM finalized_storage_top_trie WHERE key >= ?"#)
+        .map_err(InternalError)
+        .map_err(CorruptedError::Internal)
+        .map_err(AccessError::Corrupted)?
+        .bind(1, prefix)
+        .unwrap();
+
+    let mut out = Vec::new();
+    while matches!(statement.next().unwrap(), sqlite::State::Row) {
+        let key = statement
+            .read::<Vec<u8>>(0)
+            .map_err(InternalError)
+            .map_err(CorruptedError::Internal)
+            .map_err(AccessError::Corrupted)?;
+
+        // TODO: hack because I don't know how to ask sqlite to do that
+        if !(key.starts_with(prefix)) {
+            continue;
+        }
+
+        out.push(key);
+    }
+
+    Ok(out)
+}
+
 fn flush(database: &sqlite::Connection) -> Result<(), AccessError> {
     database.execute("COMMIT; BEGIN TRANSACTION;").unwrap();
     Ok(())
@@ -1143,206 +1009,4 @@ fn purge_block(database: &sqlite::Connection, hash: &[u8; 32]) -> Result<(), Acc
     statement.next().unwrap();
 
     Ok(())
-}
-
-fn grandpa_authorities_set_id(database: &sqlite::Connection) -> Result<Option<u64>, AccessError> {
-    meta_get_number(database, "grandpa_authorities_set_id")
-}
-
-fn grandpa_finalized_triggered_authorities(
-    database: &sqlite::Connection,
-) -> Result<Vec<header::GrandpaAuthority>, AccessError> {
-    let mut statement = database
-        .prepare(r#"SELECT public_key, weight FROM grandpa_triggered_authorities ORDER BY idx ASC"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-
-    let mut out = Vec::new();
-    while matches!(statement.next().unwrap(), sqlite::State::Row) {
-        let public_key = statement
-            .read::<Vec<u8>>(0)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)?;
-
-        let public_key = <[u8; 32]>::try_from(&public_key[..])
-            .map_err(|_| CorruptedError::InvalidBlockHashLen)
-            .map_err(AccessError::Corrupted)?;
-
-        let weight = statement
-            .read::<i64>(1)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)?;
-
-        let weight = NonZeroU64::new(u64::from_ne_bytes(weight.to_ne_bytes()))
-            .ok_or(CorruptedError::InvalidNumber)
-            .map_err(AccessError::Corrupted)?;
-        out.push(header::GrandpaAuthority { public_key, weight });
-    }
-
-    Ok(out)
-}
-
-fn grandpa_finalized_scheduled_change(
-    database: &sqlite::Connection,
-) -> Result<Option<(u64, Vec<header::GrandpaAuthority>)>, AccessError> {
-    if let Some(height) = meta_get_number(database, "grandpa_scheduled_target")? {
-        // TODO: duplicated from above except different table name
-        let mut statement = database
-            .prepare(
-                r#"SELECT public_key, weight FROM grandpa_scheduled_authorities ORDER BY idx ASC"#,
-            )
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)?;
-
-        let mut out = Vec::new();
-        while matches!(statement.next().unwrap(), sqlite::State::Row) {
-            let public_key = statement
-                .read::<Vec<u8>>(0)
-                .map_err(InternalError)
-                .map_err(CorruptedError::Internal)
-                .map_err(AccessError::Corrupted)?;
-
-            let public_key = <[u8; 32]>::try_from(&public_key[..])
-                .map_err(|_| CorruptedError::InvalidBlockHashLen)
-                .map_err(AccessError::Corrupted)?;
-
-            let weight = statement
-                .read::<i64>(1)
-                .map_err(InternalError)
-                .map_err(CorruptedError::Internal)
-                .map_err(AccessError::Corrupted)?;
-
-            let weight = NonZeroU64::new(u64::from_ne_bytes(weight.to_ne_bytes()))
-                .ok_or(CorruptedError::InvalidNumber)
-                .map_err(AccessError::Corrupted)?;
-            out.push(header::GrandpaAuthority { public_key, weight });
-        }
-
-        Ok(Some((height, out)))
-    } else {
-        Ok(None)
-    }
-}
-
-fn expect_nz_u64(value: u64) -> Result<NonZeroU64, AccessError> {
-    NonZeroU64::new(value)
-        .ok_or(CorruptedError::InvalidNumber)
-        .map_err(AccessError::Corrupted)
-}
-
-fn aura_finalized_authorities(
-    database: &sqlite::Connection,
-) -> Result<Vec<header::AuraAuthority>, AccessError> {
-    let mut statement = database
-        .prepare(r#"SELECT public_key FROM aura_finalized_authorities ORDER BY idx ASC"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-
-    let mut out = Vec::new();
-    while matches!(statement.next().unwrap(), sqlite::State::Row) {
-        let public_key = statement
-            .read::<Vec<u8>>(0)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)?;
-
-        let public_key = <[u8; 32]>::try_from(&public_key[..])
-            .map_err(|_| CorruptedError::InvalidBlockHashLen)
-            .map_err(AccessError::Corrupted)?;
-
-        out.push(header::AuraAuthority { public_key });
-    }
-
-    Ok(out)
-}
-
-fn encode_babe_epoch_information(info: chain_information::BabeEpochInformationRef) -> Vec<u8> {
-    let mut out = Vec::with_capacity(69 + info.authorities.len() * 40);
-    out.extend_from_slice(&info.epoch_index.to_le_bytes());
-    if let Some(start_slot_number) = info.start_slot_number {
-        out.extend_from_slice(&[1]);
-        out.extend_from_slice(&start_slot_number.to_le_bytes());
-    } else {
-        out.extend_from_slice(&[0]);
-    }
-    out.extend_from_slice(util::encode_scale_compact_usize(info.authorities.len()).as_ref());
-    for authority in info.authorities {
-        out.extend_from_slice(authority.public_key);
-        out.extend_from_slice(&authority.weight.to_le_bytes());
-    }
-    out.extend_from_slice(info.randomness);
-    out.extend_from_slice(&info.c.0.to_le_bytes());
-    out.extend_from_slice(&info.c.1.to_le_bytes());
-    out.extend_from_slice(match info.allowed_slots {
-        header::BabeAllowedSlots::PrimarySlots => &[0],
-        header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots => &[1],
-        header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots => &[2],
-    });
-    out
-}
-
-fn decode_babe_epoch_information(
-    value: &[u8],
-) -> Result<chain_information::BabeEpochInformation, AccessError> {
-    let result = nom::combinator::all_consuming(nom::combinator::map(
-        nom::sequence::tuple((
-            nom::number::complete::le_u64,
-            util::nom_option_decode(nom::number::complete::le_u64),
-            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-                nom::multi::many_m_n(
-                    num_elems,
-                    num_elems,
-                    nom::combinator::map(
-                        nom::sequence::tuple((
-                            nom::bytes::complete::take(32u32),
-                            nom::number::complete::le_u64,
-                        )),
-                        move |(public_key, weight)| header::BabeAuthority {
-                            public_key: TryFrom::try_from(public_key).unwrap(),
-                            weight,
-                        },
-                    ),
-                )
-            }),
-            nom::bytes::complete::take(32u32),
-            nom::sequence::tuple((nom::number::complete::le_u64, nom::number::complete::le_u64)),
-            nom::branch::alt((
-                nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
-                    header::BabeAllowedSlots::PrimarySlots
-                }),
-                nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
-                    header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
-                }),
-                nom::combinator::map(nom::bytes::complete::tag(&[2]), |_| {
-                    header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
-                }),
-            )),
-        )),
-        |(epoch_index, start_slot_number, authorities, randomness, c, allowed_slots)| {
-            chain_information::BabeEpochInformation {
-                epoch_index,
-                start_slot_number,
-                authorities,
-                randomness: TryFrom::try_from(randomness).unwrap(),
-                c,
-                allowed_slots,
-            }
-        },
-    ))(value)
-    .map(|(_, v)| v)
-    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ());
-
-    let result = match result {
-        Ok(r) if r.validate().is_ok() => Ok(r),
-        Ok(_) | Err(()) => Err(()),
-    };
-
-    result
-        .map_err(|()| CorruptedError::InvalidBabeEpochInformation)
-        .map_err(AccessError::Corrupted)
 }

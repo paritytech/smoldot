@@ -688,7 +688,7 @@ async fn open_database(
             // no justification.
             let database = empty
                 .initialize(
-                    genesis_chain_information,
+                    (&genesis_chain_information.finalized_block_header).into(),
                     iter::empty(),
                     None,
                     chain_spec
