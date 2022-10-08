@@ -149,6 +149,10 @@ impl RuntimeCall {
     pub fn parameter_vectored(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
         iter::empty::<Vec<u8>>()
     }
+
+    pub fn parameter_vectored_vec(&self) -> Vec<u8> {
+        Vec::new()
+    }
 }
 
 impl Query {

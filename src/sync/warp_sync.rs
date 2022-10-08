@@ -530,23 +530,42 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             ..
         } = &self.phase
         {
-            either::Left(calls.iter().filter(|(_, v)| v.is_none()).map(|(call, _)| {
-                (
-                    *warp_sync_source_id,
-                    &self.sources[warp_sync_source_id.0].user_data,
-                    DesiredRequest::RuntimeCallMerkleProof {
-                        block_hash: header.hash(self.block_number_bytes),
-                        function_name: call.function_name().into(),
-                        parameter_vectored: Cow::Owned(call.parameter_vectored().fold(
-                            Vec::new(),
-                            |mut a, b| {
-                                a.extend_from_slice(b.as_ref());
-                                a
+            either::Left(
+                // TODO: O(n)
+                calls
+                    .iter()
+                    .filter(|(_, v)| v.is_none())
+                    .filter_map(|(call, _)| {
+                        if self.in_progress_requests.iter().any(
+                            |(_, (_, _, detail))| match detail {
+                                RequestDetail::RuntimeCallMerkleProof {
+                                    function_name,
+                                    parameter_vectored,
+                                    ..
+                                } => {
+                                    function_name == call.function_name()
+                                        && parameters_equal(
+                                            parameter_vectored,
+                                            call.parameter_vectored(),
+                                        )
+                                }
+                                _ => false,
                             },
-                        )),
-                    },
-                )
-            }))
+                        ) {
+                            return None;
+                        }
+
+                        Some((
+                            *warp_sync_source_id,
+                            &self.sources[warp_sync_source_id.0].user_data,
+                            DesiredRequest::RuntimeCallMerkleProof {
+                                block_hash: header.hash(self.block_number_bytes),
+                                function_name: call.function_name().into(),
+                                parameter_vectored: Cow::Owned(call.parameter_vectored_vec()),
+                            },
+                        ))
+                    }),
+            )
         } else {
             either::Right(iter::empty())
         };
@@ -801,8 +820,9 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 },
             ) if block_hash == header.hash(self.block_number_bytes) => {
                 for (call, value) in calls.iter_mut() {
-                    // TODO: check parameter_vectored
-                    if function_name == call.function_name() {
+                    if function_name == call.function_name()
+                        && parameters_equal(&parameter_vectored, call.parameter_vectored())
+                    {
                         *value = Some(response.map(|e| e.as_ref().to_vec()).collect());
                         break;
                     }
@@ -1219,4 +1239,23 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             unreachable!()
         }
     }
+}
+
+/// Returns `true` if `a` and `b` are equal.
+fn parameters_equal(mut a: &[u8], b: impl Iterator<Item = impl AsRef<[u8]>>) -> bool {
+    for slice in b {
+        let slice = slice.as_ref();
+
+        if a.len() < slice.len() {
+            return false;
+        }
+
+        if &a[..slice.len()] != slice {
+            return false;
+        }
+
+        a = &a[slice.len()..];
+    }
+
+    true
 }
