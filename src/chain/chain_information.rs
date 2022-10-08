@@ -45,12 +45,6 @@ use core::num::NonZeroU64;
 
 pub mod build;
 
-// TODO: remove these
-pub mod aura_config;
-pub mod babe_fetch_epoch;
-pub mod babe_genesis_config;
-pub mod grandpa_genesis_config;
-
 /// Information about the latest finalized block and state found in its ancestors.
 ///
 /// Similar to [`ChainInformation`], but guaranteed to be coherent.
