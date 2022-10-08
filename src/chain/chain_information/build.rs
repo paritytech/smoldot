@@ -115,8 +115,8 @@ pub enum Error {
     /// The combination of the information retrieved from the runtime doesn't make sense together.
     #[display(fmt = "{}", _0)]
     InvalidChainInformation(chain_information::ValidityError),
-    /// No consensus algorithm or multiple consensus algorithms have been detected.
-    AmbiguousConsensusAlgorithm,
+    /// Multiple consensus algorithms have been detected.
+    MultipleConsensusAlgorithms,
 }
 
 /// Function call to perform or being performed.
@@ -429,7 +429,7 @@ impl ChainInformationBuild {
             ) {
                 (true, true, _) => {
                     return ChainInformationBuild::Finished {
-                        result: Err(Error::AmbiguousConsensusAlgorithm),
+                        result: Err(Error::MultipleConsensusAlgorithms),
                         virtual_machine: inner.virtual_machine.take().unwrap(),
                     }
                 }
