@@ -18,7 +18,7 @@
 //! Build the chain information of a chain given its runtime.
 //!
 //! This module contains the [`ChainInformationBuild`] struct, a state machine that drives the
-//! process of building the chain information of a cetain finalized point of a chain.
+//! process of building the chain information of a certain finalized point of a chain.
 
 use alloc::vec::Vec;
 use core::{fmt, iter, num::NonZeroU64};
@@ -83,7 +83,7 @@ pub enum InProgress {
     NextKey(NextKey),
 }
 
-/// Problem encountered during the chain biulding process.
+/// Problem encountered during the chain building process.
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     /// Error while starting the Wasm virtual machine.
@@ -721,11 +721,11 @@ struct ChainInformationBuildInner {
     /// values temporarily.
     virtual_machine: Option<host::HostVmPrototype>,
 
-    /// If ̀`true`, the runtime supports `AuraApi` functions.
+    /// If `true`, the runtime supports `AuraApi` functions.
     runtime_has_aura: bool,
-    /// If ̀`true`, the runtime supports `BabeApi` functions.
+    /// If `true`, the runtime supports `BabeApi` functions.
     runtime_has_babe: bool,
-    /// If ̀`true`, the runtime supports `GrandpaApi` functions.
+    /// If `true`, the runtime supports `GrandpaApi` functions.
     runtime_has_grandpa: bool,
 
     /// Output of the call to `AuraApi_slot_duration`, if it was already made.

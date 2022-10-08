@@ -300,7 +300,7 @@ enum Phase {
         /// Runtime that was downloaded, or `None` if it was not downloaded yet.
         downloaded_runtime: Option<DownloadedRuntime>,
     },
-    /// All warp sync fragments have been verified, we have dowloaded the runtime of the finalized
+    /// All warp sync fragments have been verified, we have downloaded the runtime of the finalized
     /// block, and we are now downloading and computing the information of the chain.
     ChainInformationDownload {
         /// Finalized block of the chain we warp synced to.
@@ -311,12 +311,12 @@ enum Phase {
         /// it is guaranteed to have access to the storage of the finalized block.
         warp_sync_source_id: SourceId,
         /// Runtime that was downloaded.
-        /// Always `Some`, but wrapped within an `Option` in order to be extractible.
+        /// Always `Some`, but wrapped within an `Option` in order to allow extraction.
         downloaded_runtime: Option<DownloadedRuntime>,
         /// State machine that builds the chain information.
         /// This state machine is built ahead of time but isn't driven until everything has been
         /// downloaded.
-        /// Always `Some`, but wrapped within an `Option` in order to be extractible.
+        /// Always `Some`, but wrapped within an `Option` in order to allow extraction.
         chain_info_builder: Option<chain_information::build::InProgress>,
         /// For each call required by the chain information builder, whether it has been
         /// downloaded yet.
