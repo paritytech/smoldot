@@ -426,12 +426,13 @@ impl ChainInformationBuild {
                 inner.runtime_has_babe,
                 &inner.finalized_block_header,
             ) {
-                (true, true, _) | (false, false, _) => {
+                (true, true, _) => {
                     return ChainInformationBuild::Finished {
                         result: Err(Error::AmbiguousConsensusAlgorithm),
                         virtual_machine: inner.virtual_machine.take().unwrap(),
                     }
                 }
+                (false, false, _) => chain_information::ChainInformationConsensus::Unknown,
                 (false, true, ConfigFinalizedBlockHeader::NonGenesis { .. }) => {
                     chain_information::ChainInformationConsensus::Babe {
                         finalized_block_epoch_information: Some(
