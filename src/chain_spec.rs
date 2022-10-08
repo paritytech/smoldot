@@ -36,18 +36,17 @@
 
 use crate::{
     chain::chain_information::{
-        aura_config, babe_genesis_config, grandpa_genesis_config, BabeEpochInformation,
-        ChainInformation, ChainInformationConsensus, ChainInformationFinality,
+        build, BabeEpochInformation, ChainInformation, ChainInformationConsensus,
+        ChainInformationFinality,
     },
-    executor, header, libp2p, trie,
+    executor, libp2p, trie,
 };
 
 use alloc::{
-    borrow::ToOwned as _,
     string::{String, ToString as _},
     vec::Vec,
 };
-use core::num::NonZeroU64;
+use core::{iter, num::NonZeroU64};
 
 mod light_sync_state;
 mod structs;
@@ -109,91 +108,23 @@ impl ChainSpec {
         })
         .map_err(FromGenesisStorageError::VmInitialization)?;
 
-        let (aura_genesis_config, vm_prototype) =
-            aura_config::AuraConfiguration::from_virtual_machine_prototype(vm_prototype, |k| {
-                genesis_storage.value(k).map(|v| v.to_owned())
-            });
+        let mut chain_information_build = build::Query::new(build::Config {
+            finalized_block_header: build::ConfigFinalizedBlockHeader::Genesis {
+                state_trie_root_hash: {
+                    let state_version = match vm_prototype.runtime_version().decode().state_version
+                    {
+                        Some(0) | None => trie::TrieEntryVersion::V0,
+                        Some(1) => trie::TrieEntryVersion::V1,
+                        Some(_) => return Err(FromGenesisStorageError::UnknownStateVersion),
+                    };
 
-        let (babe_genesis_config, vm_prototype) =
-            babe_genesis_config::BabeGenesisConfiguration::from_virtual_machine_prototype(
-                vm_prototype,
-                |k| genesis_storage.value(k).map(|v| v.to_owned()),
-            );
+                    match self.genesis_storage() {
+                        GenesisStorage::TrieRootHash(hash) => *hash,
+                        GenesisStorage::Items(genesis_storage) => {
+                            let mut calculation = trie::calculate_root::root_merkle_value(None);
 
-        let consensus = match (aura_genesis_config, babe_genesis_config) {
-            (Ok(aura_genesis_config), Err(err)) if err.is_function_not_found() => {
-                ChainInformationConsensus::Aura {
-                    finalized_authorities_list: aura_genesis_config.authorities_list,
-                    slot_duration: aura_genesis_config.slot_duration,
-                }
-            }
-            (Err(err), Ok(babe_genesis_config)) if err.is_function_not_found() => {
-                ChainInformationConsensus::Babe {
-                    slots_per_epoch: babe_genesis_config.slots_per_epoch,
-                    finalized_block_epoch_information: None,
-                    finalized_next_epoch_transition: BabeEpochInformation {
-                        epoch_index: 0,
-                        start_slot_number: None,
-                        authorities: babe_genesis_config.epoch0_information.authorities,
-                        randomness: babe_genesis_config.epoch0_information.randomness,
-                        c: babe_genesis_config.epoch0_configuration.c,
-                        allowed_slots: babe_genesis_config.epoch0_configuration.allowed_slots,
-                    },
-                }
-            }
-            (Err(err1), Err(err2))
-                if err1.is_function_not_found() && err2.is_function_not_found() =>
-            {
-                ChainInformationConsensus::Unknown
-            }
-            (Err(error), _) => {
-                // Note that Babe might have produced an error as well, which is intentionally
-                // ignored here in order to not make the API too complicated.
-                return Err(FromGenesisStorageError::AuraConfigLoad(error));
-            }
-            (_, Err(error)) => {
-                return Err(FromGenesisStorageError::BabeConfigLoad(error));
-            }
-            (Ok(_), Ok(_)) => {
-                return Err(FromGenesisStorageError::MultipleConsensusAlgorithms);
-            }
-        };
-
-        let (finality, vm_prototype) = {
-            let (grandpa_genesis_config, vm_prototype) =
-                grandpa_genesis_config::GrandpaGenesisConfiguration::from_virtual_machine_prototype(
-                    vm_prototype,
-                    |k| genesis_storage.value(k).map(|v| v.to_owned()),
-                );
-
-            let finality = match grandpa_genesis_config {
-                Ok(grandpa_genesis_config) => ChainInformationFinality::Grandpa {
-                    after_finalized_block_authorities_set_id: 0,
-                    finalized_scheduled_change: None,
-                    finalized_triggered_authorities: grandpa_genesis_config.initial_authorities,
-                },
-                Err(error) if error.is_function_not_found() => ChainInformationFinality::Outsourced,
-                Err(error) => return Err(FromGenesisStorageError::GrandpaConfigLoad(error)),
-            };
-
-            (finality, vm_prototype)
-        };
-
-        let state_version = match vm_prototype.runtime_version().decode().state_version {
-            Some(0) | None => trie::TrieEntryVersion::V0,
-            Some(1) => trie::TrieEntryVersion::V1,
-            Some(_) => return Err(FromGenesisStorageError::UnknownStateVersion),
-        };
-
-        let chain_info = ChainInformation {
-            finalized_block_header: {
-                let state_root = match self.genesis_storage() {
-                    GenesisStorage::TrieRootHash(hash) => *hash,
-                    GenesisStorage::Items(genesis_storage) => {
-                        let mut calculation = trie::calculate_root::root_merkle_value(None);
-
-                        loop {
-                            match calculation {
+                            loop {
+                                match calculation {
                                 trie::calculate_root::RootMerkleValueCalculation::Finished {
                                     hash,
                                     ..
@@ -211,23 +142,40 @@ impl ChainSpec {
                                     calculation = val.inject(state_version, value);
                                 }
                             }
+                            }
                         }
                     }
-                };
-
-                header::Header {
-                    parent_hash: [0; 32],
-                    number: 0,
-                    state_root,
-                    extrinsics_root: trie::empty_trie_merkle_value(),
-                    digest: header::DigestRef::empty().into(),
-                }
+                },
             },
-            consensus,
-            finality,
+            runtime: vm_prototype,
+        });
+
+        let (chain_info, vm_prototype) = loop {
+            match chain_information_build {
+                build::Query::InProgress(build::InProgress::StorageGet(get)) => {
+                    let key = get.key_as_vec();
+                    chain_information_build =
+                        get.inject_value(genesis_storage.value(&key).map(iter::once));
+                }
+                build::Query::InProgress(build::InProgress::NextKey(_nk)) => {
+                    todo!() // TODO:
+                }
+                build::Query::Finished {
+                    result: Err(err), ..
+                } => {
+                    return Err(FromGenesisStorageError::BuildChainInformation(err));
+                }
+                build::Query::Finished {
+                    result: Ok(chain_info),
+                    virtual_machine,
+                } => {
+                    break (chain_info, virtual_machine);
+                }
+            }
         };
 
-        Ok((chain_info, vm_prototype))
+        // TODO: ! we return a ChainInformation while we have a ValidChainInformation
+        Ok((chain_info.into(), vm_prototype))
     }
 
     /// Returns the name of the chain. Meant to be displayed to the user.
@@ -531,25 +479,17 @@ enum ParseErrorInner {
 pub enum FromGenesisStorageError {
     /// Runtime couldn't be found in the storage.
     RuntimeNotFound,
+    /// Error while building the chain information.
+    #[display(fmt = "{}", _0)]
+    BuildChainInformation(build::Error),
     /// Failed to decode heap pages from the storage.
     #[display(fmt = "Failed to decode heap pages from the storage: {}", _0)]
     HeapPagesDecode(executor::InvalidHeapPagesError),
     /// Error when initializing the virtual machine.
     #[display(fmt = "Error when initializing the virtual machine: {}", _0)]
     VmInitialization(executor::host::NewErr),
-    /// Error when retrieving the GrandPa configuration.
-    #[display(fmt = "Error when retrieving the GrandPa configuration: {}", _0)]
-    GrandpaConfigLoad(grandpa_genesis_config::FromVmPrototypeError),
-    /// Error when retrieving the Aura algorithm configuration.
-    #[display(fmt = "Error when retrieving the Aura configuration: {}", _0)]
-    AuraConfigLoad(aura_config::FromVmPrototypeError),
-    /// Error when retrieving the Babe algorithm configuration.
-    #[display(fmt = "Error when retrieving the Babe configuration: {}", _0)]
-    BabeConfigLoad(babe_genesis_config::FromVmPrototypeError),
     /// State version in runtime specification is not supported.
     UnknownStateVersion,
-    /// Multiple consensus algorithms have been detected.
-    MultipleConsensusAlgorithms,
     /// Chain specification doesn't contain the list of storage items.
     UnknownStorageItems,
 }
