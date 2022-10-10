@@ -59,8 +59,8 @@
 //! Calling [`Client::json_rpc_request`] queues the request in the internals of the client. Later,
 //! the client will process it.
 //!
-//! Responses are sent back by the client using the [`AddChainConfig::json_rpc_responses`] that
-//! was provided when creating the chain.
+//! Responses can be pulled by calling the [`AddChainSuccess::json_rpc_responses`] that is returned
+//! after a chain has been added.
 //!
 // TODO: talk about the fact that a randomness environment is assumed?
 
@@ -208,8 +208,8 @@ struct PublicApiChain<TChain> {
 
     /// Handle that sends requests to the JSON-RPC service that runs in the background.
     /// Destroying this handle also shuts down the service. `None` iff
-    /// [`AddChainConfig::json_rpc_responses`] was `None` when adding the chain.
-    json_rpc_sender: Option<json_rpc_service::Sender>,
+    /// [`AddChainConfig::disable_json_rpc`] was `true` when adding the chain.
+    json_rpc_frontend: Option<json_rpc_service::Frontend>,
 }
 
 /// Identifies a chain, so that multiple identical chains are de-duplicated.
@@ -804,7 +804,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             user_data: config.user_data,
             key: new_chain_key,
             chain_spec_chain_id,
-            json_rpc_sender: json_rpc_sender.clone(),
+            json_rpc_frontend: json_rpc_sender.clone(),
         });
 
         Ok(AddChainSuccess {
@@ -866,16 +866,16 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     /// queued and will be decoded and processed later.
     ///
     /// Returns an error if the node is overloaded and is capable of processing more JSON-RPC
-    /// requests before some time has passed or the [`AddChainConfig::json_rpc_responses`] channel
-    /// emptied.
+    /// requests before some time has passed or the [`AddChainSuccess::json_rpc_responses`]
+    /// stream is emptied.
     ///
     /// Also returns an error if the request could not be parsed as a valid JSON-RPC request, as
     /// in that situation smoldot is unable to send back a corresponding JSON-RPC error message.
     ///
     /// # Panic
     ///
-    /// Panics if the [`ChainId`] is invalid, or if [`AddChainConfig::json_rpc_responses`] was
-    /// `None` when adding the chain.
+    /// Panics if the [`ChainId`] is invalid, or if [`AddChainConfig::disable_json_rpc`] was
+    /// `true` when adding the chain.
     ///
     pub fn json_rpc_request(
         &mut self,
@@ -894,7 +894,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             .public_api_chains
             .get_mut(chain_id.0)
             .unwrap()
-            .json_rpc_sender
+            .json_rpc_frontend
         {
             Some(ref mut json_rpc_sender) => json_rpc_sender,
             _ => panic!(),

@@ -23,14 +23,14 @@
 //! Creating a JSON-RPC service spawns a background task (through [`StartConfig::tasks_executor`])
 //! dedicated to processing JSON-RPC requests.
 //!
-//! In order to process a JSON-RPC request, call [`Sender::queue_rpc_request`]. Later, the
-//! JSON-RPC service can queue a response or, in the case of subscriptions, a notification on the
-//! channel passed through [`StartConfig::responses_sender`].
+//! In order to process a JSON-RPC request, call [`Frontend::queue_rpc_request`]. Later, the
+//! JSON-RPC service can queue a response or, in the case of subscriptions, a notification. They
+//! can be retrieved by calling [`Frontend::next_json_rpc_response`].
 //!
 //! In the situation where an attacker finds a JSON-RPC request that takes a long time to be
 //! processed and continuously submits this same expensive request over and over again, the queue
 //! of pending requests will start growing and use more and more memory. For this reason, if this
-//! queue grows past [`Config::max_pending_requests`] items, [`Sender::queue_rpc_request`]
+//! queue grows past [`Config::max_pending_requests`] items, [`Frontend::queue_rpc_request`]
 //! will instead return an error.
 //!
 
@@ -100,8 +100,8 @@ pub struct Config {
 /// Returns a handler that allows sending requests, and a [`ServicePrototype`] that must later
 /// be initialized using [`ServicePrototype::start`].
 ///
-/// Destroying the [`Sender`] automatically shuts down the service.
-pub fn service(config: Config) -> (Sender, ServicePrototype) {
+/// Destroying the [`Frontend`] automatically shuts down the service.
+pub fn service(config: Config) -> (Frontend, ServicePrototype) {
     let mut requests_subscriptions =
         requests_subscriptions::RequestsSubscriptions::new(requests_subscriptions::Config {
             max_clients: 1,
@@ -116,7 +116,7 @@ pub fn service(config: Config) -> (Sender, ServicePrototype) {
 
     let (background_abort, background_abort_registration) = future::AbortHandle::new_pair();
 
-    let sender = Sender {
+    let frontend = Frontend {
         log_target: log_target.clone(),
         requests_subscriptions: requests_subscriptions.clone(),
         client_id,
@@ -130,40 +130,40 @@ pub fn service(config: Config) -> (Sender, ServicePrototype) {
         max_subscriptions: config.max_subscriptions,
     };
 
-    (sender, prototype)
+    (frontend, prototype)
 }
 
 /// Handle that allows sending JSON-RPC requests on the service.
 ///
-/// The [`Sender`] can be cloned, in which case the clone will refer to the same JSON-RPC
+/// The [`Frontend`] can be cloned, in which case the clone will refer to the same JSON-RPC
 /// service.
 ///
-/// Destroying all the [`Sender`]s automatically shuts down the associated service.
+/// Destroying all the [`Frontend`]s automatically shuts down the associated service.
 #[derive(Clone)]
-pub struct Sender {
+pub struct Frontend {
     /// State machine holding all the clients, requests, and subscriptions.
     ///
     /// Shared with the [`Background`].
     requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
 
-    /// Identifier of the unique client within the [`Sender::requests_subscriptions`].
+    /// Identifier of the unique client within the [`Frontend::requests_subscriptions`].
     client_id: requests_subscriptions::ClientId,
 
     /// Target to use when emitting logs.
     log_target: String,
 
     /// Handle to abort the background task that holds and processes the
-    /// [`Sender::requests_subscriptions`].
+    /// [`Frontend::requests_subscriptions`].
     background_abort: future::AbortHandle,
 }
 
-impl Sender {
+impl Frontend {
     /// Queues the given JSON-RPC request to be processed in the background.
     ///
     /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
-    /// if the requests take a long time to process or if the [`StartConfig::responses_sender`]
-    /// channel isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build
-    /// the JSON-RPC response to immediately send back to the user.
+    /// if the requests take a long time to process or if [`Frontend::next_json_rpc_response`]
+    /// isn't called often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
+    /// JSON-RPC response to immediately send back to the user.
     pub fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         // If the request isn't even a valid JSON-RPC request, we can't even send back a response.
         // We have no choice but to immediately refuse the request.
@@ -231,7 +231,7 @@ impl Sender {
     }
 }
 
-impl Drop for Sender {
+impl Drop for Frontend {
     fn drop(&mut self) {
         // TODO: no, update
         self.background_abort.abort();
@@ -375,7 +375,7 @@ impl ServicePrototype {
     }
 }
 
-/// Error potentially returned by [`Sender::queue_rpc_request`].
+/// Error potentially returned by [`Frontend::queue_rpc_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum HandleRpcError {
     /// The JSON-RPC service cannot process this request, as it is already too busy.
@@ -383,7 +383,7 @@ pub enum HandleRpcError {
         fmt = "The JSON-RPC service cannot process this request, as it is already too busy."
     )]
     Overloaded {
-        /// Value that was passed as parameter to [`Sender::queue_rpc_request`].
+        /// Value that was passed as parameter to [`Frontend::queue_rpc_request`].
         json_rpc_request: String,
     },
     /// The request isn't a valid JSON-RPC request.
