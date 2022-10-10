@@ -46,6 +46,30 @@ jobs:
     - run: docker push docker.pkg.github.com/paritytech/smoldot/node:main
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+  docs-publish:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          persist-credentials: false
+          path: repo
+          ref: main
+      - uses: actions/setup-node@v3.5.0
+      - run: npm install
+        working-directory: ./repo/bin/wasm-node/javascript
+      - uses: Swatinem/rust-cache@v1
+      - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light
+        working-directory: ./repo
+      - run: npm run doc
+        working-directory: ./repo/bin/wasm-node/javascript
+      - run: mkdir -r ./upload/doc-rust
+      - run: mkdir -r ./upload/doc-javascript
+      - run: mv ./repo/target/doc/* ./upload/doc-rust
+      - run: mv ./repo/bin/wasm-node/javascript/dist/doc/* ./upload/doc-javascript
+      - run: cd upload && ls -alR
+
   npm-publish:
     runs-on: ubuntu-latest
     container:
@@ -118,7 +142,7 @@ jobs:
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [build-push-docker-image, npm-publish, deno-publish]
+    needs: [build-push-docker-image, docs-publish, npm-publish, deno-publish]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success
