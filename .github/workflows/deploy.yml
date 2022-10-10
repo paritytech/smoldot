@@ -55,7 +55,6 @@ jobs:
         with:
           persist-credentials: false
           path: repo
-          ref: main
       - uses: actions/setup-node@v3.5.0
         with:
           node-version: current
