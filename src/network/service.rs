@@ -2306,8 +2306,8 @@ where
     ///
     /// In other words, returns `true` if there exists an established connection non-shutting-down
     /// connection with the given peer.
-    pub fn can_send_requests(&self, peer_id: &PeerId) -> bool {
-        self.inner.can_send_requests(peer_id)
+    pub fn can_start_requests(&self, peer_id: &PeerId) -> bool {
+        self.inner.can_start_requests(peer_id)
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection

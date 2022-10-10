@@ -1387,7 +1387,7 @@ where
     ///
     /// Panics if `protocol_index` isn't a valid index in [`Config::request_response_protocols`].
     /// Panics if there is no open connection with the target or if all connections are shutting
-    /// down. Use [`Peers::can_send_requests`] to check if this is the case.
+    /// down. Use [`Peers::can_start_requests`] to check if this is the case.
     ///
     #[track_caller]
     pub fn start_request(
@@ -1417,7 +1417,7 @@ where
     ///
     /// In other words, returns `true` if there exists an established connection non-shutting-down
     /// connection with the given peer.
-    pub fn can_send_requests(&self, peer_id: &PeerId) -> bool {
+    pub fn can_start_requests(&self, peer_id: &PeerId) -> bool {
         self.established_peer_connections(peer_id).any(|c| {
             let state = self.connection_state(c);
             debug_assert!(state.established); // Guaranteed by `established_peer_connections`.
