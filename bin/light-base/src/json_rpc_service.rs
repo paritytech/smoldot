@@ -120,7 +120,7 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
         log_target: log_target.clone(),
         requests_subscriptions: requests_subscriptions.clone(),
         client_id,
-        background_abort,
+        background_abort: Arc::new(background_abort),
     };
 
     let prototype = ServicePrototype {
@@ -154,7 +154,7 @@ pub struct Frontend {
 
     /// Handle to abort the background task that holds and processes the
     /// [`Frontend::requests_subscriptions`].
-    background_abort: future::AbortHandle,
+    background_abort: Arc<future::AbortHandle>,
 }
 
 impl Frontend {
@@ -233,8 +233,11 @@ impl Frontend {
 
 impl Drop for Frontend {
     fn drop(&mut self) {
-        // TODO: no, update
-        self.background_abort.abort();
+        // Call `abort()` if this was the last instance of the `Arc<AbortHandle>` (and thus the
+        // last instance of `Frontend`).
+        if let Some(background_abort) = Arc::get_mut(&mut self.background_abort) {
+            background_abort.abort();
+        }
     }
 }
 

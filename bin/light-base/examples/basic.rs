@@ -16,7 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use core::iter;
-use futures::prelude::*;
 
 fn main() {
     // The `smoldot_light` library uses the `log` crate to emit logs.
@@ -79,7 +78,7 @@ fn main() {
 
     // `json_rpc_responses` can only be `None` if we had passed `disable_json_rpc: true` in the
     // configuration.
-    let mut json_rpc_responses = json_rpc_responses.unwrap();
+    let json_rpc_responses = json_rpc_responses.unwrap();
 
     // Send a JSON-RPC request to the chain.
     // The example here asks the client to send us notifications whenever the new best block has

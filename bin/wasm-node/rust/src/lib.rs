@@ -222,7 +222,7 @@ fn add_chain(
     // Insert the chain in the client.
     let smoldot_light::AddChainSuccess {
         chain_id: smoldot_chain_id,
-        mut json_rpc_responses,
+        json_rpc_responses,
     } = match client_lock
         .as_mut()
         .unwrap()
@@ -257,6 +257,18 @@ fn add_chain(
             json_rpc_responses_rx: None,
         });
     let outer_chain_id_u32 = u32::try_from(outer_chain_id).unwrap();
+
+    // We wrap the JSON-RPC responses stream into a proper stream in order to be able to guarantee
+    // that `poll_next()` always operates on the same future.
+    let mut json_rpc_responses = json_rpc_responses.map(|json_rpc_responses| {
+        stream::unfold(json_rpc_responses, |json_rpc_responses| async {
+            // The stream ends when we remove the chain. Once the chain is removed, the user
+            // cannot poll the stream anymore. Therefore it is safe to unwrap the result here.
+            let msg = json_rpc_responses.next().await.unwrap();
+            Some((msg, json_rpc_responses))
+        })
+        .boxed()
+    });
 
     // Poll the receiver once in order for `json_rpc_responses_non_empty` to be called the first
     // time a response is received.

@@ -275,12 +275,26 @@ pub struct AddChainSuccess {
     /// Newly-allocated identifier for the chain.
     pub chain_id: ChainId,
 
-    /// Stream of JSON-RPC responses.
+    /// Stream of JSON-RPC responses or notifications.
     ///
     /// Is always `Some` if [`AddChainConfig::disable_json_rpc`] was `false`, and `None` if it was
     /// `true`. In other words, you can unwrap this `Option` if you passed `false`.
-    // TODO: return a custom type instead of a futures::stream::Stream? this would avoid depending on the futures crate to use our API
-    pub json_rpc_responses: Option<stream::BoxStream<'static, String>>,
+    pub json_rpc_responses: Option<JsonRpcResponses>,
+}
+
+/// Stream of JSON-RPC responses or notifications.
+///
+/// See [`AddChainSuccess::json_rpc_responses`].
+pub struct JsonRpcResponses {
+    inner: json_rpc_service::Frontend,
+}
+
+impl JsonRpcResponses {
+    /// Returns the next response or notification, or `None` if the chain has been removed.
+    pub async fn next(&self) -> Option<String> {
+        // TODO: no, return None if the chain has been removed
+        Some(self.inner.next_json_rpc_response().await)
+    }
 }
 
 impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
@@ -753,7 +767,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even
         // if a similar chain already existed.
-        let json_rpc_sender = if !config.disable_json_rpc {
+        let json_rpc_frontend = if !config.disable_json_rpc {
             // Clone `running_chain_init`.
             let mut running_chain_init = match services_init {
                 future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
@@ -761,7 +775,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 future::MaybeDone::Gone => unreachable!(),
             };
 
-            let (sender, service_starter) = json_rpc_service::service(json_rpc_service::Config {
+            let (frontend, service_starter) = json_rpc_service::service(json_rpc_service::Config {
                 log_name: log_name.clone(), // TODO: add a way to differentiate multiple different json-rpc services under the same chain
                 max_pending_requests: NonZeroU32::new(128).unwrap(),
                 max_subscriptions: 1024, // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
@@ -794,7 +808,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
 
             (self.spawn_new_task)("json-rpc-service-init".to_owned(), init_future.boxed());
 
-            Some(sender)
+            Some(frontend)
         } else {
             None
         };
@@ -804,18 +818,12 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             user_data: config.user_data,
             key: new_chain_key,
             chain_spec_chain_id,
-            json_rpc_frontend: json_rpc_sender.clone(),
+            json_rpc_frontend: json_rpc_frontend.clone(),
         });
 
         Ok(AddChainSuccess {
             chain_id: new_chain_id,
-            json_rpc_responses: json_rpc_sender.map(|json_rpc_sender| {
-                stream::unfold(json_rpc_sender, move |json_rpc_sender| async {
-                    let msg = json_rpc_sender.next_json_rpc_response().await;
-                    Some((msg, json_rpc_sender))
-                })
-                .boxed()
-            }),
+            json_rpc_responses: json_rpc_frontend.map(|f| JsonRpcResponses { inner: f }),
         })
     }
 
