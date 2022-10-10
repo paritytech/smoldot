@@ -56,7 +56,7 @@ pub(crate) enum Chain {
         /// Receiver for JSON-RPC responses sent by the client. `None` if JSON-RPC requests are
         /// disabled on this chain.
         /// While this could in principle be a [`smoldot_light::JsonRpcResponses`], we wrap it
-        /// within a [`futures::Stream`] in order to guarantee that the waker that we register
+        /// within a [`futures::Stream`] in order to guarantee that the `waker` that we register
         /// doesn't get cleaned up.
         json_rpc_responses_rx: Option<stream::BoxStream<'static, String>>,
     },
