@@ -70,7 +70,7 @@
 #![cfg(feature = "database-sqlite")]
 #![cfg_attr(docsrs, doc(cfg(feature = "database-sqlite")))]
 
-use crate::{chain::chain_information, chain_spec, executor, header};
+use crate::{chain::chain_information, executor, header};
 
 use core::{fmt, iter};
 use parking_lot::Mutex;
@@ -230,16 +230,88 @@ impl SqliteFullDatabase {
             block_header(&connection, finalized_block_hash, self.block_number_bytes)?
                 .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
 
-        // TODO:
-
-        match chain_information::ValidChainInformation::try_from(chain_info) {
-            Ok(ci) => Ok(ci),
-            Err(err) => Err(FinalizedAccessError::Access(AccessError::Corrupted(
-                CorruptedError::InvalidChainInformation(InvalidChainInformationError::Validity(
-                    err,
+        let runtime = {
+            let code = finalized_block_storage_top_trie(&connection, b":code")?.ok_or(
+                AccessError::Corrupted(CorruptedError::InvalidChainInformation(
+                    InvalidChainInformationError::MissingRuntimeCode,
                 )),
-            ))),
-        }
+            )?;
+            let heap_pages = executor::storage_heap_pages_to_value(
+                finalized_block_storage_top_trie(&connection, b":heappages")?
+                    .as_ref()
+                    .map(|v| &v[..]),
+            )
+            .map_err(|err| {
+                AccessError::Corrupted(CorruptedError::InvalidChainInformation(
+                    InvalidChainInformationError::InvalidHeapPages(err),
+                ))
+            })?;
+
+            executor::host::HostVmPrototype::new(executor::host::Config {
+                module: &code,
+                heap_pages,
+                exec_hint: executor::vm::ExecHint::Oneshot,
+                allow_unresolved_imports: false,
+            })
+            .map_err(|err| {
+                AccessError::Corrupted(CorruptedError::InvalidChainInformation(
+                    InvalidChainInformationError::InvalidRuntime(err),
+                ))
+            })?
+        };
+
+        let mut chain_info_builder = chain_information::build::ChainInformationBuild::new(
+            chain_information::build::Config {
+                runtime,
+                finalized_block_header: if finalized_block_header.number == 0 {
+                    chain_information::build::ConfigFinalizedBlockHeader::Genesis {
+                        state_trie_root_hash: finalized_block_header.state_root,
+                    }
+                } else {
+                    chain_information::build::ConfigFinalizedBlockHeader::NonGenesis {
+                        header: finalized_block_header,
+                        known_finality: None,
+                    }
+                },
+            },
+        );
+
+        // TODO: consider returning the runtime
+
+        let chain_info = loop {
+            match chain_info_builder {
+                chain_information::build::ChainInformationBuild::Finished {
+                    result: Ok(info),
+                    ..
+                } => {
+                    break info;
+                }
+                chain_information::build::ChainInformationBuild::Finished {
+                    result: Err(error),
+                    ..
+                } => {
+                    return Err(FinalizedAccessError::Access(AccessError::Corrupted(
+                        CorruptedError::InvalidChainInformation(
+                            InvalidChainInformationError::Build(error),
+                        ),
+                    )))
+                }
+                chain_information::build::ChainInformationBuild::InProgress(
+                    chain_information::build::InProgress::StorageGet(get),
+                ) => {
+                    let value = finalized_block_storage_top_trie(&connection, &get.key_as_vec())?;
+                    chain_info_builder = get.inject_value(value.map(iter::once));
+                }
+                chain_information::build::ChainInformationBuild::InProgress(
+                    chain_information::build::InProgress::NextKey(_),
+                ) => {
+                    // TODO:
+                    todo!()
+                }
+            }
+        };
+
+        Ok(chain_info)
     }
 
     /// Insert a new block in the database.
@@ -731,14 +803,20 @@ pub enum CorruptedError {
     Internal(InternalError),
 }
 
-// TODO: document and see if any entry is unused
+/// Error in the content of the database.
 #[derive(Debug, derive_more::Display)]
 pub enum InvalidChainInformationError {
-    /// Values in the database are incoherent together.
+    /// Runtime code is missing from the finalized block storage.
+    MissingRuntimeCode,
+    /// Heap pages is in an invalid format.
+    #[display(fmt = "Invalid heap pages format: {}", _0)]
+    InvalidHeapPages(executor::InvalidHeapPagesError),
+    /// Failed to build the runtime.
+    #[display(fmt = "Failed to build runtime: {}", _0)]
+    InvalidRuntime(executor::host::NewErr),
+    /// Error while building the chain information from the runtime.
     #[display(fmt = "{}", _0)]
-    Validity(chain_information::ValidityError),
-    // TODO: that error enum punches through abstraction layers; find a better solution
-    Build(chain_spec::FromGenesisStorageError),
+    Build(chain_information::build::Error),
 }
 
 /// Low-level database error, such as an error while accessing the file system.
