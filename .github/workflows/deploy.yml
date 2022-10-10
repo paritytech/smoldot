@@ -64,7 +64,7 @@ jobs:
       - uses: Swatinem/rust-cache@v1
       - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light
         working-directory: ./repo
-      - run: npm run doc
+      - run: npm run docs
         working-directory: ./repo/bin/wasm-node/javascript
       - run: mkdir -r ./upload/doc-rust
       - run: mkdir -r ./upload/doc-javascript
