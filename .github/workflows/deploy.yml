@@ -70,7 +70,6 @@ jobs:
           mkdir -p ./upload/doc-javascript
           mv ./repo/target/doc/* ./upload/doc-rust
           mv ./repo/bin/wasm-node/javascript/dist/doc/* ./upload/doc-javascript
-      - run: cd upload && ls -alR  # TODO: remove, to debug
       - run: |
           git init
           git config user.email "github-action@users.noreply.github.com"
