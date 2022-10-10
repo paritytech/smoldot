@@ -1409,6 +1409,20 @@ where
         ))
     }
 
+    /// Returns `true` if if it possible to send requests (i.e. through [`Peers::start_request`])
+    /// to the given peer.
+    ///
+    /// If `false` is returned, then starting a request will panic.
+    ///
+    /// In other words, returns `true` if there exists an established connection non-shutting-down
+    /// connection with the given peer.
+    pub fn can_send_requests(&self, peer_id: &PeerId) -> bool {
+        self.established_peer_connections(peer_id)
+            .filter(|c| !self.connection_state(*c).shutting_down)
+            .count()
+            != 0
+    }
+
     /// Responds to a previously-emitted [`Event::RequestIn`].
     ///
     /// # Panic

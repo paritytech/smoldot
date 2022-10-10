@@ -2298,10 +2298,16 @@ where
         None
     }
 
-    /// Returns `true` if there exists an established connection with the given peer.
-    // TODO: revisit this API w.r.t. shutdowns
-    pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
-        self.inner.established_peer_connections(peer_id).count() != 0
+    /// Returns `true` if if it possible to send requests (i.e. through
+    /// [`ChainNetwork::start_grandpa_warp_sync_request`],
+    /// [`ChainNetwork::start_blocks_request`], etc.) to the given peer.
+    ///
+    /// If `false` is returned, starting a request will panic.
+    ///
+    /// In other words, returns `true` if there exists an established connection non-shutting-down
+    /// connection with the given peer.
+    pub fn can_send_requests(&self, peer_id: &PeerId) -> bool {
+        self.inner.can_send_requests(peer_id)
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
