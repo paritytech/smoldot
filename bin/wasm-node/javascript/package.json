@@ -34,7 +34,7 @@
     "build": "node prepare.mjs --release && rimraf ./dist && npm run buildModules",
     "start": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && node demo/demo.mjs",
     "test": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && deno run ./dist/mjs/index-deno.js && ava --timeout=2m --concurrency 2 --no-worker-threads",
-    "doc": "typedoc --basePath ./src --out ./dist/docs --treatWarningsAsErrors ./src/index-browser.ts"
+    "doc": "node prepare.mjs --debug && typedoc --basePath ./src --out ./dist/docs --treatWarningsAsErrors ./src/index-browser.ts"
   },
   "dependencies": {
     "pako": "^2.0.4",
