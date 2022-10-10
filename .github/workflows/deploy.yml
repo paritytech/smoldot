@@ -57,6 +57,8 @@ jobs:
           path: repo
           ref: main
       - uses: actions/setup-node@v3.5.0
+        with:
+          node-version: current
       - run: npm install
         working-directory: ./repo/bin/wasm-node/javascript
       - uses: Swatinem/rust-cache@v1
