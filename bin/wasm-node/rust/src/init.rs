@@ -55,7 +55,7 @@ pub(crate) enum Chain {
         json_rpc_response_info: Box<bindings::JsonRpcResponseInfo>,
         /// Receiver for JSON-RPC responses sent by the client. `None` if JSON-RPC requests are
         /// disabled on this chain.
-        json_rpc_responses_rx: Option<mpsc::Receiver<String>>,
+        json_rpc_responses_rx: Option<stream::BoxStream<'static, String>>,
     },
     Erroneous {
         error: String,

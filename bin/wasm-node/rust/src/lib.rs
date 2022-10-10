@@ -28,7 +28,7 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
-use futures::{channel::mpsc, prelude::*};
+use futures::prelude::*;
 use smoldot_light::HandleRpcError;
 use std::sync::{Arc, Mutex};
 
@@ -219,39 +219,32 @@ fn add_chain(
             .collect()
     };
 
-    // If `json_rpc_running` is non-zero, then we pass a `Sender<String>` to the `add_client`
-    // function. The client will push on this channel the JSON-RPC responses and notifications.
-    let (json_rpc_responses_tx, mut json_rpc_responses) = if json_rpc_running != 0 {
-        let (tx, rx) = mpsc::channel::<String>(64);
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
-    };
-
     // Insert the chain in the client.
-    let smoldot_chain_id =
-        match client_lock
-            .as_mut()
-            .unwrap()
-            .smoldot
-            .add_chain(smoldot_light::AddChainConfig {
-                user_data: (),
-                specification: str::from_utf8(&chain_spec).unwrap(),
-                database_content: str::from_utf8(&database_content).unwrap(),
-                json_rpc_responses: json_rpc_responses_tx,
-                potential_relay_chains: potential_relay_chains.into_iter(),
-            }) {
-            Ok(c) => c,
-            Err(error) => {
-                let chain_id = client_lock
-                    .as_mut()
-                    .unwrap()
-                    .chains
-                    .insert(init::Chain::Erroneous { error });
+    let smoldot_light::AddChainSuccess {
+        chain_id: smoldot_chain_id,
+        mut json_rpc_responses,
+    } = match client_lock
+        .as_mut()
+        .unwrap()
+        .smoldot
+        .add_chain(smoldot_light::AddChainConfig {
+            user_data: (),
+            specification: str::from_utf8(&chain_spec).unwrap(),
+            database_content: str::from_utf8(&database_content).unwrap(),
+            disable_json_rpc: json_rpc_running == 0,
+            potential_relay_chains: potential_relay_chains.into_iter(),
+        }) {
+        Ok(c) => c,
+        Err(error) => {
+            let chain_id = client_lock
+                .as_mut()
+                .unwrap()
+                .chains
+                .insert(init::Chain::Erroneous { error });
 
-                return u32::try_from(chain_id).unwrap();
-            }
-        };
+            return u32::try_from(chain_id).unwrap();
+        }
+    };
 
     let outer_chain_id = client_lock
         .as_mut()

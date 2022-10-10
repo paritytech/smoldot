@@ -82,7 +82,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{cmp, num::NonZeroU32, pin::Pin};
-use futures::{channel::mpsc, prelude::*};
+use futures::prelude::*;
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
@@ -154,12 +154,9 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// be wrong to connect to the "Kusama" created by user A.
     pub potential_relay_chains: TRelays,
 
-    /// Channel to use to send the JSON-RPC responses.
-    ///
-    /// If `None`, then no JSON-RPC service is started for this chain. This saves up a lot of
+    /// If `false`, then no JSON-RPC service is started for this chain. This saves up a lot of
     /// resources, but will cause all JSON-RPC requests targeting this chain to fail.
-    // TODO: don't expose channels from the `futures` library in the public API
-    pub json_rpc_responses: Option<mpsc::Sender<String>>,
+    pub disable_json_rpc: bool,
 }
 
 /// Chain registered in a [`Client`].
@@ -273,6 +270,19 @@ impl<TPlat: platform::Platform> Clone for ChainServices<TPlat> {
     }
 }
 
+/// Returns by [`Client::add_chain`] on success.
+pub struct AddChainSuccess {
+    /// Newly-allocated identifier for the chain.
+    pub chain_id: ChainId,
+
+    /// Stream of JSON-RPC responses.
+    ///
+    /// Is always `Some` if [`AddChainConfig::disable_json_rpc`] was `false`, and `None` if it was
+    /// `true`. In other words, you can unwrap this `Option` if you passed `false`.
+    // TODO: return a custom type instead of a futures::stream::Stream? this would avoid depending on the futures crate to use our API
+    pub json_rpc_responses: Option<stream::BoxStream<'static, String>>,
+}
+
 impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     /// Initializes the smoldot client.
     pub fn new(config: ClientConfig) -> Self {
@@ -291,7 +301,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     pub fn add_chain(
         &mut self,
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
-    ) -> Result<ChainId, String> {
+    ) -> Result<AddChainSuccess, String> {
         // Decode the chain specification.
         let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
             Ok(cs) => cs,
@@ -743,7 +753,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even
         // if a similar chain already existed.
-        let json_rpc_sender = if let Some(json_rpc_responses) = config.json_rpc_responses {
+        let json_rpc_sender = if !config.disable_json_rpc {
             // Clone `running_chain_init`.
             let mut running_chain_init = match services_init {
                 future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
@@ -778,7 +788,6 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                     system_version,
                     genesis_block_hash,
                     genesis_block_state_root,
-                    responses_sender: json_rpc_responses,
                     max_parallel_requests: NonZeroU32::new(24).unwrap(),
                 })
             };
@@ -795,9 +804,19 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             user_data: config.user_data,
             key: new_chain_key,
             chain_spec_chain_id,
-            json_rpc_sender,
+            json_rpc_sender: json_rpc_sender.clone(),
         });
-        Ok(new_chain_id)
+
+        Ok(AddChainSuccess {
+            chain_id: new_chain_id,
+            json_rpc_responses: json_rpc_sender.map(|json_rpc_sender| {
+                stream::unfold(json_rpc_sender, move |json_rpc_sender| async {
+                    let msg = json_rpc_sender.next_json_rpc_response().await;
+                    Some((msg, json_rpc_sender))
+                })
+                .boxed()
+            }),
+        })
     }
 
     /// Removes the chain from smoldot. This instantaneously and silently cancels all on-going

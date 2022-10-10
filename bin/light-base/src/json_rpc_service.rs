@@ -119,7 +119,7 @@ pub fn service(config: Config) -> (Sender, ServicePrototype) {
     let sender = Sender {
         log_target: log_target.clone(),
         requests_subscriptions: requests_subscriptions.clone(),
-        client_id: client_id.clone(),
+        client_id,
         background_abort,
     };
 
@@ -127,7 +127,6 @@ pub fn service(config: Config) -> (Sender, ServicePrototype) {
         background_abort_registration,
         log_target,
         requests_subscriptions,
-        client_id,
         max_subscriptions: config.max_subscriptions,
     };
 
@@ -136,7 +135,11 @@ pub fn service(config: Config) -> (Sender, ServicePrototype) {
 
 /// Handle that allows sending JSON-RPC requests on the service.
 ///
-/// Destroying this [`Sender`] automatically shuts down the associated service.
+/// The [`Sender`] can be cloned, in which case the clone will refer to the same JSON-RPC
+/// service.
+///
+/// Destroying all the [`Sender`]s automatically shuts down the associated service.
+#[derive(Clone)]
 pub struct Sender {
     /// State machine holding all the clients, requests, and subscriptions.
     ///
@@ -161,7 +164,7 @@ impl Sender {
     /// if the requests take a long time to process or if the [`StartConfig::responses_sender`]
     /// channel isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build
     /// the JSON-RPC response to immediately send back to the user.
-    pub fn queue_rpc_request(&mut self, json_rpc_request: String) -> Result<(), HandleRpcError> {
+    pub fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         // If the request isn't even a valid JSON-RPC request, we can't even send back a response.
         // We have no choice but to immediately refuse the request.
         if let Err(error) = json_rpc::parse::parse_call(&json_rpc_request) {
@@ -202,10 +205,35 @@ impl Sender {
             }
         }
     }
+
+    /// Waits until a JSON-RPC response has been generated, then returns it.
+    ///
+    /// If this function is called multiple times in parallel, the order in which the calls are
+    /// responded to is unspecified.
+    pub async fn next_json_rpc_response(&self) -> String {
+        let message = self
+            .requests_subscriptions
+            .next_response(&self.client_id)
+            .await;
+
+        if log::log_enabled!(log::Level::Debug) {
+            log::debug!(
+                target: &self.log_target,
+                "JSON-RPC <= {}",
+                crate::util::truncate_str_iter(
+                    message.chars().filter(|c| !c.is_control()),
+                    100,
+                ).collect::<String>()
+            );
+        }
+
+        message
+    }
 }
 
 impl Drop for Sender {
     fn drop(&mut self) {
+        // TODO: no, update
         self.background_abort.abort();
     }
 }
@@ -216,9 +244,6 @@ pub struct ServicePrototype {
     ///
     /// Shared with the [`Background`].
     requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
-
-    /// Identifier of the unique client within the [`ServicePrototype::requests_subscriptions`].
-    client_id: requests_subscriptions::ClientId,
 
     /// Target to use when emitting logs.
     log_target: String,
@@ -231,9 +256,6 @@ pub struct ServicePrototype {
 
 /// Configuration for a JSON-RPC service.
 pub struct StartConfig<'a, TPlat: Platform> {
-    /// Channel to send the responses to.
-    pub responses_sender: mpsc::Sender<String>,
-
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
@@ -298,7 +320,6 @@ impl ServicePrototype {
         let background = Arc::new(Background {
             log_target: self.log_target.clone(),
             requests_subscriptions: self.requests_subscriptions,
-            client_id: self.client_id,
             new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
             chain_name: config.chain_spec.name().to_owned(),
             chain_ty: config.chain_spec.chain_type().to_owned(),
@@ -340,12 +361,10 @@ impl ServicePrototype {
         // This background task is abortable through the `background_abort` handle.
         (config.tasks_executor)(self.log_target, {
             let max_parallel_requests = config.max_parallel_requests;
-            let responses_sender = config.responses_sender;
-
             future::Abortable::new(
                 async move {
                     background
-                        .run(new_child_tasks_rx, max_parallel_requests, responses_sender)
+                        .run(new_child_tasks_rx, max_parallel_requests)
                         .await
                 },
                 self.background_abort_registration,
@@ -407,9 +426,6 @@ struct Background<TPlat: Platform> {
     /// Only requests that are valid JSON-RPC are insert into the state machine. However, requests
     /// can try to call an unknown method, or have invalid parameters.
     requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
-
-    /// Identifier of the unique client within the [`Background::requests_subscriptions`].
-    client_id: requests_subscriptions::ClientId,
 
     /// Whenever a task is sent on this channel, an executor runs it to completion.
     new_child_tasks_tx: Mutex<mpsc::UnboundedSender<future::BoxFuture<'static, ()>>>,
@@ -549,38 +565,9 @@ impl<TPlat: Platform> Background<TPlat> {
         self: Arc<Self>,
         mut new_child_tasks_rx: mpsc::UnboundedReceiver<future::BoxFuture<'static, ()>>,
         max_parallel_requests: NonZeroU32,
-        mut responses_sender: mpsc::Sender<String>,
     ) -> ! {
         // The body of this function consists in building a list of tasks, then running them.
         let mut tasks = stream::FuturesUnordered::new();
-
-        // One task is dedicated to pulling JSON-RPC responses and notifications from the inner
-        // state machine, and sending them on the `responses_sender`.
-        // Because this task does `responses_sender.send(...).await`, it can go to sleep if the
-        // receiving side of the channel isn't pulled quickly enough. This will in turn
-        // back-pressure the inner state machine.
-        tasks.push({
-            let me = self.clone();
-            async move {
-                loop {
-                    let message = me.requests_subscriptions.next_response(&me.client_id).await;
-
-                    if log::log_enabled!(log::Level::Debug) {
-                        log::debug!(
-                            target: &me.log_target,
-                            "JSON-RPC <= {}",
-                            crate::util::truncate_str_iter(
-                                message.chars().filter(|c| !c.is_control()),
-                                100,
-                            ).collect::<String>()
-                        );
-                    }
-
-                    let _ = responses_sender.send(message).await;
-                }
-            }
-            .boxed()
-        });
 
         // A certain number of tasks (`max_parallel_requests`) are dedicated to pulling requests
         // from the inner state machine and processing them.
