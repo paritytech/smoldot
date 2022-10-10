@@ -261,7 +261,7 @@ fn add_chain(
     // We wrap the JSON-RPC responses stream into a proper stream in order to be able to guarantee
     // that `poll_next()` always operates on the same future.
     let mut json_rpc_responses = json_rpc_responses.map(|json_rpc_responses| {
-        stream::unfold(json_rpc_responses, |json_rpc_responses| async {
+        stream::unfold(json_rpc_responses, |mut json_rpc_responses| async {
             // The stream ends when we remove the chain. Once the chain is removed, the user
             // cannot poll the stream anymore. Therefore it is safe to unwrap the result here.
             let msg = json_rpc_responses.next().await.unwrap();

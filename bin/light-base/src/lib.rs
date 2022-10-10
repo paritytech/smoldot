@@ -82,7 +82,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{cmp, num::NonZeroU32, pin::Pin};
-use futures::prelude::*;
+use futures::{channel::oneshot, prelude::*};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
@@ -210,6 +210,10 @@ struct PublicApiChain<TChain> {
     /// Destroying this handle also shuts down the service. `None` iff
     /// [`AddChainConfig::disable_json_rpc`] was `true` when adding the chain.
     json_rpc_frontend: Option<json_rpc_service::Frontend>,
+
+    /// Dummy channel. Nothing is ever sent on it, but the receiving side is stored in the
+    /// [`JsonRpcResponses`] in order to detect when the chain has been removed.
+    _public_api_chain_destroyed_tx: oneshot::Sender<()>,
 }
 
 /// Identifies a chain, so that multiple identical chains are de-duplicated.
@@ -286,14 +290,35 @@ pub struct AddChainSuccess {
 ///
 /// See [`AddChainSuccess::json_rpc_responses`].
 pub struct JsonRpcResponses {
-    inner: json_rpc_service::Frontend,
+    /// Receiving side for responses.
+    ///
+    /// As long as this object is alive, the JSON-RPC service will continue running. In order
+    /// to prevent that from happening, we destroy it as soon as the
+    /// [`JsonRpcResponses::public_api_chain_destroyed_rx`] is notified of the destruction of
+    /// the sender.
+    inner: Option<json_rpc_service::Frontend>,
+
+    /// Dummy channel. Nothing is ever sent on it, but the sending side is stored in the
+    /// [`PublicApiChain`] in order to detect when the chain has been removed.
+    public_api_chain_destroyed_rx: oneshot::Receiver<()>,
 }
 
 impl JsonRpcResponses {
     /// Returns the next response or notification, or `None` if the chain has been removed.
-    pub async fn next(&self) -> Option<String> {
-        // TODO: no, return None if the chain has been removed
-        Some(self.inner.next_json_rpc_response().await)
+    pub async fn next(&mut self) -> Option<String> {
+        if let Some(frontend) = self.inner.as_mut() {
+            let response_fut = frontend.next_json_rpc_response();
+            futures::pin_mut!(response_fut);
+            match future::select(response_fut, &mut self.public_api_chain_destroyed_rx).await {
+                future::Either::Left((response, _)) => return Some(response),
+                future::Either::Right((_result, _)) => {
+                    debug_assert!(_result.is_err());
+                }
+            }
+        }
+
+        self.inner = None;
+        None
     }
 }
 
@@ -814,16 +839,20 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
         };
 
         // Success!
+        let (public_api_chain_destroyed_tx, public_api_chain_destroyed_rx) = oneshot::channel();
         public_api_chains_entry.insert(PublicApiChain {
             user_data: config.user_data,
             key: new_chain_key,
             chain_spec_chain_id,
             json_rpc_frontend: json_rpc_frontend.clone(),
+            _public_api_chain_destroyed_tx: public_api_chain_destroyed_tx,
         });
-
         Ok(AddChainSuccess {
             chain_id: new_chain_id,
-            json_rpc_responses: json_rpc_frontend.map(|f| JsonRpcResponses { inner: f }),
+            json_rpc_responses: json_rpc_frontend.map(|f| JsonRpcResponses {
+                inner: Some(f),
+                public_api_chain_destroyed_rx,
+            }),
         })
     }
 
@@ -836,6 +865,9 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     /// While from the API perspective it will look like the chain no longer exists, calling this
     /// function will not actually immediately disconnect from the given chain if it is still used
     /// as the relay chain of a parachain.
+    ///
+    /// If the [`JsonRpcResponses`] object that was returned when adding the chain is still alive,
+    /// [`JsonRpcResponses::next`] will now return `None`.
     #[must_use]
     pub fn remove_chain(&mut self, id: ChainId) -> TChain {
         let removed_chain = self.public_api_chains.remove(id.0);
