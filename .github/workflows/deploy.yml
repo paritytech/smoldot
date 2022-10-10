@@ -73,11 +73,12 @@ jobs:
       - run: cd upload && ls -alR  # TODO: remove, to debug
       - run: |
           git init
-          git checkout -b gh-pages
-          git add --all
           git config user.email "github-action@users.noreply.github.com"
           git config user.name "GitHub Action"
           git config user.password ${{ secrets.GITHUB_TOKEN }}
+          git checkout -b gh-pages
+          git add --all
+          git commit -m "Documentation"
           git remote add origin ${{ github.repositoryUrl }}
         working-directory: ./upload
       - run: git push -f origin gh-pages:gh-pages
