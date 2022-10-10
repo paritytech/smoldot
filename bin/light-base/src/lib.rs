@@ -661,7 +661,11 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                             log::warn!(
                                 target: "smoldot",
                                 "Chain specification of {} contains a list of bad blocks. Bad \
-                                blocks are not implemented in the light client.", log_name
+                                blocks are not implemented in the light client. An appropriate \
+                                way to silence this warning is to remove the bad blocks from the
+                                chain specification, which can safely be done if the chain \
+                                specification contains a checkpoint and that the bad blocks have \
+                                a block number inferior to this checkpoint.", log_name
                             );
                         }
 
