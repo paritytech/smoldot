@@ -103,8 +103,8 @@ export interface Chain {
    * Be aware that some requests will cause notifications to be sent back using the same callback
    * as the responses.
    *
-   * A {MalformedJsonRpcError} is thrown if the request isn't a valid JSON-RPC request or if the
-   * request is unreasonably large (64 MiB at the time of writing of this comment).
+   * A {@link MalformedJsonRpcError} is thrown if the request isn't a valid JSON-RPC request or
+   * if the request is unreasonably large (64 MiB at the time of writing of this comment).
    * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, a
    * error response is properly generated.
    *
@@ -132,7 +132,7 @@ export interface Chain {
    * Each chain contains a buffer of the responses waiting to be sent out. Calling this function
    * pulls one element from the buffer. If this function is called at a slower rate than responses
    * are generated, then buffer will eventually become full, at which point calling
-   * {Chain.sendJsonRpc} will throw an exception.
+   * {@link Chain.sendJsonRpc} will throw an exception.
    *
    * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
    * @throws {JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.
@@ -329,8 +329,8 @@ export interface AddChainOptions {
    *
    * This option can be used in order to save up some resources.
    *
-   * It will be illegal to call {Chain.sendJsonRpc} and {Chain.nextJsonRpcResponse} on this
-   * chain.
+   * It will be illegal to call {@link Chain.sendJsonRpc} and {@link Chain.nextJsonRpcResponse} on
+   * this chain.
    */
   disableJsonRpc?: boolean,
 }
