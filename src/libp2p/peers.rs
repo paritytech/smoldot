@@ -1418,10 +1418,11 @@ where
     /// In other words, returns `true` if there exists an established connection non-shutting-down
     /// connection with the given peer.
     pub fn can_send_requests(&self, peer_id: &PeerId) -> bool {
-        self.established_peer_connections(peer_id)
-            .filter(|c| !self.connection_state(*c).shutting_down)
-            .count()
-            != 0
+        self.established_peer_connections(peer_id).any(|c| {
+            let state = self.connection_state(c);
+            debug_assert!(state.established); // Guaranteed by `established_peer_connections`.
+            !state.shutting_down
+        })
     }
 
     /// Responds to a previously-emitted [`Event::RequestIn`].
