@@ -1386,7 +1386,8 @@ where
     /// # Panic
     ///
     /// Panics if `protocol_index` isn't a valid index in [`Config::request_response_protocols`].
-    /// Panics if there is no open connection with the target.
+    /// Panics if there is no open connection with the target or if all connections are shutting
+    /// down. Use [`Peers::can_send_requests`] to check if this is the case.
     ///
     #[track_caller]
     pub fn start_request(
