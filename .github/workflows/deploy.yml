@@ -64,13 +64,15 @@ jobs:
       - uses: Swatinem/rust-cache@v1
       - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light
         working-directory: ./repo
+      - run: npm run  # TODO: remove, to debug
+        working-directory: ./repo/bin/wasm-node/javascript
       - run: npm run doc
         working-directory: ./repo/bin/wasm-node/javascript
       - run: mkdir -r ./upload/doc-rust
       - run: mkdir -r ./upload/doc-javascript
       - run: mv ./repo/target/doc/* ./upload/doc-rust
       - run: mv ./repo/bin/wasm-node/javascript/dist/doc/* ./upload/doc-javascript
-      - run: cd upload && ls -alR
+      - run: cd upload && ls -alR  # TODO: remove, to debug
 
   npm-publish:
     runs-on: ubuntu-latest
