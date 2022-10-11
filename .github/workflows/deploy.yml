@@ -70,15 +70,15 @@ jobs:
           mv ./repo/target/doc/* ./upload/doc-rust
           mv ./repo/bin/wasm-node/javascript/dist/doc/* ./upload/doc-javascript
       - run: |
-          git init
           git config user.email "github-action@users.noreply.github.com"
           git config user.name "GitHub Action"
           git config user.password ${{ secrets.GITHUB_TOKEN }}
-          git checkout -b gh-pages
+          git checkout --orphan gh-pages
+          git reset --hard
+          mv ../upload .
           git add --all
           git commit -m "Documentation"
-          git remote add origin ${{ github.repositoryUrl }}
-        working-directory: ./upload
+        working-directory: ./repo
       - run: git push -f origin gh-pages:gh-pages
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         working-directory: ./upload
