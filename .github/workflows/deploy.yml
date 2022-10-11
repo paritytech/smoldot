@@ -82,7 +82,7 @@ jobs:
         working-directory: ./repo
       - run: git push -f origin gh-pages:gh-pages
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        working-directory: ./upload
+        working-directory: ./repo
 
   npm-publish:
     runs-on: ubuntu-latest
