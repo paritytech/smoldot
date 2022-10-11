@@ -74,6 +74,7 @@ jobs:
           git config user.name "GitHub Action"
           git config user.password ${{ secrets.GITHUB_TOKEN }}
           git checkout --orphan gh-pages
+          git rm -rf .
           git clean -d --force
           mv ../upload/* .
           git add --all
