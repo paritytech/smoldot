@@ -145,7 +145,7 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
-    - run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
+    - run: RUSTDOCFLAGS=-Dwarnings cargo doc --verbose --workspace --all-features --no-deps --document-private-items
 
   fmt:
     runs-on: ubuntu-latest
