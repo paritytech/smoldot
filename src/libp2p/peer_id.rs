@@ -38,7 +38,7 @@ impl PublicKey {
     /// As indicated in the libp2p specification, the encoding is done deterministically despite
     /// the fact that the Protobuf format isn't deterministic.
     ///
-    /// See https://github.com/libp2p/specs/blob/master/peer-ids/peer-ids.md#keys.
+    /// See <https://github.com/libp2p/specs/blob/master/peer-ids/peer-ids.md#keys>.
     pub fn to_protobuf_encoding(&self) -> Vec<u8> {
         match self {
             PublicKey::Ed25519(key) => {
