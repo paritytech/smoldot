@@ -1151,11 +1151,11 @@ async fn blocks_request_response(
                     let decoded = header::decode(&header, block_number_bytes).unwrap();
                     match config.direction {
                         protocol::BlocksRequestDirection::Ascending => {
-                            protocol::BlocksRequestConfigStart::Hash(*decoded.parent_hash)
-                        }
-                        protocol::BlocksRequestDirection::Descending => {
                             // TODO: right now, since we don't necessarily pick the best chain in `block_hash_by_number`, it is possible that the next block doesn't have the current block as parent
                             protocol::BlocksRequestConfigStart::Number(decoded.number + 1)
+                        }
+                        protocol::BlocksRequestDirection::Descending => {
+                            protocol::BlocksRequestConfigStart::Hash(*decoded.parent_hash)
                         }
                     }
                 };

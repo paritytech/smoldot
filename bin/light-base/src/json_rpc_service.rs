@@ -356,7 +356,7 @@ impl ServicePrototype {
     }
 }
 
-/// Error potentially returned by [`Sender::queue_rpc_request`].
+/// Error potentially returned when queuing a JSON-RPC request.
 #[derive(Debug, derive_more::Display)]
 pub enum HandleRpcError {
     /// The JSON-RPC service cannot process this request, as it is already too busy.
@@ -364,7 +364,7 @@ pub enum HandleRpcError {
         fmt = "The JSON-RPC service cannot process this request, as it is already too busy."
     )]
     Overloaded {
-        /// Value that was passed as parameter to [`Sender::queue_rpc_request`].
+        /// Request that was being queued.
         json_rpc_request: String,
     },
     /// The request isn't a valid JSON-RPC request.

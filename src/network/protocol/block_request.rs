@@ -38,9 +38,13 @@ pub struct BlocksRequestConfig {
 /// number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlocksRequestDirection {
-    /// Blocks should be returned in ascending number, starting from the requested one.
+    /// Blocks should be returned in ascending number, starting from the requested one. In other
+    /// words, amongst all the blocks in the response, the requested block must be the one with
+    /// the lowest block number, and all the other blocks are its descendants.
     Ascending,
-    /// Blocks should be returned in descending number, starting from the requested one.
+    /// Blocks should be returned in descending number, starting from the requested one. In other
+    /// words, amongst all the blocks in the response, the requested block must be the one with
+    /// the highest block number, and all the other blocks are its ancestors.
     Descending,
 }
 

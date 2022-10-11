@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The warp syncing algorithm no longer downloads the runtime code and the runtime call proofs at the same time. Instead, it now first downloads the runtime, then checks the list of available functions, then downloads runtime call proofs. While this slightly degrades the warp syncing time by adding a round-trip time, it is more correct to first analyze the runtime instead of blindly assuming that it supports a certain set of functions. ([#2845](https://github.com/paritytech/smoldot/pull/2845))
+
 ### Fixed
 
 - Fix smoldot trying to send requests to peers whose connection is shutting down, leading to a panic. ([#2847](https://github.com/paritytech/smoldot/pull/2847))
