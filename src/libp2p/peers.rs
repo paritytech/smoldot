@@ -59,7 +59,7 @@ use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
     ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
-    CoordinatorToConnection, InboundError, MultiStreamConnectionTask, MultiStreamHandshakeKind,
+    CoordinatorToConnection, MultiStreamConnectionTask, MultiStreamHandshakeKind,
     NotificationProtocolConfig, NotificationsInClosedErr, NotificationsOutErr, ReadWrite,
     RequestError, SingleStreamConnectionTask, SingleStreamHandshakeKind, SubstreamId,
 };
@@ -198,6 +198,10 @@ where
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
         Peers {
+            inner_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
+                config.notification_protocols.len() * config.peers_capacity,
+                Default::default(),
+            ),
             inner: collection::Network::new(collection::Config {
                 capacity: config.connections_capacity,
                 noise_key: config.noise_key,
@@ -218,10 +222,6 @@ where
                 config.peers_capacity,
                 Default::default(),
             ),
-            inner_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                0,
-                Default::default(),
-            ), // TODO: capacity?
             peers_notifications_out: BTreeMap::new(),
             peers_notifications_in: BTreeSet::new(),
         }
@@ -549,7 +549,7 @@ where
                     return Some(Event::InboundError {
                         peer_id,
                         connection_id,
-                        error,
+                        error: InboundError::Connection(error),
                     });
                 }
 
@@ -688,9 +688,14 @@ where
                         .peers_notifications_in
                         .insert((peer_index, notifications_protocol_index))
                     {
-                        // TODO: notify of the problem to the API user
                         self.inner.reject_in_notifications(substream_id);
-                        continue;
+                        return Some(Event::InboundError {
+                            connection_id,
+                            peer_id: self.peers[peer_index].peer_id.clone(),
+                            error: InboundError::DuplicateNotificationsSubstream {
+                                notifications_protocol_index,
+                            },
+                        });
                     }
 
                     let _was_in = self
@@ -1819,6 +1824,19 @@ pub enum ShutdownCause {
     Connection(collection::ShutdownCause),
     /// Remote hasn't responded in time to a ping.
     OutPingTimeout,
+}
+
+/// Error that can happen while processing an inbound substream.
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum InboundError {
+    /// Error at the connection level.
+    Connection(collection::InboundError),
+    /// Refused a notifications substream because we already have an existing substream of that
+    /// protocol.
+    DuplicateNotificationsSubstream {
+        /// Notifications protocol the substream is about.
+        notifications_protocol_index: usize,
+    },
 }
 
 /// See [`Peers::set_peer_notifications_out_desired`].
