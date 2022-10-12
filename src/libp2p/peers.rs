@@ -198,6 +198,10 @@ where
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
         Peers {
+            inner_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
+                config.notification_protocols.len() * config.peers_capacity,
+                Default::default(),
+            ),
             inner: collection::Network::new(collection::Config {
                 capacity: config.connections_capacity,
                 noise_key: config.noise_key,
@@ -218,10 +222,6 @@ where
                 config.peers_capacity,
                 Default::default(),
             ),
-            inner_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                0,
-                Default::default(),
-            ), // TODO: capacity?
             peers_notifications_out: BTreeMap::new(),
             peers_notifications_in: BTreeSet::new(),
         }
