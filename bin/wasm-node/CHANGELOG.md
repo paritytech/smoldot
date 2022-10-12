@@ -2,11 +2,13 @@
 
 ## Unreleased
 
+## 0.7.2 - 2022-10-12
+
 ### Changed
 
 - The warp syncing algorithm no longer downloads the runtime code and the runtime call proofs at the same time. Instead, it now first downloads the runtime, then checks the list of available functions, then downloads runtime call proofs. While this slightly degrades the warp syncing time by adding a round-trip time, it is more correct to first analyze the runtime instead of blindly assuming that it supports a certain set of functions. ([#2845](https://github.com/paritytech/smoldot/pull/2845))
 
-### Fixed
+### Fixed
 
 - Fix smoldot trying to send requests to peers whose connection is shutting down, leading to a panic. ([#2847](https://github.com/paritytech/smoldot/pull/2847))
 - Fix the responses to libp2p identify requests being wrongly empty. ([#2840](https://github.com/paritytech/smoldot/pull/2840))
@@ -29,7 +31,7 @@
 
 - Removed `Chain.databaseContent` function. Use the `chainHead_unstable_finalizedDatabase` JSON-RPC function to obtain the database content instead. ([#2791](https://github.com/paritytech/smoldot/pull/2791))
 
-### Changed
+### Changed
 
 - `Chain.sendJsonRpc` now throws a `MalformedJsonRpcError` exception if the JSON-RPC request is too large or malformed, or a `QueueFullError` if the queue of JSON-RPC requests of the chain is full. ([#2778](https://github.com/paritytech/smoldot/pull/2778))
 - Removed `AddChainOptions.jsonRpcCallback`. Use the new `Chain.nextJsonRpcResponse` asynchronous function to pull JSON-RPC responses instead of registering a callback. A `AddChainOptions.disableJsonRpc` flag is now supported in order to bring the same effects as not passing any `jsonRpcCallback`. ([#2778](https://github.com/paritytech/smoldot/pull/2778))
