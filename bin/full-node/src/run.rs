@@ -152,21 +152,47 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         .create()
         .unwrap();
 
-    let (database, database_existed) = open_database(
-        &chain_spec,
-        &genesis_chain_information,
-        cli_options.tmp,
-        matches!(cli_output, cli::Output::Informant),
-    )
-    .await;
-    let database = Arc::new(database_thread::DatabaseThread::from(database));
+    // Directory where we will store everything on the disk, such as the database, secret keys,
+    // etc.
+    let base_storage_directory =
+        if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
+            Some(base.data_dir().to_owned())
+        } else {
+            tracing::warn!(
+                "Failed to fetch $HOME directory. Falling back to storing everything in memory, \
+                meaning that everything will be lost when the node stops. If this is intended, \
+                please make this explicit by passing the `--tmp` flag instead."
+            );
+            None
+        };
+
+    let (database, database_existed) = {
+        // Directory supposed to contain the database.
+        let db_path = base_storage_directory
+            .as_ref()
+            .map(|d| d.join(chain_spec.id()).join("database").to_owned());
+
+        let (db, existed) = open_database(
+            &chain_spec,
+            &genesis_chain_information,
+            db_path,
+            matches!(cli_output, cli::Output::Informant),
+        )
+        .await;
+
+        (Arc::new(database_thread::DatabaseThread::from(db)), existed)
+    };
 
     let relay_chain_database = if let Some(relay_chain_spec) = &relay_chain_spec {
+        let relay_db_path = base_storage_directory
+            .as_ref()
+            .map(|d| d.join(relay_chain_spec.id()).join("database").to_owned());
+
         Some(Arc::new(database_thread::DatabaseThread::from(
             open_database(
                 relay_chain_spec,
                 relay_genesis_chain_information.as_ref().unwrap(),
-                cli_options.tmp,
+                relay_db_path,
                 matches!(cli_output, cli::Output::Informant),
             )
             .await
@@ -207,10 +233,33 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         smoldot::metadata::decode(&metadata).unwrap()
     );*/
 
+    // Determine which networking key to use.
+    //
+    // This is either passed as a CLI option, loaded from disk, or generated randomly.
     let noise_key = if let Some(node_key) = cli_options.libp2p_key {
         connection::NoiseKey::new(&node_key)
+    } else if let Some(dir) = base_storage_directory {
+        let path = dir.join("libp2p_ed25519_secret_key.secret");
+        let noise_key = if path.exists() {
+            let file_content =
+                fs::read_to_string(&path).expect("failed to read libp2p secret key file content");
+            let hex_decoded =
+                hex::decode(file_content).expect("invalid libp2p secret key file content");
+            let actual_key =
+                <[u8; 32]>::try_from(hex_decoded).expect("invalid libp2p secret key file content");
+            connection::NoiseKey::new(&actual_key)
+        } else {
+            let actual_key: [u8; 32] = rand::random();
+            fs::write(&path, hex::encode(actual_key))
+                .expect("failed to write libp2p secret key file");
+            connection::NoiseKey::new(&actual_key)
+        };
+        // On Unix platforms, set the permission as 0o400 (only reading and by owner is permitted).
+        // TODO: do something equivalent on Windows
+        #[cfg(unix)]
+        let _ = fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o400));
+        noise_key
     } else {
-        // TODO: load from disk or something instead
         connection::NoiseKey::new(&rand::random())
     };
 
@@ -595,7 +644,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
 /// Opens the database from the file system, or create a new database if none is found.
 ///
-/// If `tmp` is `true`, open the database in memory instead.
+/// If `db_path` is `None`, open the database in memory instead.
 ///
 /// The returned boolean is `true` if the database existed before.
 ///
@@ -608,25 +657,9 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
     genesis_chain_information: &chain::chain_information::ChainInformation,
-    tmp: bool,
+    db_path: Option<PathBuf>,
     show_progress: bool,
 ) -> (full_sqlite::SqliteFullDatabase, bool) {
-    // Directory supposed to contain the database.
-    let db_path = if !tmp {
-        if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
-            Some(base.data_dir().join(chain_spec.id()).join("database"))
-        } else {
-            tracing::warn!(
-                "Failed to fetch $HOME directory. Falling back to a temporary database. \
-                    If this is intended, please make this explicit by passing the `--tmp` flag \
-                    instead."
-            );
-            None
-        }
-    } else {
-        None
-    };
-
     // The `unwrap()` here can panic for example in case of access denied.
     match background_open_database(
         db_path.clone(),

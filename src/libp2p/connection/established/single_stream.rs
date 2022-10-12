@@ -57,9 +57,10 @@ use super::{
     SubstreamId, SubstreamIdInner,
 };
 
-use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::{
     fmt, iter,
+    num::NonZeroUsize,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -79,16 +80,21 @@ pub struct SingleStream<TNow, TRqUd, TNotifUd> {
 
 /// Extra fields. Segregated in order to solve borrowing questions.
 struct Inner<TNow, TRqUd, TNotifUd> {
-    /// Events that should be yielded from [`SingleStream::read_write`] as soon as possible.
-    // TODO: remove this field; it is necessary because of limitations in the yamux implementation
-    pending_events: VecDeque<Event<TRqUd, TNotifUd>>,
-
     /// State of the various substreams of the connection.
     /// Consists in a collection of substreams, each of which holding a [`substream::Substream`]
     /// object, or `None` if the substream has been reset.
     /// Also includes, for each substream, a collection of buffers whose data is to be written
     /// out.
     yamux: yamux::Yamux<Option<substream::Substream<TNow, TRqUd, TNotifUd>>>,
+
+    /// If `Some`, contains the substream and number of bytes that [`Inner::yamux`] has already
+    /// processed but haven't been consumed from the buffer of decoded data in
+    /// [`SingleStream::encryption`] yet.
+    ///
+    /// After Yamux indicates that it has just processed a frame of data belonging to a certain
+    /// substream, we set this value to `Some` but leave the data in the buffer. This way, we can
+    /// process the data at a slower pace than Yamux.
+    current_data_frame: Option<(yamux::SubstreamId, NonZeroUsize)>,
 
     /// Substream in [`Inner::yamux`] used for outgoing pings.
     ///
@@ -108,6 +114,8 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     /// unnecessary code being included in the binary and reduces the binary size.
     ping_payload_randomness: rand_chacha::ChaCha20Rng,
 
+    /// See [`Config::max_inbound_substreams`].
+    max_inbound_substreams: usize,
     /// See [`Config::request_protocols`].
     request_protocols: Vec<ConfigRequestResponse>,
     /// See [`Config::notifications_protocols`].
@@ -143,7 +151,6 @@ where
     /// written are both 0, and the returned [`Event`] is `None`.
     ///
     /// If an error is returned, the socket should be entirely shut down.
-    // TODO: in case of error, we're supposed to first send a yamux goaway frame
     // TODO: consider exposing an API more similar to the one of substream::Substream::read_write?
     pub fn read_write(
         mut self,
@@ -155,47 +162,131 @@ where
         ),
         Error,
     > {
-        if let Some(event) = self.inner.pending_events.pop_front() {
-            return Ok((self, Some(event)));
-        }
-
         // First, update all the internal substreams.
         // This doesn't read data from `read_write`, but can potential write out data.
+        for substream_id in self
+            .inner
+            .yamux
+            .user_datas()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
         {
-            let read_bytes_before = read_write.read_bytes;
-            let out = self.update_all(read_write);
-            debug_assert_eq!(read_bytes_before, read_write.read_bytes);
-            if let Some(event) = out {
+            let (_num_read, event) =
+                Self::process_substream(&mut self.inner, substream_id, read_write, &[]);
+            debug_assert_eq!(_num_read, 0);
+            if let Some(event) = event {
                 return Ok((self, Some(event)));
             }
         }
 
-        // Start any outgoing peer if necessary.
+        // Start any outgoing ping if necessary.
         if read_write.now >= self.inner.next_ping {
-            self.queue_ping(read_write.now.clone() + self.inner.ping_timeout);
             self.inner.next_ping = read_write.now.clone() + self.inner.ping_interval;
+
+            // It might be that the remote has reset the ping substream, in which case the out ping
+            // substream no longer exists and we immediately consider the ping as failed.
+            if let Some(substream) = self
+                .inner
+                .yamux
+                .substream_by_id_mut(self.inner.outgoing_pings)
+            {
+                let payload = self
+                    .inner
+                    .ping_payload_randomness
+                    .sample(rand::distributions::Standard);
+                substream
+                    .into_user_data()
+                    .as_mut()
+                    .unwrap()
+                    .queue_ping(&payload, read_write.now.clone() + self.inner.ping_timeout);
+            } else {
+                return Ok((self, Some(Event::PingOutFailed)));
+            }
         }
         read_write.wake_up_after(&self.inner.next_ping);
 
-        // Decoding the incoming data.
+        // Processing incoming data might be blocked on emitting data or on removing dead
+        // substreams, and processing incoming data might lead to more data to emit. The easiest
+        // way to implement this is a single loop that does everything.
         loop {
-            if let Some(event) = self.inner.pending_events.pop_front() {
-                return Ok((self, Some(event)));
+            // If we have both sent and received a GoAway frame, that means that no new substream
+            // can be opened. If in addition to this there is no substream in the connection,
+            // then we can safely close it as a normal termination.
+            // Note that, because we have no guarantee that the remote has received our GoAway
+            // frame yet, it is possible to receive requests for new substreams even after having
+            // sent the GoAway. Because we close the writing side, it is not possible to indicate
+            // to the remote that these new substreams are denied. However, this is not a problem
+            // as the remote interprets our GoAway frame as an automatic refusal of all its pending
+            // substream requests.
+            if self.inner.yamux.is_empty()
+                && self.inner.yamux.goaway_sent()
+                && self.inner.yamux.received_goaway().is_some()
+            {
+                read_write.close_write_if_empty();
+            }
+
+            // Any meaningful activity within this loop can set this value to `true`. If this
+            // value is still `false` at the end of the loop, we return from the function due to
+            // having nothing more to do.
+            let mut must_continue_looping = false;
+
+            // If `self.inner.current_data_frame` is `Some`, that means that yamux has already
+            // processed some of the data in the buffer of decrypted data and has determined that
+            // it was data belonging to a certain substream. We now pass over this data again,
+            // but this time update the state machine specific to that substream.
+            if let Some((substream_id, bytes_remaining)) = self.inner.current_data_frame {
+                // It might be that the substream has been closed in `process_substream`.
+                if self.inner.yamux.substream_by_id_mut(substream_id).is_none() {
+                    self.encryption.consume_inbound_data(bytes_remaining.get());
+                    self.inner.current_data_frame = None;
+                    continue;
+                }
+
+                let data = &self.encryption.decoded_inbound_data()[..bytes_remaining.get()];
+
+                let (num_read, event) =
+                    Self::process_substream(&mut self.inner, substream_id, read_write, data);
+
+                if let Some(more_remaining) = NonZeroUsize::new(bytes_remaining.get() - num_read) {
+                    self.inner.current_data_frame = Some((substream_id, more_remaining))
+                } else {
+                    self.inner.current_data_frame = None;
+                }
+
+                // Discard the data from the decrypted data buffer.
+                self.encryption.consume_inbound_data(num_read);
+
+                if let Some(event) = event {
+                    return Ok((self, Some(event)));
+                } else if num_read == 0 {
+                    // Substream doesn't accept anymore data because it is blocked on writing out.
+                    return Ok((self, None));
+                } else {
+                    // Jump back to the beginning of the loop. We don't want to read more data
+                    // until this specific substream's data has been processed.
+                    continue;
+                }
             }
 
             // Transfer data from `incoming_data` to the internal buffer in `self.encryption`.
+            // Note that we treat the reading side being closed the same way as no data being
+            // received. The fact that the remote has closed their writing side is no different
+            // than them leaving their writing side open but no longer send any data at all.
+            // The remote is free to close their writing side at any point if it judges that it
+            // will no longer need to send anymore data.
+            // Note, however, that in principle the remote should have sent a GoAway frame prior
+            // to closing their writing side. But this is not something we check or really care
+            // about.
             if let Some(incoming_data) = read_write.incoming_buffer.as_mut() {
                 let num_read = self
                     .encryption
                     .inject_inbound_data(*incoming_data)
                     .map_err(Error::Noise)?;
                 read_write.advance_read(num_read);
-            } else {
-                read_write.close_write();
-                return Ok((self, None));
             }
 
             // Ask the Yamux state machine to decode the buffer present in `self.encryption`.
+            debug_assert!(self.inner.current_data_frame.is_none());
             let yamux_decode = self
                 .inner
                 .yamux
@@ -203,21 +294,39 @@ where
                 .map_err(Error::Yamux)?;
             self.inner.yamux = yamux_decode.yamux;
 
-            // TODO: it is possible that the yamux reading is blocked on writing
+            // If bytes_read is 0 and detail is None, then Yamux can't do anything more. On the
+            // other hand, if bytes_read is != 0 or detail is Some, then Yamux might have more
+            // things to do, and we must loop again.
+            if !(yamux_decode.bytes_read == 0 && yamux_decode.detail.is_none()) {
+                must_continue_looping = true;
+            }
 
             // Analyze how Yamux has parsed the data.
             // This still contains references to the data in `self.encryption`.
             match yamux_decode.detail {
-                None if yamux_decode.bytes_read == 0 => break,
+                None if yamux_decode.bytes_read == 0 => {}
                 None => {
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
                 }
 
                 Some(yamux::IncomingDataDetail::IncomingSubstream) => {
+                    debug_assert!(!self.inner.yamux.goaway_queued_or_sent());
+
+                    self.encryption
+                        .consume_inbound_data(yamux_decode.bytes_read);
+
                     // Receive a request from the remote for a new incoming substream.
-                    // These requests are automatically accepted.
-                    // TODO: add a limit to the number of substreams
+                    // These requests are automatically accepted unless the total limit to the
+                    // number of substreams has been reached.
+                    // Note that `num_inbound()` counts substreams that have been closed but not
+                    // yet removed from the state machine. This can affect the actual limit in a
+                    // subtle way. At the time of writing of this comment the limit should be
+                    // properly enforced, however it is not considered problematic if it weren't.
+                    if self.inner.yamux.num_inbound() >= self.inner.max_inbound_substreams {
+                        self.inner.yamux.reject_pending_substream();
+                        continue;
+                    }
 
                     let supported_protocols = self
                         .inner
@@ -239,8 +348,6 @@ where
                         .accept_pending_substream(Some(substream::Substream::ingoing(
                             supported_protocols,
                         )));
-                    self.encryption
-                        .consume_inbound_data(yamux_decode.bytes_read);
                 }
 
                 Some(
@@ -252,40 +359,26 @@ where
                 }
 
                 Some(yamux::IncomingDataDetail::DataFrame {
-                    mut start_offset,
+                    start_offset,
                     substream_id,
                 }) => {
-                    while start_offset != yamux_decode.bytes_read {
-                        // Data belonging to a substream has been decoded.
-                        let data = &self.encryption.decoded_inbound_data()
-                            [start_offset..yamux_decode.bytes_read];
+                    // Discard the data in `self.encryption` up to where the data frame starts.
+                    self.encryption.consume_inbound_data(start_offset);
 
-                        let (num_read, event) = Self::process_substream(
-                            &mut self.inner,
-                            substream_id,
-                            read_write,
-                            data,
-                        );
-
-                        start_offset += num_read;
-
-                        if let Some(event) = event {
-                            self.inner.pending_events.push_back(event);
-                        }
-
-                        // It might be that the substream has been closed in `process_substream`.
-                        if self.inner.yamux.substream_by_id_mut(substream_id).is_none() {
-                            break;
-                        }
+                    // The substream's data isn't immediately processed. Instead, we leave this
+                    // data in the buffer and update our internal state so that it gets processed
+                    // during the next loop.
+                    debug_assert!(self.inner.current_data_frame.is_none());
+                    if let Some(len) = NonZeroUsize::new(yamux_decode.bytes_read - start_offset) {
+                        self.inner.current_data_frame = Some((substream_id, len));
                     }
-
-                    // Discard this data in `self.encryption`.
-                    self.encryption
-                        .consume_inbound_data(yamux_decode.bytes_read);
                 }
 
-                Some(yamux::IncomingDataDetail::GoAway(_)) => {
-                    todo!() // TODO: handle properly
+                Some(yamux::IncomingDataDetail::GoAway { .. }) => {
+                    // TODO: somehow report the GoAway error code on the external API?
+                    self.encryption
+                        .consume_inbound_data(yamux_decode.bytes_read);
+                    return Ok((self, Some(Event::NewOutboundSubstreamsForbidden)));
                 }
 
                 Some(yamux::IncomingDataDetail::PingResponse) => {
@@ -293,102 +386,92 @@ where
                     unreachable!()
                 }
             };
-        }
 
-        while let Some((dead_substream_id, death_ty, state_machine)) =
-            self.inner.yamux.next_dead_substream()
-        {
-            let state_machine = match state_machine {
-                Some(s) => s,
-                None => continue,
-            };
+            // Substreams that have been closed or reset aren't immediately removed the yamux state
+            // machine. They must be removed manually, which is what is done here.
+            while let Some((dead_substream_id, death_ty, state_machine)) =
+                self.inner.yamux.next_dead_substream()
+            {
+                // Removing a dead substream might lead to Yamux being able to process more
+                // incoming data. As such, we loop again.
+                must_continue_looping = true;
 
-            match death_ty {
-                yamux::DeadSubstreamTy::Reset => {
-                    if let Some(event) = state_machine.reset() {
-                        return Ok((
-                            self,
-                            Some(Self::pass_through_substream_event(dead_substream_id, event)),
-                        ));
+                let state_machine = match state_machine {
+                    Some(s) => s,
+                    None => continue,
+                };
+
+                match death_ty {
+                    yamux::DeadSubstreamTy::Reset => {
+                        if let Some(event) = state_machine.reset() {
+                            return Ok((
+                                self,
+                                Some(Self::pass_through_substream_event(dead_substream_id, event)),
+                            ));
+                        }
                     }
-                }
-                yamux::DeadSubstreamTy::ClosedGracefully => {
-                    let mut substream_read_write = ReadWrite {
-                        now: read_write.now.clone(),
-                        incoming_buffer: None,
-                        outgoing_buffer: None,
-                        read_bytes: 0,
-                        written_bytes: 0,
-                        wake_up_after: None,
-                    };
+                    yamux::DeadSubstreamTy::ClosedGracefully => {
+                        let mut substream_read_write = ReadWrite {
+                            now: read_write.now.clone(),
+                            incoming_buffer: None,
+                            outgoing_buffer: None,
+                            read_bytes: 0,
+                            written_bytes: 0,
+                            wake_up_after: None,
+                        };
 
-                    let (_, _event) = state_machine.read_write(&mut substream_read_write);
+                        let (_, _event) = state_machine.read_write(&mut substream_read_write);
 
-                    if let Some(wake_up_after) = substream_read_write.wake_up_after {
-                        read_write.wake_up_after(&wake_up_after);
+                        if let Some(wake_up_after) = substream_read_write.wake_up_after {
+                            read_write.wake_up_after(&wake_up_after);
+                        }
+
+                        // TODO: finish here
                     }
-
-                    // TODO: finish here
                 }
             }
-        }
 
-        // The yamux state machine contains the data that needs to be written out.
-        // Try to flush it.
-        loop {
-            let bytes_out = self
+            // The yamux state machine contains the data that needs to be written out.
+            // Try to flush it.
+
+            // Calculate number of bytes that we can extract from yamux. This is similar but not
+            // exactly the same as the size of the outgoing buffer, as noise adds some headers to
+            // the data.
+            let unencrypted_bytes_to_extract = self
                 .encryption
                 .encrypt_size_conv(read_write.outgoing_buffer_available());
-            if bytes_out == 0 {
-                break;
+
+            if unencrypted_bytes_to_extract != 0 {
+                // Extract outgoing data that is buffered within yamux.
+                // TODO: don't allocate an intermediary buffer, but instead pass them directly to the encryption
+                let mut buffers = Vec::with_capacity(32);
+                let mut extract_out = self.inner.yamux.extract_out(unencrypted_bytes_to_extract);
+                while let Some(buffer) = extract_out.next() {
+                    buffers.push(buffer.as_ref().to_vec()); // TODO: copy
+                }
+
+                if !buffers.is_empty() {
+                    must_continue_looping = true;
+
+                    // Pass the data to the encryption layer.
+                    let (_read, written) = self.encryption.encrypt(
+                        buffers.into_iter(),
+                        match read_write.outgoing_buffer.as_mut() {
+                            Some((a, b)) => (a, b),
+                            None => (&mut [], &mut []),
+                        },
+                    );
+                    debug_assert!(_read <= unencrypted_bytes_to_extract);
+                    read_write.advance_write(written);
+                }
             }
 
-            // TODO: don't allocate an intermediary buffer, but instead pass them directly to the encryption
-            let mut buffers = Vec::with_capacity(32);
-            let mut extract_out = self.inner.yamux.extract_out(bytes_out);
-            while let Some(buffer) = extract_out.next() {
-                buffers.push(buffer.as_ref().to_vec()); // TODO: copy
-            }
-
-            if buffers.is_empty() {
-                break;
-            }
-
-            let (_read, written) = self.encryption.encrypt(
-                buffers.into_iter(),
-                match read_write.outgoing_buffer.as_mut() {
-                    Some((a, b)) => (a, b),
-                    None => (&mut [], &mut []),
-                },
-            );
-            debug_assert!(_read <= bytes_out);
-            read_write.advance_write(written);
-        }
-
-        Ok((self, None))
-    }
-
-    /// Updates all the inner substreams. This doesn't read from `read_write`.
-    ///
-    /// Optionally returns an event that happened as a result of writing out data or of the
-    /// passage of time.
-    fn update_all(&mut self, read_write: &mut ReadWrite<TNow>) -> Option<Event<TRqUd, TNotifUd>> {
-        for substream_id in self
-            .inner
-            .yamux
-            .user_datas()
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
-        {
-            let (_num_read, event) =
-                Self::process_substream(&mut self.inner, substream_id, read_write, &[]);
-            debug_assert_eq!(_num_read, 0);
-            if let Some(event) = event {
-                return Some(event);
+            // If `must_continue_looping` is still false, then we didn't do anything meaningful
+            // during this iteration. Return due to idleness.
+            if !must_continue_looping {
+                return Ok((self, None));
             }
         }
-
-        None
     }
 
     /// Advances a single substream.
@@ -595,6 +678,25 @@ where
         }
     }
 
+    /// Close the incoming substreams, automatically denying any new substream request from the
+    /// remote.
+    ///
+    /// Note that this does not prevent incoming-substreams-related events
+    /// (such as [`Event::RequestIn`]) from being generated, as it is possible that the remote has
+    /// already opened a substream but has no sent all the necessary handshake messages yet.
+    ///
+    /// # Panic
+    ///
+    /// Panic if this function has been called before. It is illegal to call
+    /// [`SingleStream::deny_new_incoming_substreams`] more than one on the same connections.
+    ///
+    pub fn deny_new_incoming_substreams(&mut self) {
+        // TODO: arbitrary yamux error code
+        self.inner
+            .yamux
+            .send_goaway(yamux::GoAwayErrorCode::NormalTermination)
+    }
+
     /// Sends a request to the remote.
     ///
     /// Must pass the index of the protocol within [`Config::request_protocols`].
@@ -611,6 +713,11 @@ where
     /// The timeout is the time between the moment the substream is opened and the moment the
     /// response is sent back. If the emitter doesn't send the request or if the receiver doesn't
     /// answer during this time window, the request is considered failed.
+    ///
+    /// # Panic
+    ///
+    /// Panics if a [`Event::NewOutboundSubstreamsForbidden`] event has been generated in the past.
+    ///
     pub fn add_request(
         &mut self,
         protocol_index: usize,
@@ -631,22 +738,27 @@ where
             }
         };
 
-        let substream = self
-            .inner
-            .yamux
-            .open_substream(Some(substream::Substream::request_out(
-                self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
-                timeout,
-                if has_length_prefix {
-                    Some(request)
-                } else {
-                    None
-                },
-                self.inner.request_protocols[protocol_index].max_response_size,
-                user_data,
-            )));
+        let mut substream =
+            self.inner
+                .yamux
+                .open_substream(Some(substream::Substream::request_out(
+                    self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
+                    timeout,
+                    if has_length_prefix {
+                        Some(request)
+                    } else {
+                        None
+                    },
+                    self.inner.request_protocols[protocol_index].max_response_size,
+                    user_data,
+                )));
 
-        // TODO: ? do this? substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
+        // TODO: we add some bytes due to the length prefix, this is a bit hacky as we should ask this information from the substream
+        substream.reserve_window(
+            u64::try_from(self.inner.request_protocols[protocol_index].max_response_size)
+                .unwrap_or(u64::max_value())
+                .saturating_add(64),
+        );
 
         SubstreamId(SubstreamIdInner::SingleStream(substream.id()))
     }
@@ -685,6 +797,10 @@ where
     ///
     /// Assuming that the remote is using the same implementation, an
     /// [`Event::NotificationsInOpen`] will be generated on its side.
+    ///
+    /// # Panic
+    ///
+    /// Panics if a [`Event::NewOutboundSubstreamsForbidden`] event has been generated in the past.
     ///
     pub fn open_notifications_substream(
         &mut self,
@@ -885,30 +1001,6 @@ where
             .unwrap()
             .respond_in_request(response)
     }
-
-    /// Queues an outgoing ping. Must be passed the moment when this ping will be considered as
-    /// failed.
-    fn queue_ping(&mut self, timeout: TNow) {
-        // It might be that the remote has reset the ping substream, in which case the out ping
-        // substream no longer exists and we immediately consider the ping as failed.
-        if let Some(substream) = self
-            .inner
-            .yamux
-            .substream_by_id_mut(self.inner.outgoing_pings)
-        {
-            let payload = self
-                .inner
-                .ping_payload_randomness
-                .sample(rand::distributions::Standard);
-            substream
-                .into_user_data()
-                .as_mut()
-                .unwrap()
-                .queue_ping(&payload, timeout);
-        } else {
-            self.inner.pending_events.push_back(Event::PingOutFailed);
-        }
-    }
 }
 
 impl<TNow, TRqUd, TNotifUd> fmt::Debug for SingleStream<TNow, TRqUd, TNotifUd>
@@ -976,11 +1068,12 @@ impl ConnectionPrototype {
         SingleStream {
             encryption: self.encryption,
             inner: Inner {
-                pending_events: Default::default(),
                 yamux,
+                current_data_frame: None,
                 outgoing_pings,
                 next_ping: config.first_out_ping,
                 ping_payload_randomness: randomness,
+                max_inbound_substreams: config.max_inbound_substreams,
                 request_protocols: config.request_protocols,
                 notifications_protocols: config.notifications_protocols,
                 ping_protocol: config.ping_protocol,

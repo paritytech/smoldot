@@ -46,13 +46,51 @@ jobs:
     - run: docker push docker.pkg.github.com/paritytech/smoldot/node:main
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+  docs-publish:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          path: repo
+      - uses: actions/setup-node@v3.5.0
+        with:
+          node-version: current
+      - run: npm install
+        working-directory: ./repo/bin/wasm-node/javascript
+      - uses: Swatinem/rust-cache@v1
+      - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light
+        working-directory: ./repo
+      - run: npm run doc
+        working-directory: ./repo/bin/wasm-node/javascript
+      - run: |
+          mkdir -p ./upload/doc-rust
+          mkdir -p ./upload/doc-javascript
+          mv ./repo/target/doc/* ./upload/doc-rust
+          mv ./repo/bin/wasm-node/javascript/dist/doc/* ./upload/doc-javascript
+      - run: |
+          git config user.email "github-action@users.noreply.github.com"
+          git config user.name "GitHub Action"
+          git config user.password ${{ secrets.GITHUB_TOKEN }}
+          git checkout --orphan gh-pages
+          git rm -rf .
+          git clean -d --force
+          mv ../upload/* .
+          git add --all
+          git commit -m "Documentation"
+        working-directory: ./repo
+      - run: git push -f origin gh-pages:gh-pages
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        working-directory: ./repo
+
   npm-publish:
     runs-on: ubuntu-latest
     container:
       image: rust:1.61
     steps:
       - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3.4.1
+      - uses: actions/setup-node@v3.5.0
         with:
           node-version: 12   # An old version is intentionally used in order to check compatibility
       - run: apt-get update && apt install -y binaryen # For `wasm-opt`
@@ -83,7 +121,7 @@ jobs:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
-      - uses: actions/setup-node@v3.4.1
+      - uses: actions/setup-node@v3.5.0
         with:
           node-version: 12
       - uses: denoland/setup-deno@v1
@@ -118,7 +156,7 @@ jobs:
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [build-push-docker-image, npm-publish, deno-publish]
+    needs: [build-push-docker-image, docs-publish, npm-publish, deno-publish]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success

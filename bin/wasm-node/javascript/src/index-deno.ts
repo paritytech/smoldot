@@ -26,7 +26,8 @@ export {
     Client,
     ClientOptions,
     CrashError,
-    JsonRpcCallback,
+    MalformedJsonRpcError,
+    QueueFullError,
     JsonRpcDisabledError,
     LogCallback
 } from './client.js';
@@ -105,7 +106,7 @@ export function start(options?: ClientOptions): Client {
  * Tries to open a new connection using the given configuration.
  *
  * @see Connection
- * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
+ * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
 function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean, forbidNonLocalWs: boolean, forbidWss: boolean): Connection {
     let connection: TcpWrapped | WebSocketWrapped;
@@ -136,7 +137,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
         connection.socket.binaryType = 'arraybuffer';
 
         connection.socket.onopen = () => {
-            config.onOpen({ type: 'single-stream' });
+            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
         };
         connection.socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
@@ -168,7 +169,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
 
             if (socket.destroyed)
                 return established;
-            config.onOpen({ type: 'single-stream' });
+            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
 
             // Spawns an asynchronous task that continuously reads from the socket.
             // Every time data is read, the task re-executes itself in order to continue reading.

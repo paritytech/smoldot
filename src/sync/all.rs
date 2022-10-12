@@ -46,7 +46,7 @@ use core::{
     time::Duration,
 };
 
-pub use warp_sync::WarpSyncFragment;
+pub use warp_sync::{FragmentError as WarpSyncFragmentError, WarpSyncFragment};
 
 /// Configuration for the [`AllSync`].
 // TODO: review these fields
@@ -147,7 +147,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     }),
                 }
             } else {
-                match warp_sync::warp_sync(warp_sync::Config {
+                match warp_sync::start_warp_sync(warp_sync::Config {
                     start_chain_information: config.chain_information,
                     block_number_bytes: config.block_number_bytes,
                     sources_capacity: config.sources_capacity,
@@ -1093,9 +1093,33 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             marker: marker::PhantomData,
                         })
                     }
-                    warp_sync::ProcessOne::BuildChainInformation(inner) => {
+                    warp_sync::ProcessOne::BuildRuntime(inner) => {
+                        // TODO: errors not reported to upper layer
                         // TODO: make these parameters configurable
                         match inner.build(ExecHint::CompileAheadOfTime, false).0 {
+                            warp_sync::WarpSync::InProgress(inner) => {
+                                self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                                ProcessOne::AllSync(self)
+                            }
+                            warp_sync::WarpSync::Finished(success) => {
+                                let (
+                                    new_inner,
+                                    finalized_block_runtime,
+                                    finalized_storage_code,
+                                    finalized_storage_heap_pages,
+                                ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
+                                self.inner = AllSyncInner::AllForks(new_inner);
+                                ProcessOne::WarpSyncFinished {
+                                    sync: self,
+                                    finalized_block_runtime,
+                                    finalized_storage_code,
+                                    finalized_storage_heap_pages,
+                                }
+                            }
+                        }
+                    }
+                    warp_sync::ProcessOne::BuildChainInformation(inner) => {
+                        match inner.build().0 {
                             // TODO: errors not reported to upper layer
                             warp_sync::WarpSync::InProgress(inner) => {
                                 self.inner = AllSyncInner::GrandpaWarpSync { inner };
@@ -2307,10 +2331,7 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
     pub fn perform(
         self,
         randomness_seed: [u8; 32],
-    ) -> (
-        AllSync<TRq, TSrc, TBl>,
-        Result<(), warp_sync::FragmentError>,
-    ) {
+    ) -> (AllSync<TRq, TSrc, TBl>, Result<(), WarpSyncFragmentError>) {
         let (next_grandpa_warp_sync, error) = self.inner.verify(randomness_seed);
 
         (

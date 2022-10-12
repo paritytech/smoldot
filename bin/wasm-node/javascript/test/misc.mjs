@@ -17,15 +17,26 @@
 
 import test from 'ava';
 import * as fs from 'node:fs';
-import { start } from "../dist/mjs/index-nodejs.js";
+import { start, JsonRpcDisabledError, MalformedJsonRpcError } from "../dist/mjs/index-nodejs.js";
 
 const westendSpec = fs.readFileSync('./test/westend.json', 'utf8');
 
-test('too large json-rpc requests rejected', async t => {
-  let promiseResolve;
-  let promiseReject;
-  const promise = new Promise((resolve, reject) => { promiseResolve = resolve; promiseReject = reject; });
+test('malformed json-rpc requests rejected', async t => {
+  const client = start({ logCallback: () => { } });
+  await client
+    .addChain({ chainSpec: westendSpec })
+    .then((chain) => {
+      try {
+        chain.sendJsonRpc("this is not a valid JSON-RPC request");
+      } catch(error) {
+        t.assert(error instanceof MalformedJsonRpcError);
+        t.pass();
+      }
+    })
+    .then(() => client.terminate());
+});
 
+test('too large json-rpc requests rejected', async t => {
   // Generate a very long string. We start with a length of 1 and double for every iteration.
   // Thus the final length of the string is `2^i` where `i` is the number of iterations.
   let veryLongString = 'a';
@@ -35,17 +46,45 @@ test('too large json-rpc requests rejected', async t => {
 
   const client = start({ logCallback: () => { } });
   await client
-    .addChain({
-      chainSpec: westendSpec,
-      jsonRpcCallback: (resp) => { promiseReject(resp) }
-    })
+    .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      // The test succeeds if a certain time passes without a response.
-      setTimeout(() => promiseResolve(), 2000);
-      // We use `JSON.stringify` in order to be certain that the request is valid JSON.
-      chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "foo", "params": [veryLongString] }), 0, 0);
+      try {
+        // We use `JSON.stringify` in order to be certain that the request is valid JSON.
+        chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "foo", "params": [veryLongString] }));
+      } catch(error) {
+        t.assert(error instanceof MalformedJsonRpcError);
+        t.pass();
+      }
     })
-    .then(() => promise)
-    .then(() => t.pass())
+    .then(() => client.terminate());
+});
+
+test('disableJsonRpc option forbids sendJsonRpc', async t => {
+  const client = start({ logCallback: () => { } });
+  await client
+    .addChain({ chainSpec: westendSpec, disableJsonRpc: true })
+    .then((chain) => {
+      try {
+        chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}');
+      } catch(error) {
+        t.assert(error instanceof JsonRpcDisabledError);
+        t.pass();
+      }
+    })
+    .then(() => client.terminate());
+});
+
+test('disableJsonRpc option forbids nextJsonRpcResponse', async t => {
+  const client = start({ logCallback: () => { } });
+  await client
+    .addChain({ chainSpec: westendSpec, disableJsonRpc: true })
+    .then(async (chain) => {
+      try {
+        await chain.nextJsonRpcResponse();
+      } catch(error) {
+        t.assert(error instanceof JsonRpcDisabledError);
+        t.pass();
+      }
+    })
     .then(() => client.terminate());
 });

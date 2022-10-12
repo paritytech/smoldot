@@ -133,7 +133,7 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     pub specification: &'a str,
 
     /// Opaque data containing the database content that was retrieved by calling
-    /// [`Client::database_content`] in the past.
+    /// the `chainHead_unstable_finalizedDatabase` JSON-RPC function in the past.
     ///
     /// Pass an empty string if no database content exists or is known.
     ///
@@ -168,20 +168,6 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChainId(usize);
 
-impl From<u32> for ChainId {
-    fn from(n: u32) -> ChainId {
-        // Assume that we are always on a 32bits or more platform.
-        ChainId(usize::try_from(n).unwrap())
-    }
-}
-
-impl From<ChainId> for u32 {
-    fn from(n: ChainId) -> u32 {
-        // Assume that no `ChainId` above `u32::max_value()` is ever generated.
-        u32::try_from(n.0).unwrap()
-    }
-}
-
 /// Holds a list of chains, connections, and JSON-RPC services.
 pub struct Client<TPlat: platform::Platform, TChain = ()> {
     /// Tasks can be spawned by calling this function. The first parameter is the name of the task
@@ -212,32 +198,21 @@ pub struct Client<TPlat: platform::Platform, TChain = ()> {
     system_version: String,
 }
 
-enum PublicApiChain<TChain> {
-    /// Chain initialization was successful.
-    Ok {
-        /// Opaque user data passed to [`Client::add_chain`].
-        user_data: TChain,
+struct PublicApiChain<TChain> {
+    /// Opaque user data passed to [`Client::add_chain`].
+    user_data: TChain,
 
-        /// Index of the underlying chain found in [`Client::chains_by_key`].
-        key: ChainKey,
+    /// Index of the underlying chain found in [`Client::chains_by_key`].
+    key: ChainKey,
 
-        /// Identifier of the chain found in its chain spec. Equal to the return value of
-        /// [`chain_spec::ChainSpec::id`]. Used in order to match parachains with relay chains.
-        chain_spec_chain_id: String,
+    /// Identifier of the chain found in its chain spec. Equal to the return value of
+    /// [`chain_spec::ChainSpec::id`]. Used in order to match parachains with relay chains.
+    chain_spec_chain_id: String,
 
-        /// Handle that sends requests to the JSON-RPC service that runs in the background.
-        /// Destroying this handle also shuts down the service. `None` iff
-        /// [`AddChainConfig::json_rpc_responses`] was `None` when adding the chain.
-        json_rpc_sender: Option<json_rpc_service::Sender>,
-    },
-
-    /// Chain initialization has failed.
-    Erroneous {
-        /// Opaque user data passed to [`Client::add_chain`].
-        user_data: TChain,
-        /// Human-readable error message giving the reason for the failure.
-        error: String,
-    },
+    /// Handle that sends requests to the JSON-RPC service that runs in the background.
+    /// Destroying this handle also shuts down the service. `None` iff
+    /// [`AddChainConfig::json_rpc_responses`] was `None` when adding the chain.
+    json_rpc_sender: Option<json_rpc_service::Sender>,
 }
 
 /// Identifies a chain, so that multiple identical chains are de-duplicated.
@@ -281,6 +256,7 @@ struct ChainServices<TPlat: platform::Platform> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
+    // TODO: can be grabbed from the sync service instead
     block_number_bytes: usize,
 }
 
@@ -311,26 +287,16 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     }
 
     /// Adds a new chain to the list of chains smoldot tries to synchronize.
-    ///
-    /// This function does not return a `Result`, despite the fact that the chain creation process
-    /// can fail. If the chain creation fails, a chain is added anyway, but it is set to an
-    /// "erroneous" mode.
-    /// Use [`Client::chain_is_erroneous`] to determine whether the chain is in this erroneous
-    /// mode.
-    /// Chain in erroneous mode must be cleaned up using [`Client::remove_chain`].
-    // TODO: this erroneous chain system was added to make it easier to implement the Wasm node; it should eventually be removed
+    // TODO: don't return strings as errors, but something higher level
     pub fn add_chain(
         &mut self,
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
-    ) -> ChainId {
+    ) -> Result<ChainId, String> {
         // Decode the chain specification.
         let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
             Ok(cs) => cs,
             Err(err) => {
-                return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
-                    user_data: config.user_data,
-                    error: format!("Failed to decode chain specification: {}", err),
-                }));
+                return Err(format!("Failed to decode chain specification: {}", err));
             }
         };
 
@@ -393,12 +359,8 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
 
                 (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
                     // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
-                    return ChainId(
-                        self.public_api_chains.insert(PublicApiChain::Erroneous {
-                            user_data: config.user_data,
-                            error: "Either a checkpoint or the genesis storage must be provided"
-                                .to_string(),
-                        }),
+                    return Err(
+                        "Either a checkpoint or the genesis storage must be provided".to_string(),
                     );
                 }
 
@@ -419,24 +381,21 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 }
 
                 (Err(err), _, _) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
-                        user_data: config.user_data,
-                        error: format!("Failed to build genesis chain information: {}", err),
-                    }));
+                    return Err(format!(
+                        "Failed to build genesis chain information: {}",
+                        err
+                    ));
                 }
 
                 (Ok(Err(err)), _, _) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
-                        user_data: config.user_data,
-                        error: format!("Invalid genesis chain information: {}", err),
-                    }));
+                    return Err(format!("Invalid genesis chain information: {}", err));
                 }
 
                 (_, Some(Err(err)), _) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
-                        user_data: config.user_data,
-                        error: format!("Invalid checkpoint in chain specification: {}", err),
-                    }));
+                    return Err(format!(
+                        "Invalid checkpoint in chain specification: {}",
+                        err
+                    ));
                 }
 
                 (Ok(Ok(genesis_ci)), Some(Ok(checkpoint)), _) => {
@@ -462,13 +421,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 .filter(|c| {
                     self.public_api_chains
                         .get(c.0)
-                        .map_or(false, |chain| match chain {
-                            PublicApiChain::Ok {
-                                chain_spec_chain_id,
-                                ..
-                            } => chain_spec_chain_id == relay_chain_id,
-                            _ => false,
-                        })
+                        .map_or(false, |chain| chain.chain_spec_chain_id == relay_chain_id)
                 })
                 .exactly_one();
 
@@ -477,17 +430,12 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 Err(mut iter) => {
                     // `iter` here is identical to the iterator above before `exactly_one` is
                     // called. This lets us know what failed.
-                    let error = if iter.next().is_none() {
+                    return Err(if iter.next().is_none() {
                         "Couldn't find any valid relay chain".to_string()
                     } else {
                         debug_assert!(iter.next().is_some());
                         "Multiple valid relay chains found".to_string()
-                    };
-
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
-                        user_data: config.user_data,
-                        error,
-                    }));
+                    });
                 }
             }
         } else {
@@ -543,10 +491,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             genesis_block_hash,
             relay_chain: relay_chain_id.map(|ck| {
                 (
-                    Box::new(match self.public_api_chains.get(ck.0).unwrap() {
-                        PublicApiChain::Ok { key, .. } => key.clone(),
-                        _ => unreachable!(),
-                    }),
+                    Box::new(self.public_api_chains.get(ck.0).unwrap().key.clone()),
                     chain_spec.relay_chain().unwrap().1,
                 )
             }),
@@ -565,10 +510,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             relay_chain_id.map(|relay_chain| {
                 let relay_chain = &self
                     .chains_by_key
-                    .get(match self.public_api_chains.get(relay_chain.0).unwrap() {
-                        PublicApiChain::Ok { key, .. } => key,
-                        _ => unreachable!(),
-                    })
+                    .get(&self.public_api_chains.get(relay_chain.0).unwrap().key)
                     .unwrap();
 
                 let future = match &relay_chain.services {
@@ -719,7 +661,14 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                             log::warn!(
                                 target: "smoldot",
                                 "Chain specification of {} contains a list of bad blocks. Bad \
-                                blocks are not implemented in the light client.", log_name
+                                blocks are not implemented in the light client. An appropriate \
+                                way to silence this warning is to remove the bad blocks from the \
+                                chain specification, which can safely be done:\n\
+                                - For relay chains: if the chain specification contains a \
+                                checkpoint and that the bad blocks have a block number inferior \
+                                to this checkpoint.\n\
+                                - For parachains: if the bad blocks have a block number inferior \
+                                to the current parachain finalized block.", log_name
                             );
                         }
 
@@ -849,34 +798,13 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
         };
 
         // Success!
-        public_api_chains_entry.insert(PublicApiChain::Ok {
+        public_api_chains_entry.insert(PublicApiChain {
             user_data: config.user_data,
             key: new_chain_key,
             chain_spec_chain_id,
             json_rpc_sender,
         });
-        new_chain_id
-    }
-
-    /// Adds a new dummy chain to the list of chains.
-    ///
-    /// The [`Client::chain_is_erroneous`] function for this chain returns `Some` with the given
-    /// error message.
-    pub fn add_erroneous_chain(&mut self, error_message: String, user_data: TChain) -> ChainId {
-        ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
-            user_data,
-            error: error_message,
-        }))
-    }
-
-    /// If [`Client::add_chain`] encountered an error when creating this chain, returns the error
-    /// message corresponding to it.
-    pub fn chain_is_erroneous(&self, id: ChainId) -> Option<&str> {
-        if let Some(PublicApiChain::Erroneous { error, .. }) = self.public_api_chains.get(id.0) {
-            Some(error)
-        } else {
-            None
-        }
+        Ok(new_chain_id)
     }
 
     /// Removes the chain from smoldot. This instantaneously and silently cancels all on-going
@@ -892,25 +820,18 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     pub fn remove_chain(&mut self, id: ChainId) -> TChain {
         let removed_chain = self.public_api_chains.remove(id.0);
 
-        let user_data = match removed_chain {
-            PublicApiChain::Erroneous { user_data, .. } => user_data,
-            PublicApiChain::Ok { key, user_data, .. } => {
-                let running_chain = self.chains_by_key.get_mut(&key).unwrap();
-                if running_chain.num_references.get() == 1 {
-                    log::info!(target: "smoldot", "Shutting down chain {}", running_chain.log_name);
-                    self.chains_by_key.remove(&key);
-                } else {
-                    running_chain.num_references =
-                        NonZeroU32::new(running_chain.num_references.get() - 1).unwrap();
-                }
-
-                user_data
-            }
-        };
+        let running_chain = self.chains_by_key.get_mut(&removed_chain.key).unwrap();
+        if running_chain.num_references.get() == 1 {
+            log::info!(target: "smoldot", "Shutting down chain {}", running_chain.log_name);
+            self.chains_by_key.remove(&removed_chain.key);
+        } else {
+            running_chain.num_references =
+                NonZeroU32::new(running_chain.num_references.get() - 1).unwrap();
+        }
 
         self.public_api_chains.shrink_to_fit();
 
-        user_data
+        removed_chain.user_data
     }
 
     /// Returns the user data associated to the given chain.
@@ -920,10 +841,11 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     /// Panics if the [`ChainId`] is invalid.
     ///
     pub fn chain_user_data_mut(&mut self, chain_id: ChainId) -> &mut TChain {
-        match self.public_api_chains.get_mut(chain_id.0).unwrap() {
-            PublicApiChain::Ok { user_data, .. } => user_data,
-            PublicApiChain::Erroneous { user_data, .. } => user_data,
-        }
+        &mut self
+            .public_api_chains
+            .get_mut(chain_id.0)
+            .unwrap()
+            .user_data
     }
 
     /// Enqueues a JSON-RPC request towards the given chain.
@@ -940,8 +862,8 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     ///
     /// # Panic
     ///
-    /// Panics if the [`ChainId`] is invalid, is erroneous, or if
-    /// [`AddChainConfig::json_rpc_responses`] was `None` when adding the chain.
+    /// Panics if the [`ChainId`] is invalid, or if [`AddChainConfig::json_rpc_responses`] was
+    /// `None` when adding the chain.
     ///
     pub fn json_rpc_request(
         &mut self,
@@ -956,56 +878,17 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
         json_rpc_request: String,
         chain_id: ChainId,
     ) -> Result<(), HandleRpcError> {
-        let json_rpc_sender = match self.public_api_chains.get_mut(chain_id.0) {
-            Some(PublicApiChain::Ok {
-                json_rpc_sender: Some(json_rpc_sender),
-                ..
-            }) => json_rpc_sender,
+        let json_rpc_sender = match self
+            .public_api_chains
+            .get_mut(chain_id.0)
+            .unwrap()
+            .json_rpc_sender
+        {
+            Some(ref mut json_rpc_sender) => json_rpc_sender,
             _ => panic!(),
         };
 
         json_rpc_sender.queue_rpc_request(json_rpc_request)
-    }
-
-    /// Returns opaque data that can later by passing back through
-    /// [`AddChainConfig::database_content`].
-    ///
-    /// Note that the `Future` being returned doesn't borrow `self`. Even if the chain is later
-    /// removed, this `Future` will still return a value.
-    ///
-    /// If the database content can't be obtained because not enough information is known about
-    /// the chain, a dummy value is intentionally returned.
-    ///
-    /// `max_size` can be passed force the output of the function to be smaller than the given
-    /// value.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`ChainId`] is invalid.
-    ///
-    pub fn database_content(
-        &self,
-        chain_id: ChainId,
-        max_size: usize,
-    ) -> impl Future<Output = String> {
-        let mut services = match self.public_api_chains.get(chain_id.0) {
-            Some(PublicApiChain::Ok { key, .. }) => {
-                // Clone the services initialization future.
-                match &self.chains_by_key.get(key).unwrap().services {
-                    future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
-                    future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
-                    future::MaybeDone::Gone => unreachable!(),
-                }
-            }
-            _ => panic!(),
-        };
-
-        async move {
-            // Wait for the chain to finish initializing before we can obtain the database.
-            (&mut services).await;
-            let services = Pin::new(&mut services).take_output().unwrap();
-            encode_database(&services, max_size).await
-        }
     }
 }
 
@@ -1172,14 +1055,16 @@ async fn start_services<TPlat: platform::Platform>(
 }
 
 async fn encode_database<TPlat: platform::Platform>(
-    services: &ChainServices<TPlat>,
+    network_service: &network_service::NetworkService<TPlat>,
+    sync_service: &sync_service::SyncService<TPlat>,
+    block_number_bytes: usize,
     max_size: usize,
 ) -> String {
     // Craft the structure containing all the data that we would like to include.
     let mut database_draft = SerdeDatabase {
-        chain: match services.sync_service.serialize_chain_information().await {
+        chain: match sync_service.serialize_chain_information().await {
             Some(ci) => {
-                let encoded = finalized_serialize::encode_chain(&ci, services.block_number_bytes);
+                let encoded = finalized_serialize::encode_chain(&ci, block_number_bytes);
                 serde_json::from_str(&encoded).unwrap()
             }
             None => {
@@ -1193,9 +1078,8 @@ async fn encode_database<TPlat: platform::Platform>(
                 };
             }
         },
-        nodes: services
-            .network_service
-            .discovered_nodes(0)
+        nodes: network_service
+            .discovered_nodes(0) // TODO: hacky chain_index
             .await
             .map(|(peer_id, addrs)| {
                 (

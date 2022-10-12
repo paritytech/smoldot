@@ -24,7 +24,8 @@ use super::{
         read_write::ReadWrite,
     },
     ConnectionToCoordinator, ConnectionToCoordinatorInner, CoordinatorToConnection,
-    CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork, ShutdownCause, SubstreamId,
+    CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork, ShutdownCause,
+    SingleStreamHandshakeKind, SubstreamId,
 };
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc};
@@ -64,6 +65,9 @@ enum SingleStreamConnectionTaskInner<TNow> {
         /// See [`super::Config::noise_key`].
         noise_key: Arc<NoiseKey>,
 
+        /// See [`super::Config::max_inbound_substreams`].
+        max_inbound_substreams: usize,
+
         /// See [`OverlayNetwork`].
         notification_protocols: Arc<[OverlayNetwork]>,
 
@@ -88,6 +92,11 @@ enum SingleStreamConnectionTaskInner<TNow> {
         // TODO: could be user datas in established?
         outbound_substreams_reverse:
             hashbrown::HashMap<established::SubstreamId, SubstreamId, fnv::FnvBuildHasher>,
+
+        /// After a [`ConnectionToCoordinatorInner::NotificationsInOpenCancel`] is emitted, an
+        /// entry is added to this list. If the coordinator accepts or refuses a substream in this
+        /// list, the acceptance/refusal is dismissed.
+        notifications_in_open_cancel_acknowledgments: VecDeque<established::SubstreamId>,
     },
 
     /// Connection has finished its shutdown. A [`ConnectionToCoordinatorInner::ShutdownFinished`]
@@ -128,18 +137,25 @@ where
     pub(super) fn new(
         randomness_seed: [u8; 32],
         is_initiator: bool,
+        handshake_kind: SingleStreamHandshakeKind,
         handshake_timeout: TNow,
         noise_key: Arc<NoiseKey>,
+        max_inbound_substreams: usize,
         notification_protocols: Arc<[OverlayNetwork]>,
         request_response_protocols: Arc<[ConfigRequestResponse]>,
         ping_protocol: Arc<str>,
     ) -> Self {
+        // We only support one kind of handshake at the moment. Make sure (at compile time) that
+        // the value provided as parameter is indeed the one expected.
+        let SingleStreamHandshakeKind::MultistreamSelectNoiseYamux = handshake_kind;
+
         SingleStreamConnectionTask {
             connection: SingleStreamConnectionTaskInner::Handshake {
                 handshake: handshake::HealthyHandshake::new(is_initiator),
                 randomness_seed,
                 timeout: handshake_timeout,
                 noise_key,
+                max_inbound_substreams,
                 notification_protocols,
                 request_response_protocols,
                 ping_protocol,
@@ -225,6 +241,7 @@ where
                     established,
                     outbound_substreams_map,
                     outbound_substreams_reverse,
+                    ..
                 },
             ) => {
                 let inner_substream_id =
@@ -246,6 +263,7 @@ where
                     established,
                     outbound_substreams_map,
                     outbound_substreams_reverse,
+                    ..
                 },
             ) => {
                 let inner_substream_id = established.open_notifications_substream(
@@ -268,6 +286,7 @@ where
                     established,
                     outbound_substreams_map,
                     outbound_substreams_reverse,
+                    ..
                 },
             ) => {
                 // It is possible that the remote has closed the outbound notification substream
@@ -318,17 +337,37 @@ where
                     substream_id,
                     handshake,
                 },
-                SingleStreamConnectionTaskInner::Established { established, .. },
+                SingleStreamConnectionTaskInner::Established {
+                    established,
+                    notifications_in_open_cancel_acknowledgments,
+                    ..
+                },
             ) => {
-                // TODO: must verify that the substream is still valid
-                established.accept_in_notifications_substream(substream_id, handshake, ());
+                if let Some(idx) = notifications_in_open_cancel_acknowledgments
+                    .iter()
+                    .position(|s| *s == substream_id)
+                {
+                    notifications_in_open_cancel_acknowledgments.remove(idx);
+                } else {
+                    established.accept_in_notifications_substream(substream_id, handshake, ());
+                }
             }
             (
                 CoordinatorToConnectionInner::RejectInNotifications { substream_id },
-                SingleStreamConnectionTaskInner::Established { established, .. },
+                SingleStreamConnectionTaskInner::Established {
+                    established,
+                    notifications_in_open_cancel_acknowledgments,
+                    ..
+                },
             ) => {
-                // TODO: must verify that the substream is still valid
-                established.reject_in_notifications_substream(substream_id);
+                if let Some(idx) = notifications_in_open_cancel_acknowledgments
+                    .iter()
+                    .position(|s| *s == substream_id)
+                {
+                    notifications_in_open_cancel_acknowledgments.remove(idx);
+                } else {
+                    established.reject_in_notifications_substream(substream_id);
+                }
             }
             (
                 CoordinatorToConnectionInner::StartShutdown { .. },
@@ -471,6 +510,7 @@ where
                 established,
                 mut outbound_substreams_map,
                 mut outbound_substreams_reverse,
+                mut notifications_in_open_cancel_acknowledgments,
             } => match established.read_write(read_write) {
                 Ok((connection, event)) => {
                     if read_write.is_dead() && event.is_none() {
@@ -488,6 +528,20 @@ where
                     }
 
                     match event {
+                        Some(established::Event::NewOutboundSubstreamsForbidden) => {
+                            // TODO: handle properly
+                            self.pending_messages.push_back(
+                                ConnectionToCoordinatorInner::StartShutdown(Some(
+                                    ShutdownCause::CleanShutdown,
+                                )),
+                            );
+                            self.pending_messages
+                                .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
+                            self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
+                                initiator: ShutdownInitiator::Remote,
+                            };
+                            return;
+                        }
                         Some(established::Event::InboundError(err)) => {
                             self.pending_messages
                                 .push_back(ConnectionToCoordinatorInner::InboundError(err));
@@ -530,6 +584,7 @@ where
                             );
                         }
                         Some(established::Event::NotificationsInOpenCancel { id, .. }) => {
+                            notifications_in_open_cancel_acknowledgments.push_back(id);
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::NotificationsInOpenCancel { id },
                             );
@@ -593,6 +648,7 @@ where
                         established: connection,
                         outbound_substreams_map,
                         outbound_substreams_reverse,
+                        notifications_in_open_cancel_acknowledgments,
                     };
                 }
                 Err(err) => {
@@ -613,6 +669,7 @@ where
                 randomness_seed,
                 timeout,
                 noise_key,
+                max_inbound_substreams,
                 notification_protocols,
                 request_response_protocols,
                 ping_protocol,
@@ -676,6 +733,7 @@ where
                                 randomness_seed,
                                 timeout,
                                 noise_key,
+                                max_inbound_substreams,
                                 notification_protocols,
                                 request_response_protocols,
                                 ping_protocol,
@@ -704,6 +762,7 @@ where
                                         })
                                         .collect(),
                                     request_protocols: request_response_protocols.to_vec(), // TODO: overhead
+                                    max_inbound_substreams,
                                     randomness_seed,
                                     ping_protocol: ping_protocol.to_string(), // TODO: cloning :-/
                                     ping_interval: Duration::from_secs(20),   // TODO: hardcoded
@@ -720,6 +779,8 @@ where
                                         0,
                                         Default::default(),
                                     ), // TODO: capacity?
+                                notifications_in_open_cancel_acknowledgments:
+                                    VecDeque::with_capacity(4),
                             };
                             break;
                         }
@@ -742,7 +803,7 @@ where
 
                 // This might have been done already during the shutdown process, but we do it
                 // again just in case.
-                read_write.close_write();
+                read_write.close_write_if_empty();
             }
 
             SingleStreamConnectionTaskInner::ShutdownWaitingAck {

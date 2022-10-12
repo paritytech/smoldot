@@ -135,7 +135,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 // in a row would prevent all the other tasks in the background from running.
                 // In order to provide a better granularity, we force a yield after each
                 // verification.
-                crate::util::yield_once().await;
+                crate::util::yield_twice().await;
             }
 
             queue_empty
@@ -702,11 +702,17 @@ impl<TPlat: Platform> Task<TPlat> {
                 self.sync = sync;
 
                 if let Err(err) = result {
+                    let maybe_forced_change = matches!(err, all::WarpSyncFragmentError::Verify(_));
                     log::warn!(
                         target: &self.log_target,
-                        "Failed to verify warp sync fragment from {}: {}",
+                        "Failed to verify warp sync fragment from {}: {}{}",
                         sender_peer_id,
-                        err
+                        err,
+                        if maybe_forced_change {
+                            ". This might be caused by a forced GrandPa authorities change having \
+                            been enacted on the chain. If this is the case, please update the \
+                            chain specification with a checkpoint past this forced change."
+                        } else { "" }
                     );
                 }
             }

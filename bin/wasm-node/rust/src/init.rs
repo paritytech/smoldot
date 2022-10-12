@@ -37,7 +37,29 @@ use std::{
 pub(crate) struct Client<TPlat: smoldot_light::platform::Platform, TChain> {
     pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
 
-    pub(crate) new_tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+    /// List of all chains that have been added by the user.
+    pub(crate) chains: slab::Slab<Chain>,
+}
+
+pub(crate) enum Chain {
+    Healthy {
+        smoldot_chain_id: smoldot_light::ChainId,
+
+        /// JSON-RPC responses that is at the front of the queue according to the API. If `Some`,
+        /// a pointer to the string is referenced to within
+        /// [`Chain::Healthy::json_rpc_response_info`].
+        json_rpc_response: Option<String>,
+        /// Information about [`Chain::Healthy::json_rpc_response`]. A pointer to this struct is
+        /// sent over the FFI layer to the JavaScript. As such, the pointer must never be
+        /// invalidated.
+        json_rpc_response_info: Box<bindings::JsonRpcResponseInfo>,
+        /// Receiver for JSON-RPC responses sent by the client. `None` if JSON-RPC requests are
+        /// disabled on this chain.
+        json_rpc_responses_rx: Option<mpsc::Receiver<String>>,
+    },
+    Erroneous {
+        error: String,
+    },
 }
 
 pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
@@ -173,17 +195,16 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
         .unwrap();
 
     let client = smoldot_light::Client::new(smoldot_light::ClientConfig {
-        tasks_spawner: {
-            let new_task_tx = new_task_tx.clone();
-            Box::new(move |name, task| new_task_tx.unbounded_send((name, task)).unwrap())
-        },
+        tasks_spawner: Box::new(move |name, task| {
+            new_task_tx.unbounded_send((name, task)).unwrap()
+        }),
         system_name: env!("CARGO_PKG_NAME").into(),
         system_version: env!("CARGO_PKG_VERSION").into(),
     });
 
     Client {
         smoldot: client,
-        new_tasks_spawner: new_task_tx,
+        chains: slab::Slab::with_capacity(8),
     }
 }
 

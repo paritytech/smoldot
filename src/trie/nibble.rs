@@ -61,7 +61,9 @@ pub fn all_nibbles() -> impl ExactSizeIterator<Item = Nibble> {
 /// Turns an iterator of nibbles into an iterator of bytes.
 ///
 /// If the number of nibbles is uneven, adds a `0` nibble at the end.
-pub fn nibbles_to_bytes_extend<I: Iterator<Item = Nibble>>(nibbles: I) -> impl Iterator<Item = u8> {
+pub fn nibbles_to_bytes_suffix_extend<I: Iterator<Item = Nibble>>(
+    nibbles: I,
+) -> impl Iterator<Item = u8> {
     struct Iter<I>(I);
 
     impl<I: Iterator<Item = Nibble>> Iterator for Iter<I> {
@@ -85,6 +87,48 @@ pub fn nibbles_to_bytes_extend<I: Iterator<Item = Nibble>>(nibbles: I) -> impl I
     }
 
     Iter(nibbles)
+}
+
+/// Turns an iterator of nibbles into an iterator of bytes.
+///
+/// If the number of nibbles is uneven, adds a `0` nibble at the beginning.
+pub fn nibbles_to_bytes_prefix_extend<I: ExactSizeIterator<Item = Nibble>>(
+    nibbles: I,
+) -> impl ExactSizeIterator<Item = u8> {
+    struct Iter<I>(I, bool);
+
+    impl<I: ExactSizeIterator<Item = Nibble>> Iterator for Iter<I> {
+        type Item = u8;
+
+        fn next(&mut self) -> Option<u8> {
+            let n1 = if self.1 {
+                self.1 = false;
+                Nibble(0)
+            } else {
+                self.0.next()?
+            };
+            let n2 = self.0.next()?;
+            let byte = (n1.0 << 4) | n2.0;
+            Some(byte)
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let inner_len = self.0.len();
+            let len = if self.1 {
+                debug_assert_eq!(inner_len % 2, 1);
+                (inner_len / 2) + 1
+            } else {
+                debug_assert_eq!(inner_len % 2, 0);
+                inner_len / 2
+            };
+            (len, Some(len))
+        }
+    }
+
+    impl<I: ExactSizeIterator<Item = Nibble>> ExactSizeIterator for Iter<I> {}
+
+    let has_prefix_nibble = (nibbles.len() % 2) != 0;
+    Iter(nibbles, has_prefix_nibble)
 }
 
 /// Turns an iterator of bytes into an iterator of nibbles corresponding to these bytes.

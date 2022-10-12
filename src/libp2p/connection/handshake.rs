@@ -30,6 +30,7 @@
 //! TCP handshake), depending on the strategy used for the multistream-select protocol.
 
 // TODO: finish commenting on the number of round trips
+// TODO: this module's name ("handshake") is a bit vague considering that there are multiple different handshakes based on the protocol
 
 use super::{
     super::peer_id::PeerId,
@@ -316,10 +317,11 @@ impl NoiseKeyRequired {
     pub fn resume(self, noise_key: &NoiseKey) -> HealthyHandshake {
         HealthyHandshake {
             state: NegotiationState::Encryption {
-                handshake: Box::new(noise::HandshakeInProgress::new(
-                    noise_key,
-                    self.is_initiator,
-                )),
+                handshake: Box::new(noise::HandshakeInProgress::new(noise::Config {
+                    key: noise_key,
+                    is_initiator: self.is_initiator,
+                    prologue: &[],
+                })),
             },
         }
     }

@@ -44,7 +44,8 @@ pub use crate::libp2p::{
     collection::ReadWrite,
     peers::{
         ConnectionId, ConnectionToCoordinator, CoordinatorToConnection, InRequestId, InboundError,
-        MultiStreamConnectionTask, OutRequestId, SingleStreamConnectionTask,
+        MultiStreamConnectionTask, MultiStreamHandshakeKind, OutRequestId,
+        SingleStreamConnectionTask, SingleStreamHandshakeKind,
     },
 };
 
@@ -379,10 +380,22 @@ where
             })
             .collect::<Vec<_>>();
 
+        // Maximum number that each remote is allowed to open.
+        // Note that this maximum doesn't have to be precise. There only needs to be *a* limit
+        // that is not exaggerately large, and this limit shouldn't be too low as to cause
+        // legitimate substreams to be refused.
+        // According to the protocol, a remote can only open one substream of each protocol at
+        // a time. However, we multiply this value by 2 in order to be generous. We also add 1
+        // to account for the ping protocol.
+        let max_inbound_substreams = chains.len()
+            * (1 + REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN + NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+            * 2;
+
         ChainNetwork {
             inner: peers::Peers::new(peers::Config {
                 connections_capacity: config.connections_capacity,
                 peers_capacity: config.peers_capacity,
+                max_inbound_substreams,
                 request_response_protocols,
                 noise_key: config.noise_key,
                 randomness_seed: randomness.sample(rand::distributions::Standard),
@@ -470,10 +483,14 @@ where
     pub fn add_single_stream_incoming_connection(
         &mut self,
         when_connected: TNow,
+        handshake_kind: SingleStreamHandshakeKind,
         remote_addr: multiaddr::Multiaddr,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
-        self.inner
-            .add_single_stream_incoming_connection(when_connected, remote_addr)
+        self.inner.add_single_stream_incoming_connection(
+            when_connected,
+            handshake_kind,
+            remote_addr,
+        )
     }
 
     pub fn pull_message_to_connection(
@@ -680,13 +697,13 @@ where
         now: TNow,
         target: &PeerId,
         chain_index: usize,
-        block_hash: [u8; 32],
+        block_hash: &[u8; 32],
         start_key: &[u8],
         timeout: Duration,
     ) -> OutRequestId {
-        let request_data = protocol::build_state_request(protocol::StateRequestConfig {
+        let request_data = protocol::build_state_request(protocol::StateRequest {
             block_hash,
-            start_key: start_key.to_vec(),
+            start_key,
         })
         .fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
@@ -810,6 +827,16 @@ where
             chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
             notification,
         )
+    }
+
+    /// Returns the list of peers for which we have a fully established notifications protocol of
+    /// the given protocol.
+    pub fn opened_transactions_substream(
+        &'_ self,
+        chain_index: usize,
+    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+        self.inner
+            .opened_out_notifications(chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1)
     }
 
     ///
@@ -991,6 +1018,7 @@ where
     pub fn pending_outcome_ok_single_stream(
         &mut self,
         id: PendingId,
+        handshake_kind: SingleStreamHandshakeKind,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
@@ -998,6 +1026,7 @@ where
 
         let (connection_id, connection_task) = self.inner.add_single_stream_outgoing_connection(
             when_connected.clone(),
+            handshake_kind,
             expected_peer_id,
             multiaddr.clone(),
         );
@@ -1022,34 +1051,28 @@ where
     ///
     /// See also [`ChainNetwork::pending_outcome_err`].
     ///
-    /// No [`Event::Connected`] will be generated. Calling this function implicitly acts as if
-    /// this event was generated.
-    ///
     /// # Panic
     ///
     /// Panics if the [`PendingId`] is invalid.
     ///
-    // TODO: not generating the Connected event is tricky, as the user needs to do an extra effort to know if there was already a connection to that peer
     pub fn pending_outcome_ok_multi_stream<TSubId>(
         &mut self,
         id: PendingId,
-        now: TNow,
-        peer_id: &PeerId,
+        handshake_kind: MultiStreamHandshakeKind,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
         TSubId: Clone + PartialEq + Eq + Hash,
     {
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
-        let (expected_peer_id, multiaddr, _when_connected) = self.pending_ids.get(id.0).unwrap();
+        let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.get(id.0).unwrap();
 
-        if expected_peer_id != peer_id {
-            todo!() // TODO: return an error or something
-        }
-
-        let (connection_id, connection_task) =
-            self.inner
-                .add_multi_stream_outgoing_connection(now, peer_id, multiaddr.clone());
+        let (connection_id, connection_task) = self.inner.add_multi_stream_outgoing_connection(
+            when_connected.clone(),
+            handshake_kind,
+            expected_peer_id,
+            multiaddr.clone(),
+        );
 
         // Update `self.peers`.
         {
@@ -1059,13 +1082,6 @@ where
             } else {
                 self.num_pending_per_peer.remove(expected_peer_id).unwrap();
             }
-        }
-
-        // Because multi-stream connections are considered as having immediately finished their
-        // handshake, we mark the address as connected.
-        if let Some(KBucketsPeer { addresses, .. }) = self.kbuckets_peers.get_mut(expected_peer_id)
-        {
-            addresses.set_connected(multiaddr);
         }
 
         self.pending_ids.remove(id.0);
@@ -1100,7 +1116,13 @@ where
             != 1;
 
         // If the peer is completely unreachable, unassign all of its slots.
-        if !has_any_attempt_left && !self.inner.has_established_connection(expected_peer_id) {
+        if !has_any_attempt_left
+            && self
+                .inner
+                .established_peer_connections(expected_peer_id)
+                .count()
+                == 0
+        {
             let expected_peer_id = expected_peer_id.clone(); // Necessary for borrowck reasons.
 
             for chain_index in 0..self.chains.len() {
@@ -1533,8 +1555,11 @@ where
                             response
                                 .map_err(StateRequestError::Request)
                                 .and_then(|payload| {
-                                    protocol::decode_state_response(&payload)
-                                        .map_err(StateRequestError::Decode)
+                                    if let Err(err) = protocol::decode_state_response(&payload) {
+                                        Err(StateRequestError::Decode(err))
+                                    } else {
+                                        Ok(EncodedStateResponse(payload))
+                                    }
                                 });
 
                         break Some(Event::StateRequestResult {
@@ -1758,9 +1783,27 @@ where
                     }
                 }
 
-                // Remote closes a substream.
-                // There isn't anything to do as long as the remote doesn't close our local
-                // outbound substream.
+                // Remote closes a block announce substream.
+                peers::Event::NotificationsInClose {
+                    peer_id,
+                    notifications_protocol_index,
+                    ..
+                } if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
+                    let chain_index =
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    // We unassign the inbound slot of the peer if it had one.
+                    // If the peer had an outbound slot, then this does nothing.
+                    if self.chains[chain_index].in_peers.remove(&peer_id) {
+                        self.inner.set_peer_notifications_out_desired(
+                            &peer_id,
+                            notifications_protocol_index,
+                            peers::DesiredState::NotDesired,
+                        );
+                    }
+                }
+
+                // Remote closes another substream.
                 peers::Event::NotificationsInClose { .. } => {}
 
                 // Received a block announce.
@@ -1876,10 +1919,10 @@ where
                 // Remote wants to open a block announces substream.
                 // The block announces substream is the main substream that determines whether
                 // a "chain" is open.
-                peers::Event::DesiredInNotification {
+                peers::Event::NotificationsInOpen {
                     peer_id,
                     handshake,
-                    id: desired_in_notification_id,
+                    id: substream_id,
                     notifications_protocol_index,
                 } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 => {
                     let chain_index =
@@ -1890,8 +1933,7 @@ where
                         self.chains[chain_index].chain_config.block_number_bytes,
                         &handshake,
                     ) {
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
 
                         break Some(Event::ProtocolError {
                             error: ProtocolError::BadBlockAnnouncesHandshake(err),
@@ -1908,8 +1950,7 @@ where
                                 .unwrap_or(usize::max_value())
                     {
                         // All in slots are occupied. Refuse the substream.
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
                         continue;
                     }
 
@@ -1933,12 +1974,9 @@ where
                         })
                     };
 
-                    if self
-                        .inner
-                        .in_notification_accept(desired_in_notification_id, handshake)
-                        .is_ok()
-                        && !has_out_slot
-                    {
+                    self.inner.in_notification_accept(substream_id, handshake);
+
+                    if !has_out_slot {
                         // TODO: future cancellation issue; if this future is cancelled, then trying to do the `in_notification_accept` again next time will panic
                         self.inner.set_peer_notifications_out_desired(
                             &peer_id,
@@ -1960,9 +1998,9 @@ where
                 }
 
                 // Remote wants to open a transactions substream.
-                peers::Event::DesiredInNotification {
+                peers::Event::NotificationsInOpen {
                     peer_id,
-                    id: desired_in_notification_id,
+                    id: substream_id,
                     notifications_protocol_index,
                     ..
                 } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 1 => {
@@ -1974,20 +2012,16 @@ where
                         .open_chains // TODO: clone :-/
                         .contains(&(peer_id.clone(), chain_index))
                     {
-                        // It doesn't matter if the substream is obsolete.
-                        let _ = self
-                            .inner
-                            .in_notification_accept(desired_in_notification_id, Vec::new());
+                        self.inner.in_notification_accept(substream_id, Vec::new());
                     } else {
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
                     }
                 }
 
                 // Remote wants to open a grandpa substream.
-                peers::Event::DesiredInNotification {
+                peers::Event::NotificationsInOpen {
                     peer_id,
-                    id: desired_in_notification_id,
+                    id: substream_id,
                     notifications_protocol_index,
                     ..
                 } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 => {
@@ -1999,8 +2033,7 @@ where
                         .open_chains // TODO: clone :-/
                         .contains(&(peer_id.clone(), chain_index))
                     {
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
                         continue;
                     }
 
@@ -2015,19 +2048,18 @@ where
                             .to_vec()
                     };
 
-                    // It doesn't matter if the substream is obsolete.
-                    let _ = self
-                        .inner
-                        .in_notification_accept(desired_in_notification_id, handshake);
+                    self.inner.in_notification_accept(substream_id, handshake);
                 }
 
-                peers::Event::DesiredInNotification { .. } => {
+                peers::Event::NotificationsInOpen { .. } => {
                     // Unrecognized notifications protocol.
                     unreachable!();
                 }
 
-                peers::Event::DesiredInNotificationCancel { .. } => {
-                    // TODO: do something
+                peers::Event::NotificationsInOpenCancel { .. } => {
+                    // Because we always accept/refuse incoming notification substreams instantly,
+                    // there's no possibility for a cancellation to happen.
+                    unreachable!()
                 }
             }
         };
@@ -2036,11 +2068,14 @@ where
         // to open.
         loop {
             // Note: we can't use a `while let` due to borrow checker errors.
-            let (id, _, notifications_protocol_index) =
-                match self.inner.next_unfulfilled_desired_outbound_substream() {
-                    Some(v) => v,
-                    None => break,
-                };
+            let (peer_id, notifications_protocol_index) = match self
+                .inner
+                .unfulfilled_desired_outbound_substream(false)
+                .next()
+            {
+                Some((peer_id, idx)) => (peer_id.clone(), idx),
+                None => break,
+            };
 
             let chain_config = &self.chains
                 [notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN]
@@ -2069,7 +2104,12 @@ where
                 unreachable!()
             };
 
-            self.inner.open_out_notification(id, now.clone(), handshake);
+            self.inner.open_out_notification(
+                &peer_id,
+                notifications_protocol_index,
+                now.clone(),
+                handshake,
+            );
         }
 
         event_to_return
@@ -2258,10 +2298,16 @@ where
         None
     }
 
-    /// Returns `true` if there exists an established connection with the given peer.
-    // TODO: revisit this API w.r.t. shutdowns
-    pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
-        self.inner.has_established_connection(peer_id)
+    /// Returns `true` if if it possible to send requests (i.e. through
+    /// [`ChainNetwork::start_grandpa_warp_sync_request`],
+    /// [`ChainNetwork::start_blocks_request`], etc.) to the given peer.
+    ///
+    /// If `false` is returned, starting a request will panic.
+    ///
+    /// In other words, returns `true` if there exists an established connection non-shutting-down
+    /// connection with the given peer.
+    pub fn can_start_requests(&self, peer_id: &PeerId) -> bool {
+        self.inner.can_start_requests(peer_id)
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
@@ -2486,7 +2532,7 @@ pub enum Event {
 
     StateRequestResult {
         request_id: OutRequestId,
-        response: Result<Vec<protocol::StateResponseEntry>, StateRequestError>,
+        response: Result<EncodedStateResponse, StateRequestError>,
     },
 
     StorageProofRequestResult {
@@ -2694,6 +2740,26 @@ impl EncodedGrandpaCommitMessage {
 }
 
 impl fmt::Debug for EncodedGrandpaCommitMessage {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
+/// Undecoded but valid state response.
+#[derive(Clone)]
+pub struct EncodedStateResponse(Vec<u8>);
+
+impl EncodedStateResponse {
+    /// Returns the decoded version of the state response.
+    pub fn decode(&self) -> Vec<protocol::StateResponseEntry> {
+        match protocol::decode_state_response(&self.0) {
+            Ok(r) => r,
+            Err(_) => unreachable!(),
+        }
+    }
+}
+
+impl fmt::Debug for EncodedStateResponse {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.decode(), f)
     }

@@ -197,6 +197,17 @@ impl<T> ForkTree<T> {
         }
     }
 
+    /// Returns the ancestors of the given node. The iterator is empty if the node doesn't have
+    /// any parent.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn ancestors(&'_ self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> + '_ {
+        iter::successors(Some(node), move |n| self.nodes[n.0].parent.map(NodeIndex)).skip(1)
+    }
+
     /// Returns the parent of the given node. Returns `None` if the node doesn't have any parent.
     ///
     /// # Panic

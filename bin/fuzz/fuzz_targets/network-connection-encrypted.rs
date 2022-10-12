@@ -141,6 +141,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         handshake::Handshake::Success { connection, .. } => connection
             .into_connection::<_, (), ()>(Config {
                 first_out_ping: Duration::new(60, 0),
+                max_inbound_substreams: 10,
                 notifications_protocols: Vec::new(),
                 request_protocols: vec![ConfigRequestResponse {
                     inbound_allowed: true,

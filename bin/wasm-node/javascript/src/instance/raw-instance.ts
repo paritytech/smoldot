@@ -38,8 +38,7 @@ export interface Config {
      */
     onWasmPanic: (message: string) => void,
     logCallback: (level: number, target: string, message: string) => void,
-    jsonRpcCallback: (response: string, chainId: number) => void,
-    databaseContentCallback: (data: string, chainId: number) => void,
+    jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
     cpuRateLimit: number,
 }
@@ -74,7 +73,7 @@ export interface PlatformBindings {
      * Tries to open a new connection using the given configuration.
      *
      * @see Connection
-     * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
+     * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
      */
      connect(config: ConnectionConfig): Connection;
 }
