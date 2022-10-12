@@ -35,7 +35,7 @@ export interface Config {
      * Tries to open a new connection using the given configuration.
      *
      * @see Connection
-     * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
+     * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
      */
     connect(config: ConnectionConfig): Connection;
     
