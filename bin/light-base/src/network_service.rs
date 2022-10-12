@@ -771,7 +771,10 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         let mut guarded = self.shared.guarded.lock().await;
 
         // The call to `send_block_announce` below panics if we have no active substream.
-        if !guarded.network.can_send_block_announces(target, chain_index) {
+        if !guarded
+            .network
+            .can_send_block_announces(target, chain_index)
+        {
             return Err(QueueNotificationError::NoConnection);
         }
 

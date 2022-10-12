@@ -834,12 +834,9 @@ where
     ///
     /// If this function returns `false`, calling [`ChainNetwork::send_block_announce`] will
     /// panic.
-    pub fn can_send_block_announces(
-        &self,
-        target: &PeerId,
-        chain_index: usize,
-    ) -> bool {
-        self.inner.can_queue_notification(target, chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+    pub fn can_send_block_announces(&self, target: &PeerId, chain_index: usize) -> bool {
+        self.inner
+            .can_queue_notification(target, chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
     }
 
     /// Returns the list of peers for which we have a fully established notifications protocol of
