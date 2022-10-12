@@ -308,7 +308,7 @@ impl<T> Yamux<T> {
     /// Returns `true` if there is no substream in the state machine.
     ///
     /// > **Note**: After a substream has been closed or reset, it must be removed using
-    /// >           [`Yamux::next_dead_substream`] before this function can return `true`.
+    /// >           [`Yamux::remove_dead_substream`] before this function can return `true`.
     pub fn is_empty(&self) -> bool {
         self.substreams.is_empty()
     }
@@ -528,7 +528,7 @@ impl<T> Yamux<T> {
     ///
     /// This function does not remove dead substreams from the state machine. In other words, if
     /// this function is called multiple times in a row, it will always return the same
-    /// substreams. Use [`Yamux::remove_dead_substreams`] to remove subsreams.
+    /// substreams. Use [`Yamux::remove_dead_substream`] to remove subsreams.
     pub fn dead_substreams(
         &'_ self,
     ) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &'_ T)> + '_ {
@@ -614,7 +614,8 @@ impl<T> Yamux<T> {
     /// - It is currently waiting for either [`Yamux::accept_pending_substream`] or
     /// [`Yamux::reject_pending_substream`] to be called.
     /// - If the remote opens a substream whose ID is equal to a previous substream that is now
-    /// dead. Use [`Yamux::next_dead_substream`] to remove dead substreams before continuing.
+    /// dead. Use [`Yamux::dead_substreams`] and [`Yamux::remove_dead_substream`] to remove dead
+    /// substreams before continuing.
     ///
     /// If the return value contains [`IncomingDataDetail::IncomingSubstream`], then either
     /// [`Yamux::accept_pending_substream`] or [`Yamux::reject_pending_substream`] must be called
