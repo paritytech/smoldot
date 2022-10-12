@@ -528,7 +528,7 @@ impl<T> Yamux<T> {
     ///
     /// This function does not remove dead substreams from the state machine. In other words, if
     /// this function is called multiple times in a row, it will always return the same
-    /// substreams. Use [`Yamux::remove_dead_substream`] to remove subsreams.
+    /// substreams. Use [`Yamux::remove_dead_substream`] to remove substreams.
     pub fn dead_substreams(
         &'_ self,
     ) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &'_ T)> + '_ {
