@@ -1286,7 +1286,8 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if [`SubstreamId`] is not a fully open outbound notifications substream.
+    /// Panics if there is no fully-open outbound substream with that peer-protocol combination.
+    /// This can be checked using [`Peers::can_queue_notification`].
     ///
     pub fn queue_notification(
         &mut self,
@@ -1319,6 +1320,35 @@ where
             Err(collection::QueueNotificationError::QueueFull) => {
                 Err(QueueNotificationError::QueueFull)
             }
+        }
+    }
+
+    /// Returns `true` if it is allowed to call [`Peers::queue_notification`], in other words if
+    /// there is an outbound notifications substream currently open with the target.
+    ///
+    /// If this function returns `false`, calling [`Peers::queue_notification`] will panic.
+    pub fn can_queue_notification(
+        &self,
+        target: &PeerId,
+        notifications_protocol_index: usize,
+    ) -> bool {
+        let peer_index = match self.peer_indices.get(target) {
+            Some(idx) => *idx,
+            None => return false,
+        };
+
+        match self
+            .peers_notifications_out
+            .get(&(peer_index, notifications_protocol_index))
+            .map(|state| &state.open)
+        {
+            Some(NotificationsOutOpenState::Open(_)) => true,
+            None
+            | Some(
+                NotificationsOutOpenState::Opening(_)
+                | NotificationsOutOpenState::NotOpen
+                | NotificationsOutOpenState::ClosedByRemote,
+            ) => false,
         }
     }
 

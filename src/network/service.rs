@@ -829,6 +829,19 @@ where
         )
     }
 
+    /// Returns `true` if it is allowed to call [`ChainNetwork::send_block_announce`], in other
+    /// words if there is an outbound block announces substream currently open with the target.
+    ///
+    /// If this function returns `false`, calling [`ChainNetwork::send_block_announce`] will
+    /// panic.
+    pub fn can_send_block_announces(
+        &self,
+        target: &PeerId,
+        chain_index: usize,
+    ) -> bool {
+        self.inner.can_queue_notification(target, chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+    }
+
     /// Returns the list of peers for which we have a fully established notifications protocol of
     /// the given protocol.
     pub fn opened_transactions_substream(
