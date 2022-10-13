@@ -389,28 +389,66 @@ where
 
             // Substreams that have been closed or reset aren't immediately removed the yamux state
             // machine. They must be removed manually, which is what is done here.
-            while let Some((dead_substream_id, death_ty, state_machine)) =
-                self.inner.yamux.next_dead_substream()
-            {
-                // Removing a dead substream might lead to Yamux being able to process more
-                // incoming data. As such, we loop again.
-                must_continue_looping = true;
-
-                let state_machine = match state_machine {
-                    Some(s) => s,
-                    None => continue,
-                };
-
+            let dead_substream_ids = self
+                .inner
+                .yamux
+                .dead_substreams()
+                .map(|(id, death_ty, _)| (id, death_ty))
+                .collect::<Vec<_>>();
+            for (dead_substream_id, death_ty) in dead_substream_ids {
                 match death_ty {
                     yamux::DeadSubstreamTy::Reset => {
-                        if let Some(event) = state_machine.reset() {
-                            return Ok((
-                                self,
-                                Some(Self::pass_through_substream_event(dead_substream_id, event)),
-                            ));
-                        }
+                        // If the substream has been reset, we simply remove it from the Yamux
+                        // state machine.
+
+                        // If the substream was reset by the remote, then the substream state
+                        // machine will still be `Some`.
+                        if let Some(state_machine) =
+                            self.inner.yamux.remove_dead_substream(dead_substream_id)
+                        {
+                            // TODO: consider changing this `state_machine.reset()` function to be a state transition of the substream state machine (that doesn't take ownership), to simplify the implementation of both the substream state machine and this code
+                            if let Some(event) = state_machine.reset() {
+                                return Ok((
+                                    self,
+                                    Some(Self::pass_through_substream_event(
+                                        dead_substream_id,
+                                        event,
+                                    )),
+                                ));
+                            }
+                        };
+
+                        // Removing a dead substream might lead to Yamux being able to process more
+                        // incoming data. As such, we loop again.
+                        must_continue_looping = true;
                     }
                     yamux::DeadSubstreamTy::ClosedGracefully => {
+                        // If the substream has been closed gracefully, we don't necessarily
+                        // remove it instantly. Instead, we continue processing the substream
+                        // state machine until it tells us that there are no more events to
+                        // return.
+
+                        // Mutable reference to the substream state machine within the yamux
+                        // state machine.
+                        let state_machine_refmut = self
+                            .inner
+                            .yamux
+                            .substream_by_id_mut(dead_substream_id)
+                            .unwrap()
+                            .into_user_data();
+
+                        // Extract the substream state machine, maybe putting it back later.
+                        let state_machine_extracted = match state_machine_refmut.take() {
+                            Some(s) => s,
+                            None => {
+                                // We can only happen if substream state machine has been reset,
+                                // in which case it can't be in the "closed gracefully" state.
+                                // Reaching this would indicate a bug in yamux.
+                                unreachable!()
+                            }
+                        };
+
+                        // Now we run `state_machine_extracted.read_write`.
                         let mut substream_read_write = ReadWrite {
                             now: read_write.now.clone(),
                             incoming_buffer: None,
@@ -420,13 +458,38 @@ where
                             wake_up_after: None,
                         };
 
-                        let (_, _event) = state_machine.read_write(&mut substream_read_write);
+                        let (substream_update, event) =
+                            state_machine_extracted.read_write(&mut substream_read_write);
+
+                        debug_assert!(
+                            substream_read_write.read_bytes == 0
+                                && substream_read_write.written_bytes == 0
+                        );
 
                         if let Some(wake_up_after) = substream_read_write.wake_up_after {
                             read_write.wake_up_after(&wake_up_after);
                         }
 
-                        // TODO: finish here
+                        if let Some(substream_update) = substream_update {
+                            // Put back the substream state machine. It will be picked up again
+                            // the next time `read_write` is called.
+                            *state_machine_refmut = Some(substream_update);
+                        } else {
+                            // Substream has no more events to give us. Remove it from the Yamux
+                            // state machine.
+                            self.inner.yamux.remove_dead_substream(dead_substream_id);
+
+                            // Removing a dead substream might lead to Yamux being able to process more
+                            // incoming data. As such, we loop again.
+                            must_continue_looping = true;
+                        }
+
+                        if let Some(event) = event {
+                            return Ok((
+                                self,
+                                Some(Self::pass_through_substream_event(dead_substream_id, event)),
+                            ));
+                        }
                     }
                 }
             }

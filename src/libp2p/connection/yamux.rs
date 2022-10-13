@@ -308,7 +308,7 @@ impl<T> Yamux<T> {
     /// Returns `true` if there is no substream in the state machine.
     ///
     /// > **Note**: After a substream has been closed or reset, it must be removed using
-    /// >           [`Yamux::next_dead_substream`] before this function can return `true`.
+    /// >           [`Yamux::remove_dead_substream`] before this function can return `true`.
     pub fn is_empty(&self) -> bool {
         self.substreams.is_empty()
     }
@@ -524,15 +524,24 @@ impl<T> Yamux<T> {
         }
     }
 
-    /// Finds a substream that has been closed or reset, and removes it from this state machine.
-    pub fn next_dead_substream(&mut self) -> Option<(SubstreamId, DeadSubstreamTy, T)> {
+    /// Returns the list of all substreams that have been closed or reset.
+    ///
+    /// This function does not remove dead substreams from the state machine. In other words, if
+    /// this function is called multiple times in a row, it will always return the same
+    /// substreams. Use [`Yamux::remove_dead_substream`] to remove substreams.
+    pub fn dead_substreams(
+        &'_ self,
+    ) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &'_ T)> + '_ {
         // TODO: O(n)
-        let id_to_remove = self
-            .substreams
+        self.substreams
             .iter()
-            .filter(|(_, substream)| {
+            .filter_map(|(id, substream)| {
                 match &substream.state {
-                    SubstreamState::Reset => true,
+                    SubstreamState::Reset => Some((
+                        SubstreamId(*id),
+                        DeadSubstreamTy::Reset,
+                        &substream.user_data,
+                    )),
                     SubstreamState::Healthy {
                         local_write,
                         remote_write_closed,
@@ -540,45 +549,54 @@ impl<T> Yamux<T> {
                         first_write_buffer_offset,
                         ..
                     } => {
-                        matches!(local_write, SubstreamStateLocalWrite::FinQueued)
+                        if matches!(local_write, SubstreamStateLocalWrite::FinQueued)
                             && *remote_write_closed
                             && (write_buffers.is_empty() // TODO: cumbersome
                             || (write_buffers.len() == 1
                                 && write_buffers[0].len()
                                     <= *first_write_buffer_offset))
+                        {
+                            Some((
+                                SubstreamId(*id),
+                                DeadSubstreamTy::ClosedGracefully,
+                                &substream.user_data,
+                            ))
+                        } else {
+                            None
+                        }
                     }
                 }
             })
-            .map(|(id, _)| *id)
-            .next()?;
+            .inspect(|(dead_id, _, _)| {
+                debug_assert!(match self.outgoing {
+                    Outgoing::Header {
+                        substream_data_frame: Some((OutgoingSubstreamData::Healthy(id), _)),
+                        ..
+                    }
+                    | Outgoing::SubstreamData {
+                        data: OutgoingSubstreamData::Healthy(id),
+                        ..
+                    } if id == *dead_id => false,
+                    _ => true,
+                });
+            })
+    }
 
-        debug_assert!(match self.outgoing {
-            Outgoing::Header {
-                substream_data_frame: Some((OutgoingSubstreamData::Healthy(id), _)),
-                ..
-            }
-            | Outgoing::SubstreamData {
-                data: OutgoingSubstreamData::Healthy(id),
-                ..
-            } if id.0 == id_to_remove => false,
-            _ => true,
-        });
-
-        let substream = self.substreams.remove(&id_to_remove).unwrap();
+    /// Removes a dead substream from the state machine.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream with that id doesn't exist or isn't dead.
+    ///
+    pub fn remove_dead_substream(&mut self, id: SubstreamId) -> T {
+        let substream = self.substreams.remove(&id.0).unwrap();
+        assert!(matches!(substream.state, SubstreamState::Reset));
 
         if substream.inbound {
             self.num_inbound -= 1;
         }
 
-        Some((
-            SubstreamId(id_to_remove),
-            if let SubstreamState::Reset = substream.state {
-                DeadSubstreamTy::Reset
-            } else {
-                DeadSubstreamTy::ClosedGracefully
-            },
-            substream.user_data,
-        ))
+        substream.user_data
     }
 
     /// Process some incoming data.
@@ -596,7 +614,8 @@ impl<T> Yamux<T> {
     /// - It is currently waiting for either [`Yamux::accept_pending_substream`] or
     /// [`Yamux::reject_pending_substream`] to be called.
     /// - If the remote opens a substream whose ID is equal to a previous substream that is now
-    /// dead. Use [`Yamux::next_dead_substream`] to remove dead substreams before continuing.
+    /// dead. Use [`Yamux::dead_substreams`] and [`Yamux::remove_dead_substream`] to remove dead
+    /// substreams before continuing.
     ///
     /// If the return value contains [`IncomingDataDetail::IncomingSubstream`], then either
     /// [`Yamux::accept_pending_substream`] or [`Yamux::reject_pending_substream`] must be called
