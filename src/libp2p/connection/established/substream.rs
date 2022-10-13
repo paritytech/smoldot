@@ -70,6 +70,8 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
     /// A notifications protocol has been negotiated on a substream. Either a successful handshake
     /// or an abrupt closing is now expected.
     NotificationsOutHandshakeRecv {
+        /// When the opening will time out in the absence of response.
+        timeout: TNow,
         /// Buffer for the incoming handshake.
         handshake_in: leb128::FramedInProgress,
         /// Handshake payload to write out.
@@ -462,6 +464,7 @@ where
 
                         (
                             Some(SubstreamInner::NotificationsOutHandshakeRecv {
+                                timeout,
                                 handshake_in: leb128::FramedInProgress::new(max_handshake_size),
                                 handshake_out,
                                 user_data,
@@ -498,10 +501,22 @@ where
                 )
             }
             SubstreamInner::NotificationsOutHandshakeRecv {
+                timeout,
                 handshake_in,
                 mut handshake_out,
                 user_data,
             } => {
+                if timeout < read_write.now {
+                    return (
+                        Some(SubstreamInner::NotificationsOutNegotiationFailed),
+                        Some(Event::NotificationsOutResult {
+                            result: Err((NotificationsOutErr::Timeout, user_data)),
+                        }),
+                    );
+                }
+
+                read_write.wake_up_after(&timeout);
+
                 read_write.write_from_vec_deque(&mut handshake_out);
 
                 let incoming_buffer = match read_write.incoming_buffer {
@@ -521,6 +536,7 @@ where
                 if !handshake_out.is_empty() {
                     return (
                         Some(SubstreamInner::NotificationsOutHandshakeRecv {
+                            timeout,
                             handshake_in,
                             handshake_out,
                             user_data,
@@ -547,6 +563,7 @@ where
                         read_write.advance_read(num_read);
                         (
                             Some(SubstreamInner::NotificationsOutHandshakeRecv {
+                                timeout,
                                 handshake_in,
                                 handshake_out,
                                 user_data,

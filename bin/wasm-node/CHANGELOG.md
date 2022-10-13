@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix timeout not being checked when opening a notifications substream. ([#2323](https://github.com/paritytech/smoldot/pull/2323))
+
 ## 0.7.2 - 2022-10-12
 
 ### Changed
