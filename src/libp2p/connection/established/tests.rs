@@ -17,7 +17,7 @@
 
 #![cfg(test)]
 
-use super::{Config, ConfigRequestResponse, ConfigRequestResponseIn, Event, SingleStream};
+use super::{Config, ConfigRequestResponse, ConfigRequestResponseIn, Event, RequestError, SingleStream};
 use crate::libp2p::read_write::ReadWrite;
 use std::time::Duration;
 
@@ -304,6 +304,58 @@ fn successful_request() {
         either::Left(Event::Response { id, response, .. }) => {
             assert_eq!(id, substream_id);
             assert_eq!(response.unwrap(), b"response payload".to_vec());
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+}
+
+#[test]
+fn refused_request() {
+    let config = Config {
+        first_out_ping: Duration::new(60, 0),
+        notifications_protocols: Vec::new(),
+        request_protocols: vec![ConfigRequestResponse {
+            inbound_allowed: true,
+            inbound_config: ConfigRequestResponseIn::Payload { max_size: 128 },
+            max_response_size: 1024,
+            name: "test-request-protocol".to_owned(),
+        }],
+        max_inbound_substreams: 64,
+        ping_interval: Duration::from_secs(20),
+        ping_protocol: "ping".to_owned(),
+        ping_timeout: Duration::from_secs(20),
+        randomness_seed: [0; 32],
+    };
+
+    let mut connections = perform_handshake(256, 256, config.clone(), config);
+
+    let substream_id =
+        connections
+            .alice
+            .add_request(0, b"request payload".to_vec(), Duration::from_secs(5), ());
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::RequestIn {
+            id,
+            protocol_index: 0,
+            request,
+        }) => {
+            assert_eq!(request, b"request payload");
+            connections
+                .bob
+                .respond_in_request(id, Err(()))
+                .unwrap();
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (_, event) = connections.run_until_event();
+    match event {
+        either::Left(Event::Response { id, response, .. }) => {
+            assert_eq!(id, substream_id);
+            assert!(matches!(response, Err(RequestError::SubstreamClosed)));
         }
         _ev => unreachable!("{:?}", _ev),
     }
