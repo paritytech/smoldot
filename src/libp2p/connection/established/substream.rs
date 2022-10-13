@@ -86,6 +86,9 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         notifications: VecDeque<u8>,
         /// Data passed by the user to [`Substream::notifications_out`].
         user_data: TNotifUd,
+        /// If `true`, we have reported a [`Event::NotificationsOutCloseDemanded`] event in the
+        /// past and shouldn't report one again.
+        close_demanded_by_remote: bool,
     },
     /// A notifications protocol has been closed. Waiting for the remote to close it as well.
     NotificationsOutClosed,
@@ -553,6 +556,7 @@ where
                             Some(SubstreamInner::NotificationsOut {
                                 notifications: VecDeque::new(),
                                 user_data,
+                                close_demanded_by_remote: false,
                             }),
                             Some(Event::NotificationsOutResult {
                                 result: Ok(remote_handshake),
@@ -582,14 +586,32 @@ where
             SubstreamInner::NotificationsOut {
                 mut notifications,
                 user_data,
+                close_demanded_by_remote,
             } => {
                 // Receiving data on an outgoing substream is forbidden by the protocol.
                 read_write.discard_all_incoming();
                 read_write.write_from_vec_deque(&mut notifications);
+
+                // If this debug assertion fails, it means that `incoming_buffer` was `None` in
+                // the past then became `Some` again.
+                debug_assert!(!close_demanded_by_remote || read_write.incoming_buffer.is_none());
+
+                if !close_demanded_by_remote && read_write.incoming_buffer.is_none() {
+                    return (
+                        Some(SubstreamInner::NotificationsOut {
+                            notifications,
+                            user_data,
+                            close_demanded_by_remote: true,
+                        }),
+                        Some(Event::NotificationsOutCloseDemanded),
+                    );
+                }
+
                 (
                     Some(SubstreamInner::NotificationsOut {
                         notifications,
                         user_data,
+                        close_demanded_by_remote,
                     }),
                     None,
                 )
@@ -895,6 +917,10 @@ where
                 user_data,
             } => {
                 read_write.write_from_vec_deque(&mut handshake);
+
+                if close_desired && handshake.is_empty() {
+                    read_write.close_write_if_empty();
+                }
 
                 let incoming_buffer = match read_write.incoming_buffer {
                     Some(buf) => buf,
