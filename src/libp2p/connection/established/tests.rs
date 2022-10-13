@@ -593,4 +593,57 @@ fn outbound_substream_open_timeout() {
     }
 }
 
+#[test]
+fn outbound_substream_refuse() {
+    let config = Config {
+        first_out_ping: Duration::new(60, 0),
+        notifications_protocols: vec![ConfigNotifications {
+            name: "test-notif-protocol".to_owned(),
+            max_handshake_size: 1024,
+            max_notification_size: 1024,
+        }],
+        request_protocols: Vec::new(),
+        max_inbound_substreams: 64,
+        ping_interval: Duration::from_secs(20),
+        ping_protocol: "ping".to_owned(),
+        ping_timeout: Duration::from_secs(20),
+        randomness_seed: [0; 32],
+    };
+
+    let mut connections = perform_handshake(256, 256, config.clone(), config);
+
+    let substream_id = connections.alice.open_notifications_substream(
+        0,
+        b"hello".to_vec(),
+        connections.now + Duration::from_secs(5),
+        (),
+    );
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::NotificationsInOpen {
+            id,
+            protocol_index: 0,
+            handshake,
+        }) => {
+            assert_eq!(handshake, b"hello");
+            connections.bob.reject_in_notifications_substream(id);
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (_, event) = connections.run_until_event();
+    match event {
+        either::Left(Event::NotificationsOutResult {
+            id,
+            result: Err((NotificationsOutErr::RefusedHandshake, _)),
+            ..
+        }) => {
+            assert_eq!(id, substream_id);
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+}
+
 // TODO: more tests
