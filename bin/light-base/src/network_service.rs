@@ -385,7 +385,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             let mut guarded = self.shared.guarded.lock().await;
 
             // The call to `start_blocks_request` below panics if we have no active connection.
-            if !guarded.network.has_established_connection(&target) {
+            if !guarded.network.can_start_requests(&target) {
                 return Err(BlocksRequestError::NoConnection);
             }
 
@@ -490,7 +490,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
             // The call to `start_grandpa_warp_sync_request` below panics if we have no
             // active connection.
-            if !guarded.network.has_established_connection(&target) {
+            if !guarded.network.can_start_requests(&target) {
                 return Err(GrandpaWarpSyncRequestError::NoConnection);
             }
 
@@ -593,7 +593,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
             // The call to `start_storage_proof_request` below panics if we have no active
             // connection.
-            if !guarded.network.has_established_connection(&target) {
+            if !guarded.network.can_start_requests(&target) {
                 return Err(StorageProofRequestError::NoConnection);
             }
 
@@ -663,7 +663,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             let mut guarded = self.shared.guarded.lock().await;
 
             // The call to `start_call_proof_request` below panics if we have no active connection.
-            if !guarded.network.has_established_connection(&target) {
+            if !guarded.network.can_start_requests(&target) {
                 return Err(CallProofRequestError::NoConnection);
             }
 
@@ -770,9 +770,11 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     ) -> Result<(), QueueNotificationError> {
         let mut guarded = self.shared.guarded.lock().await;
 
-        // The call to `send_block_announce` below panics if we have no active connection.
-        // TODO: not the correct check; must make sure that we have a substream open
-        if !guarded.network.has_established_connection(target) {
+        // The call to `send_block_announce` below panics if we have no active substream.
+        if !guarded
+            .network
+            .can_send_block_announces(target, chain_index)
+        {
             return Err(QueueNotificationError::NoConnection);
         }
 

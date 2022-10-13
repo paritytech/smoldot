@@ -9,7 +9,7 @@ edition = "2018"
 cargo-fuzz = true
 
 [dependencies]
-arbitrary = "1.1.6"
+arbitrary = "1.1.7"
 fnv = { version = "1.0.7", default-features = false }
 hashbrown = { version = "0.12.3", default-features = false }
 libfuzzer-sys = "0.4"
@@ -86,8 +86,8 @@ test = false
 doc = false
 
 [[bin]]
-name = "proof-node-decode"
-path = "fuzz_targets/proof-node-decode.rs"
+name = "proof-node-codec"
+path = "fuzz_targets/proof-node-codec.rs"
 test = false
 doc = false
 

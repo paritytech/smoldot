@@ -493,7 +493,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                         protocol::StorageProofRequestConfig {
                             block_hash: *block_hash,
                             keys: prefix_scan.requested_keys().map(|nibbles| {
-                                trie::nibbles_to_bytes_extend(nibbles).collect::<Vec<_>>()
+                                trie::nibbles_to_bytes_suffix_extend(nibbles).collect::<Vec<_>>()
                             }),
                         },
                         timeout_per_request,

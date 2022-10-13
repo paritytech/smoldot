@@ -40,12 +40,25 @@ pub struct BlockAnnouncesHandshakeRef<'a> {
 }
 
 /// Role a node reports playing on the network.
-// TODO: document why this is here and what this entails
+///
+/// This role can be seen more or less as a priority level. The role a node reports cannot be
+/// trusted but is used as a hint. For example, Grandpa votes can be broadcasted with a higher
+/// priority to the nodes that report themselves as authorities.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Role {
-    Full,
-    Light,
+    /// Authorities author blocks and participate in the consensus.
+    ///
+    /// This role is non-binding, and is used only as a hint to prioritize some nodes over others.
     Authority,
+
+    /// Full nodes store the state of the chain. They are part of the infrastructure of the chain
+    /// in the sense that light nodes benefit from having a lot of full nodes to connect to.
+    ///
+    /// This role is non-binding, and is used only as a hint to prioritize some nodes over others.
+    Full,
+
+    /// Light nodes are the lowest priority nodes.
+    Light,
 }
 
 impl Role {

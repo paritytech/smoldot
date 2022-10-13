@@ -892,7 +892,9 @@ impl<'a> RuntimeCallLock<'a> {
                     | proof_verify::StorageValue::HashKnownValueMissing(_)
             ) {
                 assert_eq!(key.len() % 2, 0);
-                output.push(trie::nibbles_to_bytes_extend(key.iter().copied()).collect::<Vec<_>>());
+                output.push(
+                    trie::nibbles_to_bytes_suffix_extend(key.iter().copied()).collect::<Vec<_>>(),
+                );
             }
 
             match node_info.children {
@@ -2017,7 +2019,7 @@ impl SuccessfulRuntime {
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
         // Since compiling the runtime is a CPU-intensive operation, we yield once before.
-        crate::util::yield_once().await;
+        crate::util::yield_twice().await;
 
         // Parameters for `HostVmPrototype::new`.
         let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;

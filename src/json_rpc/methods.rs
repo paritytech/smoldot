@@ -435,7 +435,6 @@ define_methods! {
         hash: HashHexString,
         key: HexString,
         #[rename = "childKey"] child_key: Option<HexString>,
-        r#type: StorageQueryType,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
     chainHead_unstable_unfollow(
@@ -477,7 +476,7 @@ define_methods! {
     chainHead_unstable_bodyEvent(subscription: Cow<'a, str>, result: ChainHeadBodyEvent) -> (),
     chainHead_unstable_callEvent(subscription: Cow<'a, str>, result: ChainHeadCallEvent<'a>) -> (),
     chainHead_unstable_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
-    chainHead_unstable_storageEvent(subscription: Cow<'a, str>, result: ChainHeadStorageEvent) -> (),
+    chainHead_unstable_storageEvent(subscription: Cow<'a, str>, result: ChainHeadStorageEvent<'a>) -> (),
     transaction_unstable_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
 
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
@@ -629,9 +628,9 @@ pub enum FollowEvent<'a> {
     },
     #[serde(rename = "finalized")]
     Finalized {
-        #[serde(rename = "finalizedBlocksHashes")]
+        #[serde(rename = "finalizedBlockHashes")]
         finalized_blocks_hashes: Vec<HashHexString>,
-        #[serde(rename = "prunedBlocksHashes")]
+        #[serde(rename = "prunedBlockHashes")]
         pruned_blocks_hashes: Vec<HashHexString>,
     },
     #[serde(rename = "stop")]
@@ -664,11 +663,13 @@ pub enum ChainHeadCallEvent<'a> {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
-pub enum ChainHeadStorageEvent {
+pub enum ChainHeadStorageEvent<'a> {
     #[serde(rename = "done")]
     Done { value: Option<String> },
     #[serde(rename = "inaccessible")]
     Inaccessible {},
+    #[serde(rename = "error")]
+    Error { error: Cow<'a, str> },
     #[serde(rename = "disjoint")]
     Disjoint {},
 }
@@ -968,16 +969,6 @@ pub enum DispatchClass {
 pub struct StorageChangeSet {
     pub block: HashHexString,
     pub changes: Vec<(HexString, Option<HexString>)>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum StorageQueryType {
-    #[serde(rename = "value")]
-    Value,
-    #[serde(rename = "hash")]
-    Hash,
-    #[serde(rename = "size")]
-    Size,
 }
 
 #[derive(Debug, Clone)]
