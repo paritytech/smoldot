@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix timeout not being checked when opening a notifications substream. ([#2323](https://github.com/paritytech/smoldot/pull/2323))
+- Fix inbound notifications substreams close requests being ignored. ([#2323](https://github.com/paritytech/smoldot/pull/2323))
+- Fix closed inbound notifications substreams still being considered as open when closed gracefully by the remote. ([#2323](https://github.com/paritytech/smoldot/pull/2323))
+
 ## 0.7.2 - 2022-10-12
 
 ### Changed

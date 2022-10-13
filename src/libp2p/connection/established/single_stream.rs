@@ -441,10 +441,15 @@ where
                         let state_machine_extracted = match state_machine_refmut.take() {
                             Some(s) => s,
                             None => {
-                                // We can only happen if substream state machine has been reset,
-                                // in which case it can't be in the "closed gracefully" state.
-                                // Reaching this would indicate a bug in yamux.
-                                unreachable!()
+                                // Substream has already been removed from the Yamux state machine
+                                // previously. We know that it can't yield any more event.
+                                self.inner.yamux.remove_dead_substream(dead_substream_id);
+
+                                // Removing a dead substream might lead to Yamux being able to
+                                // process more incoming data. As such, we loop again.
+                                must_continue_looping = true;
+
+                                continue;
                             }
                         };
 
@@ -603,19 +608,21 @@ where
                 substream.write(inner.intermediary_buffer[..written_bytes].to_vec());
             }
             if !write_is_closed && closed_after {
-                // TODO: use return value
-                // TODO: substream.close();
+                debug_assert_eq!(written_bytes, 0);
+                substream.close();
             }
 
             match substream_update {
                 Some(s) => *substream.user_data_mut() = Some(s),
                 None => {
-                    // TODO: only reset if not already closed
-                    inner
-                        .yamux
-                        .substream_by_id_mut(substream_id)
-                        .unwrap()
-                        .reset();
+                    if !closed_after || !read_is_closed {
+                        // TODO: what we do here is definitely correct, but the docs of `reset()` seem sketchy, investigate
+                        inner
+                            .yamux
+                            .substream_by_id_mut(substream_id)
+                            .unwrap()
+                            .reset();
+                    }
                 }
             };
 
@@ -867,9 +874,9 @@ where
     ///
     pub fn open_notifications_substream(
         &mut self,
-        now: TNow,
         protocol_index: usize,
         handshake: Vec<u8>,
+        timeout: TNow,
         user_data: TNotifUd,
     ) -> SubstreamId {
         let max_handshake_size =
@@ -877,8 +884,6 @@ where
 
         // TODO: turn this assert into something that can't panic?
         assert!(handshake.len() <= max_handshake_size);
-
-        let timeout = now + Duration::from_secs(20); // TODO:
 
         let substream =
             self.inner
