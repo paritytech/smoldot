@@ -806,9 +806,9 @@ where
     ///
     pub fn open_notifications_substream(
         &mut self,
-        now: TNow,
         protocol_index: usize,
         handshake: Vec<u8>,
+        timeout: TNow,
         user_data: TNotifUd,
     ) -> SubstreamId {
         let max_handshake_size =
@@ -816,8 +816,6 @@ where
 
         // TODO: turn this assert into something that can't panic?
         assert!(handshake.len() <= max_handshake_size);
-
-        let timeout = now + Duration::from_secs(20); // TODO:
 
         let substream =
             self.inner

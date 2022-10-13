@@ -18,8 +18,8 @@
 #![cfg(test)]
 
 use super::{
-    Config, ConfigRequestResponse, ConfigRequestResponseIn, Event, InboundError, RequestError,
-    SingleStream,
+    Config, ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn, Event,
+    InboundError, NotificationsOutErr, RequestError, SingleStream,
 };
 use crate::libp2p::read_write::ReadWrite;
 use std::time::Duration;
@@ -456,7 +456,139 @@ fn request_timeout() {
             assert_eq!(id, substream_id);
             assert!(matches!(response, Err(RequestError::Timeout)));
         }
-        either::Right(Event::InboundError(InboundError::NegotiationError(_))) => {}
+        _ev => unreachable!("{:?}", _ev),
+    }
+}
+
+#[test]
+fn outbound_substream_works() {
+    let config = Config {
+        first_out_ping: Duration::new(60, 0),
+        notifications_protocols: vec![ConfigNotifications {
+            name: "test-notif-protocol".to_owned(),
+            max_handshake_size: 1024,
+            max_notification_size: 1024,
+        }],
+        request_protocols: Vec::new(),
+        max_inbound_substreams: 64,
+        ping_interval: Duration::from_secs(20),
+        ping_protocol: "ping".to_owned(),
+        ping_timeout: Duration::from_secs(20),
+        randomness_seed: [0; 32],
+    };
+
+    let mut connections = perform_handshake(256, 256, config.clone(), config);
+
+    let substream_id = connections.alice.open_notifications_substream(
+        0,
+        b"hello".to_vec(),
+        connections.now + Duration::from_secs(5),
+        (),
+    );
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::NotificationsInOpen {
+            id,
+            protocol_index: 0,
+            handshake,
+        }) => {
+            assert_eq!(handshake, b"hello");
+            connections
+                .bob
+                .accept_in_notifications_substream(id, b"hello back".to_vec(), ());
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let notifications_to_send = vec![
+        b"notif 1".to_vec(),
+        b"notif 2".to_vec(),
+        b"notif 3".to_vec(),
+    ];
+    let mut notifications_to_receive = notifications_to_send.clone();
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Left(Event::NotificationsOutResult {
+            id,
+            result: Ok(handshake),
+        }) => {
+            assert_eq!(id, substream_id);
+            assert_eq!(handshake, b"hello back");
+            for notif in notifications_to_send {
+                connections.alice.write_notification_unbounded(id, notif);
+            }
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    while !notifications_to_receive.is_empty() {
+        let (connections_update, event) = connections.run_until_event();
+        connections = connections_update;
+        match event {
+            either::Right(Event::NotificationIn { notification, .. }) => {
+                let pos = notifications_to_receive
+                    .iter()
+                    .position(|n| *n == notification)
+                    .unwrap();
+                notifications_to_receive.remove(pos);
+            }
+            _ev => unreachable!("{:?}", _ev),
+        }
+    }
+}
+
+#[test]
+fn outbound_substream_open_timeout() {
+    let config = Config {
+        first_out_ping: Duration::new(60, 0),
+        notifications_protocols: vec![ConfigNotifications {
+            name: "test-notif-protocol".to_owned(),
+            max_handshake_size: 1024,
+            max_notification_size: 1024,
+        }],
+        request_protocols: Vec::new(),
+        max_inbound_substreams: 64,
+        ping_interval: Duration::from_secs(20),
+        ping_protocol: "ping".to_owned(),
+        ping_timeout: Duration::from_secs(20),
+        randomness_seed: [0; 32],
+    };
+
+    let mut connections = perform_handshake(256, 256, config.clone(), config);
+
+    let substream_id = connections.alice.open_notifications_substream(
+        0,
+        b"hello".to_vec(),
+        connections.now + Duration::from_secs(5),
+        (),
+    );
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::NotificationsInOpen {
+            protocol_index: 0,
+            handshake,
+            ..
+        }) => {
+            assert_eq!(handshake, b"hello");
+            // Don't answer.
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    connections.pass_time(Duration::from_secs(10));
+
+    let (_, event) = connections.run_until_event();
+    match event {
+        either::Left(Event::NotificationsOutResult { id, result, .. }) => {
+            assert_eq!(id, substream_id);
+            assert!(matches!(result, Err((NotificationsOutErr::Timeout, _))));
+        }
         _ev => unreachable!("{:?}", _ev),
     }
 }
