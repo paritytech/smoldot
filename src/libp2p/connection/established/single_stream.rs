@@ -441,10 +441,15 @@ where
                         let state_machine_extracted = match state_machine_refmut.take() {
                             Some(s) => s,
                             None => {
-                                // We can only happen if substream state machine has been reset,
-                                // in which case it can't be in the "closed gracefully" state.
-                                // Reaching this would indicate a bug in yamux.
-                                unreachable!()
+                                // Substream has already been removed from the Yamux state machine
+                                // previously. We know that it can't yield any more event.
+                                self.inner.yamux.remove_dead_substream(dead_substream_id);
+
+                                // Removing a dead substream might lead to Yamux being able to
+                                // process more incoming data. As such, we loop again.
+                                must_continue_looping = true;
+
+                                continue;
                             }
                         };
 

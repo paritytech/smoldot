@@ -590,7 +590,7 @@ impl<T> Yamux<T> {
     ///
     pub fn remove_dead_substream(&mut self, id: SubstreamId) -> T {
         let substream = self.substreams.remove(&id.0).unwrap();
-        assert!(matches!(substream.state, SubstreamState::Reset));
+        // TODO: check whether substream is dead using the same criteria as in dead_substreams()
 
         if substream.inbound {
             self.num_inbound -= 1;
