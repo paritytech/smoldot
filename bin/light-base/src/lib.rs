@@ -59,8 +59,8 @@
 //! Calling [`Client::json_rpc_request`] queues the request in the internals of the client. Later,
 //! the client will process it.
 //!
-//! Responses are sent back by the client using the [`AddChainConfig::json_rpc_responses`] that
-//! was provided when creating the chain.
+//! Responses can be pulled by calling the [`AddChainSuccess::json_rpc_responses`] that is returned
+//! after a chain has been added.
 //!
 // TODO: talk about the fact that a randomness environment is assumed?
 
@@ -82,7 +82,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{cmp, num::NonZeroU32, pin::Pin};
-use futures::{channel::mpsc, prelude::*};
+use futures::{channel::oneshot, prelude::*};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
@@ -154,12 +154,9 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// be wrong to connect to the "Kusama" created by user A.
     pub potential_relay_chains: TRelays,
 
-    /// Channel to use to send the JSON-RPC responses.
-    ///
-    /// If `None`, then no JSON-RPC service is started for this chain. This saves up a lot of
+    /// If `false`, then no JSON-RPC service is started for this chain. This saves up a lot of
     /// resources, but will cause all JSON-RPC requests targeting this chain to fail.
-    // TODO: don't expose channels from the `futures` library in the public API
-    pub json_rpc_responses: Option<mpsc::Sender<String>>,
+    pub disable_json_rpc: bool,
 }
 
 /// Chain registered in a [`Client`].
@@ -211,8 +208,12 @@ struct PublicApiChain<TChain> {
 
     /// Handle that sends requests to the JSON-RPC service that runs in the background.
     /// Destroying this handle also shuts down the service. `None` iff
-    /// [`AddChainConfig::json_rpc_responses`] was `None` when adding the chain.
-    json_rpc_sender: Option<json_rpc_service::Sender>,
+    /// [`AddChainConfig::disable_json_rpc`] was `true` when adding the chain.
+    json_rpc_frontend: Option<json_rpc_service::Frontend>,
+
+    /// Dummy channel. Nothing is ever sent on it, but the receiving side is stored in the
+    /// [`JsonRpcResponses`] in order to detect when the chain has been removed.
+    _public_api_chain_destroyed_tx: oneshot::Sender<()>,
 }
 
 /// Identifies a chain, so that multiple identical chains are de-duplicated.
@@ -273,6 +274,54 @@ impl<TPlat: platform::Platform> Clone for ChainServices<TPlat> {
     }
 }
 
+/// Returns by [`Client::add_chain`] on success.
+pub struct AddChainSuccess {
+    /// Newly-allocated identifier for the chain.
+    pub chain_id: ChainId,
+
+    /// Stream of JSON-RPC responses or notifications.
+    ///
+    /// Is always `Some` if [`AddChainConfig::disable_json_rpc`] was `false`, and `None` if it was
+    /// `true`. In other words, you can unwrap this `Option` if you passed `false`.
+    pub json_rpc_responses: Option<JsonRpcResponses>,
+}
+
+/// Stream of JSON-RPC responses or notifications.
+///
+/// See [`AddChainSuccess::json_rpc_responses`].
+pub struct JsonRpcResponses {
+    /// Receiving side for responses.
+    ///
+    /// As long as this object is alive, the JSON-RPC service will continue running. In order
+    /// to prevent that from happening, we destroy it as soon as the
+    /// [`JsonRpcResponses::public_api_chain_destroyed_rx`] is notified of the destruction of
+    /// the sender.
+    inner: Option<json_rpc_service::Frontend>,
+
+    /// Dummy channel. Nothing is ever sent on it, but the sending side is stored in the
+    /// [`PublicApiChain`] in order to detect when the chain has been removed.
+    public_api_chain_destroyed_rx: oneshot::Receiver<()>,
+}
+
+impl JsonRpcResponses {
+    /// Returns the next response or notification, or `None` if the chain has been removed.
+    pub async fn next(&mut self) -> Option<String> {
+        if let Some(frontend) = self.inner.as_mut() {
+            let response_fut = frontend.next_json_rpc_response();
+            futures::pin_mut!(response_fut);
+            match future::select(response_fut, &mut self.public_api_chain_destroyed_rx).await {
+                future::Either::Left((response, _)) => return Some(response),
+                future::Either::Right((_result, _)) => {
+                    debug_assert!(_result.is_err());
+                }
+            }
+        }
+
+        self.inner = None;
+        None
+    }
+}
+
 impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     /// Initializes the smoldot client.
     pub fn new(config: ClientConfig) -> Self {
@@ -291,7 +340,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     pub fn add_chain(
         &mut self,
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
-    ) -> Result<ChainId, String> {
+    ) -> Result<AddChainSuccess, String> {
         // Decode the chain specification.
         let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
             Ok(cs) => cs,
@@ -750,7 +799,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even
         // if a similar chain already existed.
-        let json_rpc_sender = if let Some(json_rpc_responses) = config.json_rpc_responses {
+        let json_rpc_frontend = if !config.disable_json_rpc {
             // Clone `running_chain_init`.
             let mut running_chain_init = match services_init {
                 future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
@@ -758,7 +807,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 future::MaybeDone::Gone => unreachable!(),
             };
 
-            let (sender, service_starter) = json_rpc_service::service(json_rpc_service::Config {
+            let (frontend, service_starter) = json_rpc_service::service(json_rpc_service::Config {
                 log_name: log_name.clone(), // TODO: add a way to differentiate multiple different json-rpc services under the same chain
                 max_pending_requests: NonZeroU32::new(128).unwrap(),
                 max_subscriptions: 1024, // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
@@ -785,26 +834,33 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                     system_version,
                     genesis_block_hash,
                     genesis_block_state_root,
-                    responses_sender: json_rpc_responses,
                     max_parallel_requests: NonZeroU32::new(24).unwrap(),
                 })
             };
 
             (self.spawn_new_task)("json-rpc-service-init".to_owned(), init_future.boxed());
 
-            Some(sender)
+            Some(frontend)
         } else {
             None
         };
 
         // Success!
+        let (public_api_chain_destroyed_tx, public_api_chain_destroyed_rx) = oneshot::channel();
         public_api_chains_entry.insert(PublicApiChain {
             user_data: config.user_data,
             key: new_chain_key,
             chain_spec_chain_id,
-            json_rpc_sender,
+            json_rpc_frontend: json_rpc_frontend.clone(),
+            _public_api_chain_destroyed_tx: public_api_chain_destroyed_tx,
         });
-        Ok(new_chain_id)
+        Ok(AddChainSuccess {
+            chain_id: new_chain_id,
+            json_rpc_responses: json_rpc_frontend.map(|f| JsonRpcResponses {
+                inner: Some(f),
+                public_api_chain_destroyed_rx,
+            }),
+        })
     }
 
     /// Removes the chain from smoldot. This instantaneously and silently cancels all on-going
@@ -816,6 +872,9 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     /// While from the API perspective it will look like the chain no longer exists, calling this
     /// function will not actually immediately disconnect from the given chain if it is still used
     /// as the relay chain of a parachain.
+    ///
+    /// If the [`JsonRpcResponses`] object that was returned when adding the chain is still alive,
+    /// [`JsonRpcResponses::next`] will now return `None`.
     #[must_use]
     pub fn remove_chain(&mut self, id: ChainId) -> TChain {
         let removed_chain = self.public_api_chains.remove(id.0);
@@ -854,16 +913,16 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     /// queued and will be decoded and processed later.
     ///
     /// Returns an error if the node is overloaded and is capable of processing more JSON-RPC
-    /// requests before some time has passed or the [`AddChainConfig::json_rpc_responses`] channel
-    /// emptied.
+    /// requests before some time has passed or the [`AddChainSuccess::json_rpc_responses`]
+    /// stream is emptied.
     ///
     /// Also returns an error if the request could not be parsed as a valid JSON-RPC request, as
     /// in that situation smoldot is unable to send back a corresponding JSON-RPC error message.
     ///
     /// # Panic
     ///
-    /// Panics if the [`ChainId`] is invalid, or if [`AddChainConfig::json_rpc_responses`] was
-    /// `None` when adding the chain.
+    /// Panics if the [`ChainId`] is invalid, or if [`AddChainConfig::disable_json_rpc`] was
+    /// `true` when adding the chain.
     ///
     pub fn json_rpc_request(
         &mut self,
@@ -882,7 +941,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             .public_api_chains
             .get_mut(chain_id.0)
             .unwrap()
-            .json_rpc_sender
+            .json_rpc_frontend
         {
             Some(ref mut json_rpc_sender) => json_rpc_sender,
             _ => panic!(),
