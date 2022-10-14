@@ -232,8 +232,10 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 /// definition, and `parser` an inner parser that parses a Protobuf tag and value.
 /// If `#[optional]` is provided, then the value produced by `parser` is wrapped around an
 /// `Option`, and the decoding of the message will succeed even if the field is missing.
-/// If `#[repeated]` is provided, then the value produced by `parser` is wrapped around a `Vec`,
-/// and the field can be provided multiple times in the message.
+/// If `#[repeated(max = n)]` is provided, then the value produced by `parser` is wrapped
+/// around a `Vec`, and the field can be provided multiple times in the message. No more than
+/// `n` items can be added to the `Vec` before the decoding fails.
+/// Note that `num` and `n` (the maximum number of items in a `Vec`) can be expressions.
 /// It is not possible to pass both `#[optional]` and `#[repeated]` at the same time.
 ///
 /// The macro produces a `nom` parser that outputs an anonymous struct whose field correspond
@@ -245,9 +247,9 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 /// use crate::protobuf;
 /// let _parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
 ///     nom::combinator::complete(protobuf::message_decode! {
-///         #[repeated] entries = 1 => protobuf::message_decode!{
+///         #[repeated(max = 4)] entries = 1 => protobuf::message_decode!{
 ///             state_root = 1 => protobuf::bytes_tag_decode(1),
-///             #[repeated] entries = 2 => protobuf::message_tag_decode(2, protobuf::message_decode!{
+///             #[repeated(max = 10)] entries = 2 => protobuf::message_tag_decode(2, protobuf::message_decode!{
 ///                 key = 1 => protobuf::bytes_tag_decode(1),
 ///                 value = 2 => protobuf::bytes_tag_decode(2),
 ///             }),
@@ -259,10 +261,10 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 ///
 // TODO: maybe optional should be default?
 macro_rules! message_decode {
-    ($($(#[$attrs:tt])* $field_name:ident = $field_num:expr => $parser:expr),*,) => {
-        $crate::util::protobuf::message_decode!($($(#[$attrs])* $field_name = $field_num => $parser),*)
+    ($($(#[$($attrs:tt)*])* $field_name:ident = $field_num:expr => $parser:expr),*,) => {
+        $crate::util::protobuf::message_decode!($($(#[$($attrs)*])* $field_name = $field_num => $parser),*)
     };
-    ($($(#[$attrs:tt])* $field_name:ident = $field_num:expr => $parser:expr),*) => {{
+    ($($(#[$($attrs:tt)*])* $field_name:ident = $field_num:expr => $parser:expr),*) => {{
         #[allow(non_camel_case_types)]
         struct Out<$($field_name),*> {
             $($field_name: $field_name,)*
@@ -271,14 +273,13 @@ macro_rules! message_decode {
         |mut input| {
             #[allow(non_camel_case_types)]
             struct InProgress<$($field_name),*> {
-                $($field_name: $crate::util::protobuf::message_decode_helper_ty!($field_name; $($attrs)*),)*
+                $($field_name: $crate::util::protobuf::message_decode_helper_ty!($field_name; $($($attrs)*)*),)*
             }
 
             let mut in_progress = InProgress {
                 $($field_name: Default::default(),)*
             };
 
-            // TODO: should there be a limit on the number of items in a Vec?
             loop {
                 // Note: it might be tempting to write `input: &[u8]` as the closure parameter
                 // instead, but this causes lifetime issues for some reason.
@@ -300,7 +301,7 @@ macro_rules! message_decode {
                         ));
                     }
 
-                    $crate::util::protobuf::message_decode_helper_store!(input, value => in_progress.$field_name; $($attrs)*);
+                    $crate::util::protobuf::message_decode_helper_store!(input, value => in_progress.$field_name; $($($attrs)*)*);
                     input = rest;
                     continue;
                 })*
@@ -314,7 +315,7 @@ macro_rules! message_decode {
             }
 
             let out = Out {
-                $($field_name: $crate::util::protobuf::message_decode_helper_unwrap!(in_progress.$field_name; $($attrs)*)?,)*
+                $($field_name: $crate::util::protobuf::message_decode_helper_unwrap!(in_progress.$field_name; $($($attrs)*)*)?,)*
             };
 
             Ok((input, out))
@@ -325,7 +326,7 @@ macro_rules! message_decode {
 macro_rules! message_decode_helper_ty {
     ($ty:ty;) => { Option<$ty> };
     ($ty:ty; optional) => { Option<$ty> };
-    ($ty:ty; repeated) => { Vec<$ty> };
+    ($ty:ty; repeated(max = $max:expr)) => { Vec<$ty> };
 }
 
 macro_rules! message_decode_helper_store {
@@ -353,7 +354,15 @@ macro_rules! message_decode_helper_store {
         }
         $dest = Some($value);
     };
-    ($input_data:expr, $value:expr => $dest:expr; repeated) => {
+    ($input_data:expr, $value:expr => $dest:expr; repeated(max = $max:expr)) => {
+        if $dest.len() >= usize::try_from($max).unwrap_or(usize::max_value()) {
+            return core::result::Result::Err(nom::Err::Error(
+                nom::error::ParseError::<&[u8]>::from_error_kind(
+                    $input_data,
+                    nom::error::ErrorKind::Many1,
+                ),
+            ));
+        }
         $dest.push($value);
     };
 }
@@ -370,7 +379,7 @@ macro_rules! message_decode_helper_unwrap {
     ($value:expr; optional) => {
         Ok($value)
     };
-    ($value:expr; repeated) => {
+    ($value:expr; repeated(max = $max:expr)) => {
         Ok($value)
     };
 }

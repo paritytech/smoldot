@@ -120,9 +120,9 @@ pub fn decode_identify_response(
             #[optional] protocol_version = 5 => protobuf::string_tag_decode,
             #[optional] agent_version = 6 => protobuf::string_tag_decode,
             #[optional] ed25519_public_key = 1 => protobuf::bytes_tag_decode,
-            #[repeated] listen_addrs = 2 => protobuf::bytes_tag_decode,
+            #[repeated(max = 1024)] listen_addrs = 2 => protobuf::bytes_tag_decode,
             #[optional] observed_addr = 4 => protobuf::bytes_tag_decode,
-            #[repeated] protocols = 3 => protobuf::string_tag_decode,
+            #[repeated(max = 1024)] protocols = 3 => protobuf::string_tag_decode,
         }),
     );
 

@@ -47,9 +47,9 @@ pub fn decode_find_node_response(
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
             response_ty = 1 => protobuf::enum_tag_decode,
-            #[repeated] peers = 8 => protobuf::message_tag_decode(protobuf::message_decode!{
+            #[repeated(max = 1024)] peers = 8 => protobuf::message_tag_decode(protobuf::message_decode!{
                 peer_id = 1 => protobuf::bytes_tag_decode,
-                #[repeated] addrs = 2 => protobuf::bytes_tag_decode,
+                #[repeated(max = 1024)] addrs = 2 => protobuf::bytes_tag_decode,
             }),
         }),
     );
