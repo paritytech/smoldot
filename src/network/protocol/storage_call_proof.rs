@@ -105,14 +105,15 @@ pub fn decode_storage_or_call_proof_response(
     };
 
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-        nom::combinator::complete(protobuf::message_decode((protobuf::message_tag_decode(
-            field_num,
-            protobuf::message_decode((protobuf::bytes_tag_decode(2),)),
-        ),))),
+        nom::combinator::complete(protobuf::message_decode! {
+            response = field_num => protobuf::message_tag_decode(field_num, protobuf::message_decode!{
+                proof = 2 => protobuf::bytes_tag_decode(2)
+            }),
+        }),
     );
 
     let proof: &[u8] = match nom::Finish::finish(parser(response_bytes)) {
-        Ok((_, ((((b,),),),))) => b,
+        Ok((_, out)) => out.response.proof,
         Err(_) => return Err(DecodeStorageCallProofResponseError::ProtobufDecode),
     };
 
