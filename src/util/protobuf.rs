@@ -220,7 +220,7 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 /// Importantly, this does **not** expect a Protobuf tag in front of the message. If the message
 /// is part of another message, you must wrap this macro call around [`message_tag_decode`].
 ///
-/// This macro expects a list of fields, each field has one of the three following syntaxes:
+/// This macro expects a list of fields, each field has one of the three following formats:
 ///
 /// ```
 /// field_name = num => parser
@@ -234,6 +234,10 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 /// `Option`, and the decoding of the message will succeed even if the field is missing.
 /// If `#[repeated]` is provided, then the value produced by `parser` is wrapped around a `Vec`,
 /// and the field can be provided multiple times in the message.
+/// It is not possible to pass both `#[optional]` and `#[repeated]` at the same time.
+///
+/// The macro produces a `nom` parser that outputs an anonymous struct whose field correspond
+/// to the provided field names.
 ///
 /// # Example
 ///
@@ -242,12 +246,12 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 /// let _parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
 ///     nom::combinator::complete(protobuf::message_decode! {
 ///         #[repeated] entries = 1 => protobuf::message_decode!{
-///             _state_root = 1 => protobuf::bytes_tag_decode(1),
+///             state_root = 1 => protobuf::bytes_tag_decode(1),
 ///             #[repeated] entries = 2 => protobuf::message_tag_decode(2, protobuf::message_decode!{
 ///                 key = 1 => protobuf::bytes_tag_decode(1),
 ///                 value = 2 => protobuf::bytes_tag_decode(2),
 ///             }),
-///             _complete = 3 => protobuf::bool_tag_decode(3),
+///             #[optional] complete = 3 => protobuf::bool_tag_decode(3),
 ///         }
 ///     }),
 /// );
