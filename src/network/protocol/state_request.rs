@@ -134,3 +134,13 @@ pub enum DecodeStateResponseError {
     /// Response contains a different number of entries than expected.
     UnexpectedEntriesCount,
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn example_response() {
+        // This is an actual response from the Polkadot chain that failed to parse in the past.
+        super::decode_state_response(&include_bytes!("./state_request/example-response")[..])
+            .unwrap();
+    }
+}
