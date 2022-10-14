@@ -279,7 +279,6 @@ macro_rules! message_decode {
             };
 
             // TODO: should there be a limit on the number of items in a Vec?
-            // TODO: check that the same field isn't provided multiple times?
             loop {
                 // Note: it might be tempting to write `input: &[u8]` as the closure parameter
                 // instead, but this causes lifetime issues for some reason.
@@ -296,13 +295,13 @@ macro_rules! message_decode {
                         // The field parser didn't consume any byte. This will lead
                         // to an infinite loop. Return an error to prevent this from
                         // happening.
-                        return Result::Err(nom::Err::Error(
+                        return core::result::Result::Err(nom::Err::Error(
                             nom::error::ParseError::<&[u8]>::from_error_kind(rest, nom::error::ErrorKind::Alt)
                         ));
                     }
 
+                    $crate::util::protobuf::message_decode_helper_store!(input, value => in_progress.$field_name; $($attrs)*);
                     input = rest;
-                    $crate::util::protobuf::message_decode_helper_store!(value => in_progress.$field_name; $($attrs)*);
                     continue;
                 })*
 
@@ -330,21 +329,44 @@ macro_rules! message_decode_helper_ty {
 }
 
 macro_rules! message_decode_helper_store {
-    ($value:expr => $dest:expr;) => {
+    ($input_data:expr, $value:expr => $dest:expr;) => {
+        if $dest.is_some() {
+            // Make sure that the field is only found once in the message.
+            return core::result::Result::Err(nom::Err::Error(
+                nom::error::ParseError::<&[u8]>::from_error_kind(
+                    $input_data,
+                    nom::error::ErrorKind::Many1,
+                ),
+            ));
+        }
         $dest = Some($value);
     };
-    ($value:expr => $dest:expr; optional) => {
+    ($input_data:expr, $value:expr => $dest:expr; optional) => {
+        if $dest.is_some() {
+            // Make sure that the field is only found once in the message.
+            return core::result::Result::Err(nom::Err::Error(
+                nom::error::ParseError::<&[u8]>::from_error_kind(
+                    $input_data,
+                    nom::error::ErrorKind::Many1,
+                ),
+            ));
+        }
         $dest = Some($value);
     };
-    ($value:expr => $dest:expr; repeated) => {
+    ($input_data:expr, $value:expr => $dest:expr; repeated) => {
         $dest.push($value);
     };
 }
 
 macro_rules! message_decode_helper_unwrap {
     ($value:expr;) => {
-        Ok($value.unwrap())
-    }; // TODO: no, error
+        $value.ok_or_else(|| {
+            nom::Err::Error(nom::error::ParseError::<&[u8]>::from_error_kind(
+                &[][..],
+                nom::error::ErrorKind::NoneOf,
+            ))
+        })
+    };
     ($value:expr; optional) => {
         Ok($value)
     };
