@@ -39,12 +39,13 @@
 use crate::platform::Platform;
 
 use alloc::{
+    borrow::ToOwned as _,
     boxed::Box,
     string::{String, ToString as _},
     sync::Arc,
     vec::Vec,
 };
-use core::{cmp, num::NonZeroUsize, pin::Pin, task::Poll, time::Duration};
+use core::{cmp, num::NonZeroUsize, ops, pin::Pin, task::Poll, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
     lock::Mutex,
@@ -59,7 +60,7 @@ use smoldot::{
     network::{protocol, service},
 };
 
-pub use service::EncodedMerkleProof;
+pub use service::{EncodedMerkleProof, EncodedStateResponse};
 
 mod tasks;
 
@@ -188,6 +189,12 @@ struct SharedGuarded<TPlat: Platform> {
         fnv::FnvBuildHasher,
     >,
 
+    storage_requests: HashMap<
+        service::OutRequestId,
+        oneshot::Sender<Result<EncodedStateResponse, service::StateRequestError>>,
+        fnv::FnvBuildHasher,
+    >,
+
     call_proof_requests: HashMap<
         service::OutRequestId,
         oneshot::Sender<Result<service::EncodedMerkleProof, service::CallProofRequestError>>,
@@ -268,6 +275,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     Default::default(),
                 ),
                 storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+                storage_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
                 call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
                 kademlia_discovery_operations: HashMap::with_capacity_and_hasher(
                     2,
@@ -648,6 +656,89 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         result.map_err(StorageProofRequestError::Request)
     }
 
+    /// Sends a storage request for a range of keys to the given peer.
+    // TODO: more docs
+    pub async fn state_request(
+        self: Arc<Self>,
+        chain_index: usize,
+        target: PeerId, // TODO: takes by value because of futures longevity issue
+        block_hash: [u8; 32],
+        keys: ops::RangeFrom<Vec<u8>>,
+        timeout: Duration,
+    ) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, bool), StorageRequestError> {
+        let rx = {
+            let mut guarded = self.shared.guarded.lock().await;
+
+            // The call to `start_state_request_unchecked` below panics if we have no active
+            // connection.
+            if !guarded.network.can_start_requests(&target) {
+                return Err(StorageRequestError::NoConnection);
+            }
+
+            log::debug!(
+                target: "network",
+                "Connection({}) <= StorageRequest(chain={}, block={}, start_key={})",
+                target,
+                self.shared.log_chain_names[chain_index],
+                HashDisplay(&block_hash),
+                HashDisplay(&keys.start)
+            );
+
+            let request_id = guarded.network.start_state_request_unchecked(
+                TPlat::now(),
+                &target,
+                chain_index,
+                &block_hash,
+                &keys.start,
+                timeout,
+            );
+
+            self.shared.wake_up_main_background_task.notify(1);
+
+            let (tx, rx) = oneshot::channel();
+            guarded.storage_requests.insert(request_id, tx);
+            rx
+        };
+
+        let result = rx.await.unwrap();
+
+        match result {
+            Ok(response) => {
+                let decoded = response.decode();
+                log::debug!(
+                    target: "network",
+                    "Connection({}) => StorageRequest(chain={}, num_elems={}, total_size={}, complete={:?})",
+                    target,
+                    self.shared.log_chain_names[chain_index],
+                    decoded.entries.len(),
+                    BytesDisplay(decoded.entries.iter().fold(0, |a, b| a + u64::try_from(b.key.len() + b.value.len()).unwrap())),
+                    decoded.complete,
+                );
+
+                // TODO: the `to_owned()` here are kind of expensive, figure if not possible to avoid them
+                Ok((
+                    decoded
+                        .entries
+                        .into_iter()
+                        .map(|entry| (entry.key.to_owned(), entry.value.to_owned()))
+                        .collect::<Vec<_>>(),
+                    decoded.complete,
+                ))
+            }
+            Err(err) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}) => StorageRequest(chain={}, error={:?})",
+                    target,
+                    self.shared.log_chain_names[chain_index],
+                    err
+                );
+
+                Err(StorageRequestError::Request(err))
+            }
+        }
+    }
+
     /// Sends a call proof request to the given peer.
     ///
     /// See also [`NetworkService::call_proof_request`].
@@ -916,6 +1007,16 @@ pub enum StorageProofRequestError {
     Request(service::StorageProofRequestError),
 }
 
+/// Error returned by [`NetworkService::storage_request`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum StorageRequestError {
+    /// No established connection with the target.
+    NoConnection,
+    /// Error during the request.
+    #[display(fmt = "{}", _0)]
+    Request(service::StateRequestError),
+}
+
 /// Error returned by [`NetworkService::call_proof_request`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum CallProofRequestError {
@@ -1143,6 +1244,16 @@ async fn update_round<TPlat: Platform>(
                         .unwrap()
                         .send(response);
                 }
+                service::Event::StateRequestResult {
+                    request_id,
+                    response,
+                } => {
+                    let _ = guarded
+                        .storage_requests
+                        .remove(&request_id)
+                        .unwrap()
+                        .send(response);
+                }
                 service::Event::CallProofRequestResult {
                     request_id,
                     response,
@@ -1153,8 +1264,7 @@ async fn update_round<TPlat: Platform>(
                         .unwrap()
                         .send(response);
                 }
-                service::Event::StateRequestResult { .. }
-                | service::Event::KademliaFindNodeRequestResult { .. } => {
+                service::Event::KademliaFindNodeRequestResult { .. } => {
                     // We never start this kind of requests.
                     unreachable!()
                 }

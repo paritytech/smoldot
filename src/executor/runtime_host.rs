@@ -621,7 +621,7 @@ impl Inner {
                             // TODO: allocating a Vec, meh
                             if let Some(overlay) = self
                                 .top_trie_changes
-                                .diff_get(&value_request.key().collect::<Vec<_>>())
+                                .diff_get(&value_request.key_as_vec())
                             {
                                 // TODO: we only support V0 for now, see https://github.com/paritytech/smoldot/issues/1967
                                 self.root_calculation =

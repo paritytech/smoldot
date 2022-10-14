@@ -103,10 +103,10 @@ use crate::{
     },
     finality::grandpa::warp_sync,
     header::{self, Header},
-    trie::proof_verify,
+    trie::{calculate_root, proof_verify, TrieEntryVersion},
 };
 
-use alloc::{borrow::Cow, vec::Vec};
+use alloc::{borrow::Cow, collections::BTreeMap, vec::Vec};
 use core::{iter, mem, ops};
 
 pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
@@ -132,6 +132,12 @@ pub enum Error {
     /// Warp sync requires fetching the key that follows another one. This isn't implemented in
     /// smoldot.
     NextKeyUnimplemented,
+    /// State version found in the runtime has an invalid value.
+    UnknownStateVersion,
+    /// The storage that has been downloaded has a trie root hash that doesn't match the one in
+    /// the header.
+    // TODO: this is a non-fatal error contrary to all the other errors in this enum
+    DownloadedStorageRootHashMismatch,
 }
 
 /// The configuration for [`start_warp_sync()`].
@@ -148,6 +154,10 @@ pub struct Config {
 
     /// The initial capacity of the list of requests.
     pub requests_capacity: usize,
+
+    /// If `true`, the warp sync system will download the storage of the chain. Determine whether
+    /// [`Success::storage`] field will be set.
+    pub download_storage: bool,
 }
 
 /// Initializes the warp sync state machine.
@@ -178,6 +188,7 @@ pub fn start_warp_sync<TSrc, TRq>(
 
     Ok(InProgressWarpSync {
         start_chain_information: config.start_chain_information,
+        download_storage: true, // TODO: config.download_storage,  testing right now
         block_number_bytes: config.block_number_bytes,
         sources: slab::Slab::with_capacity(config.sources_capacity),
         in_progress_requests: slab::Slab::with_capacity(config.requests_capacity),
@@ -222,6 +233,10 @@ pub struct Success<TSrc, TRq> {
 
     /// The list of requests that were added to the state machine.
     pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
+
+    /// Storage of the chain at the finalized block. Contains `Some` if and only if
+    /// [`Config::download_storage`] was `true`.
+    pub storage: Option<BTreeMap<Vec<u8>, Vec<u8>>>,
 }
 
 /// The warp sync state machine.
@@ -255,6 +270,8 @@ impl<TSrc, TRq> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc, TRq> {
 pub struct InProgressWarpSync<TSrc, TRq> {
     /// See [`Phase`].
     phase: Phase,
+    /// See [`Config::download_storage`].
+    download_storage: bool,
     /// Starting point of the warp syncing, as provided to [`start_warp_sync`].
     start_chain_information: ValidChainInformation,
     /// Number of bytes used to encode the block number in headers.
@@ -286,6 +303,22 @@ enum Phase {
         /// Always `Some`, but wrapped within an `Option` in order to permit extracting
         /// temporarily.
         verifier: Option<warp_sync::Verifier>,
+    },
+    /// All warp sync fragments have been verified, and we are now downloading the storage of the
+    /// finalized block of the chain.
+    StorageDownload {
+        /// Finalized block of the chain we warp synced to.
+        header: Header,
+        /// Information about the finality of the chain at the point where we warp synced to.
+        chain_information_finality: ChainInformationFinality,
+        /// Source we downloaded the last fragments from. Assuming that the source isn't malicious,
+        /// it is guaranteed to have access to the storage of the finalized block.
+        warp_sync_source_id: SourceId,
+        /// Storage items that were downloaded.
+        // TODO: limit the total size of this? otherwise the remote can just send an infinite stream of data
+        downloaded_keys: BTreeMap<Vec<u8>, Vec<u8>>,
+        /// `true` if all keys were downloaded.
+        finished: bool,
     },
     /// All warp sync fragments have been verified, and we are now downloading the runtime of the
     /// finalized block of the chain.
@@ -383,6 +416,12 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             warp_sync_source_id,
             header,
             chain_information_finality,
+            ..
+        }
+        | Phase::StorageDownload {
+            header,
+            chain_information_finality,
+            warp_sync_source_id,
             ..
         }
         | Phase::ChainInformationDownload {
@@ -491,6 +530,51 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             either::Right(iter::empty())
         };
 
+        // If we are in the appropriate phase, and we are not finished downloading the storage,
+        // return a storage download request.
+        let storage_get = if let Phase::StorageDownload {
+            header,
+            warp_sync_source_id,
+            downloaded_keys,
+            finished: false,
+            ..
+        } = &self.phase
+        {
+            // TODO: O(n)
+            if !self.in_progress_requests.iter().any(|(_, rq)| {
+                rq.0 == *warp_sync_source_id
+                    && match rq.2 {
+                        RequestDetail::StorageRequest { block_hash: b, .. }
+                            if b == header.hash(self.block_number_bytes) =>
+                        {
+                            true
+                        }
+                        _ => false,
+                    }
+            }) {
+                // TODO: this is O(n), should use `last_key_value` instead, see https://github.com/rust-lang/rust/issues/62924
+                let start = downloaded_keys
+                    .keys()
+                    .last()
+                    .map(|k| k.clone()) // TODO: no, should be the key right after
+                    .unwrap_or(Vec::new());
+
+                Some((
+                    *warp_sync_source_id,
+                    &self.sources[warp_sync_source_id.0].user_data,
+                    DesiredRequest::StorageRequest {
+                        block_hash: header.hash(self.block_number_bytes),
+                        state_trie_root: header.state_root,
+                        keys_range: ops::RangeFrom { start },
+                    },
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // If we are in the appropriate phase, and we are not currently downloading the runtime,
         // return a runtime download request.
         let runtime_parameters_get = if let Phase::RuntimeDownload {
@@ -577,6 +661,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
 
         // Chain all these demanded requests together.
         warp_sync_request
+            .chain(storage_get.into_iter())
             .chain(runtime_parameters_get.into_iter())
             .chain(call_proofs)
     }
@@ -622,9 +707,16 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     source_id,
                     user_data,
                     RequestDetail::RuntimeCallMerkleProof { .. }
+                    | RequestDetail::StorageRequest { .. }
                     | RequestDetail::RuntimeParametersGet { .. },
                 ),
                 Phase::RuntimeDownload {
+                    header,
+                    chain_information_finality,
+                    warp_sync_source_id,
+                    ..
+                }
+                | Phase::StorageDownload {
                     header,
                     chain_information_finality,
                     warp_sync_source_id,
@@ -647,6 +739,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     _,
                     user_data,
                     RequestDetail::RuntimeCallMerkleProof { .. }
+                    | RequestDetail::StorageRequest { .. }
                     | RequestDetail::RuntimeParametersGet { .. },
                 ),
                 _,
@@ -682,6 +775,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     _,
                     _,
                     RequestDetail::RuntimeCallMerkleProof { .. }
+                    | RequestDetail::StorageRequest { .. }
                     | RequestDetail::WarpSyncRequest { .. },
                 ),
                 _,
@@ -696,6 +790,61 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 storage_code: code.map(|c| c.as_ref().to_vec()),
                 storage_heap_pages: heap_pages.map(|c| c.as_ref().to_vec()),
             });
+        } else {
+            // This is checked at the beginning of this function.
+            unreachable!()
+        }
+
+        user_data
+    }
+
+    /// Injects a successful response and removes the given request from the state machine. Returns
+    /// the user data that was associated to it.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    /// Panics if the [`RequestId`] doesn't correspond to a storage get request.
+    ///
+    pub fn storage_get_success(
+        &mut self,
+        id: RequestId,
+        keys: impl Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        is_finished: bool,
+    ) -> TRq {
+        // TODO: ban the node is response is empty?
+
+        // Remove the request from the list, obtaining its user data.
+        // If the request corresponds to the runtime parameters we're looking for, the function
+        // continues below, otherwise we return early.
+        let user_data = match (self.in_progress_requests.remove(id.0), &self.phase) {
+            (
+                (_, user_data, RequestDetail::StorageRequest { block_hash, .. }),
+                Phase::StorageDownload {
+                    header, finished, ..
+                },
+            ) if block_hash == header.hash(self.block_number_bytes) && !*finished => user_data,
+            ((_, user_data, RequestDetail::StorageRequest { .. }), _) => return user_data,
+            (
+                (
+                    _,
+                    _,
+                    RequestDetail::RuntimeCallMerkleProof { .. }
+                    | RequestDetail::RuntimeParametersGet { .. }
+                    | RequestDetail::WarpSyncRequest { .. },
+                ),
+                _,
+            ) => panic!(),
+        };
+
+        if let Phase::StorageDownload {
+            downloaded_keys,
+            finished,
+            ..
+        } = &mut self.phase
+        {
+            downloaded_keys.extend(keys);
+            *finished = is_finished;
         } else {
             // This is checked at the beginning of this function.
             unreachable!()
@@ -755,6 +904,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             // Wrong request type.
             (
                 (_, _, RequestDetail::RuntimeParametersGet { .. })
+                | (_, _, RequestDetail::StorageRequest { .. })
                 | (_, _, RequestDetail::WarpSyncRequest { .. }),
                 _,
             ) => panic!(),
@@ -839,6 +989,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     /// This function takes ownership of `self` and yields it back after the operation is finished.
     pub fn process_one(self) -> ProcessOne<TSrc, TRq> {
         if let Phase::ChainInformationDownload { calls, .. } = &self.phase {
+            debug_assert!(!self.download_storage);
             // If we've downloaded everything that was needed, switch to "build chain information"
             // mode.
             if calls.values().all(Option::is_some) {
@@ -851,7 +1002,13 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             ..
         } = &self.phase
         {
+            debug_assert!(!self.download_storage);
             return ProcessOne::BuildRuntime(BuildRuntime { inner: self });
+        }
+
+        if let Phase::StorageDownload { finished: true, .. } = &self.phase {
+            debug_assert!(self.download_storage);
+            return ProcessOne::VerifyStorage(VerifyStorage { inner: self });
         }
 
         if let Phase::PendingVerify { .. } = &self.phase {
@@ -882,6 +1039,7 @@ pub enum DesiredRequest {
         block_hash: [u8; 32],
     },
     /// A storage request of the runtime code and heap pages should be started.
+    // TODO: API inconsistency: the verification of other requests responses is done within warp sync, but the verification of runtime parameters get is done externally
     RuntimeParametersGet {
         /// Hash of the block to request the parameters against.
         block_hash: [u8; 32],
@@ -896,6 +1054,15 @@ pub enum DesiredRequest {
         function_name: Cow<'static, str>,
         /// Parameters of the call.
         parameter_vectored: Cow<'static, [u8]>,
+    },
+    /// A storage request for a certain range of keys should be started.
+    StorageRequest {
+        /// Hash of the block to request the parameters against.
+        block_hash: [u8; 32],
+        /// State trie root hash found in the header of the block.
+        state_trie_root: [u8; 32],
+        /// The keys of the response must belong to this range.
+        keys_range: ops::RangeFrom<Vec<u8>>,
     },
 }
 
@@ -923,6 +1090,13 @@ pub enum RequestDetail {
         /// See [`DesiredRequest::RuntimeCallMerkleProof::parameter_vectored`].
         parameter_vectored: Cow<'static, [u8]>,
     },
+    /// See [`DesiredRequest::StorageRequest`].
+    StorageRequest {
+        /// Hash of the block to request the parameters against.
+        block_hash: [u8; 32],
+        /// The keys of the response must belong to this range.
+        keys_range: ops::RangeFrom<Vec<u8>>,
+    },
 }
 
 /// Identifier for a request in the warp sync state machine.
@@ -935,8 +1109,10 @@ pub enum ProcessOne<TSrc, TRq> {
     Idle(InProgressWarpSync<TSrc, TRq>),
     /// Ready to verify a warp sync fragment.
     VerifyWarpSyncFragment(VerifyWarpSyncFragment<TSrc, TRq>),
-    /// Ready to build the runtime of the chain..
+    /// Ready to build the runtime of the chain.
     BuildRuntime(BuildRuntime<TSrc, TRq>),
+    /// Ready to verify the downloaded storage build the runtime of the finalized chain.
+    VerifyStorage(VerifyStorage<TSrc, TRq>),
     /// Ready to verify the parameters of the chain against the finalized block.
     BuildChainInformation(BuildChainInformation<TSrc, TRq>),
 }
@@ -984,21 +1160,29 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                     *verifier = Some(next_verifier);
                 }
                 Ok(warp_sync::Next::EmptyProof) => {
-                    self.inner.phase = Phase::RuntimeDownload {
-                        header: self
-                            .inner
-                            .start_chain_information
-                            .as_ref()
-                            .finalized_block_header
-                            .into(),
-                        chain_information_finality: self
-                            .inner
-                            .start_chain_information
-                            .as_ref()
-                            .finality
-                            .into(),
-                        warp_sync_source_id: *downloaded_source,
-                        downloaded_runtime: None,
+                    let header = self
+                        .inner
+                        .start_chain_information
+                        .as_ref()
+                        .finalized_block_header
+                        .into();
+                    let chain_information_finality =
+                        self.inner.start_chain_information.as_ref().finality.into();
+                    self.inner.phase = if self.inner.download_storage {
+                        Phase::StorageDownload {
+                            header,
+                            chain_information_finality,
+                            warp_sync_source_id: *downloaded_source,
+                            downloaded_keys: BTreeMap::new(),
+                            finished: false,
+                        }
+                    } else {
+                        Phase::RuntimeDownload {
+                            header,
+                            chain_information_finality,
+                            warp_sync_source_id: *downloaded_source,
+                            downloaded_runtime: None,
+                        }
                     };
                 }
                 Ok(warp_sync::Next::Success {
@@ -1013,11 +1197,21 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                             .into();
 
                     if *final_set_of_fragments {
-                        self.inner.phase = Phase::RuntimeDownload {
-                            header,
-                            chain_information_finality,
-                            warp_sync_source_id: *downloaded_source,
-                            downloaded_runtime: None,
+                        self.inner.phase = if self.inner.download_storage {
+                            Phase::StorageDownload {
+                                header,
+                                chain_information_finality,
+                                warp_sync_source_id: *downloaded_source,
+                                downloaded_keys: BTreeMap::new(),
+                                finished: false,
+                            }
+                        } else {
+                            Phase::RuntimeDownload {
+                                header,
+                                chain_information_finality,
+                                warp_sync_source_id: *downloaded_source,
+                                downloaded_runtime: None,
+                            }
                         };
                     } else {
                         self.inner.phase = Phase::DownloadFragments {
@@ -1155,6 +1349,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                                     (src_id, RequestId(id), user_data, detail)
                                 })
                                 .collect(),
+                            storage: None,
                         }),
                         None,
                     );
@@ -1284,6 +1479,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                             (src_id, RequestId(id), user_data, detail)
                                         })
                                         .collect(),
+                                        storage: None, // TODO:
                                     }),
                                     None,
                                 );
@@ -1311,6 +1507,213 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                         }
                     }
                     chain_information::build::InProgress::NextKey(_) => {
+                        // TODO: implement
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::NextKeyUnimplemented),
+                        );
+                    }
+                }
+            }
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+/// Ready to verify the downloaded storage build the runtime of the finalized chain.
+pub struct VerifyStorage<TSrc, TRq> {
+    inner: InProgressWarpSync<TSrc, TRq>,
+}
+
+impl<TSrc, TRq> VerifyStorage<TSrc, TRq> {
+    /// Verify the downloaded storage and build the chain information.
+    ///
+    /// This function might return a [`WarpSync::Finished`], indicating the end of the warp sync.
+    ///
+    /// Must be passed parameters used for the construction of the runtime: a hint as to whether
+    /// the runtime is trusted and/or will be executed again, and whether unresolved function
+    /// imports are allowed.
+    // TODO: refactor this error or explain what it is
+    pub fn verify(
+        mut self,
+        exec_hint: ExecHint,
+        allow_unresolved_imports: bool,
+    ) -> (WarpSync<TSrc, TRq>, Option<Error>) {
+        if let Phase::StorageDownload {
+            header,
+            chain_information_finality,
+            downloaded_keys,
+            finished: true,
+            ..
+        } = &mut self.inner.phase
+        {
+            let finalized_storage_code = match downloaded_keys.get(&b":code"[..]) {
+                Some(code) => code.clone(),
+                None => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                }
+            };
+
+            let finalized_storage_heappages = downloaded_keys.get(&b":heappages"[..]).cloned();
+
+            let decoded_heap_pages =
+                match executor::storage_heap_pages_to_value(finalized_storage_heappages.as_deref())
+                {
+                    Ok(hp) => hp,
+                    Err(err) => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::InvalidHeapPages(err)),
+                        );
+                    }
+                };
+
+            // TODO: is this safe? the code is completely untrusted at this point. what about compiler bombs and stuff?
+            let runtime = match HostVmPrototype::new(host::Config {
+                module: &finalized_storage_code,
+                heap_pages: decoded_heap_pages,
+                exec_hint,
+                allow_unresolved_imports,
+            }) {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::RuntimeBuild(err)),
+                    );
+                }
+            };
+
+            // Verify that the downloaded keys and values match the state root hash.
+            // This must be done after building the runtime, in order to .
+            let obtained_root = {
+                let state_version = match runtime.runtime_version().decode().state_version {
+                    Some(0) | None => TrieEntryVersion::V0,
+                    Some(1) => TrieEntryVersion::V1,
+                    Some(_) => {
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::UnknownStateVersion),
+                        )
+                    }
+                };
+
+                let mut calc = calculate_root::root_merkle_value(None);
+                loop {
+                    match calc {
+                        calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
+                            // TODO: don't throw away the cache?
+                            break hash;
+                        }
+                        calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
+                            calc = keys.inject(downloaded_keys.keys().map(|k| k.iter().cloned()));
+                        }
+                        calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
+                            let key = value.key_as_vec();
+                            calc = value.inject(state_version, downloaded_keys.get(&key));
+                        }
+                    }
+                }
+            };
+
+            if obtained_root != header.state_root {
+                return (
+                    WarpSync::InProgress(self.inner),
+                    Some(Error::DownloadedStorageRootHashMismatch),
+                );
+            }
+
+            let mut chain_info_builder = chain_information::build::ChainInformationBuild::new(
+                chain_information::build::Config {
+                    finalized_block_header:
+                        chain_information::build::ConfigFinalizedBlockHeader::NonGenesis {
+                            header: header.clone(),
+                            known_finality: Some(chain_information_finality.clone()),
+                        },
+                    runtime,
+                },
+            );
+
+            loop {
+                match chain_info_builder {
+                    chain_information::build::ChainInformationBuild::Finished {
+                        result: Ok(chain_information),
+                        virtual_machine,
+                    } => {
+                        return (
+                            WarpSync::Finished(Success {
+                                chain_information,
+                                finalized_runtime: virtual_machine,
+                                finalized_storage_code: Some(finalized_storage_code),
+                                finalized_storage_heap_pages: finalized_storage_heappages,
+                                sources: self
+                                    .inner
+                                    .sources
+                                    .drain()
+                                    .map(|source| source.user_data)
+                                    .collect(),
+                                in_progress_requests: mem::take(
+                                    &mut self.inner.in_progress_requests,
+                                )
+                                .into_iter()
+                                .map(|(id, (src_id, user_data, detail))| {
+                                    (src_id, RequestId(id), user_data, detail)
+                                })
+                                .collect(),
+                                storage: Some(mem::take(downloaded_keys)),
+                            }),
+                            None,
+                        );
+                    }
+                    chain_information::build::ChainInformationBuild::Finished {
+                        result: Err(err),
+                        ..
+                    } => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::ChainInformationBuild(err)),
+                        );
+                    }
+                    chain_information::build::ChainInformationBuild::InProgress(
+                        chain_information::build::InProgress::StorageGet(get),
+                    ) => {
+                        let value = downloaded_keys.get(&get.key_as_vec());
+                        chain_info_builder = get.inject_value(value.map(iter::once));
+                    }
+                    chain_information::build::ChainInformationBuild::InProgress(
+                        chain_information::build::InProgress::NextKey(_),
+                    ) => {
                         // TODO: implement
                         self.inner.phase = Phase::DownloadFragments {
                             previous_verifier_values: Some((

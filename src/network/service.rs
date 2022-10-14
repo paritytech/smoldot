@@ -2761,7 +2761,7 @@ pub struct EncodedStateResponse(Vec<u8>);
 
 impl EncodedStateResponse {
     /// Returns the decoded version of the state response.
-    pub fn decode(&self) -> Vec<protocol::StateResponseEntry> {
+    pub fn decode(&self) -> protocol::StateResponse {
         match protocol::decode_state_response(&self.0) {
             Ok(r) => r,
             Err(_) => unreachable!(),
@@ -2880,7 +2880,7 @@ pub enum GrandpaWarpSyncRequestError {
 }
 
 /// Error returned by [`ChainNetwork::start_state_request_unchecked`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum StateRequestError {
     #[display(fmt = "{}", _0)]
     Request(peers::RequestError),

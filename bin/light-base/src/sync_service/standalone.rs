@@ -81,7 +81,8 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
         known_finalized_runtime: None,
         pending_block_requests: stream::FuturesUnordered::new(),
         pending_grandpa_requests: stream::FuturesUnordered::new(),
-        pending_storage_requests: stream::FuturesUnordered::new(),
+        pending_storage_keys_requests: stream::FuturesUnordered::new(),
+        pending_storage_range_requests: stream::FuturesUnordered::new(),
         pending_call_proof_requests: stream::FuturesUnordered::new(),
         warp_sync_taking_long_time_warning: future::Either::Left(TPlat::sleep(
             Duration::from_secs(15),
@@ -277,14 +278,31 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 }
             },
 
-            (request_id, result) = task.pending_storage_requests.select_next_some() => {
+            (request_id, result) = task.pending_storage_keys_requests.select_next_some() => {
                 // A storage request has been finished.
                 // `result` is an error if the request got cancelled by the sync state machine.
                 if let Ok(result) = result {
                     // Inject the result of the request into the sync state machine.
-                    task.sync.storage_get_response(
+                    task.sync.storage_get_keys_response(
                         request_id,
                         result.map(|list| list.into_iter()),
+                    ).1
+
+                } else {
+                    // The sync state machine has emitted a `Action::Cancel` earlier, and is
+                    // thus no longer interested in the response.
+                    continue;
+                }
+            },
+
+            (request_id, result) = task.pending_storage_range_requests.select_next_some() => {
+                // A storage request has been finished.
+                // `result` is an error if the request got cancelled by the sync state machine.
+                if let Ok(result) = result {
+                    // Inject the result of the request into the sync state machine.
+                    task.sync.storage_get_keys_range_response(
+                        request_id,
+                        result.map(|(list, complete)| (list.into_iter(), complete)).map_err(|_| ()),
                     ).1
 
                 } else {
@@ -422,12 +440,26 @@ struct Task<TPlat: Platform> {
     >,
 
     /// List of storage requests currently in progress.
-    pending_storage_requests: stream::FuturesUnordered<
+    pending_storage_keys_requests: stream::FuturesUnordered<
         future::BoxFuture<
             'static,
             (
                 all::RequestId,
                 Result<Result<Vec<Option<Vec<u8>>>, ()>, future::Aborted>,
+            ),
+        >,
+    >,
+
+    /// List of storage requests currently in progress.
+    pending_storage_range_requests: stream::FuturesUnordered<
+        future::BoxFuture<
+            'static,
+            (
+                all::RequestId,
+                Result<
+                    Result<(Vec<(Vec<u8>, Vec<u8>)>, bool), network_service::StorageRequestError>,
+                    future::Aborted,
+                >,
             ),
         >,
     >,
@@ -544,7 +576,7 @@ impl<TPlat: Platform> Task<TPlat> {
                     .push(async move { (request_id, grandpa_request.await) }.boxed());
             }
 
-            all::DesiredRequest::StorageGet {
+            all::DesiredRequest::StorageGetKeys {
                 block_hash,
                 state_trie_root,
                 ref keys,
@@ -588,7 +620,31 @@ impl<TPlat: Platform> Task<TPlat> {
                     .sync
                     .add_request(source_id, request_detail.into(), abort);
 
-                self.pending_storage_requests
+                self.pending_storage_keys_requests
+                    .push(async move { (request_id, storage_request.await) }.boxed());
+            }
+
+            all::DesiredRequest::StorageGetRange {
+                block_hash,
+                ref keys,
+                ..
+            } => {
+                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                let storage_request = self.network_service.clone().state_request(
+                    self.network_chain_index,
+                    peer_id,
+                    block_hash,
+                    keys.clone(),
+                    Duration::from_secs(16),
+                );
+
+                let (storage_request, abort) = future::abortable(storage_request);
+                let request_id = self
+                    .sync
+                    .add_request(source_id, request_detail.into(), abort);
+
+                self.pending_storage_range_requests
                     .push(async move { (request_id, storage_request.await) }.boxed());
             }
 

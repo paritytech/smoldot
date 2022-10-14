@@ -30,9 +30,31 @@ pub struct StateRequest<'a> {
 
     /// Response shouldn't contain any key lexicographically inferior to this key.
     ///
-    /// > **Note**: Because a response has a limited size, this value lets you send additional
+    /// > **Note**: Because a response has a limited size, this field lets you send additional
     /// >           requests that start where the previous response has ended.
     pub start_key: &'a [u8],
+}
+
+/// Description of a state request that can be sent to a peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateResponse<'a> {
+    /// List of keys and values.
+    pub entries: Vec<StateResponseEntry<'a>>,
+
+    /// `true` if the list of entries contains all remaining entries.
+    pub complete: bool,
+}
+
+/// Entry sent in a state response.
+///
+/// > **Note**: Assuming that this response comes from the network, the information in this struct
+/// >           can be erroneous and shouldn't be trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateResponseEntry<'a> {
+    /// Storage key concerned by the entry.
+    pub key: &'a [u8],
+    /// Storage value concerned by the entry.
+    pub value: &'a [u8],
 }
 
 // See https://github.com/paritytech/substrate/blob/c8653447fc8ef8d95a92fe164c96dffb37919e85/client/network/light/src/schema/light.v1.proto
@@ -56,7 +78,7 @@ pub fn build_state_request(
 /// Decodes a response into a state request response.
 pub fn decode_state_response(
     response_bytes: &[u8],
-) -> Result<Vec<StateResponseEntry>, DecodeStateResponseError> {
+) -> Result<StateResponse, DecodeStateResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode((protobuf::message_tag_decode(
             1,
@@ -74,37 +96,41 @@ pub fn decode_state_response(
         ),))),
     );
 
-    let entries: Vec<((&[u8],), Vec<((&[u8],), (&[u8],))>, (bool,))> =
-        match nom::Finish::finish(parser(response_bytes)) {
-            Ok((_, (entries,))) => entries,
-            Err(_) => return Err(DecodeStateResponseError::ProtobufDecode),
-        };
+    let entries: Vec<(
+        Option<&[u8]>,
+        Vec<(Option<&[u8]>, Option<&[u8]>)>,
+        Option<bool>,
+    )> = match nom::Finish::finish(parser(response_bytes)) {
+        Ok((_, (entries,))) => entries,
+        Err(_) => return Err(DecodeStateResponseError::ProtobufDecode),
+    };
 
-    let entries = entries
+    let (_state_root, key_values, complete) = if entries.len() == 1 {
+        entries.into_iter().next().unwrap()
+    } else {
+        return Err(DecodeStateResponseError::UnexpectedEntriesCount);
+    };
+
+    let key_values = key_values
         .into_iter()
-        .flat_map(|(_, entries, _)| entries.into_iter())
-        .map(|((key,), (value,))| StateResponseEntry { key, value })
+        .map(|(key, value)| StateResponseEntry {
+            key: key.unwrap_or(&[]),
+            value: value.unwrap_or(&[]),
+        })
         .collect();
 
-    Ok(entries)
-}
-
-/// Entry sent in a state response.
-///
-/// > **Note**: Assuming that this response comes from the network, the information in this struct
-/// >           can be erroneous and shouldn't be trusted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StateResponseEntry<'a> {
-    /// Storage key concerned by the entry.
-    pub key: &'a [u8],
-    /// Storage value concerned by the entry.
-    pub value: &'a [u8],
+    Ok(StateResponse {
+        entries: key_values,
+        complete: complete.unwrap_or(false),
+    })
 }
 
 /// Error potentially returned by [`decode_state_response`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 #[display(fmt = "Failed to decode response")]
 pub enum DecodeStateResponseError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,
+    /// Response contains a different number of entries than expected.
+    UnexpectedEntriesCount,
 }
