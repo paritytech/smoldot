@@ -117,12 +117,12 @@ pub fn decode_identify_response(
 > {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
-            #[optional] protocol_version = 5 => protobuf::string_tag_decode(5),
-            #[optional] agent_version = 6 => protobuf::string_tag_decode(6),
-            #[optional] ed25519_public_key = 1 => protobuf::bytes_tag_decode(1),
-            #[repeated] listen_addrs = 2 => protobuf::bytes_tag_decode(2),
-            #[optional] observed_addr = 4 => protobuf::bytes_tag_decode(4),
-            #[repeated] protocols = 3 => protobuf::string_tag_decode(3),
+            #[optional] protocol_version = 5 => protobuf::string_tag_decode,
+            #[optional] agent_version = 6 => protobuf::string_tag_decode,
+            #[optional] ed25519_public_key = 1 => protobuf::bytes_tag_decode,
+            #[repeated] listen_addrs = 2 => protobuf::bytes_tag_decode,
+            #[optional] observed_addr = 4 => protobuf::bytes_tag_decode,
+            #[repeated] protocols = 3 => protobuf::string_tag_decode,
         }),
     );
 

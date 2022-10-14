@@ -118,86 +118,81 @@ pub(crate) fn tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 
 /// Decodes a Protobuf tag of the given field number, and value where the data type is `uint32`.
 pub(crate) fn uint32_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], u32, E> {
-    nom::combinator::map_opt(varint_zigzag_tag_decode(field), |num| {
-        u32::try_from(num).ok()
-    })
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], u32, E> {
+    nom::combinator::map_opt(varint_zigzag_tag_decode, |num| u32::try_from(num).ok())(bytes)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the data type is `bool`.
+/// Decodes a Protobuf tag and value where the data type is `bool`.
 ///
 /// > **Note**: The implementation decodes any non-zero value as `true`, meaning that multiple
 /// >           different encoded messages can be decoded to `true`. This is important to take
 /// >           into consideration if determinism is desired.
 pub(crate) fn bool_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], bool, E> {
-    nom::combinator::map(varint_zigzag_tag_decode(field), |n| {
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], bool, E> {
+    nom::combinator::map(varint_zigzag_tag_decode, |n| {
         // Note that booleans are undocumented. However, the official Java library interprets
         // 0 as false and any other value as true.
         // See <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/BinaryReader.java#L206>
         // or <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/CodedInputStream.java#L788>
         n != 0
-    })
+    })(bytes)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the data type is "enum".
+/// Decodes a Protobuf tag and value where the data type is "enum".
 pub(crate) fn enum_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], u64, E> {
-    varint_zigzag_tag_decode(field)
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], u64, E> {
+    varint_zigzag_tag_decode(bytes)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the data type is a
-/// sub-message.
+/// Decodes a Protobuf tag and value where the data type is a sub-message.
 pub(crate) fn message_tag_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
     inner_message_parser: impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], O, E>,
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], O, E> {
-    nom::combinator::map_parser(delimited_tag_decode(field), inner_message_parser)
+    nom::combinator::map_parser(delimited_tag_decode, inner_message_parser)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the data type is "string".
+/// Decodes a Protobuf tag and value where the data type is "string".
 pub(crate) fn string_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], &'a str, E> {
-    nom::combinator::map_opt(delimited_tag_decode(field), |bytes| {
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], &'a str, E> {
+    nom::combinator::map_opt(delimited_tag_decode, |bytes| {
         if bytes.len() > 2 * 1024 * 1024 * 1024 {
             return None;
         }
         str::from_utf8(bytes).ok()
-    })
+    })(bytes)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the data type is "bytes".
+/// Decodes a Protobuf tag and value where the data type is "bytes".
 pub(crate) fn bytes_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], &'a [u8], E> {
-    nom::combinator::verify(delimited_tag_decode(field), |bytes: &[u8]| {
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], &'a [u8], E> {
+    nom::combinator::verify(delimited_tag_decode, |bytes: &[u8]| {
         bytes.len() <= 2 * 1024 * 1024 * 1024
-    })
+    })(bytes)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the wire type is `varint`
-/// or "zigzag".
+/// Decodes a Protobuf tag  and value where the wire type is `varint` or "zigzag".
 pub(crate) fn varint_zigzag_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], u64, E> {
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], u64, E> {
     nom::sequence::preceded(
-        nom::combinator::verify(tag_decode, move |(f, ty)| *f == field && *ty == 0),
+        nom::combinator::verify(tag_decode, move |(_, ty)| *ty == 0),
         leb128::nom_leb128_u64,
-    )
+    )(bytes)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the wire type is "delimited".
+/// Decodes a Protobuf tag and value where the wire type is "delimited".
 pub(crate) fn delimited_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], &'a [u8], E> {
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], &'a [u8], E> {
     nom::sequence::preceded(
-        nom::combinator::verify(tag_decode, move |(f, ty)| *f == field && *ty == 2),
+        nom::combinator::verify(tag_decode, move |(_, ty)| *ty == 2),
         nom::multi::length_data(leb128::nom_leb128_usize),
-    )
+    )(bytes)
 }
 
 /// Decodes a Protobuf tag and value and discards them.
@@ -370,7 +365,7 @@ mod tests {
 
         assert_eq!(&encoded, &[192, 31, 1]);
 
-        let decoded = super::bool_tag_decode::<nom::error::Error<&[u8]>>(504)(&encoded)
+        let decoded = super::bool_tag_decode::<nom::error::Error<&[u8]>>(&encoded)
             .unwrap()
             .1;
         assert!(decoded);
@@ -385,7 +380,7 @@ mod tests {
 
         assert_eq!(&encoded, &[240, 157, 4, 133, 220, 5]);
 
-        let decoded = super::uint32_tag_decode::<nom::error::Error<&[u8]>>(8670)(&encoded)
+        let decoded = super::uint32_tag_decode::<nom::error::Error<&[u8]>>(&encoded)
             .unwrap()
             .1;
         assert_eq!(decoded, 93701);
@@ -400,7 +395,7 @@ mod tests {
 
         assert_eq!(&encoded, &[216, 6, 197, 138, 57]);
 
-        let decoded = super::enum_tag_decode::<nom::error::Error<&[u8]>>(107)(&encoded)
+        let decoded = super::enum_tag_decode::<nom::error::Error<&[u8]>>(&encoded)
             .unwrap()
             .1;
         assert_eq!(decoded, 935237);
@@ -418,7 +413,7 @@ mod tests {
             &[210, 30, 11, 104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100]
         );
 
-        let decoded = super::string_tag_decode::<nom::error::Error<&[u8]>>(490)(&encoded)
+        let decoded = super::string_tag_decode::<nom::error::Error<&[u8]>>(&encoded)
             .unwrap()
             .1;
         assert_eq!(decoded, "hello world");
@@ -433,7 +428,7 @@ mod tests {
 
         assert_eq!(&encoded, &[18, 4, 116, 101, 115, 116]);
 
-        let decoded = super::bytes_tag_decode::<nom::error::Error<&[u8]>>(2)(&encoded)
+        let decoded = super::bytes_tag_decode::<nom::error::Error<&[u8]>>(&encoded)
             .unwrap()
             .1;
         assert_eq!(decoded, b"test");

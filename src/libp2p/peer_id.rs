@@ -82,13 +82,26 @@ impl PublicKey {
         // deterministically, and thus the fields are decoded deterministically in a precise order.
         let mut parser = nom::combinator::all_consuming::<_, _, ErrorWrapper, _>(
             nom::combinator::complete(nom::sequence::tuple((
-                nom::combinator::map_res(protobuf::enum_tag_decode(1), |val| match val {
-                    0 | 1 | 2 | 3 => Ok(val),
-                    _ => Err(FromProtobufEncodingError::UnknownAlgorithm),
-                }),
-                nom::combinator::map_res(protobuf::bytes_tag_decode(2), |d| {
-                    <[u8; 32]>::try_from(d).map_err(|_| FromProtobufEncodingError::BadEd25519Key)
-                }),
+                nom::sequence::preceded(
+                    nom::combinator::peek(nom::combinator::verify(
+                        protobuf::tag_decode,
+                        |(field_num, _)| *field_num == 1,
+                    )),
+                    nom::combinator::map_res(protobuf::enum_tag_decode, |val| match val {
+                        0 | 1 | 2 | 3 => Ok(val),
+                        _ => Err(FromProtobufEncodingError::UnknownAlgorithm),
+                    }),
+                ),
+                nom::sequence::preceded(
+                    nom::combinator::peek(nom::combinator::verify(
+                        protobuf::tag_decode,
+                        |(field_num, _)| *field_num == 2,
+                    )),
+                    nom::combinator::map_res(protobuf::bytes_tag_decode, |d| {
+                        <[u8; 32]>::try_from(d)
+                            .map_err(|_| FromProtobufEncodingError::BadEd25519Key)
+                    }),
+                ),
             ))),
         );
 

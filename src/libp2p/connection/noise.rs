@@ -768,8 +768,8 @@ impl HandshakeInProgress {
                     let mut parser =
                         nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
                             nom::combinator::complete(protobuf::message_decode! {
-                                key = 1 => protobuf::bytes_tag_decode(1),
-                                sig = 2 => protobuf::bytes_tag_decode(2),
+                                key = 1 => protobuf::bytes_tag_decode,
+                                sig = 2 => protobuf::bytes_tag_decode,
                             }),
                         );
                     match nom::Finish::finish(parser(&decoded_payload)) {
