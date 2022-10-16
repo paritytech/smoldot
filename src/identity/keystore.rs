@@ -21,10 +21,10 @@
 //! `&mut self`, making it possible to share it through an `Arc` for example) containing a list of
 //! cryptographic key pairs (i.e. both the public and secret keys).
 //!
-//! Each key pair contained within the keystore is identified as a tuple `(KeyNamespace, [u8; 32])`
+//! Each key pair contained within the keystore is identified as a `(KeyNamespace, [u8; 32])`
 //! tuple, where the `[u8; 32]` is the public key. See [`KeyNamespace`].
 //!
-//! A keystore is optionally associated with a directory of the file system into which it can
+//! A keystore is optionally associated with a directory of the file system into which it will
 //! store secret keys permanently. Keys present in this directory are considered to be the content
 //! of the keystore data structure.
 //!
