@@ -87,19 +87,13 @@ try {
     const rustOutput = "../../../target/wasm32-wasi/" + buildProfile + "/smoldot_light_wasm.wasm";
     let optimisationStageOutput = path.join(tmpDir, 'tmp.wasm');
 
-    try {
-        if (buildProfile == 'min-size-release') {
-            child_process.execSync(
-                "wasm-opt -o " + optimisationStageOutput + " -Oz --strip-debug --vacuum --dce "
-                + "../../../target/wasm32-wasi/" + buildProfile + "/smoldot_light_wasm.wasm",
-                { 'stdio': 'inherit' }
-            );
-        } else {
-            optimisationStageOutput = rustOutput;
-        }
-    } catch (error) {
-        console.warn("Failed to run `wasm-opt`. Using the direct Rust output instead.");
-        console.warn(error);
+    if (buildProfile == 'min-size-release') {
+        child_process.execSync(
+            "wasm-opt -o " + optimisationStageOutput + " -Oz --strip-debug --vacuum --dce "
+            + "../../../target/wasm32-wasi/" + buildProfile + "/smoldot_light_wasm.wasm",
+            { 'stdio': 'inherit' }
+        );
+    } else {
         optimisationStageOutput = rustOutput;
     }
 
