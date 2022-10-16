@@ -615,8 +615,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 // The chain to add always has a corresponding chain running. Simply grab the
                 // existing services and existing log name.
                 // The `log_name` created above is discarded in favour of the existing log name.
-                entry.get_mut().num_references =
-                    NonZeroU32::new(entry.get_mut().num_references.get() + 1).unwrap();
+                entry.get_mut().num_references = entry.get().num_references.checked_add(1).unwrap();
                 let entry = entry.into_mut();
                 (&mut entry.services, &entry.log_name)
             }
