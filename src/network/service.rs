@@ -1193,9 +1193,48 @@ where
         }
 
         let event_to_return = loop {
-            let inner_event = match self.inner.next_event() {
-                Some(ev) => ev,
-                None => break None,
+            // Instead of simply calling `next_event()` from the inner state machine to grab the
+            // inner event, we first call `fulfilled_undesired_outbound_substreams` and determine
+            // whether there is any already-open or opening-in-progress substream to close. If so,
+            // we perform the closing, then continue running the body of `next_event` but pretend
+            // that the underlying state machine has generated an event corresponding to that
+            // substream having been closed.
+            let inner_event = {
+                let event = loop {
+                    let to_close = self
+                        .inner
+                        .fulfilled_undesired_outbound_substreams()
+                        .next()
+                        .map(|(peer_id, idx, _)| (peer_id.clone(), idx));
+                    if let Some((peer_id, notifications_protocol_index)) = to_close {
+                        let open_or_pending = self
+                            .inner
+                            .close_out_notification(&peer_id, notifications_protocol_index);
+                        match open_or_pending {
+                            peers::OpenOrPending::Pending => {
+                                // Intentionally ignored, as it concerns a peer that is no longer
+                                // desired, and thus didn't have a slot.
+                            }
+                            peers::OpenOrPending::Open => {
+                                break Some(peers::Event::NotificationsOutClose {
+                                    notifications_protocol_index,
+                                    peer_id,
+                                })
+                            }
+                        }
+                    } else {
+                        break None;
+                    }
+                };
+
+                // No event due to closing substreams. Grab the "actual" inner event.
+                match event {
+                    Some(ev) => ev,
+                    None => match self.inner.next_event() {
+                        Some(ev) => ev,
+                        None => break None,
+                    },
+                }
             };
 
             match inner_event {
@@ -1740,6 +1779,7 @@ where
                     );
 
                     // The chain is now considered as closed.
+                    // TODO: can was_open ever be false?
                     let was_open = self.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
 
                     if was_open {
