@@ -32,6 +32,13 @@
 //! the [`std::fs`] API) doesn't automatically propagate to the public API of the keystore.
 //! Similarly, it is not intended to be possible to create two [`Keystore`] instances associated
 //! to the same directory at the same time.
+//!
+//! > **Note**: The Substrate framework also has a keystore, however this keystore implementation
+//! >           isn't compatible with the Substrate keystore implementation. In other words, this
+//! >           keystore cannot load keys found in a directory that was previously associated with
+//! >           a Substrate keystore. This was decided because the Substrate keystore made some
+//! >           questionables that it has to keep for backwards compatibility reasons. This
+//! >           keystore, being newly-written, doesn't have to follow them.
 
 #![cfg(all(feature = "std"))]
 #![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
