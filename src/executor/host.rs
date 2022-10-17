@@ -511,7 +511,7 @@ impl fmt::Debug for HostVmPrototype {
 
 /// Running virtual machine.
 #[must_use]
-#[derive(derive_more::From)]
+#[derive(derive_more::From, Debug)]
 pub enum HostVm {
     /// Wasm virtual machine is ready to be run. Call [`ReadyToRun::run`] to make progress.
     #[from]
@@ -2420,6 +2420,12 @@ impl GetMaxLogLevel {
     }
 }
 
+impl fmt::Debug for GetMaxLogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("GetMaxLogLevel").finish()
+    }
+}
+
 /// Declares the start of a transaction.
 pub struct StartStorageTransaction {
     inner: Inner,
@@ -2435,6 +2441,12 @@ impl StartStorageTransaction {
     }
 }
 
+impl fmt::Debug for StartStorageTransaction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("StartStorageTransaction").finish()
+    }
+}
+
 /// Declares the end of a transaction.
 pub struct EndStorageTransaction {
     inner: Inner,
@@ -2447,6 +2459,12 @@ impl EndStorageTransaction {
             inner: self.inner,
             resume_value: None,
         })
+    }
+}
+
+impl fmt::Debug for EndStorageTransaction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("EndStorageTransaction").finish()
     }
 }
 
