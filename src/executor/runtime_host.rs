@@ -43,11 +43,7 @@ use crate::{
     util,
 };
 
-use alloc::{
-    borrow::ToOwned as _,
-    string::{String, ToString as _},
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::{fmt, iter};
 use hashbrown::{hash_map::Entry, HashMap, HashSet};
 
@@ -724,16 +720,32 @@ impl Inner {
                     // rarely log more than a few hundred bytes. This limit is hardcoded rather
                     // than configurable because it is not expected to be reachable unless
                     // something is very wrong.
-                    // TODO: optimize somehow? don't create an intermediary String?
-                    let message = req.to_string();
-                    if self.logs.len().saturating_add(message.len()) >= 1024 * 1024 {
-                        return RuntimeHostVm::Finished(Err(Error {
-                            detail: ErrorDetail::LogsTooLong,
-                            prototype: host::HostVm::LogEmit(req).into_prototype(),
-                        }));
+                    struct WriterWithMax<'a>(&'a mut String);
+                    impl<'a> fmt::Write for WriterWithMax<'a> {
+                        fn write_str(&mut self, s: &str) -> fmt::Result {
+                            if self.0.len().saturating_add(s.len()) >= 1024 * 1024 {
+                                return Err(fmt::Error);
+                            }
+                            self.0.push_str(s);
+                            Ok(())
+                        }
+                        fn write_char(&mut self, c: char) -> fmt::Result {
+                            if self.0.len().saturating_add(1) >= 1024 * 1024 {
+                                return Err(fmt::Error);
+                            }
+                            self.0.push(c);
+                            Ok(())
+                        }
                     }
-
-                    self.logs.push_str(&message);
+                    match fmt::write(&mut WriterWithMax(&mut self.logs), format_args!("{}", req)) {
+                        Ok(()) => {}
+                        Err(fmt::Error) => {
+                            return RuntimeHostVm::Finished(Err(Error {
+                                detail: ErrorDetail::LogsTooLong,
+                                prototype: host::HostVm::LogEmit(req).into_prototype(),
+                            }));
+                        }
+                    }
                     self.vm = req.resume();
                 }
             }
