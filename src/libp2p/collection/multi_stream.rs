@@ -28,7 +28,6 @@ use super::{
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc, vec::Vec};
 use core::{
     hash::Hash,
-    iter,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -221,12 +220,9 @@ where
     /// [`MultiStreamConnectionTask::add_substream`], or [`MultiStreamConnectionTask::reset`]
     /// has been called. Multiple messages can happen in a row.
     ///
-    /// Because this function frees space in a buffer, calling
-    /// [`MultiStreamConnectionTask::ready_substreams`] and processing substreams again after it
+    /// Because this function frees space in a buffer, processing substreams again after it
     /// has returned might read/write more data and generate an event again. In other words,
-    /// the API user should call
-    ///  [`MultiStreamConnectionTask::ready_substreams`] and
-    /// [`MultiStreamConnectionTask::substream_read_write`], and
+    /// the API user should call [`MultiStreamConnectionTask::substream_read_write`] and
     /// [`MultiStreamConnectionTask::pull_message_to_coordinator`] repeatedly in a loop until no
     /// more message is generated.
     pub fn pull_message_to_coordinator(
@@ -376,7 +372,7 @@ where
     ///
     /// Calling this function might generate data to send to the connection. You should call
     /// [`MultiStreamConnectionTask::desired_outbound_substreams`] and
-    /// [`MultiStreamConnectionTask::ready_substreams`] after this function has returned.
+    /// [`MultiStreamConnectionTask::substream_read_write`] after this function has returned.
     pub fn inject_coordinator_message(&mut self, message: CoordinatorToConnection<TNow>) {
         match (message.inner, &mut self.connection) {
             (
@@ -657,47 +653,6 @@ where
             MultiStreamConnectionTaskInner::ShutdownAcked { .. }
             | MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. } => {
                 // TODO: reset the substream or something?
-            }
-        }
-    }
-
-    /// Returns a list of substreams that the state machine would like to see processed. The user
-    /// is encouraged to call [`MultiStreamConnectionTask::substream_read_write`] with this list of
-    /// substream.
-    ///
-    /// This value doesn't change automatically over time but only after a call to
-    /// [`MultiStreamConnectionTask::substream_read_write`],
-    /// [`MultiStreamConnectionTask::inject_coordinator_message`],
-    /// [`MultiStreamConnectionTask::add_substream`], or
-    /// [`MultiStreamConnectionTask::reset_substream`].
-    ///
-    /// > **Note**: An example situation is: a notification is queued, which leads to a message
-    /// >           being sent to a connection task, which, once injected, leads to a notifications
-    /// >           substream being "ready" because it needs to send more data.
-    // TODO: this function really should be more precise as to what a ready substream means
-    pub fn ready_substreams(&self) -> impl Iterator<Item = &TSubId> {
-        match &self.connection {
-            MultiStreamConnectionTaskInner::Handshake {
-                opened_substream: Some(opened_substream),
-                ..
-            } => either::Right(either::Left(iter::once(opened_substream))),
-            MultiStreamConnectionTaskInner::Established {
-                established,
-                handshake_substream,
-                ..
-            } => either::Left(
-                handshake_substream
-                    .as_ref()
-                    .into_iter()
-                    .chain(established.ready_substreams()),
-            ),
-            MultiStreamConnectionTaskInner::Handshake {
-                opened_substream: None,
-                ..
-            }
-            | MultiStreamConnectionTaskInner::ShutdownAcked { .. }
-            | MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. } => {
-                either::Right(either::Right(iter::empty()))
             }
         }
     }
