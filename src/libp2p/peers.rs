@@ -1024,6 +1024,9 @@ where
     /// When a combination of network protocol and [`PeerId`] is marked as "desired", it will
     /// be returned by [`Peers::unfulfilled_desired_outbound_substream`].
     ///
+    /// When a combination of network protocol and [`PeerId`] is no longer marked as "desired", it
+    /// will be returned by [`Peers::fulfilled_undesired_outbound_substreams`].
+    ///
     /// This function might generate a message destined to a connection. Use
     /// [`Peers::pull_message_to_connection`] to process these messages after it has returned.
     pub fn set_peer_notifications_out_desired(
@@ -1078,20 +1081,22 @@ where
             }
         } else {
             // Do nothing if not desired.
-            let current_state = match current_state {
-                btree_map::Entry::Occupied(e) if e.get().desired => e.into_mut(),
+            let mut current_state = match current_state {
+                btree_map::Entry::Occupied(e) => e,
                 _ => return,
             };
+            if !current_state.get().desired {
+                return;
+            }
 
-            current_state.desired = false;
+            current_state.get_mut().desired = false;
 
-            match current_state.open {
-                NotificationsOutOpenState::NotOpen | NotificationsOutOpenState::ClosedByRemote => {}
-                NotificationsOutOpenState::Open(substream_id)
-                | NotificationsOutOpenState::Opening(substream_id) => {
-                    self.inner.close_out_notifications(substream_id);
-                    current_state.open = NotificationsOutOpenState::NotOpen;
-                }
+            // Clean up the entry altogether if it is no longer needed.
+            if matches!(
+                current_state.get().open,
+                NotificationsOutOpenState::NotOpen | NotificationsOutOpenState::ClosedByRemote
+            ) {
+                current_state.remove();
             }
 
             // Remove from `unfulfilled_desired_peers` if the peer is not desired and there is no
@@ -1259,6 +1264,100 @@ where
         debug_assert!(_prev_value.is_none());
 
         notif_state.open = NotificationsOutOpenState::Opening(substream_id);
+    }
+
+    /// Returns the list of peer-substream combinations not marked as desired but where there
+    /// exists an open substream or a substream currently being opened.
+    ///
+    /// Use [`Peers::close_out_notification`] to actually close the substream.
+    pub fn fulfilled_undesired_outbound_substreams(
+        &'_ self,
+    ) -> impl Iterator<Item = (&'_ PeerId, usize, OpenOrPending)> + '_ {
+        // TODO: this is O(n), maybe add a cache
+        self.peers_notifications_out.iter().filter_map(
+            move |((peer_index, notifications_protocol_index), state)| {
+                if state.desired {
+                    return None;
+                }
+
+                let open_or_pending = match state.open {
+                    NotificationsOutOpenState::Open(_) => OpenOrPending::Open,
+                    NotificationsOutOpenState::Opening(_) => OpenOrPending::Pending,
+                    _ => return None,
+                };
+
+                Some((
+                    &self.peers[*peer_index].peer_id,
+                    *notifications_protocol_index,
+                    open_or_pending,
+                ))
+            },
+        )
+    }
+
+    /// Close an existing outgoing substream to the given peer, or cancel opening an outgoing
+    /// substream.
+    ///
+    /// Use [`Peers::fulfilled_undesired_outbound_substreams`] in order to determine which
+    /// substreams should be closed. However, this function can be used to close any substream
+    /// even if it marked as desired. If it is marked as desired, the substream will subsequently
+    /// be returned by [`Peers::unfulfilled_desired_outbound_substream`].
+    ///
+    /// This function might generate a message destined to a connection. Use
+    /// [`Peers::pull_message_to_connection`] to process these messages after it has returned.
+    ///
+    /// Returns whether the substream was open or still being opened.
+    ///
+    /// > **Note**: This function does *not* generate a [`Event::NotificationsOutResult`] or
+    /// >           [`Event::NotificationsOutClose`] event. Calling this function is equivalent
+    /// >           to such an event being instantaneously generated.
+    ///
+    /// # Panic
+    ///
+    /// Panics if this combination of peer-protocol isn't open or opening.
+    ///
+    pub fn close_out_notification(
+        &mut self,
+        peer_id: &PeerId,
+        notifications_protocol_index: usize,
+    ) -> OpenOrPending {
+        let peer_index = *self.peer_indices.get(peer_id).unwrap();
+
+        let mut entry = match self
+            .peers_notifications_out
+            .entry((peer_index, notifications_protocol_index))
+        {
+            btree_map::Entry::Occupied(e) => e,
+            btree_map::Entry::Vacant(_) => panic!(),
+        };
+
+        let open_or_pending = match entry.get_mut().open {
+            NotificationsOutOpenState::NotOpen | NotificationsOutOpenState::ClosedByRemote => {
+                panic!()
+            }
+            NotificationsOutOpenState::Open(substream_id)
+            | NotificationsOutOpenState::Opening(substream_id) => {
+                let open_or_pending = match entry.get_mut().open {
+                    NotificationsOutOpenState::Open(_) => OpenOrPending::Open,
+                    NotificationsOutOpenState::Opening(_) => OpenOrPending::Pending,
+                    _ => unreachable!(),
+                };
+
+                self.inner.close_out_notifications(substream_id);
+                entry.get_mut().open = NotificationsOutOpenState::NotOpen;
+
+                // Clean up the data structure.
+                if !entry.get_mut().desired {
+                    entry.remove();
+                }
+
+                open_or_pending
+            }
+        };
+
+        self.try_clean_up_peer(peer_index);
+
+        open_or_pending
     }
 
     /// Adds a notification to the queue of notifications to send to the given peer.
@@ -1747,6 +1846,8 @@ pub enum Event<TConn> {
     /// in the past but no longer are.
     ///
     /// If `Ok`, it is now possible to send notifications on this substream.
+    ///
+    /// > **Note**: No event if generated when [`Peers::close_out_notification`] is called.
     NotificationsOutResult {
         /// Peer the substream is open with.
         peer_id: PeerId,
@@ -1763,6 +1864,8 @@ pub enum Event<TConn> {
     /// A previously open outbound substream has been closed by the remote. Can only happen after
     /// a corresponding successful [`Event::NotificationsOutResult`] event has been emitted in the
     /// past.
+    ///
+    /// > **Note**: No event if generated when [`Peers::close_out_notification`] is called.
     NotificationsOutClose {
         /// Peer the substream is no longer open with.
         peer_id: PeerId,
@@ -1850,6 +1953,12 @@ pub enum DesiredState {
     /// Substream is now desired. If the peer has refused this substream in the past, try to open
     /// one again.
     DesiredReset,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum OpenOrPending {
+    Open,
+    Pending,
 }
 
 /// Error potentially returned by [`Peers::in_notification_accept`].
