@@ -220,12 +220,9 @@ where
     /// [`MultiStreamConnectionTask::add_substream`], or [`MultiStreamConnectionTask::reset`]
     /// has been called. Multiple messages can happen in a row.
     ///
-    /// Because this function frees space in a buffer, calling
-    /// [`MultiStreamConnectionTask::ready_substreams`] and processing substreams again after it
+    /// Because this function frees space in a buffer, processing substreams again after it
     /// has returned might read/write more data and generate an event again. In other words,
-    /// the API user should call
-    ///  [`MultiStreamConnectionTask::ready_substreams`] and
-    /// [`MultiStreamConnectionTask::substream_read_write`], and
+    /// the API user should call [`MultiStreamConnectionTask::substream_read_write`] and
     /// [`MultiStreamConnectionTask::pull_message_to_coordinator`] repeatedly in a loop until no
     /// more message is generated.
     pub fn pull_message_to_coordinator(
@@ -375,7 +372,7 @@ where
     ///
     /// Calling this function might generate data to send to the connection. You should call
     /// [`MultiStreamConnectionTask::desired_outbound_substreams`] and
-    /// [`MultiStreamConnectionTask::ready_substreams`] after this function has returned.
+    /// [`MultiStreamConnectionTask::substream_read_write`] after this function has returned.
     pub fn inject_coordinator_message(&mut self, message: CoordinatorToConnection<TNow>) {
         match (message.inner, &mut self.connection) {
             (
