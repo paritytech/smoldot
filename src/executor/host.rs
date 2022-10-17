@@ -563,9 +563,9 @@ pub enum HostVm {
     /// [`HostVm::ExternalStorageSet`]) since the previous
     /// [`HostVm::StartStorageTransaction`] must be rolled back if `rollback` is true.
     ///
-     /// Guaranteed by the code in this module to never happen if no transaction is in progress.
-     /// If the runtime attempts to end a non-existing transaction, an [`HostVm::Error`] is
-     /// generated instead.
+    /// Guaranteed by the code in this module to never happen if no transaction is in progress.
+    /// If the runtime attempts to end a non-existing transaction, an [`HostVm::Error`] is
+    /// generated instead.
     EndStorageTransaction {
         /// Object used to resume execution.
         resume: EndStorageTransaction,
