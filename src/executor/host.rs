@@ -486,7 +486,7 @@ impl HostVmPrototype {
                 allow_unresolved_imports: self.allow_unresolved_imports,
                 memory_total_pages: self.memory_total_pages,
                 registered_functions: self.registered_functions,
-                stroage_transaction_depth: 0,
+                storage_transaction_depth: 0,
                 allocator,
             },
         })
@@ -633,7 +633,7 @@ impl ReadyToRun {
             }) => {
                 // Wasm virtual machine has successfully returned.
 
-                if self.inner.stroage_transaction_depth > 0 {
+                if self.inner.storage_transaction_depth > 0 {
                     return HostVm::Error {
                         prototype: self.inner.into_prototype(),
                         error: Error::FinishedWithPendingTransaction,
@@ -1070,32 +1070,32 @@ impl ReadyToRun {
             HostFunction::ext_storage_child_root_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_child_next_key_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_start_transaction_version_1 => {
-                self.inner.stroage_transaction_depth += 1;
+                self.inner.storage_transaction_depth += 1;
                 HostVm::StartStorageTransaction(StartStorageTransaction { inner: self.inner })
             }
             HostFunction::ext_storage_rollback_transaction_version_1 => {
-                if self.inner.stroage_transaction_depth == 0 {
+                if self.inner.storage_transaction_depth == 0 {
                     return HostVm::Error {
                         error: Error::NoActiveTransaction,
                         prototype: self.inner.into_prototype(),
                     };
                 }
 
-                self.inner.stroage_transaction_depth -= 1;
+                self.inner.storage_transaction_depth -= 1;
                 HostVm::EndStorageTransaction {
                     resume: EndStorageTransaction { inner: self.inner },
                     rollback: true,
                 }
             }
             HostFunction::ext_storage_commit_transaction_version_1 => {
-                if self.inner.stroage_transaction_depth == 0 {
+                if self.inner.storage_transaction_depth == 0 {
                     return HostVm::Error {
                         error: Error::NoActiveTransaction,
                         prototype: self.inner.into_prototype(),
                     };
                 }
 
-                self.inner.stroage_transaction_depth -= 1;
+                self.inner.storage_transaction_depth -= 1;
                 HostVm::EndStorageTransaction {
                     resume: EndStorageTransaction { inner: self.inner },
                     rollback: false,
@@ -2584,8 +2584,8 @@ struct Inner {
     /// Value passed to [`HostVmPrototype::new`].
     allow_unresolved_imports: bool,
 
-    /// The depth of stroage transaction started with `ext_storage_start_transaction_version_1`.
-    stroage_transaction_depth: u32,
+    /// The depth of storage transaction started with `ext_storage_start_transaction_version_1`.
+    storage_transaction_depth: u32,
 
     /// See [`HostVmPrototype::registered_functions`].
     registered_functions: Vec<FunctionImport>,
