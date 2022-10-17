@@ -562,6 +562,10 @@ pub enum HostVm {
     /// Ends a storage transaction. All changes made to the storage (e.g. through a
     /// [`HostVm::ExternalStorageSet`]) since the previous
     /// [`HostVm::StartStorageTransaction`] must be rolled back if `rollback` is true.
+    ///
+     /// Guaranteed by the code in this module to never happen if no transaction is in progress.
+     /// If the runtime attempts to end a non-existing transaction, an [`HostVm::Error`] is
+     /// generated instead.
     EndStorageTransaction {
         /// Object used to resume execution.
         resume: EndStorageTransaction,
