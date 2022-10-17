@@ -917,8 +917,7 @@ where
                         match self.kbuckets_peers.entry(peer_id) {
                             hashbrown::hash_map::Entry::Occupied(e) => {
                                 let e = e.into_mut();
-                                e.num_references =
-                                    NonZeroUsize::new(e.num_references.get() + 1).unwrap();
+                                e.num_references = e.num_references.checked_add(1).unwrap();
                                 e
                             }
                             hashbrown::hash_map::Entry::Vacant(e) => {
