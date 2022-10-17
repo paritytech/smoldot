@@ -194,7 +194,12 @@
 use super::{allocator, vm};
 use crate::{trie, util};
 
-use alloc::{borrow::ToOwned as _, format, string::String, vec, vec::Vec};
+use alloc::{
+    borrow::ToOwned as _,
+    string::{String, ToString as _},
+    vec,
+    vec::Vec,
+};
 use core::{fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
@@ -1693,38 +1698,46 @@ impl ReadyToRun {
                     }
                 };
 
-                let log_entry = format!("{}", num);
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
-                    log_entry,
+                    log_entry: LogEmitInner::Num(num),
                 })
             }
             HostFunction::ext_misc_print_utf8_version_1 => {
-                let data = str::from_utf8(expect_pointer_size!(0).as_ref()).map(|s| s.to_owned());
-                let log_entry = match data {
-                    Ok(m) => m,
-                    Err(error) => {
-                        return HostVm::Error {
-                            error: Error::Utf8Error {
-                                function: host_fn.name(),
-                                param_num: 2,
-                                error,
-                            },
-                            prototype: self.inner.into_prototype(),
-                        };
-                    }
-                };
+                let (str_ptr, str_size) = expect_pointer_size_raw!(0);
+
+                let utf8_check = str::from_utf8(
+                    self.inner
+                        .vm
+                        .read_memory(str_ptr, str_size)
+                        .unwrap()
+                        .as_ref(),
+                )
+                .map(|_| ());
+                if let Err(error) = utf8_check {
+                    return HostVm::Error {
+                        error: Error::Utf8Error {
+                            function: host_fn.name(),
+                            param_num: 2,
+                            error,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
 
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
-                    log_entry,
+                    log_entry: LogEmitInner::Utf8 { str_ptr, str_size },
                 })
             }
             HostFunction::ext_misc_print_hex_version_1 => {
-                let log_entry = hex::encode(expect_pointer_size!(0));
+                let (data_ptr, data_size) = expect_pointer_size_raw!(0);
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
-                    log_entry,
+                    log_entry: LogEmitInner::Hex {
+                        data_ptr,
+                        data_size,
+                    },
                 })
             }
             HostFunction::ext_misc_runtime_version_version_1 => {
@@ -1778,28 +1791,57 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_logging_log_version_1 => {
-                let _log_level = expect_u32!(0);
-                // let _target = expect_pointer_size!(1);
+                let log_level = expect_u32!(0);
 
-                let message =
-                    str::from_utf8(expect_pointer_size!(2).as_ref()).map(|s| s.to_owned());
-                let log_entry = match message {
-                    Ok(m) => m,
-                    Err(error) => {
-                        return HostVm::Error {
-                            error: Error::Utf8Error {
-                                function: host_fn.name(),
-                                param_num: 2,
-                                error,
-                            },
-                            prototype: self.inner.into_prototype(),
-                        };
-                    }
-                };
+                let (target_str_ptr, target_str_size) = expect_pointer_size_raw!(1);
+                let target_utf8_check = str::from_utf8(
+                    self.inner
+                        .vm
+                        .read_memory(target_str_ptr, target_str_size)
+                        .unwrap()
+                        .as_ref(),
+                )
+                .map(|_| ());
+                if let Err(error) = target_utf8_check {
+                    return HostVm::Error {
+                        error: Error::Utf8Error {
+                            function: host_fn.name(),
+                            param_num: 2,
+                            error,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
+
+                let (msg_str_ptr, msg_str_size) = expect_pointer_size_raw!(2);
+                let msg_utf8_check = str::from_utf8(
+                    self.inner
+                        .vm
+                        .read_memory(msg_str_ptr, msg_str_size)
+                        .unwrap()
+                        .as_ref(),
+                )
+                .map(|_| ());
+                if let Err(error) = msg_utf8_check {
+                    return HostVm::Error {
+                        error: Error::Utf8Error {
+                            function: host_fn.name(),
+                            param_num: 2,
+                            error,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
 
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
-                    log_entry,
+                    log_entry: LogEmitInner::Log {
+                        _log_level: log_level,
+                        _target_str_ptr: target_str_ptr,
+                        _target_str_size: target_str_size,
+                        msg_str_ptr,
+                        msg_str_size,
+                    },
                 })
             }
             HostFunction::ext_logging_max_level_version_1 => {
@@ -2374,7 +2416,35 @@ impl fmt::Debug for ExternalOffchainStorageSet {
 /// call [`alloc::string::ToString::to_string`] to turn it into a `String`.
 pub struct LogEmit {
     inner: Inner,
-    log_entry: String,
+    log_entry: LogEmitInner,
+}
+
+enum LogEmitInner {
+    Num(u64),
+    Utf8 {
+        /// Pointer to the string. Guaranteed to be in range and to be UTF-8.
+        str_ptr: u32,
+        /// Size of the string. Guaranteed to be in range and to be UTF-8.
+        str_size: u32,
+    },
+    Hex {
+        /// Pointer to the data. Guaranteed to be in range.
+        data_ptr: u32,
+        /// Size of the data. Guaranteed to be in range.
+        data_size: u32,
+    },
+    Log {
+        /// Log level. Arbitrary number indicated by runtime, but typically in the 1..=5 range.
+        _log_level: u32,
+        /// Pointer to the string of the log target. Guaranteed to be in range and to be UTF-8.
+        _target_str_ptr: u32,
+        /// Size of the string of the log target. Guaranteed to be in range and to be UTF-8.
+        _target_str_size: u32,
+        /// Pointer to the string of the log message. Guaranteed to be in range and to be UTF-8.
+        msg_str_ptr: u32,
+        /// Size of the string of the log message. Guaranteed to be in range and to be UTF-8.
+        msg_str_size: u32,
+    },
 }
 
 impl LogEmit {
@@ -2389,14 +2459,42 @@ impl LogEmit {
 
 impl fmt::Display for LogEmit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", &self.log_entry)
+        match self.log_entry {
+            LogEmitInner::Num(num) => write!(f, "{}", num),
+            LogEmitInner::Utf8 { str_ptr, str_size } => {
+                let str = self.inner.vm.read_memory(str_ptr, str_size).unwrap();
+                let str = str::from_utf8(str.as_ref()).unwrap();
+                write!(f, "{}", str)
+            }
+            LogEmitInner::Hex {
+                data_ptr,
+                data_size,
+            } => {
+                let data = self.inner.vm.read_memory(data_ptr, data_size).unwrap();
+                write!(f, "{}", hex::encode(data.as_ref()))
+            }
+            LogEmitInner::Log {
+                msg_str_ptr,
+                msg_str_size,
+                ..
+            } => {
+                let str = self
+                    .inner
+                    .vm
+                    .read_memory(msg_str_ptr, msg_str_size)
+                    .unwrap();
+                let str = str::from_utf8(str.as_ref()).unwrap();
+                // TODO: don't just ignore the target and log level? better log representation? more control?
+                write!(f, "{}", str)
+            }
+        }
     }
 }
 
 impl fmt::Debug for LogEmit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("LogEmit")
-            .field("message", &self.log_entry)
+            .field("message", &self.to_string())
             .finish()
     }
 }
