@@ -61,10 +61,6 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// Does not include the ping substream.
     desired_out_substreams: VecDeque<(substream::Substream<TNow, TRqUd, TNotifUd>, u32)>,
 
-    /// List of substreams that might have data to send out. Might contain substreams that are
-    /// still in [`MultiStream::desired_out_substreams`].
-    ready_substreams: hashbrown::HashSet<u32, fnv::FnvBuildHasher>,
-
     /// Substream used for outgoing pings.
     ///
     /// Initially contains `None` as the substream for pings isn't opened yet.
@@ -135,10 +131,6 @@ where
             ),
             next_out_substream_id: 0,
             desired_out_substreams: VecDeque::with_capacity(num_expected_substreams),
-            ready_substreams: hashbrown::HashSet::with_capacity_and_hasher(
-                num_expected_substreams,
-                Default::default(),
-            ),
             ping_substream: None,
             next_ping: config.first_out_ping,
             ping_payload_randomness: randomness,
@@ -231,29 +223,6 @@ where
         }
     }
 
-    /// Returns a list of substreams that the state machine would like to see reset. The user is
-    /// encouraged to call [`MultiStream::substream_read_write`] with this list of
-    /// substream.
-    ///
-    /// This value doesn't change automatically over time but only after a call to
-    /// [`MultiStream::substream_read_write`],  [`MultiStream::add_substream`], or
-    /// [`MultiStream::reset_substream`].
-    ///
-    /// This mechanism is not a substitute for [`ReadWrite::wake_up_after`]. If calling
-    /// [`MultiStream::substream_read_write`] puts something in [`ReadWrite::wake_up_after`], then
-    /// the substream should be processed after this time, even if it isn't return by this
-    /// method.
-    /// TODO: it should be the case above it is currently too complicated from the user's perspective to handle a `wake_up_after` value for each substream
-    ///
-    /// > **Note**: An example situation is: a notification is queued, which leads to a message
-    /// >           being sent to a connection task, which, once injected, leads to a notifications
-    /// >           substream being "ready" because it needs to send more data.
-    pub fn ready_substreams(&self) -> impl Iterator<Item = &TSubId> {
-        self.ready_substreams
-            .iter()
-            .filter_map(|in_id| self.out_in_substreams_map.get(in_id))
-    }
-
     /// Immediately destroys the substream with the given identifier.
     ///
     /// The given identifier is now considered invalid by the state machine.
@@ -264,7 +233,6 @@ where
     ///
     pub fn reset_substream(&mut self, substream_id: &TSubId) {
         let (substream, out_substream_id) = self.in_substreams.remove(substream_id).unwrap();
-        self.ready_substreams.remove(&out_substream_id);
 
         if Some(substream_id) == self.ping_substream.as_ref() {
             self.ping_substream = None;
@@ -321,10 +289,6 @@ where
 
             let (mut substream_update, event) = substream.read_write(read_write);
 
-            if event.is_none() && read_write.written_bytes == written_bytes_before {
-                self.ready_substreams.remove(&out_substream_id);
-            }
-
             match (event, substream_update.as_mut()) {
                 (None, _) => {}
                 (Some(substream::Event::InboundNegotiated(protocol)), Some(substream)) => {
@@ -376,7 +340,6 @@ where
                 if Some(&substream_id) == self.ping_substream.as_ref() {
                     self.ping_substream = None;
                 }
-                self.ready_substreams.remove(&out_substream_id);
                 true
             };
         }
@@ -504,8 +467,6 @@ where
             substream_id,
         ));
 
-        self.ready_substreams.insert(substream_id);
-
         // TODO: ? do this? substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
 
         SubstreamId(SubstreamIdInner::MultiStream(substream_id))
@@ -574,8 +535,6 @@ where
             substream_id,
         ));
 
-        self.ready_substreams.insert(substream_id);
-
         SubstreamId(SubstreamIdInner::MultiStream(substream_id))
     }
 
@@ -606,8 +565,6 @@ where
             .unwrap()
             .0
             .accept_in_notifications_substream(handshake, max_notification_size, user_data);
-
-        self.ready_substreams.insert(substream_id);
     }
 
     /// Rejects an inbound notifications protocol. Must be called in response to a
@@ -631,8 +588,6 @@ where
             .unwrap()
             .0
             .reject_in_notifications_substream();
-
-        self.ready_substreams.insert(substream_id);
     }
 
     /// Queues a notification to be written out on the given substream.
@@ -669,8 +624,6 @@ where
             .unwrap()
             .0
             .write_notification_unbounded(notification);
-
-        self.ready_substreams.insert(substream_id);
     }
 
     /// Returns the number of bytes waiting to be sent out on that substream.
@@ -722,8 +675,6 @@ where
             .unwrap()
             .0
             .close_notifications_substream();
-
-        self.ready_substreams.insert(substream_id);
     }
 
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
@@ -740,8 +691,6 @@ where
         };
 
         let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
-
-        self.ready_substreams.insert(substream_id);
 
         self.in_substreams
             .get_mut(inner_substream_id)
