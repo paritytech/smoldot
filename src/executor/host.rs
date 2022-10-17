@@ -2434,7 +2434,7 @@ enum LogEmitInner {
         data_size: u32,
     },
     Log {
-        /// Log level. Arbitrary number indicated by runtime, but typically in the 1..=5 range.
+        /// Log level. Arbitrary number indicated by runtime, but typically in the `1..=5` range.
         _log_level: u32,
         /// Pointer to the string of the log target. Guaranteed to be in range and to be UTF-8.
         _target_str_ptr: u32,
