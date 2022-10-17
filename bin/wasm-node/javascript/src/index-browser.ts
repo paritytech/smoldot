@@ -373,6 +373,8 @@ export function start(options?: ClientOptions): Client {
       openOutSubstream: () => {
         // `openOutSubstream` can only be called after we have called `config.onOpen`, therefore
         // `pc` is guaranteed to be non-null.
+        // Note that the label passed to `createDataChannel` is required to be empty as per the
+        // libp2p WebRTC specification.
         if (isFirstSubstream) {
           isFirstSubstream = false;
           addChannel(pc!.createDataChannel("", { id: 0, negotiated: true }), 'outbound')
