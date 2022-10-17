@@ -28,7 +28,6 @@ use super::{
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc, vec::Vec};
 use core::{
     hash::Hash,
-    iter,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -657,47 +656,6 @@ where
             MultiStreamConnectionTaskInner::ShutdownAcked { .. }
             | MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. } => {
                 // TODO: reset the substream or something?
-            }
-        }
-    }
-
-    /// Returns a list of substreams that the state machine would like to see processed. The user
-    /// is encouraged to call [`MultiStreamConnectionTask::substream_read_write`] with this list of
-    /// substream.
-    ///
-    /// This value doesn't change automatically over time but only after a call to
-    /// [`MultiStreamConnectionTask::substream_read_write`],
-    /// [`MultiStreamConnectionTask::inject_coordinator_message`],
-    /// [`MultiStreamConnectionTask::add_substream`], or
-    /// [`MultiStreamConnectionTask::reset_substream`].
-    ///
-    /// > **Note**: An example situation is: a notification is queued, which leads to a message
-    /// >           being sent to a connection task, which, once injected, leads to a notifications
-    /// >           substream being "ready" because it needs to send more data.
-    // TODO: this function really should be more precise as to what a ready substream means
-    pub fn ready_substreams(&self) -> impl Iterator<Item = &TSubId> {
-        match &self.connection {
-            MultiStreamConnectionTaskInner::Handshake {
-                opened_substream: Some(opened_substream),
-                ..
-            } => either::Right(either::Left(iter::once(opened_substream))),
-            MultiStreamConnectionTaskInner::Established {
-                established,
-                handshake_substream,
-                ..
-            } => either::Left(
-                handshake_substream
-                    .as_ref()
-                    .into_iter()
-                    .chain(established.ready_substreams()),
-            ),
-            MultiStreamConnectionTaskInner::Handshake {
-                opened_substream: None,
-                ..
-            }
-            | MultiStreamConnectionTaskInner::ShutdownAcked { .. }
-            | MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. } => {
-                either::Right(either::Right(iter::empty()))
             }
         }
     }

@@ -285,8 +285,6 @@ where
                 read_write.wake_up_after(&self.next_ping);
             }
 
-            let written_bytes_before = read_write.written_bytes;
-
             let (mut substream_update, event) = substream.read_write(read_write);
 
             match (event, substream_update.as_mut()) {
