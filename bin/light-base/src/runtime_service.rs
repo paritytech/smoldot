@@ -892,7 +892,9 @@ impl<'a> RuntimeCallLock<'a> {
                     | proof_verify::StorageValue::HashKnownValueMissing(_)
             ) {
                 assert_eq!(key.len() % 2, 0);
-                output.push(trie::nibbles_to_bytes_extend(key.iter().copied()).collect::<Vec<_>>());
+                output.push(
+                    trie::nibbles_to_bytes_suffix_extend(key.iter().copied()).collect::<Vec<_>>(),
+                );
             }
 
             match node_info.children {
@@ -1528,19 +1530,20 @@ impl<TPlat: Platform> Background<TPlat> {
     ) {
         let mut guarded = self.guarded.lock().await;
 
-        guarded.runtimes.retain(|_, rt| rt.strong_count() > 0);
-
-        // Try to find an existing identical runtime.
+        // Try to find an existing runtime identical to the one that has just been downloaded.
+        // This loop is `O(n)`, but given that we expect this list to very small (at most 1 or
+        // 2 elements), this is not a problem.
         let existing_runtime = guarded
             .runtimes
             .iter()
             .filter_map(|(_, rt)| rt.upgrade())
             .find(|rt| rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages);
 
+        // If no identical runtime was found, try compiling the runtime.
+        // TODO: use a let-else construct here once stable
         let runtime = if let Some(existing_runtime) = existing_runtime {
             existing_runtime
         } else {
-            // No identical runtime was found. Try compiling the new runtime.
             let runtime = SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
             match &runtime {
                 Ok(runtime) => {
@@ -1572,6 +1575,7 @@ impl<TPlat: Platform> Background<TPlat> {
             runtime
         };
 
+        // Insert the runtime into the tree.
         match &mut guarded.tree {
             GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
                 tree.async_op_finished(async_op_id, runtime);
@@ -1598,6 +1602,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         user_data: new_finalized,
                         best_block_index,
                         pruned_blocks,
+                        former_finalized_async_op_user_data: former_finalized_runtime,
                         ..
                     }) => {
                         *finalized_block = new_finalized;
@@ -1609,6 +1614,13 @@ impl<TPlat: Platform> Background<TPlat> {
                             "Worker => OutputFinalized(hash={}, best={})",
                             HashDisplay(&finalized_block.hash), HashDisplay(&best_block_hash)
                         );
+
+                        // The finalization might cause some runtimes in the list of runtimes
+                        // to have become unused. Clean them up.
+                        drop(former_finalized_runtime);
+                        guarded
+                            .runtimes
+                            .retain(|_, runtime| runtime.strong_count() > 0);
 
                         let all_blocks_notif = Notification::Finalized {
                             best_block_hash,
@@ -1965,7 +1977,7 @@ impl<TPlat: Platform> Background<TPlat> {
         // Clean up unused runtimes to free up resources.
         guarded
             .runtimes
-            .retain(|_, runtime| runtime.strong_count() == 0);
+            .retain(|_, runtime| runtime.strong_count() > 0);
     }
 }
 
@@ -2007,7 +2019,7 @@ impl SuccessfulRuntime {
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
         // Since compiling the runtime is a CPU-intensive operation, we yield once before.
-        crate::util::yield_once().await;
+        crate::util::yield_twice().await;
 
         // Parameters for `HostVmPrototype::new`.
         let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;

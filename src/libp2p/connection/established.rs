@@ -18,6 +18,7 @@
 mod multi_stream;
 mod single_stream;
 pub mod substream;
+mod tests;
 
 use super::yamux;
 use alloc::{string::String, vec::Vec};

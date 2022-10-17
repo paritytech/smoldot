@@ -30,8 +30,9 @@ export {
   Client,
   ClientOptions,
   CrashError,
-  JsonRpcCallback,
   JsonRpcDisabledError,
+  MalformedJsonRpcError,
+  QueueFullError,
   LogCallback
 } from './client.js';
 
@@ -74,7 +75,7 @@ export function start(options?: ClientOptions): Client {
  * Tries to open a new connection using the given configuration.
  *
  * @see Connection
- * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
+ * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
  function connect(config: ConnectionConfig, forbidWs: boolean, forbidNonLocalWs: boolean, forbidWss: boolean, forbidWebRTC: boolean): Connection {
   // Attempt to parse the multiaddress.
@@ -374,7 +375,7 @@ export function start(options?: ClientOptions): Client {
         // `pc` is guaranteed to be non-null.
         if (isFirstSubstream) {
           isFirstSubstream = false;
-          addChannel(pc!.createDataChannel("data", { id: 1, negotiated: true }), 'outbound')
+          addChannel(pc!.createDataChannel("data", { id: 0, negotiated: true }), 'outbound')
         } else {
           addChannel(pc!.createDataChannel("data"), 'outbound')
         }

@@ -35,7 +35,7 @@ export interface Config {
      * Tries to open a new connection using the given configuration.
      *
      * @see Connection
-     * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
+     * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
      */
     connect(config: ConnectionConfig): Connection;
     
@@ -47,8 +47,7 @@ export interface Config {
     onPanic: (message: string) => never,
     
     logCallback: (level: number, target: string, message: string) => void,
-    jsonRpcCallback: (response: string, chainId: number) => void,
-    databaseContentCallback: (data: string, chainId: number) => void,
+    jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
 }
 
@@ -215,34 +214,11 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
             config.onPanic(message);
         },
 
-        // Used by the Rust side to emit a JSON-RPC response or subscription notification.
-        json_rpc_respond: (ptr: number, len: number, chainId: number) => {
+        // Used by the Rust side to notify that a JSON-RPC response or subscription notification
+        // is available in the queue of JSON-RPC responses.
+        json_rpc_responses_non_empty: (chainId: number) => {
             if (killedTracked.killed) return;
-
-            const instance = config.instance!;
-
-            ptr >>>= 0;
-            len >>>= 0;
-
-            let message = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
-            if (config.jsonRpcCallback) {
-                config.jsonRpcCallback(message, chainId);
-            }
-        },
-
-        // Used by the Rust side in response to asking for the database content of a chain.
-        database_content_ready: (ptr: number, len: number, chainId: number) => {
-            if (killedTracked.killed) return;
-
-            const instance = config.instance!;
-
-            ptr >>>= 0;
-            len >>>= 0;
-
-            let content = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
-            if (config.databaseContentCallback) {
-                config.databaseContentCallback(content, chainId);
-            }
+            config.jsonRpcResponsesNonEmptyCallback(chainId);
         },
 
         // Used by the Rust side to emit a log entry.

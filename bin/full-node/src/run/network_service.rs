@@ -555,7 +555,7 @@ impl NetworkService {
 
         // The call to `send_block_announce` below panics if we have no active connection.
         // TODO: not the correct check; must make sure that we have a substream open
-        if !guarded.network.has_established_connection(target) {
+        if !guarded.network.can_start_requests(target) {
             return Err(QueueNotificationError::NoConnection);
         }
 
@@ -624,7 +624,7 @@ impl NetworkService {
             let mut guarded = self.inner.guarded.lock().await;
 
             // The call to `start_blocks_request` below panics if we have no active connection.
-            if !guarded.network.has_established_connection(&target) {
+            if !guarded.network.can_start_requests(&target) {
                 return Err(BlocksRequestError::NoConnection);
             }
 
@@ -1151,11 +1151,11 @@ async fn blocks_request_response(
                     let decoded = header::decode(&header, block_number_bytes).unwrap();
                     match config.direction {
                         protocol::BlocksRequestDirection::Ascending => {
-                            protocol::BlocksRequestConfigStart::Hash(*decoded.parent_hash)
-                        }
-                        protocol::BlocksRequestDirection::Descending => {
                             // TODO: right now, since we don't necessarily pick the best chain in `block_hash_by_number`, it is possible that the next block doesn't have the current block as parent
                             protocol::BlocksRequestConfigStart::Number(decoded.number + 1)
+                        }
+                        protocol::BlocksRequestDirection::Descending => {
+                            protocol::BlocksRequestConfigStart::Hash(*decoded.parent_hash)
                         }
                     }
                 };

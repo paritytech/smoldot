@@ -697,13 +697,13 @@ where
         now: TNow,
         target: &PeerId,
         chain_index: usize,
-        block_hash: [u8; 32],
+        block_hash: &[u8; 32],
         start_key: &[u8],
         timeout: Duration,
     ) -> OutRequestId {
-        let request_data = protocol::build_state_request(protocol::StateRequestConfig {
+        let request_data = protocol::build_state_request(protocol::StateRequest {
             block_hash,
-            start_key: start_key.to_vec(),
+            start_key,
         })
         .fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
@@ -829,6 +829,16 @@ where
         )
     }
 
+    /// Returns `true` if it is allowed to call [`ChainNetwork::send_block_announce`], in other
+    /// words if there is an outbound block announces substream currently open with the target.
+    ///
+    /// If this function returns `false`, calling [`ChainNetwork::send_block_announce`] will
+    /// panic.
+    pub fn can_send_block_announces(&self, target: &PeerId, chain_index: usize) -> bool {
+        self.inner
+            .can_queue_notification(target, chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+    }
+
     /// Returns the list of peers for which we have a fully established notifications protocol of
     /// the given protocol.
     pub fn opened_transactions_substream(
@@ -907,8 +917,7 @@ where
                         match self.kbuckets_peers.entry(peer_id) {
                             hashbrown::hash_map::Entry::Occupied(e) => {
                                 let e = e.into_mut();
-                                e.num_references =
-                                    NonZeroUsize::new(e.num_references.get() + 1).unwrap();
+                                e.num_references = e.num_references.checked_add(1).unwrap();
                                 e
                             }
                             hashbrown::hash_map::Entry::Vacant(e) => {
@@ -1116,7 +1125,13 @@ where
             != 1;
 
         // If the peer is completely unreachable, unassign all of its slots.
-        if !has_any_attempt_left && !self.inner.has_established_connection(expected_peer_id) {
+        if !has_any_attempt_left
+            && self
+                .inner
+                .established_peer_connections(expected_peer_id)
+                .count()
+                == 0
+        {
             let expected_peer_id = expected_peer_id.clone(); // Necessary for borrowck reasons.
 
             for chain_index in 0..self.chains.len() {
@@ -1177,9 +1192,48 @@ where
         }
 
         let event_to_return = loop {
-            let inner_event = match self.inner.next_event() {
-                Some(ev) => ev,
-                None => break None,
+            // Instead of simply calling `next_event()` from the inner state machine to grab the
+            // inner event, we first call `fulfilled_undesired_outbound_substreams` and determine
+            // whether there is any already-open or opening-in-progress substream to close. If so,
+            // we perform the closing, then continue running the body of `next_event` but pretend
+            // that the underlying state machine has generated an event corresponding to that
+            // substream having been closed.
+            let inner_event = {
+                let event = loop {
+                    let to_close = self
+                        .inner
+                        .fulfilled_undesired_outbound_substreams()
+                        .next()
+                        .map(|(peer_id, idx, _)| (peer_id.clone(), idx));
+                    if let Some((peer_id, notifications_protocol_index)) = to_close {
+                        let open_or_pending = self
+                            .inner
+                            .close_out_notification(&peer_id, notifications_protocol_index);
+                        match open_or_pending {
+                            peers::OpenOrPending::Pending => {
+                                // Intentionally ignored, as it concerns a peer that is no longer
+                                // desired, and thus didn't have a slot.
+                            }
+                            peers::OpenOrPending::Open => {
+                                break Some(peers::Event::NotificationsOutClose {
+                                    notifications_protocol_index,
+                                    peer_id,
+                                })
+                            }
+                        }
+                    } else {
+                        break None;
+                    }
+                };
+
+                // No event due to closing substreams. Grab the "actual" inner event.
+                match event {
+                    Some(ev) => ev,
+                    None => match self.inner.next_event() {
+                        Some(ev) => ev,
+                        None => break None,
+                    },
+                }
             };
 
             match inner_event {
@@ -1549,8 +1603,11 @@ where
                             response
                                 .map_err(StateRequestError::Request)
                                 .and_then(|payload| {
-                                    protocol::decode_state_response(&payload)
-                                        .map_err(StateRequestError::Decode)
+                                    if let Err(err) = protocol::decode_state_response(&payload) {
+                                        Err(StateRequestError::Decode(err))
+                                    } else {
+                                        Ok(EncodedStateResponse(payload))
+                                    }
                                 });
 
                         break Some(Event::StateRequestResult {
@@ -1721,6 +1778,7 @@ where
                     );
 
                     // The chain is now considered as closed.
+                    // TODO: can was_open ever be false?
                     let was_open = self.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
 
                     if was_open {
@@ -1774,9 +1832,27 @@ where
                     }
                 }
 
-                // Remote closes a substream.
-                // There isn't anything to do as long as the remote doesn't close our local
-                // outbound substream.
+                // Remote closes a block announce substream.
+                peers::Event::NotificationsInClose {
+                    peer_id,
+                    notifications_protocol_index,
+                    ..
+                } if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
+                    let chain_index =
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    // We unassign the inbound slot of the peer if it had one.
+                    // If the peer had an outbound slot, then this does nothing.
+                    if self.chains[chain_index].in_peers.remove(&peer_id) {
+                        self.inner.set_peer_notifications_out_desired(
+                            &peer_id,
+                            notifications_protocol_index,
+                            peers::DesiredState::NotDesired,
+                        );
+                    }
+                }
+
+                // Remote closes another substream.
                 peers::Event::NotificationsInClose { .. } => {}
 
                 // Received a block announce.
@@ -1892,10 +1968,10 @@ where
                 // Remote wants to open a block announces substream.
                 // The block announces substream is the main substream that determines whether
                 // a "chain" is open.
-                peers::Event::DesiredInNotification {
+                peers::Event::NotificationsInOpen {
                     peer_id,
                     handshake,
-                    id: desired_in_notification_id,
+                    id: substream_id,
                     notifications_protocol_index,
                 } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 => {
                     let chain_index =
@@ -1906,8 +1982,7 @@ where
                         self.chains[chain_index].chain_config.block_number_bytes,
                         &handshake,
                     ) {
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
 
                         break Some(Event::ProtocolError {
                             error: ProtocolError::BadBlockAnnouncesHandshake(err),
@@ -1924,8 +1999,7 @@ where
                                 .unwrap_or(usize::max_value())
                     {
                         // All in slots are occupied. Refuse the substream.
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
                         continue;
                     }
 
@@ -1949,12 +2023,9 @@ where
                         })
                     };
 
-                    if self
-                        .inner
-                        .in_notification_accept(desired_in_notification_id, handshake)
-                        .is_ok()
-                        && !has_out_slot
-                    {
+                    self.inner.in_notification_accept(substream_id, handshake);
+
+                    if !has_out_slot {
                         // TODO: future cancellation issue; if this future is cancelled, then trying to do the `in_notification_accept` again next time will panic
                         self.inner.set_peer_notifications_out_desired(
                             &peer_id,
@@ -1976,9 +2047,9 @@ where
                 }
 
                 // Remote wants to open a transactions substream.
-                peers::Event::DesiredInNotification {
+                peers::Event::NotificationsInOpen {
                     peer_id,
-                    id: desired_in_notification_id,
+                    id: substream_id,
                     notifications_protocol_index,
                     ..
                 } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 1 => {
@@ -1990,20 +2061,16 @@ where
                         .open_chains // TODO: clone :-/
                         .contains(&(peer_id.clone(), chain_index))
                     {
-                        // It doesn't matter if the substream is obsolete.
-                        let _ = self
-                            .inner
-                            .in_notification_accept(desired_in_notification_id, Vec::new());
+                        self.inner.in_notification_accept(substream_id, Vec::new());
                     } else {
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
                     }
                 }
 
                 // Remote wants to open a grandpa substream.
-                peers::Event::DesiredInNotification {
+                peers::Event::NotificationsInOpen {
                     peer_id,
-                    id: desired_in_notification_id,
+                    id: substream_id,
                     notifications_protocol_index,
                     ..
                 } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 => {
@@ -2015,8 +2082,7 @@ where
                         .open_chains // TODO: clone :-/
                         .contains(&(peer_id.clone(), chain_index))
                     {
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
                         continue;
                     }
 
@@ -2031,19 +2097,18 @@ where
                             .to_vec()
                     };
 
-                    // It doesn't matter if the substream is obsolete.
-                    let _ = self
-                        .inner
-                        .in_notification_accept(desired_in_notification_id, handshake);
+                    self.inner.in_notification_accept(substream_id, handshake);
                 }
 
-                peers::Event::DesiredInNotification { .. } => {
+                peers::Event::NotificationsInOpen { .. } => {
                     // Unrecognized notifications protocol.
                     unreachable!();
                 }
 
-                peers::Event::DesiredInNotificationCancel { .. } => {
-                    // TODO: do something
+                peers::Event::NotificationsInOpenCancel { .. } => {
+                    // Because we always accept/refuse incoming notification substreams instantly,
+                    // there's no possibility for a cancellation to happen.
+                    unreachable!()
                 }
             }
         };
@@ -2052,11 +2117,14 @@ where
         // to open.
         loop {
             // Note: we can't use a `while let` due to borrow checker errors.
-            let (id, _, notifications_protocol_index) =
-                match self.inner.next_unfulfilled_desired_outbound_substream() {
-                    Some(v) => v,
-                    None => break,
-                };
+            let (peer_id, notifications_protocol_index) = match self
+                .inner
+                .unfulfilled_desired_outbound_substream(false)
+                .next()
+            {
+                Some((peer_id, idx)) => (peer_id.clone(), idx),
+                None => break,
+            };
 
             let chain_config = &self.chains
                 [notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN]
@@ -2085,7 +2153,12 @@ where
                 unreachable!()
             };
 
-            self.inner.open_out_notification(id, now.clone(), handshake);
+            self.inner.open_out_notification(
+                &peer_id,
+                notifications_protocol_index,
+                now.clone(),
+                handshake,
+            );
         }
 
         event_to_return
@@ -2274,10 +2347,16 @@ where
         None
     }
 
-    /// Returns `true` if there exists an established connection with the given peer.
-    // TODO: revisit this API w.r.t. shutdowns
-    pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
-        self.inner.has_established_connection(peer_id)
+    /// Returns `true` if if it possible to send requests (i.e. through
+    /// [`ChainNetwork::start_grandpa_warp_sync_request`],
+    /// [`ChainNetwork::start_blocks_request`], etc.) to the given peer.
+    ///
+    /// If `false` is returned, starting a request will panic.
+    ///
+    /// In other words, returns `true` if there exists an established connection non-shutting-down
+    /// connection with the given peer.
+    pub fn can_start_requests(&self, peer_id: &PeerId) -> bool {
+        self.inner.can_start_requests(peer_id)
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
@@ -2502,7 +2581,7 @@ pub enum Event {
 
     StateRequestResult {
         request_id: OutRequestId,
-        response: Result<Vec<protocol::StateResponseEntry>, StateRequestError>,
+        response: Result<EncodedStateResponse, StateRequestError>,
     },
 
     StorageProofRequestResult {
@@ -2710,6 +2789,26 @@ impl EncodedGrandpaCommitMessage {
 }
 
 impl fmt::Debug for EncodedGrandpaCommitMessage {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
+/// Undecoded but valid state response.
+#[derive(Clone)]
+pub struct EncodedStateResponse(Vec<u8>);
+
+impl EncodedStateResponse {
+    /// Returns the decoded version of the state response.
+    pub fn decode(&self) -> Vec<protocol::StateResponseEntry> {
+        match protocol::decode_state_response(&self.0) {
+            Ok(r) => r,
+            Err(_) => unreachable!(),
+        }
+    }
+}
+
+impl fmt::Debug for EncodedStateResponse {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.decode(), f)
     }

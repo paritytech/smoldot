@@ -40,7 +40,7 @@ if (buildProfile != 'debug' && buildProfile != 'min-size-release')
 // The Rust version is pinned because the wasi target is still unstable. Without pinning, it is
 // possible for the wasm-js bindings to change between two Rust versions. Feel free to update
 // this version pin whenever you like, provided it continues to build.
-const rustVersion = '1.61.0';
+const rustVersion = '1.64.0';
 
 // Assume that the user has `rustup` installed and make sure that `rust_version` is available.
 // Because `rustup install` requires an Internet connection, check whether the toolchain is
@@ -87,19 +87,13 @@ try {
     const rustOutput = "../../../target/wasm32-wasi/" + buildProfile + "/smoldot_light_wasm.wasm";
     let optimisationStageOutput = path.join(tmpDir, 'tmp.wasm');
 
-    try {
-        if (buildProfile == 'min-size-release') {
-            child_process.execSync(
-                "wasm-opt -o " + optimisationStageOutput + " -Oz --strip-debug --vacuum --dce "
-                + "../../../target/wasm32-wasi/" + buildProfile + "/smoldot_light_wasm.wasm",
-                { 'stdio': 'inherit' }
-            );
-        } else {
-            optimisationStageOutput = rustOutput;
-        }
-    } catch (error) {
-        console.warn("Failed to run `wasm-opt`. Using the direct Rust output instead.");
-        console.warn(error);
+    if (buildProfile == 'min-size-release') {
+        child_process.execSync(
+            "wasm-opt -o " + optimisationStageOutput + " -Oz --strip-debug --vacuum --dce "
+            + "../../../target/wasm32-wasi/" + buildProfile + "/smoldot_light_wasm.wasm",
+            { 'stdio': 'inherit' }
+        );
+    } else {
         optimisationStageOutput = rustOutput;
     }
 

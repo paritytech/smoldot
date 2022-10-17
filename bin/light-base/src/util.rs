@@ -16,14 +16,25 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 /// Use in an asynchronous context to interrupt the current task execution and schedule it back.
+/// Twice.
 ///
 /// This function is useful in order to guarantee a fine granularity of tasks execution time in
 /// situations where a CPU-heavy task is being performed.
-pub async fn yield_once() {
-    let mut pending = true;
-    futures::future::poll_fn(move |cx| {
-        if pending {
-            pending = false;
+///
+/// We do not yield once, but twice.
+/// The reason is that, at the time of writing, `FuturesUnordered` yields to the outside after
+/// one of its futures has yielded twice. We use `FuturesUnordered` in the Wasm node.
+/// Yielding to the outside is important in the context of the browser node because it gives
+/// time to the browser to run its own events loop.
+/// See <https://github.com/rust-lang/futures-rs/blob/7a98cf0bbeb397dcfaf5f020b371ab9e836d33d4/futures-util/src/stream/futures_unordered/mod.rs#L531>
+/// See <https://github.com/rust-lang/futures-rs/issues/2053> for a discussion about a proper
+/// solution.
+// TODO: this is a complete hack ^
+pub async fn yield_twice() {
+    let mut num_pending_remain = 2;
+    core::future::poll_fn(move |cx| {
+        if num_pending_remain > 0 {
+            num_pending_remain -= 1;
             cx.waker().wake_by_ref();
             core::task::Poll::Pending
         } else {

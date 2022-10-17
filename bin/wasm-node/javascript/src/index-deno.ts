@@ -26,7 +26,8 @@ export {
     Client,
     ClientOptions,
     CrashError,
-    JsonRpcCallback,
+    MalformedJsonRpcError,
+    QueueFullError,
     JsonRpcDisabledError,
     LogCallback
 } from './client.js';
@@ -105,7 +106,7 @@ export function start(options?: ClientOptions): Client {
  * Tries to open a new connection using the given configuration.
  *
  * @see Connection
- * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
+ * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
 function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean, forbidNonLocalWs: boolean, forbidWss: boolean): Connection {
     let connection: TcpWrapped | WebSocketWrapped;

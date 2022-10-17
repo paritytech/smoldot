@@ -1271,18 +1271,38 @@ where
                         continue;
                     }
 
-                    let substream_id = self
+                    // The event might concern a substream that we have already accepted or
+                    // refused. In that situation, either reinterpret the event as
+                    // "NotificationsInClose" or discard it.
+                    if let Some(substream_id) = self
                         .ingoing_notification_substreams_by_connection
                         .remove(&(connection_id, inner_substream_id))
-                        .unwrap();
-                    let _was_in = self.ingoing_notification_substreams.remove(&substream_id);
-                    debug_assert!(_was_in.is_some());
-
-                    Event::NotificationsInClose {
-                        substream_id,
-                        outcome: Err(NotificationsInClosedErr::Substream(
-                            established::NotificationsInClosedErr::SubstreamReset,
-                        )),
+                    {
+                        let (_, state, _) = self
+                            .ingoing_notification_substreams
+                            .remove(&substream_id)
+                            .unwrap();
+                        match state {
+                            SubstreamState::Open => Event::NotificationsInClose {
+                                substream_id,
+                                outcome: Err(NotificationsInClosedErr::Substream(
+                                    established::NotificationsInClosedErr::SubstreamReset,
+                                )),
+                            },
+                            SubstreamState::Pending => {
+                                Event::NotificationsInOpenCancel { substream_id }
+                            }
+                        }
+                    } else {
+                        // Substream was refused. As documented, we must confirm the reception of
+                        // the event by sending back a rejection.
+                        self.messages_to_connections.push_back((
+                            connection_id,
+                            CoordinatorToConnectionInner::RejectInNotifications {
+                                substream_id: inner_substream_id,
+                            },
+                        ));
+                        continue;
                     }
                 }
                 ConnectionToCoordinatorInner::NotificationIn {
@@ -1507,6 +1527,26 @@ enum ConnectionToCoordinatorInner {
         handshake: Vec<u8>,
     },
     /// See the corresponding event in [`established::Event`].
+    ///
+    /// The coordinator should be aware that, due to the asynchronous nature of communications, it
+    /// might receive this event after having sent a
+    /// [`CoordinatorToConnectionInner::AcceptInNotifications`] or
+    /// [`CoordinatorToConnectionInner::RejectInNotifications`]. In that situation, the coordinator
+    /// should either reinterpret the message as a `NotificationsInClose` (if it had accepted it)
+    /// or ignore it (if it had rejected it).
+    ///
+    /// The connection should be aware that, due to the asynchronous nature of communications, it
+    /// might later receive an [`CoordinatorToConnectionInner::AcceptInNotifications`] or
+    /// [`CoordinatorToConnectionInner::RejectInNotifications`] concerning this substream. In that
+    /// situation, the connection should ignore this message.
+    ///
+    /// Because substream IDs can be reused, this introduces an ambiguity in the following sequence
+    /// of events: send `NotificationsInOpen`, send `NotificationsInOpenCancel`, send
+    /// `NotificationsInOpen`, receive `AcceptInNotifications`. Does the `AcceptInNotifications`
+    /// refer to the first `NotificationsInOpen` or to the second?
+    /// In order to solve this problem, the coordinator must always send back a
+    /// [`CoordinatorToConnectionInner::RejectInNotifications`] in order to acknowledge a
+    /// `NotificationsInOpenCancel`.
     NotificationsInOpenCancel {
         id: established::SubstreamId,
     },
@@ -1749,6 +1789,15 @@ pub enum Event<TConn> {
         remote_handshake: Vec<u8>,
     },
 
+    /// The remote has canceled the opening an incoming notifications substream.
+    ///
+    /// This can only happen before the notification substream has been accepted or refused.
+    NotificationsInOpenCancel {
+        /// Substream that has been closed. Guaranteed to match a substream that was earlier
+        /// reported with a [`Event::NotificationsInOpen`].
+        substream_id: SubstreamId,
+    },
+
     /// Received a notification on a notifications substream of a connection.
     NotificationsIn {
         /// Substream on which the notification has been received. Guaranteed to be a substream
@@ -1761,9 +1810,7 @@ pub enum Event<TConn> {
 
     /// The remote has closed an incoming notifications substream.
     ///
-    /// This can happen both before or after the notification substream has been accepted. If it
-    /// happens before the substream has been accepted, this event should be interpreted as
-    /// canceling the opening.
+    /// This can only happen after the notification substream has been accepted.
     NotificationsInClose {
         /// Substream that has been closed. Guaranteed to match a substream that was earlier
         /// reported with a [`Event::NotificationsInOpen`].
