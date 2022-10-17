@@ -24,11 +24,8 @@
 
 // TODO: usage and example
 
-use core::{fmt, pin::Pin, task::Poll};
-use futures::{
-    io::{AsyncRead, AsyncWrite},
-    prelude::*,
-};
+use core::{fmt, future, pin::Pin, task::Poll};
+use futures::io::{AsyncRead, AsyncWrite};
 use std::io;
 
 /// Holds an implementation of `AsyncRead` and `AsyncWrite`, alongside with a read buffer and a
