@@ -441,7 +441,6 @@ impl Keystore {
                             {
                                 Ok(key) => {
                                     drop(guarded);
-                                    // TODO: is creating the signing context expensive?
                                     Cow::Owned(key)
                                 }
                                 Err(err) => {
