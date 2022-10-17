@@ -37,8 +37,8 @@
 //! >           isn't compatible with the Substrate keystore implementation. In other words, this
 //! >           keystore cannot load keys found in a directory that was previously associated with
 //! >           a Substrate keystore. This was decided because the Substrate keystore made some
-//! >           questionables that it has to keep for backwards compatibility reasons. This
-//! >           keystore, being newly-written, doesn't have to follow them.
+//! >           questionable decisions that it has to keep for backwards compatibility reasons.
+//! >           This keystore, being newly-written, doesn't have to follow them.
 
 #![cfg(all(feature = "std"))]
 #![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
