@@ -1070,6 +1070,7 @@ impl ReadyToRun {
             HostFunction::ext_storage_child_root_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_child_next_key_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_start_transaction_version_1 => {
+                // TODO: a maximum depth is important in order to prevent a malicious runtime from crashing the client, but the depth needs to be the same as in Substrate; figure out
                 self.inner.storage_transaction_depth += 1;
                 HostVm::StartStorageTransaction(StartStorageTransaction { inner: self.inner })
             }
