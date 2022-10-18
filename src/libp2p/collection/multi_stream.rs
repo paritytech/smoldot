@@ -814,7 +814,7 @@ where
                     let mut parser =
                         nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
                             nom::combinator::complete(nom::combinator::map_parser(
-                                nom::multi::length_data(crate::util::nom_scale_compact_usize),
+                                nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
                                 protobuf::message_decode! {
                                     #[optional] flags = 1 => protobuf::enum_tag_decode,
                                     #[optional] message = 2 => protobuf::bytes_tag_decode,
