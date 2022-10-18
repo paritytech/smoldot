@@ -55,35 +55,34 @@ pub fn build_state_request(
 
 /// Decodes a response into a state request response.
 pub fn decode_state_response(
-    response_bytes: &[u8],
-) -> Result<Vec<StateResponseEntry>, DecodeStateResponseError> {
+    response_bytes: &'_ [u8],
+) -> Result<Vec<StateResponseEntry<'_>>, DecodeStateResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-        nom::combinator::complete(protobuf::message_decode((protobuf::message_tag_decode(
-            1,
-            protobuf::message_decode((
-                protobuf::bytes_tag_decode(1),
-                protobuf::message_tag_decode(
-                    2,
-                    protobuf::message_decode((
-                        protobuf::bytes_tag_decode(1),
-                        protobuf::bytes_tag_decode(2),
-                    )),
-                ),
-                protobuf::bool_tag_decode(3),
-            )),
-        ),))),
+        nom::combinator::complete(protobuf::message_decode! {
+            #[repeated(max = 1)] entries = 1 => protobuf::message_decode!{
+                _state_root = 1 => protobuf::bytes_tag_decode,
+                #[repeated(max = 4 * 1024 * 1024)] entries = 2 => protobuf::message_tag_decode(protobuf::message_decode!{
+                    key = 1 => protobuf::bytes_tag_decode,
+                    value = 2 => protobuf::bytes_tag_decode,
+                }),
+                _complete = 3 => protobuf::bool_tag_decode,
+            }
+        }),
     );
 
-    let entries: Vec<((&[u8],), Vec<((&[u8],), (&[u8],))>, (bool,))> =
-        match nom::Finish::finish(parser(response_bytes)) {
-            Ok((_, (entries,))) => entries,
-            Err(_) => return Err(DecodeStateResponseError::ProtobufDecode),
-        };
+    let decoded = match nom::Finish::finish(parser(response_bytes)) {
+        Ok((_, entries)) => entries,
+        Err(_) => return Err(DecodeStateResponseError::ProtobufDecode),
+    };
 
-    let entries = entries
+    let entries = decoded
+        .entries
         .into_iter()
-        .flat_map(|(_, entries, _)| entries.into_iter())
-        .map(|((key,), (value,))| StateResponseEntry { key, value })
+        .flat_map(|entries| entries.entries.into_iter())
+        .map(|entry| StateResponseEntry {
+            key: entry.key,
+            value: entry.value,
+        })
         .collect();
 
     Ok(entries)
