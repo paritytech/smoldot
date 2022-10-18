@@ -52,7 +52,7 @@ jobs:
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v3.5.0
+    - uses: actions/setup-node@v3.5.1
       with:
         node-version: '12'  # An old version is used to ensure compatibility
     - uses: denoland/setup-deno@v1
@@ -70,7 +70,7 @@ jobs:
       with:
         fetch-depth: 0  # Necessary to fetch pull request base below
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v3.5.0
+    - uses: actions/setup-node@v3.5.1
       with:
         node-version: '14'  # Because this step doesn't actually check anything, we use a more liberal version
     - uses: baptiste0928/cargo-install@v1  # This action ensures that the twiggy compilation is cached.

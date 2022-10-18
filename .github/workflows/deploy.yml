@@ -54,7 +54,7 @@ jobs:
       - uses: actions/checkout@v3
         with:
           path: repo
-      - uses: actions/setup-node@v3.5.0
+      - uses: actions/setup-node@v3.5.1
         with:
           node-version: current
       - run: npm install
@@ -90,7 +90,7 @@ jobs:
       image: rust:1.64
     steps:
       - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3.5.0
+      - uses: actions/setup-node@v3.5.1
         with:
           node-version: 12   # An old version is intentionally used in order to check compatibility
       - run: apt-get update && apt install -y binaryen # For `wasm-opt`
@@ -121,7 +121,7 @@ jobs:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
-      - uses: actions/setup-node@v3.5.0
+      - uses: actions/setup-node@v3.5.1
         with:
           node-version: 12
       - uses: denoland/setup-deno@v1
