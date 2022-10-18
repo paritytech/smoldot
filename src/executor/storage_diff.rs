@@ -148,6 +148,16 @@ impl StorageDiff {
             .map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])))
     }
 
+    /// Returns an iterator to all the entries in the diff.
+    ///
+    /// Each value is either `Some` if the diff overwrites this diff, or `None` if it erases the
+    /// underlying value.
+    pub fn diff_into_iter_unordered(
+        self,
+    ) -> impl ExactSizeIterator<Item = (Vec<u8>, Option<Vec<u8>>)> {
+        self.hashmap.into_iter()
+    }
+
     /// Returns the storage value at the given key. `None` if this key doesn't have any value.
     pub fn storage_get<'a, 'b>(
         &'a self,
