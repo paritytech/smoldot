@@ -381,6 +381,8 @@ where
                 // If the substream state machine has already processed all the data within
                 // `read_buffer`, process the flags of the current protobuf frame, discard that
                 // protobuf frame, and loop again.
+                continue_looping = true;
+
                 // Discard the data.
                 debug_assert_ne!(protobuf_frame_size, 0);
                 substream.read_buffer_partial_read = 0;
