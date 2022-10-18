@@ -222,7 +222,7 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 ///
 /// This macro expects a list of fields, each field has one of the three following formats:
 ///
-/// ```
+/// ```ignore
 /// field_name = num => parser
 /// #[optional] field_name = num => parser
 /// #[repeated] field_name = num => parser
@@ -243,8 +243,7 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 ///
 /// # Example
 ///
-/// ```
-/// use crate::protobuf;
+/// ```ignore
 /// let _parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
 ///     nom::combinator::complete(protobuf::message_decode! {
 ///         #[repeated(max = 4)] entries = 1 => protobuf::message_decode!{
