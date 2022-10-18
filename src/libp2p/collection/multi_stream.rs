@@ -889,14 +889,12 @@ where
                     // more data than would fit in 16kiB.
                     debug_assert!(protobuf_frame_len <= 16384);
                     debug_assert!(
-                        util::encode_scale_compact_usize(protobuf_frame_len)
-                            .as_ref()
-                            .len()
-                            + protobuf_frame_len
+                        util::leb128::encode_usize(protobuf_frame_len).count() + protobuf_frame_len
                             <= 16384
                     );
-                    read_write
-                        .write_out(util::encode_scale_compact_usize(protobuf_frame_len).as_ref());
+                    for byte in util::leb128::encode_usize(protobuf_frame_len) {
+                        read_write.write_out(&[byte]);
+                    }
                     for buffer in protobuf_frame {
                         read_write.write_out(AsRef::<[u8]>::as_ref(&buffer));
                     }
