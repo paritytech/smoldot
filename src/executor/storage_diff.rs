@@ -272,6 +272,14 @@ impl StorageDiff {
             self.btree.insert(key.clone(), value.is_some());
         }
     }
+
+	pub fn iter(&self) -> impl Iterator<Item = (&[u8], Option<&[u8]>)> {
+		self.hashmap.iter().map(|(k, v)| (k.as_ref(), v.as_ref().map(|v| &v[..])))
+	}
+
+	pub fn into_iter(self) -> impl Iterator<Item = (Vec<u8>, Option<Vec<u8>>)> {
+		self.hashmap.into_iter()
+	}
 }
 
 impl fmt::Debug for StorageDiff {
