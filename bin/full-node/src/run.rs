@@ -238,7 +238,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // This is either passed as a CLI option, loaded from disk, or generated randomly.
     let noise_key = if let Some(node_key) = cli_options.libp2p_key {
         connection::NoiseKey::new(&node_key)
-    } else if let Some(dir) = base_storage_directory {
+    } else if let Some(dir) = base_storage_directory.as_ref() {
         let path = dir.join("libp2p_ed25519_secret_key.secret");
         let noise_key = if path.exists() {
             let file_content =
@@ -402,7 +402,14 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     let mut network_events_receivers = network_events_receivers.into_iter();
 
     let keystore = Arc::new({
-        let mut keystore = keystore::Keystore::new(rand::random());
+        let mut keystore = keystore::Keystore::new(
+            base_storage_directory
+                .as_ref()
+                .map(|path| path.join(chain_spec.id()).join("keys")),
+            rand::random(),
+        )
+        .await
+        .unwrap();
         for private_key in cli_options.keystore_memory {
             keystore.insert_sr25519_memory(keystore::KeyNamespace::all(), &private_key);
         }
@@ -440,7 +447,16 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 block_number_bytes: usize::from(
                     relay_chain_spec.as_ref().unwrap().block_number_bytes(),
                 ),
-                keystore: Arc::new(keystore::Keystore::new(rand::random())),
+                keystore: Arc::new(
+                    keystore::Keystore::new(
+                        base_storage_directory
+                            .as_ref()
+                            .map(|path| path.join(chain_spec.id()).join("keys")),
+                        rand::random(),
+                    )
+                    .await
+                    .unwrap(),
+                ),
                 jaeger_service, // TODO: consider passing a different jaeger service with a different service name
                 slot_duration_author_ratio: 43691_u16,
             })

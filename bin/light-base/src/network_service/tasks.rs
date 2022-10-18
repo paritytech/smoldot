@@ -434,13 +434,9 @@ async fn multi_stream_connection_task<TPlat: Platform>(
             wake_up_after = None;
         }
 
-        // Perform a read-write on all substreams that are ready.
-        // TODO: what is a ready substream is a bit of a clusterfuck, figure out
-        for substream_id in connection_task
-            .ready_substreams()
-            .copied()
-            .collect::<Vec<_>>()
-        {
+        // Perform a read-write on all substreams.
+        // TODO: trying to read/write every single substream every single time is suboptimal, but making this not suboptimal is very complicated
+        for substream_id in open_substreams.iter().map(|(id, _)| id).collect::<Vec<_>>() {
             let substream = &mut open_substreams[substream_id];
 
             let mut read_write = ReadWrite {
