@@ -486,7 +486,7 @@ impl HostVmPrototype {
                 allow_unresolved_imports: self.allow_unresolved_imports,
                 memory_total_pages: self.memory_total_pages,
                 registered_functions: self.registered_functions,
-                within_storage_transaction: false,
+                storage_transaction_depth: 0,
                 allocator,
             },
         })
@@ -557,10 +557,6 @@ pub enum HostVm {
     #[from]
     CallRuntimeVersion(CallRuntimeVersion),
     /// Declares the start of a storage transaction. See [`HostVm::EndStorageTransaction`].
-    ///
-    /// Guaranteed by the code in this module to never happen while already within a transaction.
-    /// If the runtime attempts to start a nested transaction, an [`HostVm::Error`] is
-    /// generated instead.
     #[from]
     StartStorageTransaction(StartStorageTransaction),
     /// Ends a storage transaction. All changes made to the storage (e.g. through a
@@ -637,7 +633,7 @@ impl ReadyToRun {
             }) => {
                 // Wasm virtual machine has successfully returned.
 
-                if self.inner.within_storage_transaction {
+                if self.inner.storage_transaction_depth > 0 {
                     return HostVm::Error {
                         prototype: self.inner.into_prototype(),
                         error: Error::FinishedWithPendingTransaction,
@@ -1074,39 +1070,33 @@ impl ReadyToRun {
             HostFunction::ext_storage_child_root_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_child_next_key_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_start_transaction_version_1 => {
-                if self.inner.within_storage_transaction {
-                    return HostVm::Error {
-                        error: Error::NestedTransaction,
-                        prototype: self.inner.into_prototype(),
-                    };
-                }
-
-                self.inner.within_storage_transaction = true;
+                // TODO: a maximum depth is important in order to prevent a malicious runtime from crashing the client, but the depth needs to be the same as in Substrate; figure out
+                self.inner.storage_transaction_depth += 1;
                 HostVm::StartStorageTransaction(StartStorageTransaction { inner: self.inner })
             }
             HostFunction::ext_storage_rollback_transaction_version_1 => {
-                if !self.inner.within_storage_transaction {
+                if self.inner.storage_transaction_depth == 0 {
                     return HostVm::Error {
                         error: Error::NoActiveTransaction,
                         prototype: self.inner.into_prototype(),
                     };
                 }
 
-                self.inner.within_storage_transaction = false;
+                self.inner.storage_transaction_depth -= 1;
                 HostVm::EndStorageTransaction {
                     resume: EndStorageTransaction { inner: self.inner },
                     rollback: true,
                 }
             }
             HostFunction::ext_storage_commit_transaction_version_1 => {
-                if !self.inner.within_storage_transaction {
+                if self.inner.storage_transaction_depth == 0 {
                     return HostVm::Error {
                         error: Error::NoActiveTransaction,
                         prototype: self.inner.into_prototype(),
                     };
                 }
 
-                self.inner.within_storage_transaction = false;
+                self.inner.storage_transaction_depth -= 1;
                 HostVm::EndStorageTransaction {
                     resume: EndStorageTransaction { inner: self.inner },
                     rollback: false,
@@ -2595,9 +2585,8 @@ struct Inner {
     /// Value passed to [`HostVmPrototype::new`].
     allow_unresolved_imports: bool,
 
-    /// If true, a transaction has been started using `ext_storage_start_transaction_version_1`.
-    /// No further transaction start is allowed before the current one ends.
-    within_storage_transaction: bool,
+    /// The depth of storage transaction started with `ext_storage_start_transaction_version_1`.
+    storage_transaction_depth: u32,
 
     /// See [`HostVmPrototype::registered_functions`].
     registered_functions: Vec<FunctionImport>,
@@ -2910,10 +2899,6 @@ pub enum Error {
         /// Decoding error that happened.
         error: core::str::Utf8Error,
     },
-    /// Called `ext_storage_start_transaction_version_1` with a transaction was already in
-    /// progress.
-    #[display(fmt = "Attempted to start a transaction while one is already in progress")]
-    NestedTransaction,
     /// Called `ext_storage_rollback_transaction_version_1` or
     /// `ext_storage_commit_transaction_version_1` but no transaction was in progress.
     #[display(fmt = "Attempted to end a transaction while none is in progress")]
