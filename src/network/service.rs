@@ -735,7 +735,7 @@ where
         now: TNow,
         target: &PeerId,
         chain_index: usize,
-        config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
+        config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
         timeout: Duration,
     ) -> OutRequestId {
         let request_data =

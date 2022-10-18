@@ -23,7 +23,7 @@ use super::{
 };
 use crate::util::{self, protobuf};
 
-use alloc::{collections::VecDeque, string::String, vec::Vec};
+use alloc::{collections::VecDeque, string::String, vec, vec::Vec};
 use core::{
     cmp, fmt,
     hash::Hash,
