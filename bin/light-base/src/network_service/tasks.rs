@@ -384,10 +384,6 @@ async fn multi_stream_connection_task<TPlat: Platform>(
     // to implement it this way.
     let mut write_buffer = vec![0; 16384]; // TODO: the write buffer must not exceed 16kiB due to the libp2p WebRTC spec; this should ideally be enforced through the connection task API
 
-    // When reading/writing substreams, the substream can ask to be woken up after a certain time.
-    // This variable stores the earliest time when we should be waking up.
-    let mut wake_up_after = None;
-
     loop {
         // Start opening new outbound substreams, if needed.
         for _ in 0..connection_task
@@ -423,15 +419,9 @@ async fn multi_stream_connection_task<TPlat: Platform>(
 
         let now = TPlat::now();
 
-        // Clear `wake_up_after` if necessary, otherwise it will always stay at a constant value.
-        // TODO: nit: can use `Option::is_some_and` after it's stable; https://github.com/rust-lang/rust/issues/93050
-        if wake_up_after
-            .as_ref()
-            .map(|time| *time <= now)
-            .unwrap_or(false)
-        {
-            wake_up_after = None;
-        }
+        // When reading/writing substreams, the substream can ask to be woken up after a certain
+        // time. This variable stores the earliest time when we should be waking up.
+        let mut wake_up_after = None;
 
         // Perform a read-write on all substreams.
         // TODO: trying to read/write every single substream every single time is suboptimal, but making this not suboptimal is very complicated
