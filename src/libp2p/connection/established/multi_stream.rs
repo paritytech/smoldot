@@ -585,17 +585,15 @@ where
                 }
             }
 
-            if !continue_looping {
-                break if substream.inner.is_some() {
-                    false
-                } else {
-                    if Some(substream_id) == self.ping_substream.as_ref() {
-                        self.ping_substream = None;
-                    }
-                    self.out_in_substreams_map.remove(&substream.id);
-                    self.in_substreams.remove(&substream_id);
-                    true
-                };
+            if substream.inner.is_none() {
+                if Some(substream_id) == self.ping_substream.as_ref() {
+                    self.ping_substream = None;
+                }
+                self.out_in_substreams_map.remove(&substream.id);
+                self.in_substreams.remove(&substream_id);
+                break true;
+            } else if !continue_looping {
+                break false;
             }
         }
     }
