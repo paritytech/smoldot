@@ -116,48 +116,41 @@ pub fn decode_identify_response(
     DecodeIdentifyResponseError,
 > {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-        nom::combinator::complete(protobuf::message_decode((
-            protobuf::string_tag_decode(5),
-            protobuf::string_tag_decode(6),
-            protobuf::bytes_tag_decode(1),
-            protobuf::bytes_tag_decode(2),
-            protobuf::bytes_tag_decode(4),
-            protobuf::string_tag_decode(3),
-        ))),
+        nom::combinator::complete(protobuf::message_decode! {
+            #[optional] protocol_version = 5 => protobuf::string_tag_decode,
+            #[optional] agent_version = 6 => protobuf::string_tag_decode,
+            #[optional] ed25519_public_key = 1 => protobuf::bytes_tag_decode,
+            #[repeated(max = 1024)] listen_addrs = 2 => protobuf::bytes_tag_decode,
+            #[optional] observed_addr = 4 => protobuf::bytes_tag_decode,
+            #[repeated(max = 1024)] protocols = 3 => protobuf::string_tag_decode,
+        }),
     );
 
-    let (
-        protocol_version,
-        agent_version,
-        ed25519_public_key,
-        listen_addrs,
-        observed_addr,
-        protocols,
-    ): (Option<_>, Option<_>, Option<_>, Vec<_>, Option<_>, Vec<_>) =
-        match nom::Finish::finish(parser(response_bytes)) {
-            Ok((_, (a, b, c, d, e, f))) => (a, b, c, d, e, f),
-            Err(_) => return Err(DecodeIdentifyResponseError::ProtobufDecode),
-        };
+    let decoded = match nom::Finish::finish(parser(response_bytes)) {
+        Ok((_, out)) => out,
+        Err(_) => return Err(DecodeIdentifyResponseError::ProtobufDecode),
+    };
 
     Ok(IdentifyResponse {
-        agent_version: agent_version.unwrap_or_default(),
-        protocol_version: protocol_version.unwrap_or_default(),
+        agent_version: decoded.agent_version.unwrap_or_default(),
+        protocol_version: decoded.protocol_version.unwrap_or_default(),
         ed25519_public_key: match PublicKey::from_protobuf_encoding(
-            ed25519_public_key.unwrap_or_default(),
+            decoded.ed25519_public_key.unwrap_or_default(),
         )
         .map_err(DecodeIdentifyResponseError::InvalidPublicKey)?
         {
             PublicKey::Ed25519(key) => key,
         },
-        listen_addrs: listen_addrs
+        listen_addrs: decoded
+            .listen_addrs
             .into_iter()
             .map(|a| Multiaddr::try_from(a.to_vec()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| DecodeIdentifyResponseError::InvalidMultiaddr)?
             .into_iter(),
-        observed_addr: Multiaddr::try_from(observed_addr.unwrap_or_default().to_vec())
+        observed_addr: Multiaddr::try_from(decoded.observed_addr.unwrap_or_default().to_vec())
             .map_err(|_| DecodeIdentifyResponseError::InvalidMultiaddr)?,
-        protocols: protocols.into_iter(),
+        protocols: decoded.protocols.into_iter(),
     })
 }
 
