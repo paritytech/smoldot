@@ -95,7 +95,7 @@ struct Substream<TNow, TRqUd, TNotifUd> {
     /// and `None` if it has been reset.
     inner: Option<substream::Substream<TNow, TRqUd, TNotifUd>>,
     /// All incoming data is first transferred to this buffer.
-    // TODO: this is very suboptimal code, instead the parsing should be done in a stream way
+    // TODO: this is very suboptimal code, instead the parsing should be done in a streaming way
     read_buffer: Vec<u8>,
     /// The buffer within `read_buffer` might contain a full Protobuf frame, but not all of the
     /// data within that frame was processed by the underlying substream.
@@ -285,36 +285,35 @@ where
         substream_id: &TSubId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> bool {
+        let mut substream = self.in_substreams.get_mut(substream_id).unwrap();
+
+        // Reading/writing the ping substream is used to queue new outgoing pings.
+        if Some(substream_id) == self.ping_substream.as_ref() {
+            if read_write.now >= self.next_ping {
+                let payload = self
+                    .ping_payload_randomness
+                    .sample(rand::distributions::Standard);
+                substream
+                    .inner
+                    .as_mut()
+                    .unwrap()
+                    .queue_ping(&payload, read_write.now.clone() + self.ping_timeout);
+                self.next_ping = read_write.now.clone() + self.ping_interval;
+            }
+
+            read_write.wake_up_after(&self.next_ping);
+        }
+
+        // TODO: make it explicit in the API that this is indeed the WebRTC protocol, as almost everything below is WebRTC-specific
+
         loop {
             // Don't process any more data before events are pulled.
             if self.pending_events.len() >= MAX_PENDING_EVENTS {
                 return false;
             }
 
-            // If this flag is still `false` at the end of the loop, we break out of it.
-            let mut continue_looping = false;
-
-            let mut substream = self.in_substreams.get_mut(substream_id).unwrap();
-
-            // Reading/writing the ping substream is used to queue new outgoing pings.
-            if Some(substream_id) == self.ping_substream.as_ref() {
-                if read_write.now >= self.next_ping {
-                    let payload = self
-                        .ping_payload_randomness
-                        .sample(rand::distributions::Standard);
-                    substream
-                        .inner
-                        .as_mut()
-                        .unwrap()
-                        .queue_ping(&payload, read_write.now.clone() + self.ping_timeout);
-                    self.next_ping = read_write.now.clone() + self.ping_interval;
-                }
-
-                read_write.wake_up_after(&self.next_ping);
-            }
-
-            // In the event where there's not enough space in the outgoing buffer to write a
-            // Protobuf message, we just return immediately.
+            // In the situation where there's not enough space in the outgoing buffer to write an
+            // outgoing Protobuf frame, we just return immediately.
             // This is necessary because calling `substream.read_write` can generate a write
             // close message.
             // TODO: this is error-prone, as we have no guarantee that the outgoing buffer will ever be > 6 bytes, for example in principle the API user could decide to use only a write buffer of 2 bytes, although that would be a very stupid thing to do
@@ -322,13 +321,15 @@ where
                 return false;
             }
 
+            // If this flag is still `false` at the end of the loop, we break out of it.
+            let mut continue_looping = false;
+
             // The incoming data is not directly the data of the substream. Instead, everything
-            // is wrapped within a Protobuf message. For this reason, we first buffer the data in
+            // is wrapped within a Protobuf frame. For this reason, we first transfer the data to
             // a buffer.
             //
             // According to the libp2p WebRTC spec, a frame and its length prefix must not be
             // larger than 16kiB, meaning that the read buffer never has to exceed this size.
-            // TODO: make it explicit in the API that this is indeed the WebRTC protocol
             // TODO: this is very suboptimal; improve
             if let Some(incoming_buffer) = read_write.incoming_buffer {
                 // TODO: reset the substream if `remote_writing_side_closed`
@@ -345,6 +346,8 @@ where
             }
 
             // Try to parse the content of `self.read_buffer`.
+            // If the content of `self.read_buffer` is an incomplete frame, the flags will be
+            // `None` and the message will be `&[]`.
             let (protobuf_frame_size, flags, message_within_frame) = {
                 let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
                     nom::combinator::complete(nom::combinator::map_parser(
@@ -355,17 +358,18 @@ where
                         },
                     )),
                 );
+
                 match nom::Finish::finish(parser(&substream.read_buffer)) {
                     Ok((rest, framed_message)) => {
-                        let num_bytes_read = substream.read_buffer.len() - rest.len();
+                        let protobuf_frame_size = substream.read_buffer.len() - rest.len();
                         (
-                            num_bytes_read,
+                            protobuf_frame_size,
                             framed_message.flags,
                             framed_message.message.unwrap_or(&[][..]),
                         )
                     }
                     Err(err) if err.code == nom::error::ErrorKind::Eof => {
-                        // TODO: reset the substream if incoming_buffer is full, as it means that the frame is too large
+                        // TODO: reset the substream if incoming_buffer is full, as it means that the frame is too large, and remove the debug_assert below
                         debug_assert!(substream.read_buffer.len() < 16384);
                         (0, None, &[][..])
                     }
@@ -377,7 +381,7 @@ where
                 }
             };
 
-            let event = if message_within_frame.len() < substream.read_buffer_partial_read {
+            let event = if message_within_frame.len() <= substream.read_buffer_partial_read {
                 // If the substream state machine has already processed all the data within
                 // `read_buffer`, process the flags of the current protobuf frame, discard that
                 // protobuf frame, and loop again.
@@ -408,6 +412,9 @@ where
                     None
                 }
             } else {
+                // We allocate a buffer where the substream state machine will temporarily write
+                // out its data. The size of the buffer is capped in order to prevent the substream
+                // from generating data that wouldn't fit in a single protobuf frame.
                 let mut intermediary_write_buffer =
                     vec![
                         0;
@@ -443,10 +450,13 @@ where
                     read_write.wake_up_after(wake_up_after)
                 }
 
+                // Continue looping as the substream might have more data to read or write.
                 if sub_read_write.read_bytes != 0 || sub_read_write.written_bytes != 0 {
                     continue_looping = true;
                 }
 
+                // Determine whether we should send a message on that substream with a specific
+                // flag.
                 let flag_to_write_out = if substream.inner.is_none()
                     && (!substream.remote_writing_side_closed
                         || sub_read_write.outgoing_buffer.is_some())
@@ -465,6 +475,7 @@ where
                     None
                 };
 
+                // Send out message.
                 if flag_to_write_out.is_some() || sub_read_write.written_bytes != 0 {
                     let written_bytes = sub_read_write.written_bytes;
                     drop(sub_read_write);
@@ -472,19 +483,19 @@ where
                     debug_assert!(written_bytes <= intermediary_write_buffer.len());
 
                     let protobuf_frame = {
-                        let flag_to_write_out = flag_to_write_out
+                        let flag_out = flag_to_write_out
                             .into_iter()
                             .flat_map(|f| protobuf::enum_tag_encode(1, f));
-                        let message = if written_bytes != 0 {
+                        let message_out = if written_bytes != 0 {
                             Some(&intermediary_write_buffer[..written_bytes])
                         } else {
                             None
                         }
                         .into_iter()
                         .flat_map(|m| protobuf::bytes_tag_encode(2, m));
-                        flag_to_write_out
+                        flag_out
                             .map(either::Left)
-                            .chain(message.map(either::Right))
+                            .chain(message_out.map(either::Right))
                     };
 
                     let protobuf_frame_len = protobuf_frame.clone().fold(0, |mut l, b| {
@@ -492,8 +503,17 @@ where
                         l
                     });
 
+                    // The spec mentions that a frame plus its length prefix shouldn't exceed
+                    // 16kiB. This is normally ensured by forbidding the substream from writing
+                    // more data than would fit in 16kiB.
                     debug_assert!(protobuf_frame_len <= 16384);
-
+                    debug_assert!(
+                        util::encode_scale_compact_usize(protobuf_frame_len)
+                            .as_ref()
+                            .len()
+                            + protobuf_frame_len
+                            <= 16384
+                    );
                     read_write
                         .write_out(util::encode_scale_compact_usize(protobuf_frame_len).as_ref());
                     for buffer in protobuf_frame {
