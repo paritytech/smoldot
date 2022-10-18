@@ -45,7 +45,7 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// raw data sent/received on a substream. When the user for example resets an "in substream",
     /// the "out substream" remains valid.
     in_substreams:
-        hashbrown::HashMap<TSubId, (Substream<TNow, TRqUd, TNotifUd>, u32), util::SipHasherBuild>,
+        hashbrown::HashMap<TSubId, Substream<TNow, TRqUd, TNotifUd>, util::SipHasherBuild>,
 
     out_in_substreams_map: hashbrown::HashMap<u32, TSubId, fnv::FnvBuildHasher>,
 
@@ -56,7 +56,7 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// Every time an outgoing substream is opened, an item is pulled from this list.
     ///
     /// Does not include the ping substream.
-    desired_out_substreams: VecDeque<(Substream<TNow, TRqUd, TNotifUd>, u32)>,
+    desired_out_substreams: VecDeque<Substream<TNow, TRqUd, TNotifUd>>,
 
     /// Substream used for outgoing pings.
     ///
@@ -90,6 +90,7 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
 }
 
 struct Substream<TNow, TRqUd, TNotifUd> {
+    id: u32,
     inner: substream::Substream<TNow, TRqUd, TNotifUd>,
 }
 
@@ -182,7 +183,7 @@ where
     /// Panics if there already exists a substream with an identical identifier.
     ///
     pub fn add_substream(&mut self, id: TSubId, outbound: bool) {
-        let (substream, out_substream_id) = if !outbound {
+        let substream = if !outbound {
             let out_substream_id = self.next_out_substream_id;
             self.next_out_substream_id += 1;
 
@@ -195,24 +196,20 @@ where
                 .chain(iter::once(self.ping_protocol.clone()))
                 .collect::<Vec<_>>();
 
-            (
-                Substream {
-                    inner: substream::Substream::ingoing(supported_protocols),
-                },
-                out_substream_id,
-            )
+            Substream {
+                id: out_substream_id,
+                inner: substream::Substream::ingoing(supported_protocols),
+            }
         } else if self.ping_substream.is_none() {
             let out_substream_id = self.next_out_substream_id;
             self.next_out_substream_id += 1;
 
             self.ping_substream = Some(id.clone());
 
-            (
-                Substream {
-                    inner: substream::Substream::ping_out(self.ping_protocol.clone()),
-                },
-                out_substream_id,
-            )
+            Substream {
+                id: out_substream_id,
+                inner: substream::Substream::ping_out(self.ping_protocol.clone()),
+            }
         } else if let Some(desired) = self.desired_out_substreams.pop_front() {
             desired
         } else {
@@ -220,7 +217,7 @@ where
             todo!()
         };
 
-        let previous_value = self.in_substreams.insert(id, (substream, out_substream_id));
+        let previous_value = self.in_substreams.insert(id, substream);
         if previous_value.is_some() {
             // There is already a substream with that identifier. This is forbidden by the API of
             // this function.
@@ -237,7 +234,7 @@ where
     /// Panics if there is no substream with that identifier.
     ///
     pub fn reset_substream(&mut self, substream_id: &TSubId) {
-        let (substream, out_substream_id) = self.in_substreams.remove(substream_id).unwrap();
+        let substream = self.in_substreams.remove(substream_id).unwrap();
 
         if Some(substream_id) == self.ping_substream.as_ref() {
             self.ping_substream = None;
@@ -245,7 +242,7 @@ where
 
         let maybe_event = substream.inner.reset();
         if let Some(event) = maybe_event {
-            self.on_substream_event(out_substream_id, event);
+            self.on_substream_event(substream.id, event);
         }
     }
 
@@ -274,7 +271,7 @@ where
             }
 
             // TODO: not great to remove then insert back the substream
-            let (substream_id, (mut substream, out_substream_id)) =
+            let (substream_id, mut substream) =
                 self.in_substreams.remove_entry(substream_id).unwrap();
 
             // Reading/writing the ping substream is used to queue new outgoing pings.
@@ -296,15 +293,15 @@ where
 
             match (event, substream_update.as_mut()) {
                 (None, _) => {}
-                (Some(substream::Event::InboundNegotiated(protocol)), Some(substream)) => {
+                (Some(substream::Event::InboundNegotiated(protocol)), Some(substream_upd)) => {
                     if protocol == self.ping_protocol {
-                        substream.set_inbound_ty(substream::InboundTy::Ping);
+                        substream_upd.set_inbound_ty(substream::InboundTy::Ping);
                     } else if let Some(protocol_index) = self
                         .request_protocols
                         .iter()
                         .position(|p| p.name == protocol)
                     {
-                        substream.set_inbound_ty(substream::InboundTy::Request {
+                        substream_upd.set_inbound_ty(substream::InboundTy::Request {
                             protocol_index,
                             request_max_size: if let ConfigRequestResponseIn::Payload { max_size } =
                                 self.request_protocols[protocol_index].inbound_config
@@ -319,7 +316,7 @@ where
                         .iter()
                         .position(|p| p.name == protocol)
                     {
-                        substream.set_inbound_ty(substream::InboundTy::Notifications {
+                        substream_upd.set_inbound_ty(substream::InboundTy::Notifications {
                             protocol_index,
                             max_handshake_size: self.notifications_protocols[protocol_index]
                                 .max_handshake_size,
@@ -331,28 +328,24 @@ where
                     // TODO: a bit crappy to put this insert here; DRY
                     self.in_substreams.insert(
                         substream_id,
-                        (
-                            Substream {
-                                inner: substream_update.unwrap(),
-                            },
-                            out_substream_id,
-                        ),
+                        Substream {
+                            id: substream.id,
+                            inner: substream_update.unwrap(),
+                        },
                     );
                     continue;
                 }
                 (Some(substream::Event::InboundNegotiated(_)), None) => {}
-                (Some(other), _) => self.on_substream_event(out_substream_id, other),
+                (Some(other), _) => self.on_substream_event(substream.id, other),
             }
 
             break if let Some(substream_update) = substream_update {
                 self.in_substreams.insert(
                     substream_id,
-                    (
-                        Substream {
-                            inner: substream_update,
-                        },
-                        out_substream_id,
-                    ),
+                    Substream {
+                        id: substream.id,
+                        inner: substream_update,
+                    },
                 );
                 false
             } else {
@@ -471,22 +464,20 @@ where
         let substream_id = self.next_out_substream_id;
         self.next_out_substream_id += 1;
 
-        self.desired_out_substreams.push_back((
-            Substream {
-                inner: substream::Substream::request_out(
-                    self.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
-                    timeout,
-                    if has_length_prefix {
-                        Some(request)
-                    } else {
-                        None
-                    },
-                    self.request_protocols[protocol_index].max_response_size,
-                    user_data,
-                ),
-            },
-            substream_id,
-        ));
+        self.desired_out_substreams.push_back(Substream {
+            id: substream_id,
+            inner: substream::Substream::request_out(
+                self.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
+                timeout,
+                if has_length_prefix {
+                    Some(request)
+                } else {
+                    None
+                },
+                self.request_protocols[protocol_index].max_response_size,
+                user_data,
+            ),
+        });
 
         // TODO: ? do this? substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
 
@@ -510,7 +501,6 @@ where
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()
-            .0
             .inner
             .notifications_substream_user_data_mut()
     }
@@ -546,18 +536,16 @@ where
         let substream_id = self.next_out_substream_id;
         self.next_out_substream_id += 1;
 
-        self.desired_out_substreams.push_back((
-            Substream {
-                inner: substream::Substream::notifications_out(
-                    timeout,
-                    self.notifications_protocols[protocol_index].name.clone(), // TODO: clone :-/,
-                    handshake,
-                    max_handshake_size,
-                    user_data,
-                ),
-            },
-            substream_id,
-        ));
+        self.desired_out_substreams.push_back(Substream {
+            id: substream_id,
+            inner: substream::Substream::notifications_out(
+                timeout,
+                self.notifications_protocols[protocol_index].name.clone(), // TODO: clone :-/,
+                handshake,
+                max_handshake_size,
+                user_data,
+            ),
+        });
 
         SubstreamId(SubstreamIdInner::MultiStream(substream_id))
     }
@@ -587,7 +575,6 @@ where
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()
-            .0
             .inner
             .accept_in_notifications_substream(handshake, max_notification_size, user_data);
     }
@@ -611,7 +598,6 @@ where
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()
-            .0
             .inner
             .reject_in_notifications_substream();
     }
@@ -648,7 +634,6 @@ where
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()
-            .0
             .inner
             .write_notification_unbounded(notification);
     }
@@ -673,7 +658,6 @@ where
         self.in_substreams
             .get(inner_substream_id)
             .unwrap()
-            .0
             .inner
             .notification_substream_queued_bytes()
     }
@@ -701,7 +685,6 @@ where
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()
-            .0
             .inner
             .close_notifications_substream();
     }
@@ -724,7 +707,6 @@ where
         self.in_substreams
             .get_mut(inner_substream_id)
             .ok_or(substream::RespondInRequestError::SubstreamClosed)?
-            .0
             .inner
             .respond_in_request(response)
     }
