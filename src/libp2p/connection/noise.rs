@@ -767,13 +767,13 @@ impl HandshakeInProgress {
                 let (identity_key, identity_sig) = {
                     let mut parser =
                         nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-                            nom::combinator::complete(protobuf::message_decode((
-                                protobuf::bytes_tag_decode(1),
-                                protobuf::bytes_tag_decode(2),
-                            ))),
+                            nom::combinator::complete(protobuf::message_decode! {
+                                key = 1 => protobuf::bytes_tag_decode,
+                                sig = 2 => protobuf::bytes_tag_decode,
+                            }),
                         );
                     match nom::Finish::finish(parser(&decoded_payload)) {
-                        Ok((_, ((key,), (sig,)))) => (key, sig),
+                        Ok((_, out)) => (out.key, out.sig),
                         Err(_) => return Err(HandshakeError::PayloadDecode(PayloadDecodeError)),
                     }
                 };
