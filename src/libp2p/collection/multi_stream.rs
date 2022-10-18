@@ -176,7 +176,7 @@ where
             connection: MultiStreamConnectionTaskInner::Handshake {
                 handshake: Some(noise::HandshakeInProgress::new(noise::Config {
                     key: &noise_key,
-                    is_initiator: true, // TODO: is_initiator?
+                    is_initiator: false, // TODO: is_initiator?
                     prologue: &noise_prologue,
                 })),
                 opened_substream: None,
