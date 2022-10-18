@@ -382,7 +382,7 @@ async fn multi_stream_connection_task<TPlat: Platform>(
     // from this slice the data to send. Consequently, the write buffer is held locally. This is
     // suboptimal compared to writing to a write buffer provided by the platform, but it is easier
     // to implement it this way.
-    let mut write_buffer = vec![0; 4096];
+    let mut write_buffer = vec![0; 16384]; // TODO: the write buffer must not exceed 16kiB due to the libp2p WebRTC spec; this should ideally be enforced through the connection task API
 
     // When reading/writing substreams, the substream can ask to be woken up after a certain time.
     // This variable stores the earliest time when we should be waking up.
