@@ -349,14 +349,14 @@ where
             // If the content of `self.read_buffer` is an incomplete frame, the flags will be
             // `None` and the message will be `&[]`.
             let (protobuf_frame_size, flags, message_within_frame) = {
-                let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-                    nom::combinator::complete(nom::combinator::map_parser(
+                let mut parser = nom::combinator::complete::<_, _, nom::error::Error<&[u8]>, _>(
+                    nom::combinator::map_parser(
                         nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
                         protobuf::message_decode! {
                             #[optional] flags = 1 => protobuf::enum_tag_decode,
                             #[optional] message = 2 => protobuf::bytes_tag_decode,
                         },
-                    )),
+                    ),
                 );
 
                 match nom::Finish::finish(parser(&substream.read_buffer)) {
