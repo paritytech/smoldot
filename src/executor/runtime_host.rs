@@ -473,8 +473,9 @@ struct Inner {
     /// Pending changes to the top storage trie that this execution performs.
     top_trie_changes: storage_diff::StorageDiff,
 
-    /// Contains pending storage reverts if and only if we're within a storage transaction. When changes are applied to
-    /// [`Inner::top_trie_changes`], the reverse operation is added here.
+    /// Contains pending storage reverts if and only if we're within a storage transaction.
+    /// When changes are applied to [`Inner::top_trie_changes`], the reverse operation is
+    /// added here.
     ///
     /// When the storage transaction ends, either this hash map is entirely discarded (to commit
     /// changes), or applied to [`Inner::top_trie_changes`] (to revert).
