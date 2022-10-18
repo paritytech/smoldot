@@ -237,6 +237,9 @@ where
             todo!()
         };
 
+        let _prev_val = self.out_in_substreams_map.insert(substream.id, id.clone());
+        debug_assert!(_prev_val.is_none());
+
         let previous_value = self.in_substreams.insert(id, substream);
         if previous_value.is_some() {
             // There is already a substream with that identifier. This is forbidden by the API of
@@ -255,6 +258,8 @@ where
     ///
     pub fn reset_substream(&mut self, substream_id: &TSubId) {
         let substream = self.in_substreams.remove(substream_id).unwrap();
+        let _was_in = self.out_in_substreams_map.remove(&substream.id);
+        debug_assert!(!_was_in.is_some());
 
         if Some(substream_id) == self.ping_substream.as_ref() {
             self.ping_substream = None;
