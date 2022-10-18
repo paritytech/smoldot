@@ -381,14 +381,15 @@ where
                 }
             };
 
-            let event = if message_within_frame.len() <= substream.read_buffer_partial_read {
+            let event = if protobuf_frame_size != 0
+                && message_within_frame.len() <= substream.read_buffer_partial_read
+            {
                 // If the substream state machine has already processed all the data within
                 // `read_buffer`, process the flags of the current protobuf frame, discard that
                 // protobuf frame, and loop again.
                 continue_looping = true;
 
                 // Discard the data.
-                debug_assert_ne!(protobuf_frame_size, 0);
                 substream.read_buffer_partial_read = 0;
                 substream.read_buffer = substream
                     .read_buffer
