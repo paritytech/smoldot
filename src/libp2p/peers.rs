@@ -148,6 +148,13 @@ pub struct Peers<TConn, TNow> {
     /// Keys are combinations of `(peer_index, notifications_protocol_index)`. Values are the
     /// state of the corresponding outbound notifications substream.
     peers_notifications_out: BTreeMap<(usize, usize), NotificationsOutState>,
+
+    /// Subset of [`Peers::peers_notifications_out`]. Only contains entries that are not desired
+    /// and open or pending.
+    /// Keys are combinations of `(peer_index, notifications_protocol_index)`. Values are the
+    /// state of the corresponding outbound notifications substream.
+    fulfilled_undesired_outbound_substreams:
+        hashbrown::HashMap<(usize, usize), OpenOrPending, fnv::FnvBuildHasher>,
 }
 
 /// See [`Peers::peers_notifications_out`].
@@ -223,6 +230,10 @@ where
                 Default::default(),
             ),
             peers_notifications_out: BTreeMap::new(),
+            fulfilled_undesired_outbound_substreams: hashbrown::HashMap::with_capacity_and_hasher(
+                0, // TODO: capacity?
+                Default::default(),
+            ),
             peers_notifications_in: BTreeSet::new(),
         }
     }
@@ -624,6 +635,14 @@ where
                         if !desired {
                             self.peers_notifications_out
                                 .remove(&(peer_index, notifications_protocol_index));
+                            let _was_in = self
+                                .fulfilled_undesired_outbound_substreams
+                                .remove(&(peer_index, notifications_protocol_index));
+                            debug_assert!(matches!(_was_in, Some(OpenOrPending::Pending)));
+                        } else {
+                            debug_assert!(!self
+                                .fulfilled_undesired_outbound_substreams
+                                .contains_key(&(peer_index, notifications_protocol_index)));
                         }
                     }
 
@@ -663,6 +682,14 @@ where
                     if !notification_out.desired {
                         self.peers_notifications_out
                             .remove(&(peer_index, notifications_protocol_index));
+                        let _was_in = self
+                            .fulfilled_undesired_outbound_substreams
+                            .remove(&(peer_index, notifications_protocol_index));
+                        debug_assert!(matches!(_was_in, Some(OpenOrPending::Open)));
+                    } else {
+                        debug_assert!(!self
+                            .fulfilled_undesired_outbound_substreams
+                            .contains_key(&(peer_index, notifications_protocol_index)));
                     }
 
                     return Some(Event::NotificationsOutClose {
@@ -1066,6 +1093,18 @@ where
                 current_state.open = NotificationsOutOpenState::NotOpen;
             }
 
+            // Remove substream from `fulfilled_undesired_outbound_substreams`, as it is
+            // no longer undesired.
+            if matches!(
+                current_state.open,
+                NotificationsOutOpenState::Open(_) | NotificationsOutOpenState::Opening(_)
+            ) {
+                let _was_in = self
+                    .fulfilled_undesired_outbound_substreams
+                    .remove(&(peer_index, notification_protocol));
+                debug_assert!(_was_in.is_some());
+            }
+
             // Insert in `unfulfilled_desired_peers` if there is no non-shutting-down established
             // or handshaking connection of that peer.
             if !self
@@ -1090,6 +1129,23 @@ where
             }
 
             current_state.get_mut().desired = false;
+
+            // Insert substream into `fulfilled_undesired_outbound_substreams`, as it is
+            // now undesired.
+            if matches!(
+                current_state.get().open,
+                NotificationsOutOpenState::Open(_) | NotificationsOutOpenState::Opening(_)
+            ) {
+                let _pre_value = self.fulfilled_undesired_outbound_substreams.insert(
+                    (peer_index, notification_protocol),
+                    match current_state.get().open {
+                        NotificationsOutOpenState::Open(_) => OpenOrPending::Open,
+                        NotificationsOutOpenState::Opening(_) => OpenOrPending::Pending,
+                        _ => unreachable!(),
+                    },
+                );
+                debug_assert!(_pre_value.is_none());
+            }
 
             // Clean up the entry altogether if it is no longer needed.
             if matches!(
@@ -1273,24 +1329,13 @@ where
     pub fn fulfilled_undesired_outbound_substreams(
         &'_ self,
     ) -> impl Iterator<Item = (&'_ PeerId, usize, OpenOrPending)> + '_ {
-        // TODO: this is O(n), maybe add a cache
-        self.peers_notifications_out.iter().filter_map(
-            move |((peer_index, notifications_protocol_index), state)| {
-                if state.desired {
-                    return None;
-                }
-
-                let open_or_pending = match state.open {
-                    NotificationsOutOpenState::Open(_) => OpenOrPending::Open,
-                    NotificationsOutOpenState::Opening(_) => OpenOrPending::Pending,
-                    _ => return None,
-                };
-
-                Some((
+        self.fulfilled_undesired_outbound_substreams.iter().map(
+            |((peer_index, notifications_protocol_index), open_or_pending)| {
+                (
                     &self.peers[*peer_index].peer_id,
                     *notifications_protocol_index,
-                    open_or_pending,
-                ))
+                    *open_or_pending,
+                )
             },
         )
     }
@@ -1345,6 +1390,13 @@ where
 
                 self.inner.close_out_notifications(substream_id);
                 entry.get_mut().open = NotificationsOutOpenState::NotOpen;
+
+                if !entry.get().desired {
+                    let _was_in = self
+                        .fulfilled_undesired_outbound_substreams
+                        .remove(&(peer_index, notifications_protocol_index));
+                    debug_assert_eq!(_was_in, Some(open_or_pending));
+                }
 
                 // Clean up the data structure.
                 if !entry.get_mut().desired {
