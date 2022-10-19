@@ -382,12 +382,7 @@ async fn multi_stream_connection_task<TPlat: Platform>(
     // from this slice the data to send. Consequently, the write buffer is held locally. This is
     // suboptimal compared to writing to a write buffer provided by the platform, but it is easier
     // to implement it this way.
-    let mut write_buffer = vec![0; 4096];
-
-    // When reading/writing substreams, the substream can ask to be woken up after a certain time.
-    // This variable stores the earliest time when we should be waking up.
-    // TODO: this is wrong; this code assumes that substreams will be found in `ready_substreams` while it is not the case now; however it seems more appropriate to modify `ready_substreams` rather than accomodate this limitation here
-    let mut wake_up_after = None;
+    let mut write_buffer = vec![0; 16384]; // TODO: the write buffer must not exceed 16kiB due to the libp2p WebRTC spec; this should ideally be enforced through the connection task API
 
     loop {
         // Start opening new outbound substreams, if needed.
@@ -424,56 +419,52 @@ async fn multi_stream_connection_task<TPlat: Platform>(
 
         let now = TPlat::now();
 
-        // Clear `wake_up_after` if necessary, otherwise it will always stay at a constant value.
-        // TODO: nit: can use `Option::is_some_and` after it's stable; https://github.com/rust-lang/rust/issues/93050
-        if wake_up_after
-            .as_ref()
-            .map(|time| *time <= now)
-            .unwrap_or(false)
-        {
-            wake_up_after = None;
-        }
+        // When reading/writing substreams, the substream can ask to be woken up after a certain
+        // time. This variable stores the earliest time when we should be waking up.
+        let mut wake_up_after = None;
 
         // Perform a read-write on all substreams.
         // TODO: trying to read/write every single substream every single time is suboptimal, but making this not suboptimal is very complicated
         for substream_id in open_substreams.iter().map(|(id, _)| id).collect::<Vec<_>>() {
-            let substream = &mut open_substreams[substream_id];
+            loop {
+                let substream = &mut open_substreams[substream_id];
 
-            let mut read_write = ReadWrite {
-                now: now.clone(),
-                incoming_buffer: TPlat::read_buffer(substream),
-                outgoing_buffer: Some((&mut write_buffer, &mut [])), // TODO: this should be None if a previous read_write() produced None
-                read_bytes: 0,
-                written_bytes: 0,
-                wake_up_after: None,
-            };
+                let mut read_write = ReadWrite {
+                    now: now.clone(),
+                    incoming_buffer: TPlat::read_buffer(substream),
+                    outgoing_buffer: Some((&mut write_buffer, &mut [])), // TODO: this should be None if a previous read_write() produced None
+                    read_bytes: 0,
+                    written_bytes: 0,
+                    wake_up_after,
+                };
 
-            let kill_substream =
-                connection_task.substream_read_write(&substream_id, &mut read_write);
+                let kill_substream =
+                    connection_task.substream_read_write(&substream_id, &mut read_write);
 
-            // Because the `read_write` object borrows the stream, we need to drop it before we
-            // can modify the connection. Before dropping the `read_write`, clone some important
-            // information from it.
-            let read_bytes = read_write.read_bytes;
-            let written_bytes = read_write.written_bytes;
-            match (&mut wake_up_after, &read_write.wake_up_after) {
-                (_, None) => {}
-                (val @ None, Some(t)) => *val = Some(t.clone()),
-                (Some(curr), Some(upd)) if *upd < *curr => *curr = upd.clone(),
-                (Some(_), Some(_)) => {}
-            }
-            drop(read_write);
+                // Because the `read_write` object borrows the stream, we need to drop it before we
+                // can modify the connection. Before dropping the `read_write`, clone some important
+                // information from it.
+                let read_bytes = read_write.read_bytes;
+                let written_bytes = read_write.written_bytes;
+                wake_up_after = read_write.wake_up_after.take();
+                drop(read_write);
 
-            // Now update the connection.
-            if written_bytes != 0 {
-                TPlat::send(substream, &write_buffer[..written_bytes]);
-            }
-            TPlat::advance_read_cursor(substream, read_bytes);
+                // Now update the connection.
+                if written_bytes != 0 {
+                    TPlat::send(substream, &write_buffer[..written_bytes]);
+                }
+                TPlat::advance_read_cursor(substream, read_bytes);
 
-            // If the `connection_task` requires this substream to be killed, we drop the `Stream`
-            // object.
-            if kill_substream {
-                open_substreams.remove(substream_id);
+                // If the `connection_task` requires this substream to be killed, we drop the `Stream`
+                // object.
+                if kill_substream {
+                    open_substreams.remove(substream_id);
+                    break;
+                }
+
+                if read_bytes == 0 && written_bytes == 0 {
+                    break;
+                }
             }
         }
 

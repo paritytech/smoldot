@@ -256,7 +256,7 @@ export function start(options?: ClientOptions): Client {
               "v=0" + "\n" +
               // Identifies the creator of the SDP document. We are allowed to use dummy values
               // (`-` and `0.0.0.0`) to remain anonymous, which we do. Note that "IN" means
-              // "Internet". (RFC8866)
+              // "Internet" (and not "input"). (RFC8866)
               "o=- 0 0 IN IP" + ipVersion  + " " + targetIp + "\n" +
               // Name for the session. We are allowed to pass a dummy `-`. (RFC8866)
               "s=-" + "\n" +
@@ -264,7 +264,7 @@ export function start(options?: ClientOptions): Client {
               // expires. (RFC8866)
               "t=0 0" + "\n" +
               // A lite implementation is only appropriate for devices that will
-              // *always* be connected to the public Internet and have a public
+              // always be connected to the public Internet and have a public
               // IP address at which it can receive packets from any
               // correspondent.  ICE will not function when a lite implementation
               // is placed behind a NAT (RFC8445).
@@ -273,12 +273,12 @@ export function start(options?: ClientOptions): Client {
               // The protocol in this line (i.e. `TCP/DTLS/SCTP` or `UDP/DTLS/SCTP`) must always be
               // the same as the one in the offer. We know that this is true because we tweak the
               // offer to match the protocol.
-              // The `<fmt>` component must always be `pc-datachannel` for WebRTC.
+              // The `<fmt>` component must always be `webrtc-datachannel` for WebRTC.
               // The rest of the SDP payload adds attributes to this specific media stream.
               // RFCs: 8839, 8866, 8841
               "m=application " + targetPort + " " + "UDP/DTLS/SCTP webrtc-datachannel" + "\n" +
               // Indicates the IP address of the remote.
-              // Note that "IN" means "Internet".
+              // Note that "IN" means "Internet" (and not "input").
               "c=IN IP" + ipVersion + " " + targetIp + "\n" +
               // Media ID - uniquely identifies this media stream (RFC9143).
               "a=mid:0" + "\n" +
@@ -287,6 +287,7 @@ export function start(options?: ClientOptions): Client {
               // ICE username and password, which are used for establishing and
               // maintaining the ICE connection. (RFC8839)
               // MUST match ones used by the answerer (server).
+              // These values are set according to the libp2p WebRTC specification.
               "a=ice-ufrag:" + remoteCertMultibase + "\n" +
               "a=ice-pwd:" + remoteCertMultibase + "\n" +
               // Fingerprint of the certificate that the server will use during the TLS
@@ -303,8 +304,9 @@ export function start(options?: ClientOptions): Client {
               // (UDP or TCP)
               "a=sctp-port:5000" + "\n" +
               // The maximum SCTP user message size (in bytes) (RFC8841)
-              "a=max-message-size:100000" + "\n" +
-              // A transport address for a candidate that can be used for connectivity checks (RFC8839).
+              "a=max-message-size:16384" + "\n" +  // TODO: should this be part of the spec?
+              // A transport address for a candidate that can be used for connectivity
+              // checks (RFC8839).
               "a=candidate:1 1 UDP 1 " + targetIp + " " + targetPort + " typ host" + "\n";
 
           await pc!.setRemoteDescription({ type: "answer", sdp: remoteSdp });

@@ -1289,7 +1289,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
     async fn storage_query(
         &self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+        keys: impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone,
         hash: &[u8; 32],
         total_attempts: u32,
         timeout_per_request: Duration,
