@@ -239,11 +239,11 @@ where
             ),
             peers_notifications_out: BTreeMap::new(),
             unfulfilled_desired_outbound_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                0, // TODO: capacity?
+                config.peers_capacity,
                 Default::default(),
             ),
             fulfilled_undesired_outbound_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                0, // TODO: capacity?
+                config.peers_capacity,
                 Default::default(),
             ),
             peers_notifications_in: BTreeSet::new(),
