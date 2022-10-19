@@ -146,6 +146,8 @@ export function start(options?: ClientOptions): Client {
     const remoteCertMultihash = multibaseBase64Decode(remoteCertMultibase);
     const remoteCertSha256Hash = multihashToSha256(remoteCertMultihash);
 
+    // TODO: detect localhost for Firefox? https://bugzilla.mozilla.org/show_bug.cgi?id=1659672
+
     let pc: RTCPeerConnection | null = null;
     const dataChannels = new Map<number, RTCDataChannel>();
     // TODO: this system is a complete hack
@@ -158,6 +160,7 @@ export function start(options?: ClientOptions): Client {
     // inbound and outbound substreams.
     const addChannel = (dataChannel: RTCDataChannel, direction: 'inbound' | 'outbound') => {
       const dataChannelId = dataChannel.id!;
+      dataChannel.binaryType = 'arraybuffer';
 
       dataChannel.onopen = () => {
           config.onStreamOpened(dataChannelId, direction);
