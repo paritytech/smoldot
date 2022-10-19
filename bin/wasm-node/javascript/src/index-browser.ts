@@ -263,10 +263,10 @@ export function start(options?: ClientOptions): Client {
               // Start and end of the validity of the session. `0 0` means that the session never
               // expires. (RFC8866)
               "t=0 0" + "\n" +
-              // A non-lite implementation is only appropriate for devices that will
+              // A lite implementation is only appropriate for devices that will
               // always be connected to the public Internet and have a public
               // IP address at which it can receive packets from any
-              // correspondent.  ICE will not function when a non-lite implementation
+              // correspondent.  ICE will not function when a lite implementation
               // is placed behind a NAT (RFC8445).
               "a=ice-lite" + "\n" +
               // A `m=` line describes a request to establish a certain protocol.
