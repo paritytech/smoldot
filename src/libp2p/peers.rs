@@ -759,15 +759,35 @@ where
                     ));
                     notification_out.open = NotificationsOutOpenState::ClosedByRemote;
 
-                    // Remove entry from map if it has become useless.
+                    // Update the maps.
                     if !notification_out.desired {
                         self.peers_notifications_out
                             .remove(&(peer_index, notifications_protocol_index));
+                        debug_assert!(!self
+                            .unfulfilled_desired_outbound_substreams
+                            .contains_key(&(peer_index, notifications_protocol_index)));
                         let _was_in = self
                             .fulfilled_undesired_outbound_substreams
                             .remove(&(peer_index, notifications_protocol_index));
                         debug_assert!(matches!(_was_in, Some(OpenOrPending::Open)));
                     } else {
+                        if self
+                            .connections_by_peer
+                            .range(
+                                (peer_index, ConnectionId::min_value())
+                                    ..=(peer_index, ConnectionId::max_value()),
+                            )
+                            .any(|(_, connection_id)| {
+                                let state = self.inner.connection_state(*connection_id);
+                                state.established && !state.shutting_down
+                            })
+                        {
+                            let _prev_value = self
+                                .unfulfilled_desired_outbound_substreams
+                                .insert((peer_index, notifications_protocol_index), true);
+                            debug_assert!(_prev_value.is_none());
+                        }
+
                         debug_assert!(!self
                             .fulfilled_undesired_outbound_substreams
                             .contains_key(&(peer_index, notifications_protocol_index)));
