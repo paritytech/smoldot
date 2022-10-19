@@ -33,7 +33,7 @@ pub struct StorageProofRequestConfig<TKeysIter> {
 
 /// Builds the bytes corresponding to a storage proof request.
 pub fn build_storage_proof_request<'a>(
-    config: StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a>,
+    config: StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + 'a>,
 ) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
     protobuf::message_tag_encode(
         2,

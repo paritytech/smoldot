@@ -66,8 +66,8 @@ pub(crate) fn message_tag_encode<'a>(
 
 pub(crate) fn bytes_tag_encode<'a>(
     field: u64,
-    data: impl AsRef<[u8]> + 'a,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    data: impl AsRef<[u8]> + Clone + 'a,
+) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
     // Protobuf only allows 2 GiB of data.
     debug_assert!(data.as_ref().len() <= 2 * 1024 * 1024 * 1024);
     delimited_tag_encode(field, data)
@@ -75,8 +75,9 @@ pub(crate) fn bytes_tag_encode<'a>(
 
 pub(crate) fn string_tag_encode<'a>(
     field: u64,
-    data: impl AsRef<str> + 'a,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    data: impl AsRef<str> + Clone + 'a,
+) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    #[derive(Clone)]
     struct Wrapper<T>(T);
     impl<T: AsRef<str>> AsRef<[u8]> for Wrapper<T> {
         fn as_ref(&self) -> &[u8] {
@@ -97,8 +98,8 @@ pub(crate) fn varint_zigzag_tag_encode(field: u64, value: u64) -> impl Iterator<
 
 pub(crate) fn delimited_tag_encode<'a>(
     field: u64,
-    data: impl AsRef<[u8]> + 'a,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    data: impl AsRef<[u8]> + Clone + 'a,
+) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
     tag_encode(field, 2)
         .chain(leb128::encode_usize(data.as_ref().len()))
         .map(|v| either::Right([v]))
