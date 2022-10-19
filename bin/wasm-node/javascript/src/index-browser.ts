@@ -273,7 +273,7 @@ export function start(options?: ClientOptions): Client {
               // The protocol in this line (i.e. `TCP/DTLS/SCTP` or `UDP/DTLS/SCTP`) must always be
               // the same as the one in the offer. We know that this is true because we tweak the
               // offer to match the protocol.
-              // The `<fmt>` component must always be `pc-datachannel` for WebRTC.
+              // The `<fmt>` component must always be `webrtc-datachannel` for WebRTC.
               // The rest of the SDP payload adds attributes to this specific media stream.
               // RFCs: 8839, 8866, 8841
               "m=application " + targetPort + " " + "UDP/DTLS/SCTP webrtc-datachannel" + "\n" +
@@ -287,6 +287,7 @@ export function start(options?: ClientOptions): Client {
               // ICE username and password, which are used for establishing and
               // maintaining the ICE connection. (RFC8839)
               // MUST match ones used by the answerer (server).
+              // These values are set according to the libp2p WebRTC specification.
               "a=ice-ufrag:" + remoteCertMultibase + "\n" +
               "a=ice-pwd:" + remoteCertMultibase + "\n" +
               // Fingerprint of the certificate that the server will use during the TLS
@@ -304,7 +305,8 @@ export function start(options?: ClientOptions): Client {
               "a=sctp-port:5000" + "\n" +
               // The maximum SCTP user message size (in bytes) (RFC8841)
               "a=max-message-size:16384" + "\n" +  // TODO: should this be part of the spec?
-              // A transport address for a candidate that can be used for connectivity checks (RFC8839).
+              // A transport address for a candidate that can be used for connectivity
+              // checks (RFC8839).
               "a=candidate:1 1 UDP 1 " + targetIp + " " + targetPort + " typ host" + "\n";
 
           await pc!.setRemoteDescription({ type: "answer", sdp: remoteSdp });
