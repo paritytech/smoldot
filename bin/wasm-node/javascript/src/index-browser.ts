@@ -256,17 +256,17 @@ export function start(options?: ClientOptions): Client {
               "v=0" + "\n" +
               // Identifies the creator of the SDP document. We are allowed to use dummy values
               // (`-` and `0.0.0.0`) to remain anonymous, which we do. Note that "IN" means
-              // "Internet". (RFC8866)
+              // "Internet" (and not "input"). (RFC8866)
               "o=- 0 0 IN IP" + ipVersion  + " " + targetIp + "\n" +
               // Name for the session. We are allowed to pass a dummy `-`. (RFC8866)
               "s=-" + "\n" +
               // Start and end of the validity of the session. `0 0` means that the session never
               // expires. (RFC8866)
               "t=0 0" + "\n" +
-              // A lite implementation is only appropriate for devices that will
-              // *always* be connected to the public Internet and have a public
+              // A non-lite implementation is only appropriate for devices that will
+              // always be connected to the public Internet and have a public
               // IP address at which it can receive packets from any
-              // correspondent.  ICE will not function when a lite implementation
+              // correspondent.  ICE will not function when a non-lite implementation
               // is placed behind a NAT (RFC8445).
               "a=ice-lite" + "\n" +
               // A `m=` line describes a request to establish a certain protocol.
@@ -278,7 +278,7 @@ export function start(options?: ClientOptions): Client {
               // RFCs: 8839, 8866, 8841
               "m=application " + targetPort + " " + "UDP/DTLS/SCTP webrtc-datachannel" + "\n" +
               // Indicates the IP address of the remote.
-              // Note that "IN" means "Internet".
+              // Note that "IN" means "Internet" (and not "input").
               "c=IN IP" + ipVersion + " " + targetIp + "\n" +
               // Media ID - uniquely identifies this media stream (RFC9143).
               "a=mid:0" + "\n" +
