@@ -15,6 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use crate::util::{self, protobuf};
+
 use super::{
     super::{
         connection::{established, noise},
@@ -25,8 +27,9 @@ use super::{
     NotificationsOutErr, OverlayNetwork, PeerId, ShutdownCause, SubstreamId,
 };
 
-use alloc::{collections::VecDeque, string::ToString as _, sync::Arc, vec::Vec};
+use alloc::{collections::VecDeque, string::ToString as _, sync::Arc, vec, vec::Vec};
 use core::{
+    cmp,
     hash::Hash,
     ops::{Add, Sub},
     time::Duration,
@@ -44,6 +47,12 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
 
         /// Noise handshake in progress. Always `Some`, except to be temporarily extracted.
         handshake: Option<noise::HandshakeInProgress>,
+
+        /// All incoming data for the handshake substream is first transferred to this buffer.
+        // TODO: this is very suboptimal code, instead the parsing should be done in a streaming way
+        handshake_read_buffer: Vec<u8>,
+
+        handshake_read_buffer_partial_read: usize,
 
         /// Other substreams, besides [`MultiStreamConnectionTaskInner::Handshake::opened_substream`],
         /// that have been opened. For each substream, contains a boolean indicating whether the
@@ -167,10 +176,12 @@ where
             connection: MultiStreamConnectionTaskInner::Handshake {
                 handshake: Some(noise::HandshakeInProgress::new(noise::Config {
                     key: &noise_key,
-                    is_initiator: true, // TODO: is_initiator?
+                    is_initiator: false, // TODO: is_initiator?
                     prologue: &noise_prologue,
                 })),
                 opened_substream: None,
+                handshake_read_buffer: Vec::new(),
+                handshake_read_buffer_partial_read: 0,
                 extra_open_substreams: hashbrown::HashMap::with_capacity_and_hasher(
                     0,
                     Default::default(),
@@ -730,9 +741,11 @@ where
             }
             MultiStreamConnectionTaskInner::Handshake {
                 opened_substream: Some(opened_substream),
+                handshake_read_buffer,
                 ..
             } if opened_substream == substream_id => {
                 // TODO: the handshake has failed, kill the connection?
+                handshake_read_buffer.clear();
             }
             MultiStreamConnectionTaskInner::Handshake {
                 extra_open_substreams,
@@ -768,6 +781,8 @@ where
             MultiStreamConnectionTaskInner::Handshake {
                 handshake,
                 opened_substream,
+                handshake_read_buffer,
+                handshake_read_buffer_partial_read,
                 established,
                 extra_open_substreams,
             } if opened_substream
@@ -775,12 +790,144 @@ where
                 .map_or(false, |s| s == substream_id) =>
             {
                 // TODO: check the handshake timeout
-                match handshake.take().unwrap().read_write(read_write) {
+
+                // The Noise data is not directly the data of the substream. Instead, everything
+                // is wrapped within a Protobuf frame. For this reason, we first transfer the data
+                // to a buffer.
+                //
+                // According to the libp2p WebRTC spec, a frame and its length prefix must not be
+                // larger than 16kiB, meaning that the read buffer never has to exceed this size.
+                // TODO: this is very suboptimal; improve
+                if let Some(incoming_buffer) = read_write.incoming_buffer {
+                    // TODO: reset the substream if `remote_writing_side_closed`
+                    let max_to_transfer =
+                        cmp::min(incoming_buffer.len(), 16384 - handshake_read_buffer.len());
+                    handshake_read_buffer.extend_from_slice(&incoming_buffer[..max_to_transfer]);
+                    debug_assert!(handshake_read_buffer.len() <= 16384);
+                    read_write.advance_read(max_to_transfer);
+                }
+
+                // Try to parse the content of `handshake_read_buffer`.
+                // If the content of `handshake_read_buffer` is an incomplete frame, the flags
+                // will be `None` and the message will be `&[]`.
+                let (protobuf_frame_size, flags, message_within_frame) = {
+                    let mut parser = nom::combinator::complete::<_, _, nom::error::Error<&[u8]>, _>(
+                        nom::combinator::map_parser(
+                            nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+                            protobuf::message_decode! {
+                                #[optional] flags = 1 => protobuf::enum_tag_decode,
+                                #[optional] message = 2 => protobuf::bytes_tag_decode,
+                            },
+                        ),
+                    );
+
+                    match nom::Finish::finish(parser(&handshake_read_buffer)) {
+                        Ok((rest, framed_message)) => {
+                            let protobuf_frame_size = handshake_read_buffer.len() - rest.len();
+                            (
+                                protobuf_frame_size,
+                                framed_message.flags,
+                                framed_message.message.unwrap_or(&[][..]),
+                            )
+                        }
+                        Err(err) if err.code == nom::error::ErrorKind::Eof => {
+                            // TODO: reset the substream if incoming_buffer is full, as it means that the frame is too large, and remove the debug_assert below
+                            debug_assert!(handshake_read_buffer.len() < 16384);
+                            (0, None, &[][..])
+                        }
+                        Err(_) => {
+                            // Message decoding error.
+                            // TODO: no, handshake failed
+                            return true;
+                        }
+                    }
+                };
+
+                // We allocate a buffer where the Noise state machine will temporarily write out
+                // its data. The size of the buffer is capped in order to prevent the substream
+                // from generating data that wouldn't fit in a single protobuf frame.
+                let mut intermediary_write_buffer =
+                    vec![
+                        0;
+                        cmp::min(read_write.outgoing_buffer_available(), 16384).saturating_sub(10)
+                    ]; // TODO: this -10 calculation is hacky because we need to account for the variable length prefixes everywhere
+
+                let mut sub_read_write = ReadWrite {
+                    now: read_write.now.clone(),
+                    incoming_buffer: Some(
+                        &message_within_frame[*handshake_read_buffer_partial_read..],
+                    ),
+                    outgoing_buffer: Some((&mut intermediary_write_buffer, &mut [])),
+                    read_bytes: 0,
+                    written_bytes: 0,
+                    wake_up_after: None,
+                };
+
+                let handshake_outcome = handshake.take().unwrap().read_write(&mut sub_read_write);
+                *handshake_read_buffer_partial_read += sub_read_write.read_bytes;
+                if let Some(wake_up_after) = &sub_read_write.wake_up_after {
+                    read_write.wake_up_after(wake_up_after)
+                }
+
+                // Send out the message that the Noise handshake has written
+                // into `intermediary_write_buffer`.
+                if sub_read_write.written_bytes != 0 {
+                    let written_bytes = sub_read_write.written_bytes;
+                    drop(sub_read_write);
+
+                    debug_assert!(written_bytes <= intermediary_write_buffer.len());
+
+                    let protobuf_frame =
+                        protobuf::bytes_tag_encode(2, &intermediary_write_buffer[..written_bytes]);
+                    let protobuf_frame_len = protobuf_frame.clone().fold(0, |mut l, b| {
+                        l += AsRef::<[u8]>::as_ref(&b).len();
+                        l
+                    });
+
+                    // The spec mentions that a frame plus its length prefix shouldn't exceed
+                    // 16kiB. This is normally ensured by forbidding the substream from writing
+                    // more data than would fit in 16kiB.
+                    debug_assert!(protobuf_frame_len <= 16384);
+                    debug_assert!(
+                        util::leb128::encode_usize(protobuf_frame_len).count() + protobuf_frame_len
+                            <= 16384
+                    );
+                    for byte in util::leb128::encode_usize(protobuf_frame_len) {
+                        read_write.write_out(&[byte]);
+                    }
+                    for buffer in protobuf_frame {
+                        read_write.write_out(AsRef::<[u8]>::as_ref(&buffer));
+                    }
+                }
+
+                if protobuf_frame_size != 0
+                    && message_within_frame.len() <= *handshake_read_buffer_partial_read
+                {
+                    // If the substream state machine has processed all the data within
+                    // `read_buffer`, process the flags of the current protobuf frame and
+                    // discard that protobuf frame so that at the next iteration we pick
+                    // up the rest.
+
+                    // Discard the data.
+                    *handshake_read_buffer_partial_read = 0;
+                    *handshake_read_buffer = handshake_read_buffer
+                        .split_at(protobuf_frame_size)
+                        .1
+                        .to_vec();
+
+                    // Process the flags.
+                    // TODO: ignore FIN and treat any other flag as error
+                    if flags.map_or(false, |f| f != 0) {
+                        todo!()
+                    }
+                }
+
+                match handshake_outcome {
                     Ok(noise::NoiseHandshake::InProgress(handshake_update)) => {
                         *handshake = Some(handshake_update);
                         false
                     }
-                    Err(_err) => todo!(), // TODO: /!\
+                    Err(_err) => todo!("{:?}", _err), // TODO: /!\
                     Ok(noise::NoiseHandshake::Success {
                         cipher: _,
                         remote_peer_id,

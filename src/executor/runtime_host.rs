@@ -82,7 +82,7 @@ pub fn run(
             .run_vectored(config.function_to_call, config.parameter)?
             .into(),
         top_trie_changes: config.storage_top_trie_changes,
-        top_trie_transaction_revert: None,
+        top_trie_transaction_revert: Vec::new(),
         offchain_storage_changes: config.offchain_storage_changes,
         top_trie_root_calculation_cache: Some(
             config.top_trie_root_calculation_cache.unwrap_or_default(),
@@ -347,7 +347,7 @@ impl PrefixKeys {
                     let previous_value = self.inner.top_trie_changes.diff_insert_erase(key.clone());
 
                     if let Some(top_trie_transaction_revert) =
-                        self.inner.top_trie_transaction_revert.as_mut()
+                        self.inner.top_trie_transaction_revert.last_mut()
                     {
                         if let Entry::Vacant(entry) = top_trie_transaction_revert.entry(key) {
                             entry.insert(previous_value);
@@ -473,13 +473,14 @@ struct Inner {
     /// Pending changes to the top storage trie that this execution performs.
     top_trie_changes: storage_diff::StorageDiff,
 
-    /// `Some` if and only if we're within a storage transaction. When changes are applied to
-    /// [`Inner::top_trie_changes`], the reverse operation is added here.
+    /// Contains pending storage reverts if and only if we're within a storage transaction.
+    /// When changes are applied to [`Inner::top_trie_changes`], the reverse operation is
+    /// added here.
     ///
     /// When the storage transaction ends, either this hash map is entirely discarded (to commit
     /// changes), or applied to [`Inner::top_trie_changes`] (to revert).
     top_trie_transaction_revert:
-        Option<HashMap<Vec<u8>, Option<Option<Vec<u8>>>, fnv::FnvBuildHasher>>,
+        Vec<HashMap<Vec<u8>, Option<Option<Vec<u8>>>, fnv::FnvBuildHasher>>,
 
     /// Pending changes to the off-chain storage that this execution performs.
     offchain_storage_changes: storage_diff::StorageDiff,
@@ -548,7 +549,7 @@ impl Inner {
                     };
 
                     if let Some(top_trie_transaction_revert) =
-                        self.top_trie_transaction_revert.as_mut()
+                        self.top_trie_transaction_revert.last_mut()
                     {
                         if let Entry::Vacant(entry) =
                             top_trie_transaction_revert.entry(req.key().as_ref().to_vec())
@@ -574,7 +575,7 @@ impl Inner {
                             .top_trie_changes
                             .diff_insert(req.key().as_ref().to_vec(), current_value);
                         if let Some(top_trie_transaction_revert) =
-                            self.top_trie_transaction_revert.as_mut()
+                            self.top_trie_transaction_revert.last_mut()
                         {
                             if let Entry::Vacant(entry) =
                                 top_trie_transaction_revert.entry(req.key().as_ref().to_vec())
@@ -679,17 +680,18 @@ impl Inner {
                 }
 
                 host::HostVm::StartStorageTransaction(tx) => {
-                    self.top_trie_transaction_revert = Some(Default::default());
+                    self.top_trie_transaction_revert.push(Default::default());
                     self.vm = tx.resume();
                 }
 
                 host::HostVm::EndStorageTransaction { resume, rollback } => {
                     // The inner implementation guarantees that a storage transaction can only
                     // end if it has earlier been started.
-                    debug_assert!(self.top_trie_transaction_revert.is_some());
+                    debug_assert!(!self.top_trie_transaction_revert.is_empty());
+                    let last = self.top_trie_transaction_revert.pop().unwrap();
 
                     if rollback {
-                        for (key, value) in self.top_trie_transaction_revert.take().unwrap() {
+                        for (key, value) in last {
                             if let Some(value) = value {
                                 if let Some(value) = value {
                                     let _ = self.top_trie_changes.diff_insert(key, value);
@@ -705,7 +707,6 @@ impl Inner {
                         self.top_trie_root_calculation_cache = Some(Default::default());
                     }
 
-                    self.top_trie_transaction_revert = None;
                     self.vm = resume.resume();
                 }
 

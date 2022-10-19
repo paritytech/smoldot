@@ -585,7 +585,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         self: Arc<Self>,
         chain_index: usize,
         target: PeerId, // TODO: takes by value because of futures longevity issue
-        config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
+        config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
         timeout: Duration,
     ) -> Result<service::EncodedMerkleProof, StorageProofRequestError> {
         let rx = {
