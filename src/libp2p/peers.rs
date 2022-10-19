@@ -685,7 +685,6 @@ where
 
                     if result.is_ok() {
                         notification_out.open = NotificationsOutOpenState::Open(substream_id);
-                        // TODO: close if `!desired`
                     } else {
                         notification_out.open = NotificationsOutOpenState::ClosedByRemote;
                         self.inner_notification_substreams
