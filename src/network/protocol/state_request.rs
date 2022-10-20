@@ -81,14 +81,14 @@ pub fn decode_state_response(
 ) -> Result<StateResponse, DecodeStateResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
-            #[repeated(max = 1)] entries = 1 => protobuf::message_decode!{
+            #[repeated(max = 1)] entries = 1 => protobuf::message_tag_decode(protobuf::message_decode!{
                 #[optional] _state_root = 1 => protobuf::bytes_tag_decode,
                 #[repeated(max = 4 * 1024 * 1024)] key_values = 2 => protobuf::message_tag_decode(protobuf::message_decode!{
                     key = 1 => protobuf::bytes_tag_decode,
                     value = 2 => protobuf::bytes_tag_decode,
                 }),
                 #[optional] complete = 3 => protobuf::bool_tag_decode,
-            }
+            })
         }),
     );
 
