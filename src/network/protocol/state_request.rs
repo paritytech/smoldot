@@ -81,7 +81,7 @@ pub fn decode_state_response(
 ) -> Result<StateResponse, DecodeStateResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
-            #[repeated(max = 1)] entries = 1 => protobuf::message_tag_decode(protobuf::message_decode!{
+            #[repeated(max = 2048)] entries = 1 => protobuf::message_tag_decode(protobuf::message_decode!{
                 #[optional] _state_root = 1 => protobuf::bytes_tag_decode,
                 #[repeated(max = 4 * 1024 * 1024)] key_values = 2 => protobuf::message_tag_decode(protobuf::message_decode!{
                     key = 1 => protobuf::bytes_tag_decode,
@@ -134,6 +134,13 @@ mod tests {
     fn example_response() {
         // This is an actual response from the Polkadot chain that failed to parse in the past.
         super::decode_state_response(&include_bytes!("./state_request/example-response")[..])
+            .unwrap();
+    }
+
+    #[test]
+    fn example_response_2() {
+        // This is an actual response from the Polkadot chain that failed to parse in the past.
+        super::decode_state_response(&include_bytes!("./state_request/example-response-2")[..])
             .unwrap();
     }
 }
