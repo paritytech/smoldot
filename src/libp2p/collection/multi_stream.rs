@@ -186,7 +186,7 @@ where
                     0,
                     Default::default(),
                 ),
-                established: Some(established::MultiStream::new(established::Config {
+                established: Some(established::MultiStream::webrtc(established::Config {
                     notifications_protocols: notification_protocols
                         .iter()
                         .map(|net| established::ConfigNotifications {

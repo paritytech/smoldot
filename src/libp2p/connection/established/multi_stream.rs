@@ -114,7 +114,7 @@ where
     TSubId: Clone + PartialEq + Eq + Hash,
 {
     /// Creates a new connection from the given configuration.
-    pub fn new(config: Config<TNow>) -> MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
+    pub fn webrtc(config: Config<TNow>) -> MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
         // TODO: check conflicts between protocol names?
 
         // We expect at maximum one parallel request per protocol, plus one substream per direction
@@ -308,8 +308,6 @@ where
 
             read_write.wake_up_after(&self.next_ping);
         }
-
-        // TODO: make it explicit in the API that this is indeed the WebRTC protocol, as almost everything below is WebRTC-specific
 
         loop {
             // Don't process any more data before events are pulled.
