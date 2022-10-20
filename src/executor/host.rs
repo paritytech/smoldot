@@ -194,7 +194,12 @@
 use super::{allocator, vm};
 use crate::{trie, util};
 
-use alloc::{borrow::ToOwned as _, format, string::String, vec, vec::Vec};
+use alloc::{
+    borrow::ToOwned as _,
+    string::{String, ToString as _},
+    vec,
+    vec::Vec,
+};
 use core::{fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
@@ -481,7 +486,7 @@ impl HostVmPrototype {
                 allow_unresolved_imports: self.allow_unresolved_imports,
                 memory_total_pages: self.memory_total_pages,
                 registered_functions: self.registered_functions,
-                within_storage_transaction: false,
+                storage_transaction_depth: 0,
                 allocator,
             },
         })
@@ -511,7 +516,7 @@ impl fmt::Debug for HostVmPrototype {
 
 /// Running virtual machine.
 #[must_use]
-#[derive(derive_more::From)]
+#[derive(derive_more::From, Debug)]
 pub enum HostVm {
     /// Wasm virtual machine is ready to be run. Call [`ReadyToRun::run`] to make progress.
     #[from]
@@ -552,10 +557,6 @@ pub enum HostVm {
     #[from]
     CallRuntimeVersion(CallRuntimeVersion),
     /// Declares the start of a storage transaction. See [`HostVm::EndStorageTransaction`].
-    ///
-    /// Guaranteed by the code in this module to never happen while already within a transaction.
-    /// If the runtime attempts to start a nested transaction, an [`HostVm::Error`] is
-    /// generated instead.
     #[from]
     StartStorageTransaction(StartStorageTransaction),
     /// Ends a storage transaction. All changes made to the storage (e.g. through a
@@ -632,7 +633,7 @@ impl ReadyToRun {
             }) => {
                 // Wasm virtual machine has successfully returned.
 
-                if self.inner.within_storage_transaction {
+                if self.inner.storage_transaction_depth > 0 {
                     return HostVm::Error {
                         prototype: self.inner.into_prototype(),
                         error: Error::FinishedWithPendingTransaction,
@@ -1069,39 +1070,33 @@ impl ReadyToRun {
             HostFunction::ext_storage_child_root_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_child_next_key_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_start_transaction_version_1 => {
-                if self.inner.within_storage_transaction {
-                    return HostVm::Error {
-                        error: Error::NestedTransaction,
-                        prototype: self.inner.into_prototype(),
-                    };
-                }
-
-                self.inner.within_storage_transaction = true;
+                // TODO: a maximum depth is important in order to prevent a malicious runtime from crashing the client, but the depth needs to be the same as in Substrate; figure out
+                self.inner.storage_transaction_depth += 1;
                 HostVm::StartStorageTransaction(StartStorageTransaction { inner: self.inner })
             }
             HostFunction::ext_storage_rollback_transaction_version_1 => {
-                if !self.inner.within_storage_transaction {
+                if self.inner.storage_transaction_depth == 0 {
                     return HostVm::Error {
                         error: Error::NoActiveTransaction,
                         prototype: self.inner.into_prototype(),
                     };
                 }
 
-                self.inner.within_storage_transaction = false;
+                self.inner.storage_transaction_depth -= 1;
                 HostVm::EndStorageTransaction {
                     resume: EndStorageTransaction { inner: self.inner },
                     rollback: true,
                 }
             }
             HostFunction::ext_storage_commit_transaction_version_1 => {
-                if !self.inner.within_storage_transaction {
+                if self.inner.storage_transaction_depth == 0 {
                     return HostVm::Error {
                         error: Error::NoActiveTransaction,
                         prototype: self.inner.into_prototype(),
                     };
                 }
 
-                self.inner.within_storage_transaction = false;
+                self.inner.storage_transaction_depth -= 1;
                 HostVm::EndStorageTransaction {
                     resume: EndStorageTransaction { inner: self.inner },
                     rollback: false,
@@ -1693,38 +1688,46 @@ impl ReadyToRun {
                     }
                 };
 
-                let log_entry = format!("{}", num);
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
-                    log_entry,
+                    log_entry: LogEmitInner::Num(num),
                 })
             }
             HostFunction::ext_misc_print_utf8_version_1 => {
-                let data = str::from_utf8(expect_pointer_size!(0).as_ref()).map(|s| s.to_owned());
-                let log_entry = match data {
-                    Ok(m) => m,
-                    Err(error) => {
-                        return HostVm::Error {
-                            error: Error::Utf8Error {
-                                function: host_fn.name(),
-                                param_num: 2,
-                                error,
-                            },
-                            prototype: self.inner.into_prototype(),
-                        };
-                    }
-                };
+                let (str_ptr, str_size) = expect_pointer_size_raw!(0);
+
+                let utf8_check = str::from_utf8(
+                    self.inner
+                        .vm
+                        .read_memory(str_ptr, str_size)
+                        .unwrap()
+                        .as_ref(),
+                )
+                .map(|_| ());
+                if let Err(error) = utf8_check {
+                    return HostVm::Error {
+                        error: Error::Utf8Error {
+                            function: host_fn.name(),
+                            param_num: 2,
+                            error,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
 
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
-                    log_entry,
+                    log_entry: LogEmitInner::Utf8 { str_ptr, str_size },
                 })
             }
             HostFunction::ext_misc_print_hex_version_1 => {
-                let log_entry = hex::encode(expect_pointer_size!(0));
+                let (data_ptr, data_size) = expect_pointer_size_raw!(0);
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
-                    log_entry,
+                    log_entry: LogEmitInner::Hex {
+                        data_ptr,
+                        data_size,
+                    },
                 })
             }
             HostFunction::ext_misc_runtime_version_version_1 => {
@@ -1778,28 +1781,57 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_logging_log_version_1 => {
-                let _log_level = expect_u32!(0);
-                // let _target = expect_pointer_size!(1);
+                let log_level = expect_u32!(0);
 
-                let message =
-                    str::from_utf8(expect_pointer_size!(2).as_ref()).map(|s| s.to_owned());
-                let log_entry = match message {
-                    Ok(m) => m,
-                    Err(error) => {
-                        return HostVm::Error {
-                            error: Error::Utf8Error {
-                                function: host_fn.name(),
-                                param_num: 2,
-                                error,
-                            },
-                            prototype: self.inner.into_prototype(),
-                        };
-                    }
-                };
+                let (target_str_ptr, target_str_size) = expect_pointer_size_raw!(1);
+                let target_utf8_check = str::from_utf8(
+                    self.inner
+                        .vm
+                        .read_memory(target_str_ptr, target_str_size)
+                        .unwrap()
+                        .as_ref(),
+                )
+                .map(|_| ());
+                if let Err(error) = target_utf8_check {
+                    return HostVm::Error {
+                        error: Error::Utf8Error {
+                            function: host_fn.name(),
+                            param_num: 2,
+                            error,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
+
+                let (msg_str_ptr, msg_str_size) = expect_pointer_size_raw!(2);
+                let msg_utf8_check = str::from_utf8(
+                    self.inner
+                        .vm
+                        .read_memory(msg_str_ptr, msg_str_size)
+                        .unwrap()
+                        .as_ref(),
+                )
+                .map(|_| ());
+                if let Err(error) = msg_utf8_check {
+                    return HostVm::Error {
+                        error: Error::Utf8Error {
+                            function: host_fn.name(),
+                            param_num: 2,
+                            error,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
 
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
-                    log_entry,
+                    log_entry: LogEmitInner::Log {
+                        _log_level: log_level,
+                        _target_str_ptr: target_str_ptr,
+                        _target_str_size: target_str_size,
+                        msg_str_ptr,
+                        msg_str_size,
+                    },
                 })
             }
             HostFunction::ext_logging_max_level_version_1 => {
@@ -2374,7 +2406,35 @@ impl fmt::Debug for ExternalOffchainStorageSet {
 /// call [`alloc::string::ToString::to_string`] to turn it into a `String`.
 pub struct LogEmit {
     inner: Inner,
-    log_entry: String,
+    log_entry: LogEmitInner,
+}
+
+enum LogEmitInner {
+    Num(u64),
+    Utf8 {
+        /// Pointer to the string. Guaranteed to be in range and to be UTF-8.
+        str_ptr: u32,
+        /// Size of the string. Guaranteed to be in range and to be UTF-8.
+        str_size: u32,
+    },
+    Hex {
+        /// Pointer to the data. Guaranteed to be in range.
+        data_ptr: u32,
+        /// Size of the data. Guaranteed to be in range.
+        data_size: u32,
+    },
+    Log {
+        /// Log level. Arbitrary number indicated by runtime, but typically in the `1..=5` range.
+        _log_level: u32,
+        /// Pointer to the string of the log target. Guaranteed to be in range and to be UTF-8.
+        _target_str_ptr: u32,
+        /// Size of the string of the log target. Guaranteed to be in range and to be UTF-8.
+        _target_str_size: u32,
+        /// Pointer to the string of the log message. Guaranteed to be in range and to be UTF-8.
+        msg_str_ptr: u32,
+        /// Size of the string of the log message. Guaranteed to be in range and to be UTF-8.
+        msg_str_size: u32,
+    },
 }
 
 impl LogEmit {
@@ -2389,14 +2449,42 @@ impl LogEmit {
 
 impl fmt::Display for LogEmit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", &self.log_entry)
+        match self.log_entry {
+            LogEmitInner::Num(num) => write!(f, "{}", num),
+            LogEmitInner::Utf8 { str_ptr, str_size } => {
+                let str = self.inner.vm.read_memory(str_ptr, str_size).unwrap();
+                let str = str::from_utf8(str.as_ref()).unwrap();
+                write!(f, "{}", str)
+            }
+            LogEmitInner::Hex {
+                data_ptr,
+                data_size,
+            } => {
+                let data = self.inner.vm.read_memory(data_ptr, data_size).unwrap();
+                write!(f, "{}", hex::encode(data.as_ref()))
+            }
+            LogEmitInner::Log {
+                msg_str_ptr,
+                msg_str_size,
+                ..
+            } => {
+                let str = self
+                    .inner
+                    .vm
+                    .read_memory(msg_str_ptr, msg_str_size)
+                    .unwrap();
+                let str = str::from_utf8(str.as_ref()).unwrap();
+                // TODO: don't just ignore the target and log level? better log representation? more control?
+                write!(f, "{}", str)
+            }
+        }
     }
 }
 
 impl fmt::Debug for LogEmit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("LogEmit")
-            .field("message", &self.log_entry)
+            .field("message", &self.to_string())
             .finish()
     }
 }
@@ -2420,6 +2508,12 @@ impl GetMaxLogLevel {
     }
 }
 
+impl fmt::Debug for GetMaxLogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("GetMaxLogLevel").finish()
+    }
+}
+
 /// Declares the start of a transaction.
 pub struct StartStorageTransaction {
     inner: Inner,
@@ -2435,6 +2529,12 @@ impl StartStorageTransaction {
     }
 }
 
+impl fmt::Debug for StartStorageTransaction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("StartStorageTransaction").finish()
+    }
+}
+
 /// Declares the end of a transaction.
 pub struct EndStorageTransaction {
     inner: Inner,
@@ -2447,6 +2547,12 @@ impl EndStorageTransaction {
             inner: self.inner,
             resume_value: None,
         })
+    }
+}
+
+impl fmt::Debug for EndStorageTransaction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("EndStorageTransaction").finish()
     }
 }
 
@@ -2479,9 +2585,8 @@ struct Inner {
     /// Value passed to [`HostVmPrototype::new`].
     allow_unresolved_imports: bool,
 
-    /// If true, a transaction has been started using `ext_storage_start_transaction_version_1`.
-    /// No further transaction start is allowed before the current one ends.
-    within_storage_transaction: bool,
+    /// The depth of storage transaction started with `ext_storage_start_transaction_version_1`.
+    storage_transaction_depth: u32,
 
     /// See [`HostVmPrototype::registered_functions`].
     registered_functions: Vec<FunctionImport>,
@@ -2794,10 +2899,6 @@ pub enum Error {
         /// Decoding error that happened.
         error: core::str::Utf8Error,
     },
-    /// Called `ext_storage_start_transaction_version_1` with a transaction was already in
-    /// progress.
-    #[display(fmt = "Attempted to start a transaction while one is already in progress")]
-    NestedTransaction,
     /// Called `ext_storage_rollback_transaction_version_1` or
     /// `ext_storage_commit_transaction_version_1` but no transaction was in progress.
     #[display(fmt = "Attempted to end a transaction while none is in progress")]

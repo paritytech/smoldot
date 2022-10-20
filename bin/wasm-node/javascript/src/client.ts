@@ -71,9 +71,9 @@ export interface Client {
    *
    * @param options Configuration of the chain to add.
    *
-   * @throws {AddChainError} If the chain can't be added.
-   * @throws {AlreadyDestroyedError} If the client has been terminated earlier.
-   * @throws {CrashError} If the background client has crashed.
+   * @throws {@link AddChainError} If the chain can't be added.
+   * @throws {@link AlreadyDestroyedError} If the client has been terminated earlier.
+   * @throws {@link CrashError} If the background client has crashed.
    */
   addChain(options: AddChainOptions): Promise<Chain>;
 
@@ -83,8 +83,8 @@ export interface Client {
    * Afterwards, trying to use the client or any of its chains again will lead to an exception
    * being thrown.
    *
-   * @throws {AlreadyDestroyedError} If the client has already been terminated earlier.
-   * @throws {CrashError} If the background client has crashed.
+   * @throws {@link AlreadyDestroyedError} If the client has already been terminated earlier.
+   * @throws {@link CrashError} If the background client has crashed.
    */
   terminate(): Promise<void>;
 }
@@ -103,8 +103,8 @@ export interface Chain {
    * Be aware that some requests will cause notifications to be sent back using the same callback
    * as the responses.
    *
-   * A {MalformedJsonRpcError} is thrown if the request isn't a valid JSON-RPC request or if the
-   * request is unreasonably large (64 MiB at the time of writing of this comment).
+   * A {@link MalformedJsonRpcError} is thrown if the request isn't a valid JSON-RPC request or
+   * if the request is unreasonably large (64 MiB at the time of writing of this comment).
    * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, a
    * error response is properly generated.
    *
@@ -115,11 +115,11 @@ export interface Chain {
    *
    * @param rpc JSON-encoded RPC request.
    *
-   * @throws {MalformedJsonRpcError} If the payload isn't valid JSON-RPC.
-   * @throws {QueueFullError} If the queue of JSON-RPC requests of the chain is full.
-   * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
-   * @throws {JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.
-   * @throws {CrashError} If the background client has crashed.
+   * @throws {@link MalformedJsonRpcError} If the payload isn't valid JSON-RPC.
+   * @throws {@link QueueFullError} If the queue of JSON-RPC requests of the chain is full.
+   * @throws {@link AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
+   * @throws {@link JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.
+   * @throws {@link CrashError} If the background client has crashed.
    */
   sendJsonRpc(rpc: string): void;
 
@@ -132,11 +132,11 @@ export interface Chain {
    * Each chain contains a buffer of the responses waiting to be sent out. Calling this function
    * pulls one element from the buffer. If this function is called at a slower rate than responses
    * are generated, then buffer will eventually become full, at which point calling
-   * {Chain.sendJsonRpc} will throw an exception.
+   * {@link Chain.sendJsonRpc} will throw an exception.
    *
-   * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
-   * @throws {JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.
-   * @throws {CrashError} If the background client has crashed.
+   * @throws {@link AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
+   * @throws {@link JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.
+   * @throws {@link CrashError} If the background client has crashed.
    */
   nextJsonRpcResponse(): Promise<string>;
 
@@ -152,8 +152,8 @@ export interface Chain {
    * to track parachains and relaychains, or to destroy them in the correct order, as this is
    * handled automatically.
    *
-   * @throws {AlreadyDestroyedError} If the chain has already been removed or the client has been terminated.
-   * @throws {CrashError} If the background client has crashed.
+   * @throws {@link AlreadyDestroyedError} If the chain has already been removed or the client has been terminated.
+   * @throws {@link CrashError} If the background client has crashed.
    */
   remove(): void;
 }
@@ -329,8 +329,8 @@ export interface AddChainOptions {
    *
    * This option can be used in order to save up some resources.
    *
-   * It will be illegal to call {Chain.sendJsonRpc} and {Chain.nextJsonRpcResponse} on this
-   * chain.
+   * It will be illegal to call {@link Chain.sendJsonRpc} and {@link Chain.nextJsonRpcResponse} on
+   * this chain.
    */
   disableJsonRpc?: boolean,
 }

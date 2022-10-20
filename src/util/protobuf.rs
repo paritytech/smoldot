@@ -66,8 +66,8 @@ pub(crate) fn message_tag_encode<'a>(
 
 pub(crate) fn bytes_tag_encode<'a>(
     field: u64,
-    data: impl AsRef<[u8]> + 'a,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    data: impl AsRef<[u8]> + Clone + 'a,
+) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
     // Protobuf only allows 2 GiB of data.
     debug_assert!(data.as_ref().len() <= 2 * 1024 * 1024 * 1024);
     delimited_tag_encode(field, data)
@@ -75,8 +75,9 @@ pub(crate) fn bytes_tag_encode<'a>(
 
 pub(crate) fn string_tag_encode<'a>(
     field: u64,
-    data: impl AsRef<str> + 'a,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    data: impl AsRef<str> + Clone + 'a,
+) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    #[derive(Clone)]
     struct Wrapper<T>(T);
     impl<T: AsRef<str>> AsRef<[u8]> for Wrapper<T> {
         fn as_ref(&self) -> &[u8] {
@@ -97,32 +98,12 @@ pub(crate) fn varint_zigzag_tag_encode(field: u64, value: u64) -> impl Iterator<
 
 pub(crate) fn delimited_tag_encode<'a>(
     field: u64,
-    data: impl AsRef<[u8]> + 'a,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    data: impl AsRef<[u8]> + Clone + 'a,
+) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
     tag_encode(field, 2)
         .chain(leb128::encode_usize(data.as_ref().len()))
         .map(|v| either::Right([v]))
         .chain(iter::once(either::Left(data)))
-}
-
-/// Decodes a Protobuf message.
-///
-/// Must be passed a list of parsers that will parse a tag and value (such as for example
-/// [`uint32_tag_decode`] or [`string_tag_decode`]) as a tuple, similar to the `alt` or `tuple`
-/// combinators of `nom`.
-///
-/// Contrary to the built-in `nom` combinators, this combinator follows protobuf-specific rules,
-/// namely that fields can be in any order and that unknown fields are allowed.
-///
-/// If you pass as parameter a tuple `(a, b, c)`, the parser will be able to parse
-/// `((a_output,), (b_output,), (c_output,))` but also
-/// `((a_output,), Vec<b_output>, Option<c_output>)` or any combination of `(,)`, `Vec` or
-/// `Option` for each of the parameters.
-/// This makes it possible to parse messages with `repeated` or `optional` fields.
-pub(crate) fn message_decode<'a, O, E, F: MessageDecodeFields<'a, O, E>>(
-    mut fields: F,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], O, E> {
-    move |bytes| fields.decode(bytes)
 }
 
 /// Decodes a Protobuf tag. On success, returns the field number and wire type.
@@ -138,86 +119,81 @@ pub(crate) fn tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 
 /// Decodes a Protobuf tag of the given field number, and value where the data type is `uint32`.
 pub(crate) fn uint32_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], u32, E> {
-    nom::combinator::map_opt(varint_zigzag_tag_decode(field), |num| {
-        u32::try_from(num).ok()
-    })
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], u32, E> {
+    nom::combinator::map_opt(varint_zigzag_tag_decode, |num| u32::try_from(num).ok())(bytes)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the data type is `bool`.
+/// Decodes a Protobuf tag and value where the data type is `bool`.
 ///
 /// > **Note**: The implementation decodes any non-zero value as `true`, meaning that multiple
 /// >           different encoded messages can be decoded to `true`. This is important to take
 /// >           into consideration if determinism is desired.
 pub(crate) fn bool_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], bool, E> {
-    nom::combinator::map(varint_zigzag_tag_decode(field), |n| {
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], bool, E> {
+    nom::combinator::map(varint_zigzag_tag_decode, |n| {
         // Note that booleans are undocumented. However, the official Java library interprets
         // 0 as false and any other value as true.
         // See <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/BinaryReader.java#L206>
         // or <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/CodedInputStream.java#L788>
         n != 0
-    })
+    })(bytes)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the data type is "enum".
+/// Decodes a Protobuf tag and value where the data type is "enum".
 pub(crate) fn enum_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], u64, E> {
-    varint_zigzag_tag_decode(field)
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], u64, E> {
+    varint_zigzag_tag_decode(bytes)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the data type is a
-/// sub-message.
+/// Decodes a Protobuf tag and value where the data type is a sub-message.
 pub(crate) fn message_tag_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
     inner_message_parser: impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], O, E>,
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], O, E> {
-    nom::combinator::map_parser(delimited_tag_decode(field), inner_message_parser)
+    nom::combinator::map_parser(delimited_tag_decode, inner_message_parser)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the data type is "string".
+/// Decodes a Protobuf tag and value where the data type is "string".
 pub(crate) fn string_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], &'a str, E> {
-    nom::combinator::map_opt(delimited_tag_decode(field), |bytes| {
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], &'a str, E> {
+    nom::combinator::map_opt(delimited_tag_decode, |bytes| {
         if bytes.len() > 2 * 1024 * 1024 * 1024 {
             return None;
         }
         str::from_utf8(bytes).ok()
-    })
+    })(bytes)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the data type is "bytes".
+/// Decodes a Protobuf tag and value where the data type is "bytes".
 pub(crate) fn bytes_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], &'a [u8], E> {
-    nom::combinator::verify(delimited_tag_decode(field), |bytes: &[u8]| {
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], &'a [u8], E> {
+    nom::combinator::verify(delimited_tag_decode, |bytes: &[u8]| {
         bytes.len() <= 2 * 1024 * 1024 * 1024
-    })
+    })(bytes)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the wire type is `varint`
-/// or "zigzag".
+/// Decodes a Protobuf tag  and value where the wire type is `varint` or "zigzag".
 pub(crate) fn varint_zigzag_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], u64, E> {
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], u64, E> {
     nom::sequence::preceded(
-        nom::combinator::verify(tag_decode, move |(f, ty)| *f == field && *ty == 0),
+        nom::combinator::verify(tag_decode, move |(_, ty)| *ty == 0),
         leb128::nom_leb128_u64,
-    )
+    )(bytes)
 }
 
-/// Decodes a Protobuf tag of the given field number, and value where the wire type is "delimited".
+/// Decodes a Protobuf tag and value where the wire type is "delimited".
 pub(crate) fn delimited_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], &'a [u8], E> {
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], &'a [u8], E> {
     nom::sequence::preceded(
-        nom::combinator::verify(tag_decode, move |(f, ty)| *f == field && *ty == 2),
+        nom::combinator::verify(tag_decode, move |(_, ty)| *ty == 2),
         nom::multi::length_data(leb128::nom_leb128_usize),
-    )
+    )(bytes)
 }
 
 /// Decodes a Protobuf tag and value and discards them.
@@ -240,147 +216,178 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     })(bytes)
 }
 
-/// Helper trait for [`message_decode`].
-pub(crate) trait MessageDecodeFields<'a, O, E> {
-    fn decode(&mut self, bytes: &'a [u8]) -> nom::IResult<&'a [u8], O, E>;
-}
-
-macro_rules! message_decode_fields {
-    ($(($field:ident $out:ident),)*) => {
-        impl<'a, $($field,)* $($out,)* Err: nom::error::ParseError<&'a [u8]>> MessageDecodeFields<'a, ($($out,)*), Err> for ($($field,)*)
-        where
-            $($field: nom::Parser<&'a [u8], <$out>::Item, Err>,)*
-            $($out: MessageDecodeFieldOutput,)*
-        {
-            #[allow(nonstandard_style)]
-            fn decode(&mut self, mut bytes: &'a [u8]) -> nom::IResult<&'a [u8], ($($out,)*), Err> {
-                let mut out: ($(<$out as MessageDecodeFieldOutput>::Init,)*) = Default::default();
-                let ($($field,)*) = self;
-
-                loop {
-                    let mut err = None::<Err>;
-                    let ($($out,)*) = &mut out;
-
-                    // Try to parse each field one by one.
-                    // If a field parses successfully, we `continue` the loop.
-                    // Note that it is slightly inefficient to parse the tag over and over again,
-                    // but this overhead is in practice most likely negligible and getting rid of
-                    // it would likely make the API much more convoluted.
-                    $(
-                        match nom::Parser::parse($field, bytes) {
-                            Ok((rest, out)) => {
-                                if bytes == rest {
-                                    // The field parser didn't consume any byte. This will lead
-                                    // to an infinite loop. Return an error to prevent this from
-                                    // happening.
-                                    return Result::Err(nom::Err::Error(
-                                        Err::from_error_kind(rest, nom::error::ErrorKind::Alt)
-                                    ));
-                                }
-
-                                bytes = rest;
-                                <$out as MessageDecodeFieldOutput>::append($out, out);
-                                continue;
-                            }
-                            Err(nom::Err::Error(e)) => {
-                                err = Some(match err {
-                                    Some(err) => nom::error::ParseError::or(err, e),
-                                    None => e,
-                                });
-                            }
-                            Err(err) => return Err(err),
-                        };
-                    )*
-
-                    // If we reach here, none of the parsers has matched the given tag.
-                    // Skip the field as it might simply be unknown.
-                    match tag_value_skip_decode(bytes) {
-                        Ok((rest, ())) => {
-                            debug_assert_ne!(bytes, rest);
-                            bytes = rest;
-                            continue;
-                        }
-                        Err(try_skip_err) => {
-                            // Failed to parse a tag and value, meaning that the protobuf message
-                            // might be invalid, but most likely simply indicates EOF.
-                            let ($($out,)*) = out;
-                            if let ($(Some($out),)*) = ($(MessageDecodeFieldOutput::finish($out),)*) {
-                                return Ok((bytes, ($($out,)*)))
-                            }
-
-                            if let Some(err) = err {
-                                return Err(nom::Err::Error(nom::error::ParseError::append(bytes, nom::error::ErrorKind::Alt, err)));
-                            }
-
-                            return Err(try_skip_err)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-macro_rules! message_decode_fields_recurse {
-    (($first:ident $first_out:ident), $(($field:ident $out:ident),)*) => {
-        message_decode_fields!(($first $first_out), $(($field $out),)*);
-        message_decode_fields_recurse!($(($field $out),)*);
+/// Decodes a Protobuf message.
+///
+/// Importantly, this does **not** expect a Protobuf tag in front of the message. If the message
+/// is part of another message, you must wrap this macro call around [`message_tag_decode`].
+///
+/// This macro expects a list of fields, each field has one of the three following formats:
+///
+/// ```ignore
+/// field_name = num => parser
+/// #[optional] field_name = num => parser
+/// #[repeated] field_name = num => parser
+/// ```
+///
+/// `field_name` must be an identifier, `num` the field number according to the Protobuf
+/// definition, and `parser` an inner parser that parses a Protobuf tag and value.
+/// If `#[optional]` is provided, then the value produced by `parser` is wrapped around an
+/// `Option`, and the decoding of the message will succeed even if the field is missing.
+/// If `#[repeated(max = n)]` is provided, then the value produced by `parser` is wrapped
+/// around a `Vec`, and the field can be provided multiple times in the message. No more than
+/// `n` items can be added to the `Vec` before the decoding fails.
+/// Note that `num` and `n` (the maximum number of items in a `Vec`) can be expressions.
+/// It is not possible to pass both `#[optional]` and `#[repeated]` at the same time.
+///
+/// The macro produces a `nom` parser that outputs an anonymous struct whose field correspond
+/// to the provided field names.
+///
+/// # Example
+///
+/// ```ignore
+/// let _parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
+///     nom::combinator::complete(protobuf::message_decode! {
+///         #[repeated(max = 4)] entries = 1 => protobuf::message_decode!{
+///             state_root = 1 => protobuf::bytes_tag_decode(1),
+///             #[repeated(max = 10)] entries = 2 => protobuf::message_tag_decode(2, protobuf::message_decode!{
+///                 key = 1 => protobuf::bytes_tag_decode(1),
+///                 value = 2 => protobuf::bytes_tag_decode(2),
+///             }),
+///             #[optional] complete = 3 => protobuf::bool_tag_decode(3),
+///         }
+///     }),
+/// );
+/// ```
+///
+// TODO: maybe optional should be default?
+macro_rules! message_decode {
+    ($($(#[$($attrs:tt)*])* $field_name:ident = $field_num:expr => $parser:expr),*,) => {
+        $crate::util::protobuf::message_decode!($($(#[$($attrs)*])* $field_name = $field_num => $parser),*)
     };
-    () => {};
+    ($($(#[$($attrs:tt)*])* $field_name:ident = $field_num:expr => $parser:expr),*) => {{
+        #[allow(non_camel_case_types)]
+        struct Out<$($field_name),*> {
+            $($field_name: $field_name,)*
+        }
+
+        |mut input| {
+            #[allow(non_camel_case_types)]
+            struct InProgress<$($field_name),*> {
+                $($field_name: $crate::util::protobuf::message_decode_helper_ty!($field_name; $($($attrs)*)*),)*
+            }
+
+            let mut in_progress = InProgress {
+                $($field_name: Default::default(),)*
+            };
+
+            loop {
+                // Note: it might be tempting to write `input: &[u8]` as the closure parameter
+                // instead, but this causes lifetime issues for some reason.
+                if <[u8]>::is_empty(input) {
+                    break;
+                }
+
+                let (_, (field_num, _wire_ty)) = $crate::util::protobuf::tag_decode(input)?;
+
+                $(if field_num == $field_num {
+                    let (rest, value) = nom::Parser::<&[u8], _, _>::parse(&mut $parser, input)?;
+
+                    if input == rest {
+                        // The field parser didn't consume any byte. This will lead
+                        // to an infinite loop. Return an error to prevent this from
+                        // happening.
+                        return core::result::Result::Err(nom::Err::Error(
+                            nom::error::ParseError::<&[u8]>::from_error_kind(rest, nom::error::ErrorKind::Alt)
+                        ));
+                    }
+
+                    $crate::util::protobuf::message_decode_helper_store!(input, value => in_progress.$field_name; $($($attrs)*)*);
+                    input = rest;
+                    continue;
+                })*
+
+                // Fields with an unrecognized number are deliberately ignored. This is
+                // a fundamental feature of protobuf in order to make protocol upgrades
+                // easier.
+                let (rest, ()) = $crate::util::protobuf::tag_value_skip_decode(input)?;
+                debug_assert!(input != rest);
+                input = rest;
+            }
+
+            let out = Out {
+                $($field_name: $crate::util::protobuf::message_decode_helper_unwrap!(in_progress.$field_name; $($($attrs)*)*)?,)*
+            };
+
+            Ok((input, out))
+        }
+    }};
 }
 
-message_decode_fields_recurse!((A Ao), (B Bo), (C Co), (D Do), (E Eo), (F Fo), (G Go), (H Ho), (I Io),);
-
-pub(crate) trait MessageDecodeFieldOutput: Sized {
-    type Init: Default;
-    type Item;
-
-    fn append(value: &mut Self::Init, other: Self::Item);
-    fn finish(value: Self::Init) -> Option<Self>;
+macro_rules! message_decode_helper_ty {
+    ($ty:ty;) => { Option<$ty> };
+    ($ty:ty; optional) => { Option<$ty> };
+    ($ty:ty; repeated(max = $max:expr)) => { Vec<$ty> };
 }
 
-impl<T> MessageDecodeFieldOutput for (T,) {
-    type Init = Option<T>;
-    type Item = T;
-
-    fn append(value: &mut Option<T>, other: T) {
-        // As documented in the protobuf spec, a later value supercedes an earlier one. A duplicate
-        // field intentionally isn't an error.
-        *value = Some(other);
-    }
-
-    fn finish(value: Option<T>) -> Option<(T,)> {
-        value.map(|v| (v,))
-    }
+macro_rules! message_decode_helper_store {
+    ($input_data:expr, $value:expr => $dest:expr;) => {
+        if $dest.is_some() {
+            // Make sure that the field is only found once in the message.
+            return core::result::Result::Err(nom::Err::Error(
+                nom::error::ParseError::<&[u8]>::from_error_kind(
+                    $input_data,
+                    nom::error::ErrorKind::Many1,
+                ),
+            ));
+        }
+        $dest = Some($value);
+    };
+    ($input_data:expr, $value:expr => $dest:expr; optional) => {
+        if $dest.is_some() {
+            // Make sure that the field is only found once in the message.
+            return core::result::Result::Err(nom::Err::Error(
+                nom::error::ParseError::<&[u8]>::from_error_kind(
+                    $input_data,
+                    nom::error::ErrorKind::Many1,
+                ),
+            ));
+        }
+        $dest = Some($value);
+    };
+    ($input_data:expr, $value:expr => $dest:expr; repeated(max = $max:expr)) => {
+        if $dest.len() >= usize::try_from($max).unwrap_or(usize::max_value()) {
+            return core::result::Result::Err(nom::Err::Error(
+                nom::error::ParseError::<&[u8]>::from_error_kind(
+                    $input_data,
+                    nom::error::ErrorKind::Many1,
+                ),
+            ));
+        }
+        $dest.push($value);
+    };
 }
 
-impl<T> MessageDecodeFieldOutput for Vec<T> {
-    type Init = Vec<T>;
-    type Item = T;
-
-    fn append(value: &mut Vec<T>, other: T) {
-        value.push(other);
-    }
-
-    fn finish(value: Vec<T>) -> Option<Vec<T>> {
-        Some(value)
-    }
+macro_rules! message_decode_helper_unwrap {
+    ($value:expr;) => {
+        $value.ok_or_else(|| {
+            nom::Err::Error(nom::error::ParseError::<&[u8]>::from_error_kind(
+                &[][..],
+                nom::error::ErrorKind::NoneOf,
+            ))
+        })
+    };
+    ($value:expr; optional) => {
+        Ok($value)
+    };
+    ($value:expr; repeated(max = $max:expr)) => {
+        Ok($value)
+    };
 }
 
-impl<T> MessageDecodeFieldOutput for Option<T> {
-    type Init = Option<T>;
-    type Item = T;
-
-    fn append(value: &mut Option<T>, other: T) {
-        // As documented in the protobuf spec, a later value supercedes an earlier one. A duplicate
-        // field intentionally isn't an error.
-        *value = Some(other);
-    }
-
-    fn finish(value: Option<T>) -> Option<Option<T>> {
-        Some(value)
-    }
-}
+pub(crate) use {
+    message_decode, message_decode_helper_store, message_decode_helper_ty,
+    message_decode_helper_unwrap,
+};
 
 #[cfg(test)]
 mod tests {
@@ -393,7 +400,7 @@ mod tests {
 
         assert_eq!(&encoded, &[192, 31, 1]);
 
-        let decoded = super::bool_tag_decode::<nom::error::Error<&[u8]>>(504)(&encoded)
+        let decoded = super::bool_tag_decode::<nom::error::Error<&[u8]>>(&encoded)
             .unwrap()
             .1;
         assert!(decoded);
@@ -408,7 +415,7 @@ mod tests {
 
         assert_eq!(&encoded, &[240, 157, 4, 133, 220, 5]);
 
-        let decoded = super::uint32_tag_decode::<nom::error::Error<&[u8]>>(8670)(&encoded)
+        let decoded = super::uint32_tag_decode::<nom::error::Error<&[u8]>>(&encoded)
             .unwrap()
             .1;
         assert_eq!(decoded, 93701);
@@ -423,7 +430,7 @@ mod tests {
 
         assert_eq!(&encoded, &[216, 6, 197, 138, 57]);
 
-        let decoded = super::enum_tag_decode::<nom::error::Error<&[u8]>>(107)(&encoded)
+        let decoded = super::enum_tag_decode::<nom::error::Error<&[u8]>>(&encoded)
             .unwrap()
             .1;
         assert_eq!(decoded, 935237);
@@ -441,7 +448,7 @@ mod tests {
             &[210, 30, 11, 104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100]
         );
 
-        let decoded = super::string_tag_decode::<nom::error::Error<&[u8]>>(490)(&encoded)
+        let decoded = super::string_tag_decode::<nom::error::Error<&[u8]>>(&encoded)
             .unwrap()
             .1;
         assert_eq!(decoded, "hello world");
@@ -456,7 +463,7 @@ mod tests {
 
         assert_eq!(&encoded, &[18, 4, 116, 101, 115, 116]);
 
-        let decoded = super::bytes_tag_decode::<nom::error::Error<&[u8]>>(2)(&encoded)
+        let decoded = super::bytes_tag_decode::<nom::error::Error<&[u8]>>(&encoded)
             .unwrap()
             .1;
         assert_eq!(decoded, b"test");

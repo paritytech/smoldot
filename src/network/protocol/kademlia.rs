@@ -45,23 +45,18 @@ pub fn decode_find_node_response(
     response_bytes: &[u8],
 ) -> Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, DecodeFindNodeResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-        nom::combinator::complete(protobuf::message_decode::<((_,), Vec<_>), _, _>((
-            protobuf::enum_tag_decode(1),
-            protobuf::message_tag_decode(
-                8,
-                protobuf::message_decode::<((_,), Vec<_>), _, _>((
-                    protobuf::bytes_tag_decode(1),
-                    protobuf::bytes_tag_decode(2),
-                )),
-            ),
-        ))),
+        nom::combinator::complete(protobuf::message_decode! {
+            response_ty = 1 => protobuf::enum_tag_decode,
+            #[repeated(max = 1024)] peers = 8 => protobuf::message_tag_decode(protobuf::message_decode!{
+                peer_id = 1 => protobuf::bytes_tag_decode,
+                #[repeated(max = 1024)] addrs = 2 => protobuf::bytes_tag_decode,
+            }),
+        }),
     );
 
-    let closer_peers: Vec<_> = match nom::Finish::finish(parser(response_bytes)) {
-        Ok((_, ((4,), peers))) => peers,
-        Ok((_, ((_other_message_ty,), _))) => {
-            return Err(DecodeFindNodeResponseError::BadResponseTy)
-        }
+    let closer_peers = match nom::Finish::finish(parser(response_bytes)) {
+        Ok((_, out)) if out.response_ty == 4 => out.peers,
+        Ok((_, _)) => return Err(DecodeFindNodeResponseError::BadResponseTy),
         Err(_) => {
             return Err(DecodeFindNodeResponseError::ProtobufDecode(
                 ProtobufDecodeError,
@@ -70,12 +65,12 @@ pub fn decode_find_node_response(
     };
 
     let mut result = Vec::with_capacity(closer_peers.len());
-    for ((peer_id,), addrs) in closer_peers {
-        let peer_id = peer_id::PeerId::from_bytes(peer_id.to_vec())
+    for peer in closer_peers {
+        let peer_id = peer_id::PeerId::from_bytes(peer.peer_id.to_vec())
             .map_err(|(err, _)| DecodeFindNodeResponseError::BadPeerId(err))?;
 
-        let mut multiaddrs = Vec::with_capacity(addrs.len());
-        for addr in addrs {
+        let mut multiaddrs = Vec::with_capacity(peer.addrs.len());
+        for addr in peer.addrs {
             let addr = multiaddr::Multiaddr::try_from(addr.to_vec())
                 .map_err(DecodeFindNodeResponseError::BadMultiaddr)?;
             multiaddrs.push(addr);

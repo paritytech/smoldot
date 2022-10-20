@@ -16,7 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use core::iter;
-use futures::{channel::mpsc, prelude::*};
 
 fn main() {
     // The `smoldot_light` library uses the `log` crate to emit logs.
@@ -41,23 +40,20 @@ fn main() {
         system_version: env!("CARGO_PKG_VERSION").into(),
     });
 
-    // Once a chain has been added, we will be able to send JSON-RPC requests to it. And in
-    // return, the client will send back JSON-RPC responses. The JSON-RPC responses will be sent
-    // by the client on the `json_rpc_responses_tx` channel (that we inject inside the client).
-    let (json_rpc_responses_tx, mut json_rpc_responses_rx) = mpsc::channel(32);
-
     // Ask the client to connect to a chain.
-    let chain_id = client
+    let smoldot_light::AddChainSuccess {
+        chain_id,
+        json_rpc_responses,
+    } = client
         .add_chain(smoldot_light::AddChainConfig {
             // The most important field of the configuration is the chain specification. This is a
             // JSON document containing all the information necessary for the client to connect to said
             // chain.
             specification: include_str!("../../polkadot.json"),
 
-            // See above.
-            // Note that it is possible to pass `None`, in which case the chain will not be able to
-            // handle JSON-RPC requests. This can be used to save up some resources.
-            json_rpc_responses: Some(json_rpc_responses_tx),
+            // If `true`, the chain will not be able to handle JSON-RPC requests. This can be used
+            // to save up some resources.
+            disable_json_rpc: false,
 
             // This field is necessary only if adding a parachain.
             potential_relay_chains: iter::empty(),
@@ -80,6 +76,10 @@ fn main() {
 
     // The chain is now properly initialized.
 
+    // `json_rpc_responses` can only be `None` if we had passed `disable_json_rpc: true` in the
+    // configuration.
+    let mut json_rpc_responses = json_rpc_responses.unwrap();
+
     // Send a JSON-RPC request to the chain.
     // The example here asks the client to send us notifications whenever the new best block has
     // changed.
@@ -97,7 +97,7 @@ fn main() {
     // JSON-RPC responses.
     async_std::task::block_on(async move {
         loop {
-            let response = json_rpc_responses_rx.next().await.unwrap();
+            let response = json_rpc_responses.next().await.unwrap();
             println!("JSON-RPC response: {}", response);
         }
     })

@@ -267,9 +267,9 @@ where
                 },
             ) => {
                 let inner_substream_id = established.open_notifications_substream(
-                    now,
                     overlay_network_index,
                     handshake,
+                    now + Duration::from_secs(20), // TODO: make configurable
                     (),
                 );
 

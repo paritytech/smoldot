@@ -398,7 +398,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
         block_number: u64,
         block_hash: &[u8; 32],
         storage_trie_root: &[u8; 32],
-        requested_keys: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+        requested_keys: impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone,
         total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,

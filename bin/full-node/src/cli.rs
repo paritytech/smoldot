@@ -23,9 +23,8 @@
 //! # Example
 //!
 //! ```no_run
-//! use clap::StructOpt as _;
-//! let cli_options = full_node::CliOptions::from_args();
-//! println!("Quiet: {:?}", cli_options.quiet);
+//! use clap::Parser as _;
+//! let cli_options = full_node::CliOptions::parse();
 //! ```
 //!
 // TODO: I believe this example isn't tested ^ which kills the point of having it
@@ -37,66 +36,74 @@ use smoldot::{
         PeerId,
     },
 };
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, str::FromStr};
 
 // Note: the doc-comments applied to this struct and its field are visible when the binary is
 // started with `--help`.
 
-#[derive(Debug, clap::StructOpt)]
-#[clap(about, author, version)]
-pub enum CliOptions {
+#[derive(Debug, clap::Parser)]
+#[command(about, author, version, long_about = None)]
+#[command(propagate_version = true)]
+pub struct CliOptions {
+    #[command(subcommand)]
+    pub command: CliOptionsCommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum CliOptionsCommand {
     /// Connects to the chain and synchronizes the local database with the network.
+    #[command(name = "run")]
     Run(Box<CliOptionsRun>),
     /// Computes the 64 bits BLAKE2 hash of a string payload and prints the hexadecimal-encoded hash.
-    #[structopt(name = "blake2-64bits-hash")]
+    #[command(name = "blake2-64bits-hash")]
     Blake264BitsHash(CliOptionsBlake264Hash),
 }
 
-#[derive(Debug, clap::StructOpt)]
+#[derive(Debug, clap::Parser)]
 pub struct CliOptionsRun {
     /// Chain to connect to ("Polkadot", "Kusama", "Westend", or a file path).
-    #[structopt(long, default_value = "polkadot")]
+    #[arg(long, default_value = "polkadot")]
     pub chain: CliChain,
     /// Output to stdout: auto, none, informant, logs, logs-json.
-    #[structopt(long, default_value = "auto")]
+    #[arg(long, default_value = "auto")]
     pub output: Output,
     /// Log filter. Example: `foo=trace`
-    #[structopt(long)]
-    pub log: Vec<tracing_subscriber::filter::Directive>,
+    #[arg(long)]
+    pub log: Vec<LogDirective>,
     /// Coloring: auto, always, never
-    #[structopt(long, default_value = "auto")]
+    #[arg(long, default_value = "auto")]
     pub color: ColorChoice,
     /// Ed25519 private key of network identity (as a seed phrase).
-    #[structopt(long, parse(try_from_str = decode_ed25519_private_key))]
+    #[arg(long, value_parser = decode_ed25519_private_key)]
     pub libp2p_key: Option<[u8; 32]>,
     /// `Multiaddr` to listen on.
-    #[structopt(long, parse(try_from_str = decode_multiaddr))]
+    #[arg(long, value_parser = decode_multiaddr)]
     pub listen_addr: Vec<Multiaddr>,
     /// `Multiaddr` of an additional node to try to connect to on startup.
-    #[structopt(long, parse(try_from_str = parse_bootnode))]
+    #[arg(long, value_parser = parse_bootnode)]
     pub additional_bootnode: Vec<Bootnode>,
     /// Bind point of the JSON-RPC server ("none" or <ip>:<port>).
-    #[structopt(long, default_value = "127.0.0.1:9944", parse(try_from_str = parse_json_rpc_address))]
+    #[arg(long, default_value = "127.0.0.1:9944", value_parser = parse_json_rpc_address)]
     pub json_rpc_address: JsonRpcAddress,
     /// List of secret phrases to insert in the keystore of the node. Used to author blocks.
-    #[structopt(long, parse(try_from_str = decode_sr25519_private_key))]
+    #[arg(long, value_parser = decode_sr25519_private_key)]
     // TODO: also automatically add the same keys through ed25519?
     pub keystore_memory: Vec<[u8; 64]>,
     /// Address of a Jaeger agent to send traces to (hint: port is typically 6831).
-    #[structopt(long)]
+    #[arg(long)]
     pub jaeger: Option<SocketAddr>,
     /// Do not load or store anything on disk.
-    #[structopt(long)]
+    #[arg(long)]
     pub tmp: bool,
 }
 
-#[derive(Debug, clap::StructOpt)]
+#[derive(Debug, clap::Parser)]
 pub struct CliOptionsBlake264Hash {
     /// Payload whose hash to compute.
     pub payload: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CliChain {
     Polkadot,
     Kusama,
@@ -120,7 +127,7 @@ impl core::str::FromStr for CliChain {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ColorChoice {
     Always,
     Never,
@@ -150,7 +157,7 @@ impl core::str::FromStr for ColorChoice {
 #[display(fmt = "Color must be one of: always, auto, never")]
 pub struct ColorChoiceParseError;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, clap::ValueEnum)]
 pub enum Output {
     Auto,
     None,
@@ -159,31 +166,7 @@ pub enum Output {
     LogsJson,
 }
 
-impl core::str::FromStr for Output {
-    type Err = OutputParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "auto" {
-            Ok(Output::Auto)
-        } else if s == "none" {
-            Ok(Output::None)
-        } else if s == "informant" {
-            Ok(Output::Informant)
-        } else if s == "logs" {
-            Ok(Output::Logs)
-        } else if s == "logs-json" {
-            Ok(Output::LogsJson)
-        } else {
-            Err(OutputParseError)
-        }
-    }
-}
-
-#[derive(Debug, derive_more::Display, derive_more::Error)]
-#[display(fmt = "Output must be one of: auto, none, informant, logs, logs-json")]
-pub struct OutputParseError;
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct JsonRpcAddress(pub Option<SocketAddr>);
 
 fn parse_json_rpc_address(string: &str) -> Result<JsonRpcAddress, String> {
@@ -199,6 +182,23 @@ fn parse_json_rpc_address(string: &str) -> Result<JsonRpcAddress, String> {
 }
 
 #[derive(Debug)]
+pub struct LogDirective(pub tracing_subscriber::filter::Directive);
+
+impl Clone for LogDirective {
+    fn clone(&self) -> Self {
+        LogDirective(self.0.to_string().parse().unwrap())
+    }
+}
+
+impl FromStr for LogDirective {
+    type Err = <tracing_subscriber::filter::Directive as FromStr>::Err;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(LogDirective(s.parse()?))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Bootnode {
     pub address: Multiaddr,
     pub peer_id: PeerId,
