@@ -80,48 +80,41 @@ pub fn decode_state_response(
     response_bytes: &[u8],
 ) -> Result<StateResponse, DecodeStateResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-        nom::combinator::complete(protobuf::message_decode((protobuf::message_tag_decode(
-            1,
-            protobuf::message_decode((
-                protobuf::bytes_tag_decode(1),
-                protobuf::message_tag_decode(
-                    2,
-                    protobuf::message_decode((
-                        protobuf::bytes_tag_decode(1),
-                        protobuf::bytes_tag_decode(2),
-                    )),
-                ),
-                protobuf::bool_tag_decode(3),
-            )),
-        ),))),
+        nom::combinator::complete(protobuf::message_decode! {
+            #[repeated(max = 1)] entries = 1 => protobuf::message_decode!{
+                #[optional] _state_root = 1 => protobuf::bytes_tag_decode,
+                #[repeated(max = 4 * 1024 * 1024)] key_values = 2 => protobuf::message_tag_decode(protobuf::message_decode!{
+                    key = 1 => protobuf::bytes_tag_decode,
+                    value = 2 => protobuf::bytes_tag_decode,
+                }),
+                #[optional] complete = 3 => protobuf::bool_tag_decode,
+            }
+        }),
     );
 
-    let entries: Vec<(
-        Option<&[u8]>,
-        Vec<(Option<&[u8]>, Option<&[u8]>)>,
-        Option<bool>,
-    )> = match nom::Finish::finish(parser(response_bytes)) {
-        Ok((_, (entries,))) => entries,
+    let decoded = match nom::Finish::finish(parser(response_bytes)) {
+        Ok((_, entries)) => entries,
         Err(_) => return Err(DecodeStateResponseError::ProtobufDecode),
     };
 
-    let (_state_root, key_values, complete) = if entries.len() == 1 {
-        entries.into_iter().next().unwrap()
+    let entry = if decoded.entries.len() == 1 {
+        decoded.entries.into_iter().next().unwrap()
     } else {
         return Err(DecodeStateResponseError::UnexpectedEntriesCount);
     };
 
-    let key_values = key_values
+    let key_values = entry
+        .key_values
         .into_iter()
-        .map(|(key, value)| StateResponseEntry {
-            key: key.unwrap_or(&[]),
-            value: value.unwrap_or(&[]),
+        .map(|key_value| StateResponseEntry {
+            key: key_value.key,
+            value: key_value.value,
         })
         .collect();
 
     Ok(StateResponse {
         entries: key_values,
-        complete: complete.unwrap_or(false),
+        complete: entry.complete.unwrap_or(false),
     })
 }
 

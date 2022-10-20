@@ -32,7 +32,7 @@
 // TODO: this is a complete hack ^
 pub async fn yield_twice() {
     let mut num_pending_remain = 2;
-    futures::future::poll_fn(move |cx| {
+    core::future::poll_fn(move |cx| {
         if num_pending_remain > 0 {
             num_pending_remain -= 1;
             cx.waker().wake_by_ref();

@@ -24,16 +24,15 @@ use super::{
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::{
-    fmt, mem, slice,
+    fmt, future, mem,
+    pin::Pin,
+    slice,
     task::{Context, Poll, Waker},
 };
 // TODO: we use std::sync::Mutex rather than parking_lot::Mutex due to issues with Cargo features, see <https://github.com/paritytech/smoldot/issues/2732>
 use std::sync::Mutex;
 
-use futures::{
-    future::{self, Future},
-    task, FutureExt as _,
-};
+use futures::{task, FutureExt as _};
 
 /// See [`super::Module`].
 #[derive(Clone)]
@@ -472,7 +471,13 @@ enum JitInner {
     },
     /// `Future` that drives the execution. Contains an invocation of `wasmtime::Func::call_async`.
     Executing(
-        future::LocalBoxFuture<'static, (wasmtime::Store<()>, Result<Option<WasmValue>, String>)>,
+        Pin<
+            Box<
+                dyn future::Future<
+                    Output = (wasmtime::Store<()>, Result<Option<WasmValue>, String>),
+                >,
+            >,
+        >,
     ),
     /// Execution has finished because the future has returned `Poll::Ready` in the past.
     Done(wasmtime::Store<()>),
@@ -575,7 +580,7 @@ impl Jit {
         // Resume the coroutine execution.
         // The `Future` is polled with a no-op waker. We are in total control of when the
         // execution might be able to progress, hence the lack of need for a waker.
-        match Future::poll(
+        match future::Future::poll(
             function_call.as_mut(),
             &mut Context::from_waker(task::noop_waker_ref()),
         ) {
@@ -753,7 +758,7 @@ impl Jit {
                 // `MemoryGrowRequired`, perform the grow, and switch back to `WithinFunctionCall`.
                 // The `Future` is polled with a no-op waker. We are in total control of when the
                 // execution might be able to progress, hence the lack of need for a waker.
-                match Future::poll(
+                match future::Future::poll(
                     function_call.as_mut(),
                     &mut Context::from_waker(task::noop_waker_ref()),
                 ) {
@@ -796,7 +801,7 @@ impl Jit {
                 }
                 drop(shared_lock);
 
-                match Future::poll(
+                match future::Future::poll(
                     function_call.as_mut(),
                     &mut Context::from_waker(task::noop_waker_ref()),
                 ) {
