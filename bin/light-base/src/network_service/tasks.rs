@@ -356,7 +356,8 @@ async fn single_stream_connection_task<TPlat: Platform>(
 /// Asynchronous task managing a specific multi-stream connection after it's been open.
 ///
 /// > **Note**: This function is specific to WebRTC in the sense that it checks whether the reading
-/// >           and writing sides of substreams never close. It can easily be made more
+/// >           and writing sides of substreams never close, and adjusts the size of the write
+/// >           buffer to not go over the frame size limit of WebRTC. It can easily be made more
 /// >           general-purpose.
 // TODO: a lot of logging disappeared
 async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
@@ -388,7 +389,9 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
     // from this slice the data to send. Consequently, the write buffer is held locally. This is
     // suboptimal compared to writing to a write buffer provided by the platform, but it is easier
     // to implement it this way.
-    let mut write_buffer = vec![0; 16384]; // TODO: the write buffer must not exceed 16kiB due to the libp2p WebRTC spec; this should ideally be enforced through the connection task API
+    // The write buffer is limited to 16kiB, as this is the maximum amount of data a single
+    // WebRTC frame can have.
+    let mut write_buffer = vec![0; 16384];
 
     loop {
         // Start opening new outbound substreams, if needed.

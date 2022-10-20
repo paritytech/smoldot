@@ -123,6 +123,12 @@ pub trait Platform: Send + 'static {
     fn advance_read_cursor(stream: &mut Self::Stream, bytes: usize);
 
     /// Queues the given bytes to be sent out on the given connection.
+    ///
+    /// > **Note**: In the case of [`PlatformConnection::MultiStreamWebRtc`], be aware that there
+    /// >           exists a limit to the amount of data to send at once. The `data` parameter
+    /// >           is guaranteed to fit within that limit. Due to the existence of this limit,
+    /// >           the implementation of this function shouldn't attempt to save function calls
+    /// >           by performing internal buffering and batching multiple calls into one.
     // TODO: back-pressure
     // TODO: allow closing sending side
     fn send(stream: &mut Self::Stream, data: &[u8]);
