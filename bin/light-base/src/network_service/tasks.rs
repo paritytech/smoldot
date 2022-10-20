@@ -221,6 +221,8 @@ async fn single_stream_connection_task<TPlat: Platform>(
             connection_task.inject_coordinator_message(message);
         }
 
+        // TODO: `TPlat::read_buffer` can return `None` if the connection has been abruptly closed, should we handle this and stop reading/writing? cc https://github.com/paritytech/smoldot/issues/2782
+
         // Perform a read-write. This updates the internal state of the connection task.
         let now = TPlat::now();
         let mut read_write = ReadWrite {
@@ -433,14 +435,21 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
             loop {
                 let substream = &mut open_substreams[substream_id];
 
+                let incoming_buffer = match TPlat::read_buffer(substream) {
+                    Some(buf) => buf,
+                    None => {
+                        // In the case of WebRTC, `read_buffer` returns `None` only if the
+                        // substream has been reset by the remote. We inform the connection task,
+                        // and the substream is now considered dead.
+                        connection_task.reset_substream(&substream_id);
+                        open_substreams.remove(substream_id);
+                        break;
+                    }
+                };
+
                 let mut read_write = ReadWrite {
                     now: now.clone(),
-                    incoming_buffer: {
-                        let buf = TPlat::read_buffer(substream);
-                        // In WebRTC, the reading and writing side never closes.
-                        debug_assert!(buf.is_some());
-                        buf
-                    },
+                    incoming_buffer: Some(incoming_buffer),
                     outgoing_buffer: Some((&mut write_buffer, &mut [])),
                     read_bytes: 0,
                     written_bytes: 0,
@@ -466,8 +475,8 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
                 }
                 TPlat::advance_read_cursor(substream, read_bytes);
 
-                // If the `connection_task` requires this substream to be killed, we drop the `Stream`
-                // object.
+                // If the `connection_task` requires this substream to be killed, we drop the
+                // `Stream` object.
                 if kill_substream {
                     open_substreams.remove(substream_id);
                     break;
