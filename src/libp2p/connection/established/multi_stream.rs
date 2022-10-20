@@ -280,17 +280,23 @@ where
     /// This method will refuse to accept data if too many events are already queued. Use
     /// [`MultiStream::pull_event`] to empty the queue of events between calls to this method.
     ///
+    /// In the case of a WebRTC connection, the [`ReadWrite::incoming_buffer`] and
+    /// [`ReadWrite::outgoing_buffer`] must always be `Some`.
+    ///
     /// # Panic
     ///
     /// Panics if there is no substream with that identifier.
+    /// Panics if this is a WebRTC connection, and the reading or writing side is closed.
     ///
-    // TODO: clarify docs to explain that in the case of WebRTC the reading and writing sides never close, and substream can only ever reset
     pub fn substream_read_write(
         &mut self,
         substream_id: &TSubId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> bool {
         let mut substream = self.in_substreams.get_mut(substream_id).unwrap();
+
+        // In WebRTC, the reading and writing side is never closed.
+        assert!(read_write.incoming_buffer.is_some() && read_write.outgoing_buffer.is_some());
 
         // Reading/writing the ping substream is used to queue new outgoing pings.
         if Some(substream_id) == self.ping_substream.as_ref() {
@@ -582,6 +588,9 @@ where
                     Self::on_substream_event(&mut self.pending_events, substream.id, other)
                 }
             }
+
+            // WebRTC never closes the writing side.
+            debug_assert!(read_write.outgoing_buffer.is_some());
 
             if substream.inner.is_none() {
                 if Some(substream_id) == self.ping_substream.as_ref() {

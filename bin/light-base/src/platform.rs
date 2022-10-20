@@ -109,7 +109,8 @@ pub trait Platform: Send + 'static {
     /// Gives access to the content of the read buffer of the given stream.
     ///
     /// Returns `None` if the remote has closed their sending side or if the stream has been
-    /// reset.
+    /// reset. Returning `None` is forbidden in the case of
+    /// [`PlatformConnection::MultiStreamWebRtc`].
     fn read_buffer(stream: &mut Self::Stream) -> Option<&[u8]>;
 
     /// Discards the first `bytes` bytes of the read buffer of this stream. This makes it
@@ -134,7 +135,8 @@ pub enum PlatformConnection<TStream, TConnection> {
     /// should be negotiated. The division in multiple substreams is handled internally.
     SingleStreamMultistreamSelectNoiseYamux(TStream),
     /// The connection is made of multiple substreams. The encryption and multiplexing are handled
-    /// externally.
+    /// externally. The reading and writing sides of substreams must never close, and substreams
+    /// can only be abruptly closed by either side.
     MultiStreamWebRtc {
         /// Object representing the WebRTC connection.
         connection: TConnection,

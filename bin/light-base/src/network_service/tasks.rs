@@ -172,7 +172,7 @@ pub(super) async fn connection_task<TPlat: Platform>(
             .await
         }
         either::Right((socket, task)) => {
-            multi_stream_connection_task::<TPlat>(
+            webrtc_multi_stream_connection_task::<TPlat>(
                 socket,
                 shared.clone(),
                 connection_id,
@@ -352,8 +352,12 @@ async fn single_stream_connection_task<TPlat: Platform>(
 }
 
 /// Asynchronous task managing a specific multi-stream connection after it's been open.
+///
+/// > **Note**: This function is specific to WebRTC in the sense that it checks whether the reading
+/// >           and writing sides of substreams never close. It can easily be made more
+/// >           general-purpose.
 // TODO: a lot of logging disappeared
-async fn multi_stream_connection_task<TPlat: Platform>(
+async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
     mut connection: TPlat::Connection,
     shared: Arc<Shared<TPlat>>,
     connection_id: service::ConnectionId,
@@ -431,12 +435,19 @@ async fn multi_stream_connection_task<TPlat: Platform>(
 
                 let mut read_write = ReadWrite {
                     now: now.clone(),
-                    incoming_buffer: TPlat::read_buffer(substream),
-                    outgoing_buffer: Some((&mut write_buffer, &mut [])), // TODO: this should be None if a previous read_write() produced None
+                    incoming_buffer: {
+                        let buf = TPlat::read_buffer(substream);
+                        // In WebRTC, the reading and writing side never closes.
+                        debug_assert!(buf.is_some());
+                        buf
+                    },
+                    outgoing_buffer: Some((&mut write_buffer, &mut [])),
                     read_bytes: 0,
                     written_bytes: 0,
                     wake_up_after,
                 };
+
+                debug_assert!(read_write.outgoing_buffer.is_some());
 
                 let kill_substream =
                     connection_task.substream_read_write(&substream_id, &mut read_write);

@@ -767,9 +767,13 @@ where
     /// state machine and its identifier is now invalid. If the reading or writing side of the
     /// substream was still open, then the user should reset that substream.
     ///
+    /// In the case of a WebRTC connection, the [`ReadWrite::incoming_buffer`] and
+    /// [`ReadWrite::outgoing_buffer`] must always be `Some`.
+    ///
     /// # Panic
     ///
     /// Panics if there is no substream with that identifier.
+    /// Panics if this is a WebRTC connection, and the reading or writing side is closed.
     ///
     // TODO: better return value
     pub fn substream_read_write(
@@ -777,6 +781,11 @@ where
         substream_id: &TSubId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> bool {
+        // In WebRTC, the reading and writing sides are never closed.
+        // Note that the `established::MultiStream` state machine also performs this check, but
+        // we do it here again because we're not necessarily in the ̀`established` state.
+        assert!(read_write.incoming_buffer.is_some() && read_write.outgoing_buffer.is_some());
+
         match &mut self.connection {
             MultiStreamConnectionTaskInner::Handshake {
                 handshake,
