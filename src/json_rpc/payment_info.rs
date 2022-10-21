@@ -60,8 +60,45 @@ fn nom_decode_payment_info<'a, E: nom::error::ParseError<&'a [u8]>>(
                 2 => Some(methods::DispatchClass::Mandatory),
                 _ => None,
             }),
-            // TODO: this is actually of type `Balance`; figure out how to find that type
-            nom::number::complete::le_u128,
+            |bytes| {
+                // The exact format here is the SCALE encoding of the type `Balance`.
+                // Normally, determining the actual type of `Balance` would require parsing the
+                // metadata provided by the runtime. However, this is a pretty difficult to
+                // implement and CPU-heavy. Instead, given that there is no other field after
+                // the balance, we simply parse all the remaining bytes.
+                // Because the SCALE encoding of a number is the number in little endian format,
+                // we decode the bytes in little endian format in a way that works no matter the
+                // number of bytes.
+                // If a field was to be added after the balance, this code would need to be
+                // modified.
+                // TODO: must make sure that TransactionPaymentApi is at version 1, see https://github.com/paritytech/smoldot/issues/949
+                let mut num = 0u128;
+                let mut shift = 0u32;
+                for byte in <[u8]>::iter(bytes) {
+                    let shifted =
+                        u128::from(*byte)
+                            .checked_mul(1 << shift)
+                            .ok_or(nom::Err::Error(nom::error::make_error(
+                                bytes,
+                                nom::error::ErrorKind::Digit,
+                            )))?;
+                    num =
+                        num.checked_add(shifted)
+                            .ok_or(nom::Err::Error(nom::error::make_error(
+                                bytes,
+                                nom::error::ErrorKind::Digit,
+                            )))?;
+                    shift =
+                        shift
+                            .checked_add(16)
+                            .ok_or(nom::Err::Error(nom::error::make_error(
+                                bytes,
+                                nom::error::ErrorKind::Digit,
+                            )))?;
+                }
+
+                Ok((&[][..], num))
+            },
         )),
         |(weight, class, partial_fee)| methods::RuntimeDispatchInfo {
             weight,

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The [`payment_queryInfo`] JSON-RPC function now works with runtimes that have defined the type of `Balance` to be less than 16 bytes.
+
 ## 0.7.3 - 2022-10-19
 
 ### Changed
