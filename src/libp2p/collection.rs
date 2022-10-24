@@ -85,6 +85,9 @@ pub enum MultiStreamHandshakeKind {
     /// The connection is a WebRTC connection.
     ///
     /// See <https://github.com/libp2p/specs/pull/412> for details.
+    ///
+    /// The reading and writing side of substreams must never be closed. Substreams can only be
+    /// abruptly destroyed by either side.
     WebRtc {
         /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
         local_tls_certificate_multihash: Vec<u8>,

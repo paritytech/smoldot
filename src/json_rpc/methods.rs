@@ -460,7 +460,7 @@ define_methods! {
     // <https://github.com/paritytech/smoldot/issues/2456>.
     network_unstable_subscribeEvents() -> Cow<'a, str>,
     network_unstable_unsubscribeEvents(subscription: Cow<'a, str>) -> (),
-    chainHead_unstable_finalizedDatabase(max_size_bytes: Option<u64>) -> Cow<'a, str>,
+    chainHead_unstable_finalizedDatabase(#[rename = "maxSizeBytes"] max_size_bytes: Option<u64>) -> Cow<'a, str>,
 }
 
 define_methods! {
