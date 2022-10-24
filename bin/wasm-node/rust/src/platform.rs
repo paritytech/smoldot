@@ -166,7 +166,7 @@ impl smoldot_light::platform::Platform for Platform {
                         remote_tls_certificate_multihash: remote_tls_certificate_multihash.clone(),
                     })
                 }
-                ConnectionInner::Closed {
+                ConnectionInner::Reset {
                     message,
                     connection_handles_alive,
                 } => {
@@ -195,7 +195,7 @@ impl smoldot_light::platform::Platform for Platform {
                     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
                     match &mut connection.inner {
-                        ConnectionInner::Closed { .. } => return None,
+                        ConnectionInner::Reset { .. } => return None,
                         ConnectionInner::MultiStreamWebRtc {
                             opened_substreams_to_pick_up,
                             connection_handles_alive,
@@ -260,7 +260,7 @@ impl smoldot_light::platform::Platform for Platform {
             let mut lock = STATE.try_lock().unwrap();
             let stream = lock.streams.get_mut(stream_id).unwrap();
 
-            if !stream.messages_queue.is_empty() || stream.closed {
+            if !stream.messages_queue.is_empty() || stream.reset {
                 return future::ready(()).boxed();
             }
 
@@ -276,7 +276,7 @@ impl smoldot_light::platform::Platform for Platform {
         let mut lock = STATE.try_lock().unwrap();
         let stream = lock.streams.get_mut(stream_id).unwrap();
 
-        if stream.closed {
+        if stream.reset {
             return smoldot_light::platform::ReadBuffer::Reset;
         }
 
@@ -333,7 +333,7 @@ impl smoldot_light::platform::Platform for Platform {
         let mut lock = STATE.try_lock().unwrap();
         let stream = lock.streams.get_mut(&(*connection_id, *stream_id)).unwrap();
 
-        if stream.closed {
+        if stream.reset {
             return;
         }
 
@@ -361,7 +361,7 @@ impl Drop for StreamWrapper {
             ConnectionInner::NotOpen => unreachable!(),
             ConnectionInner::SingleStreamMsNoiseYamux => {
                 unsafe {
-                    bindings::connection_close(self.0 .0);
+                    bindings::reset_connection(self.0 .0);
                 }
 
                 debug_assert_eq!(self.0 .1, 0);
@@ -371,17 +371,17 @@ impl Drop for StreamWrapper {
                 connection_handles_alive,
                 ..
             } => {
-                unsafe { bindings::connection_stream_close(self.0 .0, self.0 .1) }
+                unsafe { bindings::connection_stream_reset(self.0 .0, self.0 .1) }
                 *connection_handles_alive -= 1;
                 let remove_connection = *connection_handles_alive == 0;
                 if remove_connection {
                     unsafe {
-                        bindings::connection_close(self.0 .0);
+                        bindings::reset_connection(self.0 .0);
                     }
                 }
                 remove_connection
             }
-            ConnectionInner::Closed {
+            ConnectionInner::Reset {
                 connection_handles_alive,
                 ..
             } => {
@@ -389,7 +389,7 @@ impl Drop for StreamWrapper {
                 let remove_connection = *connection_handles_alive == 0;
                 if remove_connection {
                     unsafe {
-                        bindings::connection_close(self.0 .0);
+                        bindings::reset_connection(self.0 .0);
                     }
                 }
                 remove_connection
@@ -417,7 +417,7 @@ impl Drop for ConnectionWrapper {
                 connection_handles_alive,
                 ..
             }
-            | ConnectionInner::Closed {
+            | ConnectionInner::Reset {
                 connection_handles_alive,
                 ..
             } => {
@@ -430,7 +430,7 @@ impl Drop for ConnectionWrapper {
             lock.connections.remove(&self.0).unwrap();
             if remove_connection {
                 unsafe {
-                    bindings::connection_close(self.0);
+                    bindings::reset_connection(self.0);
                 }
             }
         }
@@ -479,8 +479,8 @@ enum ConnectionInner {
         /// Multihash encoding of the TLS certificate used by the remote node at the DTLS layer.
         remote_tls_certificate_multihash: Vec<u8>,
     },
-    /// [`bindings::connection_closed`] has been called
-    Closed {
+    /// [`bindings::connection_reset`] has been called
+    Reset {
         /// Message given by the bindings to justify the closure.
         message: String,
         /// Number of objects (connections and streams) in the [`Platform`] API that reference
@@ -490,8 +490,8 @@ enum ConnectionInner {
 }
 
 struct Stream {
-    /// `true` if the sending and receiving sides of the stream have been closed.
-    closed: bool,
+    /// `true` if the sending and receiving sides of the stream have been reset.
+    reset: bool,
     /// List of messages received through [`bindings::stream_message`]. Must never contain
     /// empty messages.
     messages_queue: VecDeque<Box<[u8]>>,
@@ -523,7 +523,7 @@ pub(crate) fn connection_open_single_stream(connection_id: u32, handshake_ty: u3
     let _prev_value = lock.streams.insert(
         (connection_id, 0),
         Stream {
-            closed: false,
+            reset: false,
             messages_queue: VecDeque::with_capacity(8),
             something_happened: event_listener::Event::new(),
         },
@@ -601,14 +601,14 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: 
     let actual_stream_id = match connection.inner {
         ConnectionInner::MultiStreamWebRtc { .. } => stream_id,
         ConnectionInner::SingleStreamMsNoiseYamux => 0,
-        ConnectionInner::Closed { .. } | ConnectionInner::NotOpen => unreachable!(),
+        ConnectionInner::Reset { .. } | ConnectionInner::NotOpen => unreachable!(),
     };
 
     let stream = lock
         .streams
         .get_mut(&(connection_id, actual_stream_id))
         .unwrap();
-    debug_assert!(!stream.closed);
+    debug_assert!(!stream.reset);
 
     let ptr = usize::try_from(ptr).unwrap();
     let len = usize::try_from(len).unwrap();
@@ -641,7 +641,7 @@ pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbo
         let _prev_value = lock.streams.insert(
             (connection_id, stream_id),
             Stream {
-                closed: false,
+                reset: false,
                 messages_queue: VecDeque::with_capacity(8),
                 something_happened: event_listener::Event::new(),
             },
@@ -666,7 +666,7 @@ pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbo
     }
 }
 
-pub(crate) fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
+pub(crate) fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
@@ -677,10 +677,10 @@ pub(crate) fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
             connection_handles_alive,
             ..
         } => *connection_handles_alive,
-        ConnectionInner::Closed { .. } => unreachable!(),
+        ConnectionInner::Reset { .. } => unreachable!(),
     };
 
-    connection.inner = ConnectionInner::Closed {
+    connection.inner = ConnectionInner::Reset {
         connection_handles_alive,
         message: {
             let ptr = usize::try_from(ptr).unwrap();
@@ -697,16 +697,16 @@ pub(crate) fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
         .streams
         .range_mut((connection_id, u32::min_value())..=(connection_id, u32::max_value()))
     {
-        stream.closed = true;
+        stream.reset = true;
         stream.something_happened.notify(usize::max_value());
     }
 }
 
-pub(crate) fn stream_closed(connection_id: u32, stream_id: u32) {
+pub(crate) fn stream_reset(connection_id: u32, stream_id: u32) {
     // Note that, as documented, it is illegal to call this function on single-stream substreams.
     // We can thus assume that the `stream_id` is valid.
     let mut lock = STATE.try_lock().unwrap();
     let stream = lock.streams.get_mut(&(connection_id, stream_id)).unwrap();
-    stream.closed = true;
+    stream.reset = true;
     stream.something_happened.notify(usize::max_value());
 }
