@@ -261,13 +261,18 @@ export function start(options?: ClientOptions): Client {
       pc.onnegotiationneeded = async (_event) => {
           // Create a new offer and set it as local description.
           let sdpOffer = (await pc!.createOffer()).sdp!;
+          // We check that the locally-generated SDP offer has a data channel with the UDP
+          // protocol. If that isn't the case, the connection will likely fail.
+          if (sdpOffer.match(/^m=application(\s+)(\d+)(\s+)UDP\/DTLS\/SCTP(\s+)webrtc-datachannel$/m) === null) {
+            console.error("Local offer doesn't contain UDP data channel. WebRTC connections will likely fail. Please report this issue.");
+          }
           // According to the libp2p WebRTC spec, the ufrag and pwd are the same
           // randomly-generated string. We modify the local description to ensure that.
           const pwd = sdpOffer.match(/^a=ice-pwd:(.+)$/m);
           if (pwd != null) {
             sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:' + pwd[1]);
           } else {
-            console.error("Failed to set ufrag to pwd. WebRTC connections will likely fail. Please report this issues.");
+            console.error("Failed to set ufrag to pwd. WebRTC connections will likely fail. Please report this issue.");
           }
           await pc!.setLocalDescription({ type: 'offer', sdp: sdpOffer });
 
@@ -296,8 +301,7 @@ export function start(options?: ClientOptions): Client {
               "a=ice-lite" + "\n" +
               // A `m=` line describes a request to establish a certain protocol.
               // The protocol in this line (i.e. `TCP/DTLS/SCTP` or `UDP/DTLS/SCTP`) must always be
-              // the same as the one in the offer. We know that this is true because we tweak the
-              // offer to match the protocol.
+              // the same as the one in the offer. We know that this is true because checked above.
               // The `<fmt>` component must always be `webrtc-datachannel` for WebRTC.
               // The rest of the SDP payload adds attributes to this specific media stream.
               // RFCs: 8839, 8866, 8841
