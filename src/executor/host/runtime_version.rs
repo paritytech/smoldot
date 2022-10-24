@@ -276,6 +276,39 @@ impl<'a> CoreVersionApisRefIter<'a> {
         }
     }
 
+    /// Tries to find within this iterator the given API, and if found returns the version number.
+    ///
+    /// If multiple API versions are found, the highest one is returned.
+    ///
+    /// > **Note**: If you start iterating (for example by calling `next()`) then call this
+    /// >           function, the search will only be performed on the rest of the iterator,
+    /// >           which is typically not what you want. Preferably always call this function
+    /// >           on a fresh iterator.
+    pub fn find_version(&self, api: &str) -> Option<u32> {
+        self.find_versions([api])[0]
+    }
+
+    /// Similar to [`CoreVersionApisRefIter::find_version`], but allows passing multiple API names
+    /// at once. This is more optimized if multiple API names are to be queried.
+    pub fn find_versions<const N: usize>(&self, apis: [&str; N]) -> [Option<u32>; N] {
+        let hashed = core::array::from_fn::<_, N, _>(|n| hash_api_name(apis[n]));
+        let mut out = [None; N];
+
+        for api in self.clone() {
+            for (n, expected) in hashed.iter().enumerate() {
+                if *expected == api.name_hash {
+                    match out[n] {
+                        Some(ref mut v) if *v < api.version => *v = api.version,
+                        Some(_) => {}
+                        ref mut v @ None => *v = Some(api.version),
+                    }
+                }
+            }
+        }
+
+        out
+    }
+
     /// Returns `true` if this iterator contains the API with the given name and its version is in
     /// the provided range.
     ///

@@ -184,22 +184,16 @@ impl ChainInformationBuild {
             assert_ne!(header.number, 0);
         }
 
-        // TODO: also check versions?
-        let mut runtime_has_aura = false;
-        let mut runtime_has_babe = false;
-        let mut runtime_has_grandpa = false;
-        let aura_api_name = blake2_rfc::blake2b::blake2b(8, &[], b"AuraApi");
-        let babe_api_name = blake2_rfc::blake2b::blake2b(8, &[], b"BabeApi");
-        let grandpa_api_name = blake2_rfc::blake2b::blake2b(8, &[], b"GrandpaApi");
-        for api in config.runtime.runtime_version().decode().apis {
-            if api.name_hash == aura_api_name.as_bytes() {
-                runtime_has_aura = true;
-            } else if api.name_hash == babe_api_name.as_bytes() {
-                runtime_has_babe = true;
-            } else if api.name_hash == grandpa_api_name.as_bytes() {
-                runtime_has_grandpa = true;
-            }
-        }
+        // TODO: also check version numbers?
+        let apis_versions = config
+            .runtime
+            .runtime_version()
+            .decode()
+            .apis
+            .find_versions(["AuraApi", "BabeApi", "GrandpaApi"]);
+        let runtime_has_aura = apis_versions[0].is_some();
+        let runtime_has_babe = apis_versions[1].is_some();
+        let runtime_has_grandpa = apis_versions[2].is_some();
 
         let inner = ChainInformationBuildInner {
             finalized_block_header: config.finalized_block_header,
