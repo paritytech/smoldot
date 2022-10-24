@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- When opening a WebRTC connection, the ufrag and password of SDP requests are now properly set according to the WebRTC libp2p specification.
+- When opening a WebRTC connection, the ufrag and password of SDP requests are now properly set according to the WebRTC libp2p specification. ([#2924](https://github.com/paritytech/smoldot/pull/2924))
 
 ## 0.7.3 - 2022-10-19
 
