@@ -264,7 +264,7 @@ export function start(options?: ClientOptions): Client {
           // We check that the locally-generated SDP offer has a data channel with the UDP
           // protocol. If that isn't the case, the connection will likely fail.
           if (sdpOffer.match(/^m=application(\s+)(\d+)(\s+)UDP\/DTLS\/SCTP(\s+)webrtc-datachannel$/m) === null) {
-            console.error("UDP local offer doesn't contain UDP data channel. WebRTC connections will likely fail. Please report this issue.");
+            console.error("Local offer doesn't contain UDP data channel. WebRTC connections will likely fail. Please report this issue.");
           }
           // According to the libp2p WebRTC spec, the ufrag and pwd are the same
           // randomly-generated string. We modify the local description to ensure that.
