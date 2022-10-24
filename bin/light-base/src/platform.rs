@@ -179,6 +179,6 @@ pub enum ReadBuffer<'a> {
     /// type [`PlatformConnection::MultiStreamWebRtc`].
     Closed,
 
-    /// The stream has been abprutly closed by the remote.
+    /// The stream has been abruptly closed by the remote.
     Reset,
 }
