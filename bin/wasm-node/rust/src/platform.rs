@@ -270,25 +270,29 @@ impl smoldot_light::platform::Platform for Platform {
         something_happened.boxed()
     }
 
-    fn read_buffer(StreamWrapper(stream_id, read_buffer): &mut Self::Stream) -> Option<&[u8]> {
+    fn read_buffer(
+        StreamWrapper(stream_id, read_buffer): &mut Self::Stream,
+    ) -> smoldot_light::platform::ReadBuffer {
         let mut lock = STATE.try_lock().unwrap();
         let stream = lock.streams.get_mut(stream_id).unwrap();
 
         if stream.closed {
-            return None;
+            return smoldot_light::platform::ReadBuffer::Reset;
         }
 
         if read_buffer.buffer_first_offset < read_buffer.buffer.len() {
-            return Some(&read_buffer.buffer[read_buffer.buffer_first_offset..]);
+            return smoldot_light::platform::ReadBuffer::Open(
+                &read_buffer.buffer[read_buffer.buffer_first_offset..],
+            );
         }
 
         // Move the next buffer from `STATE` into `read_buffer`.
         if let Some(msg) = stream.messages_queue.pop_front() {
             read_buffer.buffer = msg;
             read_buffer.buffer_first_offset = 0;
-            Some(&read_buffer.buffer[..])
+            smoldot_light::platform::ReadBuffer::Open(&read_buffer.buffer[..])
         } else {
-            Some(&[])
+            smoldot_light::platform::ReadBuffer::Open(&[])
         }
     }
 
