@@ -172,7 +172,7 @@ pub(super) async fn connection_task<TPlat: Platform>(
             .await
         }
         either::Right((socket, task)) => {
-            multi_stream_connection_task::<TPlat>(
+            webrtc_multi_stream_connection_task::<TPlat>(
                 socket,
                 shared.clone(),
                 connection_id,
@@ -220,6 +220,8 @@ async fn single_stream_connection_task<TPlat: Platform>(
             };
             connection_task.inject_coordinator_message(message);
         }
+
+        // TODO: `TPlat::read_buffer` can return `None` if the connection has been abruptly closed, should we handle this and stop reading/writing? cc https://github.com/paritytech/smoldot/issues/2782
 
         // Perform a read-write. This updates the internal state of the connection task.
         let now = TPlat::now();
@@ -352,8 +354,13 @@ async fn single_stream_connection_task<TPlat: Platform>(
 }
 
 /// Asynchronous task managing a specific multi-stream connection after it's been open.
+///
+/// > **Note**: This function is specific to WebRTC in the sense that it checks whether the reading
+/// >           and writing sides of substreams never close, and adjusts the size of the write
+/// >           buffer to not go over the frame size limit of WebRTC. It can easily be made more
+/// >           general-purpose.
 // TODO: a lot of logging disappeared
-async fn multi_stream_connection_task<TPlat: Platform>(
+async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
     mut connection: TPlat::Connection,
     shared: Arc<Shared<TPlat>>,
     connection_id: service::ConnectionId,
@@ -382,7 +389,9 @@ async fn multi_stream_connection_task<TPlat: Platform>(
     // from this slice the data to send. Consequently, the write buffer is held locally. This is
     // suboptimal compared to writing to a write buffer provided by the platform, but it is easier
     // to implement it this way.
-    let mut write_buffer = vec![0; 16384]; // TODO: the write buffer must not exceed 16kiB due to the libp2p WebRTC spec; this should ideally be enforced through the connection task API
+    // The write buffer is limited to 16kiB, as this is the maximum amount of data a single
+    // WebRTC frame can have.
+    let mut write_buffer = vec![0; 16384];
 
     loop {
         // Start opening new outbound substreams, if needed.
@@ -429,14 +438,28 @@ async fn multi_stream_connection_task<TPlat: Platform>(
             loop {
                 let substream = &mut open_substreams[substream_id];
 
+                let incoming_buffer = match TPlat::read_buffer(substream) {
+                    Some(buf) => buf,
+                    None => {
+                        // In the case of WebRTC, `read_buffer` returns `None` only if the
+                        // substream has been reset by the remote. We inform the connection task,
+                        // and the substream is now considered dead.
+                        connection_task.reset_substream(&substream_id);
+                        open_substreams.remove(substream_id);
+                        break;
+                    }
+                };
+
                 let mut read_write = ReadWrite {
                     now: now.clone(),
-                    incoming_buffer: TPlat::read_buffer(substream),
-                    outgoing_buffer: Some((&mut write_buffer, &mut [])), // TODO: this should be None if a previous read_write() produced None
+                    incoming_buffer: Some(incoming_buffer),
+                    outgoing_buffer: Some((&mut write_buffer, &mut [])),
                     read_bytes: 0,
                     written_bytes: 0,
                     wake_up_after,
                 };
+
+                debug_assert!(read_write.outgoing_buffer.is_some());
 
                 let kill_substream =
                     connection_task.substream_read_write(&substream_id, &mut read_write);
@@ -455,8 +478,8 @@ async fn multi_stream_connection_task<TPlat: Platform>(
                 }
                 TPlat::advance_read_cursor(substream, read_bytes);
 
-                // If the `connection_task` requires this substream to be killed, we drop the `Stream`
-                // object.
+                // If the `connection_task` requires this substream to be killed, we drop the
+                // `Stream` object.
                 if kill_substream {
                     open_substreams.remove(substream_id);
                     break;
