@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The parameter of `chainHead_unstable_finalizedDatabase` has been renamed from `max_size_bytes` to `maxSizeBytes`.
+
 ## 0.7.3 - 2022-10-19
 
 ### Changed
