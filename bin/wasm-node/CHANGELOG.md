@@ -7,6 +7,10 @@
 - The `payment_queryInfo` JSON-RPC function now works with runtimes that have defined the type of `Balance` to be less than 16 bytes. ([#2914](https://github.com/paritytech/smoldot/pull/2914))
 - The parameter of `chainHead_unstable_finalizedDatabase` has been renamed from `max_size_bytes` to `maxSizeBytes`. ([#2923](https://github.com/paritytech/smoldot/pull/2923))
 
+### Fixed
+
+- Fix errors showing in the browser's console about WebSockets being already in the CLOSED or CLOSED state.
+
 ## 0.7.3 - 2022-10-19
 
 ### Changed
