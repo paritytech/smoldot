@@ -358,6 +358,7 @@ impl ServicePrototype {
                     Default::default(),
                 ),
             }),
+            printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
         });
 
         // Spawns the background task that actually runs the logic of that JSON-RPC service.
@@ -476,6 +477,10 @@ struct Background<TPlat: Platform> {
     next_subscription_id: atomic::AtomicU64,
 
     subscriptions: Mutex<Subscriptions>,
+
+    /// If `true`, we have already printed a warning about usage of the legacy JSON-RPC API. This
+    /// flag prevents printing this message multiple times.
+    printed_legacy_json_rpc_warning: atomic::AtomicBool,
 }
 
 struct Subscriptions {
@@ -721,6 +726,109 @@ impl<TPlat: Platform> Background<TPlat> {
                 unreachable!()
             }
         };
+
+        // Print a warning for legacy JSON-RPC functions.
+        match call {
+            methods::MethodCall::account_nextIndex { .. }
+            | methods::MethodCall::author_hasKey { .. }
+            | methods::MethodCall::author_hasSessionKeys { .. }
+            | methods::MethodCall::author_insertKey { .. }
+            | methods::MethodCall::author_pendingExtrinsics { .. }
+            | methods::MethodCall::author_removeExtrinsic { .. }
+            | methods::MethodCall::author_rotateKeys { .. }
+            | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
+            | methods::MethodCall::author_submitExtrinsic { .. }
+            | methods::MethodCall::author_unwatchExtrinsic { .. }
+            | methods::MethodCall::babe_epochAuthorship { .. }
+            | methods::MethodCall::chain_getBlock { .. }
+            | methods::MethodCall::chain_getBlockHash { .. }
+            | methods::MethodCall::chain_getFinalizedHead { .. }
+            | methods::MethodCall::chain_getHeader { .. }
+            | methods::MethodCall::chain_subscribeAllHeads { .. }
+            | methods::MethodCall::chain_subscribeFinalizedHeads { .. }
+            | methods::MethodCall::chain_subscribeNewHeads { .. }
+            | methods::MethodCall::chain_unsubscribeAllHeads { .. }
+            | methods::MethodCall::chain_unsubscribeFinalizedHeads { .. }
+            | methods::MethodCall::chain_unsubscribeNewHeads { .. }
+            | methods::MethodCall::childstate_getKeys { .. }
+            | methods::MethodCall::childstate_getStorage { .. }
+            | methods::MethodCall::childstate_getStorageHash { .. }
+            | methods::MethodCall::childstate_getStorageSize { .. }
+            | methods::MethodCall::grandpa_roundState { .. }
+            | methods::MethodCall::offchain_localStorageGet { .. }
+            | methods::MethodCall::offchain_localStorageSet { .. }
+            | methods::MethodCall::payment_queryInfo { .. }
+            | methods::MethodCall::state_call { .. }
+            | methods::MethodCall::state_getKeys { .. }
+            | methods::MethodCall::state_getKeysPaged { .. }
+            | methods::MethodCall::state_getMetadata { .. }
+            | methods::MethodCall::state_getPairs { .. }
+            | methods::MethodCall::state_getReadProof { .. }
+            | methods::MethodCall::state_getRuntimeVersion { .. }
+            | methods::MethodCall::state_getStorage { .. }
+            | methods::MethodCall::state_getStorageHash { .. }
+            | methods::MethodCall::state_getStorageSize { .. }
+            | methods::MethodCall::state_queryStorage { .. }
+            | methods::MethodCall::state_queryStorageAt { .. }
+            | methods::MethodCall::state_subscribeRuntimeVersion { .. }
+            | methods::MethodCall::state_subscribeStorage { .. }
+            | methods::MethodCall::state_unsubscribeRuntimeVersion { .. }
+            | methods::MethodCall::state_unsubscribeStorage { .. }
+            | methods::MethodCall::system_accountNextIndex { .. }
+            | methods::MethodCall::system_addReservedPeer { .. }
+            | methods::MethodCall::system_chain { .. }
+            | methods::MethodCall::system_chainType { .. }
+            | methods::MethodCall::system_dryRun { .. }
+            | methods::MethodCall::system_health { .. }
+            | methods::MethodCall::system_localListenAddresses { .. }
+            | methods::MethodCall::system_localPeerId { .. }
+            | methods::MethodCall::system_name { .. }
+            | methods::MethodCall::system_networkState { .. }
+            | methods::MethodCall::system_nodeRoles { .. }
+            | methods::MethodCall::system_peers { .. }
+            | methods::MethodCall::system_properties { .. }
+            | methods::MethodCall::system_removeReservedPeer { .. }
+            | methods::MethodCall::system_version { .. } => {
+                if !self
+                    .printed_legacy_json_rpc_warning
+                    .swap(true, atomic::Ordering::Relaxed)
+                {
+                    log::warn!(
+                        target: &self.log_target,
+                        "The JSON-RPC client has just called a JSON-RPC function from the legacy \
+                        JSON-RPC API ({}). Legacy JSON-RPC functions have loose semantics and \
+                        cannot be properly implemented on a light client. You are encouraged to \
+                        use the new JSON-RPC API \
+                        <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
+                        legacy JSON-RPC API functions will be deprecated and removed in the \
+                        distant future.",
+                        call.name()
+                    )
+                }
+            }
+            methods::MethodCall::chainHead_unstable_body { .. }
+            | methods::MethodCall::chainHead_unstable_call { .. }
+            | methods::MethodCall::chainHead_unstable_follow { .. }
+            | methods::MethodCall::chainHead_unstable_genesisHash { .. }
+            | methods::MethodCall::chainHead_unstable_header { .. }
+            | methods::MethodCall::chainHead_unstable_stopBody { .. }
+            | methods::MethodCall::chainHead_unstable_stopCall { .. }
+            | methods::MethodCall::chainHead_unstable_stopStorage { .. }
+            | methods::MethodCall::chainHead_unstable_storage { .. }
+            | methods::MethodCall::chainHead_unstable_unfollow { .. }
+            | methods::MethodCall::chainHead_unstable_unpin { .. }
+            | methods::MethodCall::chainSpec_unstable_chainName { .. }
+            | methods::MethodCall::chainSpec_unstable_genesisHash { .. }
+            | methods::MethodCall::chainSpec_unstable_properties { .. }
+            | methods::MethodCall::rpc_methods { .. }
+            | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
+            | methods::MethodCall::sudo_unstable_version { .. }
+            | methods::MethodCall::transaction_unstable_submitAndWatch { .. }
+            | methods::MethodCall::transaction_unstable_unwatch { .. }
+            | methods::MethodCall::network_unstable_subscribeEvents { .. }
+            | methods::MethodCall::network_unstable_unsubscribeEvents { .. }
+            | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
+        }
 
         // Each call is handled in a separate method.
         match call {
