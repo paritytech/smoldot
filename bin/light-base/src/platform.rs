@@ -172,7 +172,7 @@ pub struct ConnectError {
 pub enum ReadBuffer<'a> {
     /// Reading side of the stream is fully open. Contains the data waiting to be processed.
     Open(&'a [u8]),
-    
+
     /// The reading side of the stream has been closed by the remote.
     ///
     /// Note that this is forbidden for connections of
