@@ -6,6 +6,10 @@
 
 - The parameter of `chainHead_unstable_finalizedDatabase` has been renamed from `max_size_bytes` to `maxSizeBytes`. ([#2923](https://github.com/paritytech/smoldot/pull/2923))
 
+### Fixed
+
+- When opening a WebRTC connection, the ufrag and password of SDP requests are now properly set according to the WebRTC libp2p specification.
+
 ## 0.7.3 - 2022-10-19
 
 ### Changed
