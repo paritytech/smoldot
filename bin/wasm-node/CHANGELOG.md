@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The parameter of `chainHead_unstable_finalizedDatabase` has been renamed from `max_size_bytes` to `maxSizeBytes`. ([#2923](https://github.com/paritytech/smoldot/pull/2923))
+
 ## 0.7.3 - 2022-10-19
 
 ### Changed
