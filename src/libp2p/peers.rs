@@ -2129,6 +2129,7 @@ pub enum InboundError {
     Connection(collection::InboundError),
     /// Refused a notifications substream because we already have an existing substream of that
     /// protocol.
+    #[display(fmt = "Refused duplicate notifications substream")]
     DuplicateNotificationsSubstream {
         /// Notifications protocol the substream is about.
         notifications_protocol_index: usize,
