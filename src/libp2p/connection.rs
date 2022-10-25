@@ -61,15 +61,16 @@
 //! > **Note**: This module only contains *no_std*-friendly code, and creating TCP connections
 //! >           isn't handled by it.
 //!
-//! After a TCP connection is established, use [`handshake::HealthyHandshake::noise_yamux`] to
-//! initialize the state machine that needs to be maintained in parallel of the connection. The
-//! data sent and received over the socket must respectively be obtained or injected using
-//! [`handshake::HealthyHandshake::read_write`]. See the [`handshake`] module documentation for
-//! more details.
+//! After a TCP connection is established, use
+//! [`single_stream_handshake::HealthyHandshake::noise_yamux`] to initialize the state machine that
+//! needs to be maintained in parallel of the connection. The data sent and received over the
+//! socket must respectively be obtained or injected using
+//! [`single_stream_handshake::HealthyHandshake::read_write`]. See the [`single_stream_handshake`]
+//! module documentation for more details.
 //!
-//! Keep in mind that the [`handshake`] module doesn't provide any timeout. Users are strongly
-//! encouraged to add one, in order to detect situations where the remote is, intentionally or
-//! not, unresponsive.
+//! Keep in mind that the [`single_stream_handshake`] module doesn't provide any timeout. Users
+//! are strongly encouraged to add one, in order to detect situations where the remote is,
+//! intentionally or not, unresponsive.
 //!
 //! After the handshake is successful, use [`established::ConnectionPrototype::into_connection`]
 //! to obtain an [`established::SingleStream`]. Similar to the handshake, use
