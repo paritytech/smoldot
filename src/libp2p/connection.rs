@@ -79,7 +79,7 @@
 pub use noise::{NoiseKey, UnsignedNoiseKey};
 
 pub mod established;
-pub mod single_stream_handshake;
 pub mod multistream_select;
 pub mod noise;
+pub mod single_stream_handshake;
 pub mod yamux;
