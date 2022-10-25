@@ -26,7 +26,7 @@
 //! >           for more information.
 //!
 //! Once a TCP connection has been established, the *handshake* phase starts. This handshake
-//! is described in details in the documentation [`handshake`] module.
+//! is described in details in the documentation [`single_stream_handshake`] module.
 //!
 //! The handshake consists in negotiating with the remote an encryption layer, thanks to which all
 //! communications are encrypted, and a multiplexing layer, thanks to which the stream of data can
