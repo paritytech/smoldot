@@ -63,7 +63,7 @@
 //!
 //! After a TCP connection is established, use [`handshake::HealthyHandshake::noise_yamux`] to
 //! initialize the state machine that needs to be maintained in parallel of the connection. The
-//! data send and received over the socket must respectively be obtained or injected using
+//! data sent and received over the socket must respectively be obtained or injected using
 //! [`handshake::HealthyHandshake::read_write`]. See the [`handshake`] module documentation for
 //! more details.
 //!
