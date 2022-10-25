@@ -49,8 +49,8 @@ fn perform_handshake(
     assert_ne!(alice_to_bob_buffer_size, 0);
     assert_ne!(bob_to_alice_buffer_size, 0);
 
-    let mut alice = handshake::Handshake::new(true);
-    let mut bob = handshake::Handshake::new(false);
+    let mut alice = handshake::Handshake::noise_yamux(true);
+    let mut bob = handshake::Handshake::noise_yamux(false);
 
     let alice_key = NoiseKey::new(&rand::random());
     let bob_key = NoiseKey::new(&rand::random());

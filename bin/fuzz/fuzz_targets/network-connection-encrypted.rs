@@ -47,8 +47,8 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         is_initiator
     };
 
-    let mut local = handshake::Handshake::new(local_is_initiator);
-    let mut remote = handshake::Handshake::new(!local_is_initiator);
+    let mut local = handshake::Handshake::noise_yamux(local_is_initiator);
+    let mut remote = handshake::Handshake::noise_yamux(!local_is_initiator);
 
     // Note that the noise keys and randomness are constant rather than being derived from the
     // fuzzing data. This is because we're not here to fuzz the cryptographic code (which we

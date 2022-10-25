@@ -151,7 +151,7 @@ where
 
         SingleStreamConnectionTask {
             connection: SingleStreamConnectionTaskInner::Handshake {
-                handshake: handshake::HealthyHandshake::new(is_initiator),
+                handshake: handshake::HealthyHandshake::noise_yamux(is_initiator),
                 randomness_seed,
                 timeout: handshake_timeout,
                 noise_key,
