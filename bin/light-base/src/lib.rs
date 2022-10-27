@@ -369,8 +369,16 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 ),
             ) {
                 // Use the database if it contains a more recent block than the chain spec checkpoint.
-                (Ok(Ok(genesis_ci)), checkpoint, Ok((database, checkpoint_nodes)))
-                    if checkpoint
+                (
+                    Ok(Ok(genesis_ci)),
+                    checkpoint,
+                    Ok((genesis_hash, database, checkpoint_nodes)),
+                ) if genesis_hash
+                    == genesis_ci
+                        .as_ref()
+                        .finalized_block_header
+                        .hash(chain_spec.block_number_bytes().into())
+                    && checkpoint
                         .as_ref()
                         .and_then(|r| r.as_ref().ok())
                         .map_or(true, |cp| {
@@ -386,7 +394,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 (
                     Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
                     checkpoint,
-                    Ok((database, checkpoint_nodes)),
+                    Ok((database_genesis_hash, database, checkpoint_nodes)),
                 ) if checkpoint
                     .as_ref()
                     .and_then(|r| r.as_ref().ok())
@@ -403,7 +411,20 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                         digest: header::DigestRef::empty().into(),
                     };
 
-                    (database, genesis_header, checkpoint_nodes)
+                    if database_genesis_hash
+                        == genesis_header.hash(chain_spec.block_number_bytes().into())
+                    {
+                        (database, genesis_header, checkpoint_nodes)
+                    } else if let Some(Ok(checkpoint)) = checkpoint {
+                        // Database is incorrect.
+                        (checkpoint, genesis_header, checkpoint_nodes)
+                    } else {
+                        // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
+                        return Err(
+                            "Either a checkpoint or the genesis storage must be provided"
+                                .to_string(),
+                        );
+                    }
                 }
 
                 (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
@@ -1115,11 +1136,13 @@ async fn start_services<TPlat: platform::Platform>(
 async fn encode_database<TPlat: platform::Platform>(
     network_service: &network_service::NetworkService<TPlat>,
     sync_service: &sync_service::SyncService<TPlat>,
+    genesis_block_hash: &[u8; 32],
     block_number_bytes: usize,
     max_size: usize,
 ) -> String {
     // Craft the structure containing all the data that we would like to include.
     let mut database_draft = SerdeDatabase {
+        genesis_hash: hex::encode(genesis_block_hash),
         chain: match sync_service.serialize_chain_information().await {
             Some(ci) => {
                 let encoded = finalized_serialize::encode_chain(&ci, block_number_bytes);
@@ -1188,12 +1211,19 @@ fn decode_database(
     block_number_bytes: usize,
 ) -> Result<
     (
+        [u8; 32],
         chain::chain_information::ValidChainInformation,
         Vec<(PeerId, Vec<multiaddr::Multiaddr>)>,
     ),
     (),
 > {
     let decoded: SerdeDatabase = serde_json::from_str(encoded).map_err(|_| ())?;
+
+    let genesis_hash = if decoded.genesis_hash.len() == 64 {
+        <[u8; 32]>::try_from(hex::decode(&decoded.genesis_hash).map_err(|_| ())?).unwrap()
+    } else {
+        return Err(());
+    };
 
     let (chain, _) = finalized_serialize::decode_chain(
         &serde_json::to_string(&decoded.chain).unwrap(),
@@ -1216,11 +1246,14 @@ fn decode_database(
         })
         .collect::<Vec<_>>();
 
-    Ok((chain, nodes))
+    Ok((genesis_hash, chain, nodes))
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SerdeDatabase {
+    /// Hexadecimal-encoded hash of the genesis block header. Has no `0x` prefix.
+    #[serde(rename = "genesisHash")]
+    genesis_hash: String,
     chain: Box<serde_json::value::RawValue>,
     nodes: hashbrown::HashMap<String, Vec<String>, fnv::FnvBuildHasher>,
 }

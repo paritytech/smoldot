@@ -18,7 +18,7 @@
 #![cfg(feature = "std")]
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
-use super::{ConnectError, Platform, PlatformConnection, PlatformSubstreamDirection};
+use super::{ConnectError, Platform, PlatformConnection, PlatformSubstreamDirection, ReadBuffer};
 
 use alloc::{collections::VecDeque, sync::Arc};
 use core::{pin::Pin, str, task::Poll, time::Duration};
@@ -286,9 +286,10 @@ impl Platform for AsyncStdTcpWebSocket {
         }))
     }
 
-    fn read_buffer(stream: &mut Self::Stream) -> Option<&[u8]> {
+    fn read_buffer(stream: &mut Self::Stream) -> ReadBuffer {
         if stream.read_buffer.is_none() {
-            return None;
+            // TODO: the implementation doesn't let us differentiate between Closed and Reset
+            return ReadBuffer::Reset;
         }
 
         let mut lock = stream.read_data_rx.lock();
@@ -297,12 +298,12 @@ impl Platform for AsyncStdTcpWebSocket {
                 Some(b) => stream.read_buffer.as_mut().unwrap().extend(b),
                 None => {
                     stream.read_buffer = None;
-                    return None;
+                    return ReadBuffer::Reset;
                 }
             }
         }
 
-        Some(stream.read_buffer.as_ref().unwrap())
+        ReadBuffer::Open(stream.read_buffer.as_ref().unwrap())
     }
 
     fn advance_read_cursor(stream: &mut Self::Stream, bytes: usize) {

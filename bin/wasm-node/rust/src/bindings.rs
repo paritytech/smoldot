@@ -173,11 +173,11 @@ extern "C" {
     ///
     /// - `Opening` (initial state)
     /// - `Open`
-    /// - `Closed`
+    /// - `Reset`
     ///
-    /// When in the `Opening` or `Open` state, the connection can transition to the `Closed` state
+    /// When in the `Opening` or `Open` state, the connection can transition to the `Reset` state
     /// if the remote closes the connection or refuses the connection altogether. When that
-    /// happens, [`connection_closed`] must be called. Once in the `Closed` state, the connection
+    /// happens, [`connection_reset`] must be called. Once in the `Reset` state, the connection
     /// cannot transition back to another state.
     ///
     /// Initially in the `Opening` state, the connection can transition to the `Open` state if the
@@ -187,11 +187,11 @@ extern "C" {
     /// There exists two kind of connections: single-stream and multi-stream. Single-stream
     /// connections are assumed to have a single stream open at all time and the encryption and
     /// multiplexing are handled internally by smoldot. Multi-stream connections open and close
-    /// streams over time using [`connection_stream_opened`] and [`stream_closed`], and the
+    /// streams over time using [`connection_stream_opened`] and [`stream_reset`], and the
     /// encryption and multiplexing are handled by the user of these bindings.
     pub fn connection_new(id: u32, addr_ptr: u32, addr_len: u32, error_ptr_ptr: u32) -> u32;
 
-    /// Close a connection previously initialized with [`connection_new`].
+    /// Abruptly close a connection previously initialized with [`connection_new`].
     ///
     /// This destroys the identifier passed as parameter. This identifier must never be passed
     /// through the FFI boundary, unless the same identifier is later allocated again with
@@ -202,7 +202,7 @@ extern "C" {
     ///
     /// > **Note**: In JavaScript, remember to unregister event handlers before calling for
     /// >           example `WebSocket.close()`.
-    pub fn connection_close(id: u32);
+    pub fn reset_connection(id: u32);
 
     /// Queues a new outbound substream opening. The [`connection_stream_opened`] function must
     /// later be called when the substream has been successfully opened.
@@ -211,12 +211,12 @@ extern "C" {
     /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
     pub fn connection_stream_open(connection_id: u32);
 
-    /// Closes an existing substream of a multi-stream connection. The substream must currently
-    /// be in the `Open` state.
+    /// Abruptly closes an existing substream of a multi-stream connection. The substream must
+    /// currently be in the `Open` state.
     ///
     /// This function will only be called for multi-stream connections. The connection must
     /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
-    pub fn connection_stream_close(connection_id: u32, stream_id: u32);
+    pub fn connection_stream_reset(connection_id: u32, stream_id: u32);
 
     /// Queues data on the given stream. The data is found in the memory of the WebAssembly
     /// virtual machine, at the given pointer. The data must be sent as a binary frame.
@@ -535,7 +535,7 @@ pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, o
     crate::platform::connection_stream_opened(connection_id, stream_id, outbound)
 }
 
-/// Can be called at any point by the JavaScript code if the connection switches to the `Closed`
+/// Can be called at any point by the JavaScript code if the connection switches to the `Reset`
 /// state.
 ///
 /// Must only be called once per connection object.
@@ -545,11 +545,11 @@ pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, o
 ///
 /// See also [`connection_new`].
 #[no_mangle]
-pub extern "C" fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
-    crate::platform::connection_closed(connection_id, ptr, len)
+pub extern "C" fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
+    crate::platform::connection_reset(connection_id, ptr, len)
 }
 
-/// Can be called at any point by the JavaScript code if the stream switches to the `Closed`
+/// Can be called at any point by the JavaScript code if the stream switches to the `Reset`
 /// state.
 ///
 /// Must only be called once per stream.
@@ -560,6 +560,6 @@ pub extern "C" fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
 ///
 /// See also [`connection_open_multi_stream`].
 #[no_mangle]
-pub extern "C" fn stream_closed(connection_id: u32, stream_id: u32) {
-    crate::platform::stream_closed(connection_id, stream_id)
+pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32) {
+    crate::platform::stream_reset(connection_id, stream_id)
 }
