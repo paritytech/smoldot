@@ -108,14 +108,14 @@ export function start(options?: ClientOptions): Client {
       };
       connection.onclose = (event) => {
           const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
-          config.onConnectionClose(message);
+          config.onConnectionReset(message);
       };
       connection.onmessage = (msg) => {
           config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
       };
 
       return {
-        close: (): void => {
+        reset: (): void => {
             connection.onopen = null;
             connection.onclose = null;
             connection.onmessage = null;
@@ -167,11 +167,11 @@ export function start(options?: ClientOptions): Client {
       };
 
       dataChannel.onerror = (_error) => {
-          config.onStreamClose(dataChannelId);
+          config.onStreamReset(dataChannelId);
       };
 
       dataChannel.onclose = () => {
-          config.onStreamClose(dataChannelId);
+          config.onStreamReset(dataChannelId);
       };
 
       dataChannel.onmessage = (m) => {
@@ -226,7 +226,7 @@ export function start(options?: ClientOptions): Client {
       if (localTlsCertificateHex === undefined) {
         // Because we've already returned from the `connect` function at this point, we pretend
         // that the connection has failed to open.
-        config.onConnectionClose('Failed to obtain the browser certificate fingerprint');
+        config.onConnectionReset('Failed to obtain the browser certificate fingerprint');
         return;
       }
       const localTlsCertificateMultihash = new Uint8Array(34);
@@ -240,7 +240,7 @@ export function start(options?: ClientOptions): Client {
       // open.
       pc.onconnectionstatechange = (_event) => {
         if (pc!.connectionState == "closed" || pc!.connectionState == "disconnected" || pc!.connectionState == "failed") {
-          config.onConnectionClose("WebRTC state transitioned to " + pc!.connectionState);
+          config.onConnectionReset("WebRTC state transitioned to " + pc!.connectionState);
 
           pc!.onconnectionstatechange = null;
           pc!.onnegotiationneeded = null;
@@ -361,7 +361,7 @@ export function start(options?: ClientOptions): Client {
     });
 
     return {
-      close: (streamId: number | undefined): void => {
+      reset: (streamId: number | undefined): void => {
         // If `streamId` is undefined, then the whole connection must be destroyed.
         if (streamId === undefined) {
           // The `RTCPeerConnection` is created at the same time as we report the connection as

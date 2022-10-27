@@ -20,7 +20,7 @@
 use smoldot::libp2p::{
     connection::{
         established::{Config, ConfigRequestResponse, ConfigRequestResponseIn, Event},
-        handshake, noise,
+        noise, single_stream_handshake,
     },
     read_write::ReadWrite,
 };
@@ -47,8 +47,8 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         is_initiator
     };
 
-    let mut local = handshake::Handshake::new(local_is_initiator);
-    let mut remote = handshake::Handshake::new(!local_is_initiator);
+    let mut local = single_stream_handshake::Handshake::noise_yamux(local_is_initiator);
+    let mut remote = single_stream_handshake::Handshake::noise_yamux(!local_is_initiator);
 
     // Note that the noise keys and randomness are constant rather than being derived from the
     // fuzzing data. This is because we're not here to fuzz the cryptographic code (which we
@@ -66,16 +66,16 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     while !matches!(
         (&local, &remote),
         (
-            handshake::Handshake::Success { .. },
-            handshake::Handshake::Success { .. }
+            single_stream_handshake::Handshake::Success { .. },
+            single_stream_handshake::Handshake::Success { .. }
         )
     ) {
         match local {
-            handshake::Handshake::Success { .. } => {}
-            handshake::Handshake::NoiseKeyRequired(key_req) => {
+            single_stream_handshake::Handshake::Success { .. } => {}
+            single_stream_handshake::Handshake::NoiseKeyRequired(key_req) => {
                 local = key_req.resume(&local_key).into()
             }
-            handshake::Handshake::Healthy(nego) => {
+            single_stream_handshake::Handshake::Healthy(nego) => {
                 let local_to_remote_buffer_len = local_to_remote_buffer.len();
                 if local_to_remote_buffer_len < local_to_remote_buffer.capacity() {
                     let cap = local_to_remote_buffer.capacity();
@@ -103,11 +103,11 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         }
 
         match remote {
-            handshake::Handshake::Success { .. } => {}
-            handshake::Handshake::NoiseKeyRequired(key_req) => {
+            single_stream_handshake::Handshake::Success { .. } => {}
+            single_stream_handshake::Handshake::NoiseKeyRequired(key_req) => {
                 remote = key_req.resume(&remote_key).into()
             }
-            handshake::Handshake::Healthy(nego) => {
+            single_stream_handshake::Handshake::Healthy(nego) => {
                 let remote_to_local_buffer_len = remote_to_local_buffer.len();
                 if remote_to_local_buffer_len < remote_to_local_buffer.capacity() {
                     let cap = remote_to_local_buffer.capacity();
@@ -138,7 +138,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // Handshake successful.
     // Turn `local` and `remote` into state machines corresponding to the established connection.
     let mut local = match local {
-        handshake::Handshake::Success { connection, .. } => connection
+        single_stream_handshake::Handshake::Success { connection, .. } => connection
             .into_connection::<_, (), ()>(Config {
                 first_out_ping: Duration::new(60, 0),
                 max_inbound_substreams: 10,
@@ -157,7 +157,9 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         _ => unreachable!(),
     };
     let mut remote = match remote {
-        handshake::Handshake::Success { connection, .. } => connection.into_noise_state_machine(),
+        single_stream_handshake::Handshake::Success { connection, .. } => {
+            connection.into_noise_state_machine()
+        }
         _ => unreachable!(),
     };
 

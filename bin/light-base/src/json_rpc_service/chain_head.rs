@@ -1441,6 +1441,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let response = super::super::encode_database(
             &self.network_service.0,
             &self.sync_service,
+            &self.genesis_block_hash,
             self.sync_service.block_number_bytes(),
             usize::try_from(max_size_bytes.unwrap_or(u64::max_value()))
                 .unwrap_or(usize::max_value()),
