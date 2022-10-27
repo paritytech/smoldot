@@ -25,8 +25,8 @@ fn handshake_basic_works() {
         let key1 = NoiseKey::new(&rand::random());
         let key2 = NoiseKey::new(&rand::random());
 
-        let mut handshake1 = Handshake::new(true);
-        let mut handshake2 = Handshake::new(false);
+        let mut handshake1 = Handshake::noise_yamux(true);
+        let mut handshake2 = Handshake::noise_yamux(false);
 
         let mut buf_1_to_2 = Vec::new();
         let mut buf_2_to_1 = Vec::new();

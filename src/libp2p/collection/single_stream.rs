@@ -19,7 +19,7 @@ use super::{
     super::{
         connection::{
             established::{self, ConfigRequestResponse},
-            handshake, NoiseKey,
+            single_stream_handshake, NoiseKey,
         },
         read_write::ReadWrite,
     },
@@ -49,7 +49,7 @@ pub struct SingleStreamConnectionTask<TNow> {
 enum SingleStreamConnectionTaskInner<TNow> {
     /// Connection is still in its handshake phase.
     Handshake {
-        handshake: handshake::HealthyHandshake,
+        handshake: single_stream_handshake::HealthyHandshake,
 
         /// Seed that will be used to initialize randomness when building the
         /// [`established::SingleStream`].
@@ -151,7 +151,7 @@ where
 
         SingleStreamConnectionTask {
             connection: SingleStreamConnectionTaskInner::Handshake {
-                handshake: handshake::HealthyHandshake::new(is_initiator),
+                handshake: single_stream_handshake::HealthyHandshake::noise_yamux(is_initiator),
                 randomness_seed,
                 timeout: handshake_timeout,
                 noise_key,
@@ -736,7 +736,7 @@ where
                     };
 
                     match result {
-                        handshake::Handshake::Healthy(updated_handshake)
+                        single_stream_handshake::Handshake::Healthy(updated_handshake)
                             if (read_before, written_before)
                                 == (read_write.read_bytes, read_write.written_bytes) =>
                         {
@@ -752,10 +752,10 @@ where
                             };
                             break;
                         }
-                        handshake::Handshake::Healthy(updated_handshake) => {
+                        single_stream_handshake::Handshake::Healthy(updated_handshake) => {
                             handshake = updated_handshake;
                         }
-                        handshake::Handshake::Success {
+                        single_stream_handshake::Handshake::Success {
                             remote_peer_id,
                             connection,
                         } => {
@@ -796,7 +796,7 @@ where
                             };
                             break;
                         }
-                        handshake::Handshake::NoiseKeyRequired(key) => {
+                        single_stream_handshake::Handshake::NoiseKeyRequired(key) => {
                             handshake = key.resume(&noise_key);
                         }
                     }
