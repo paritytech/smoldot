@@ -236,6 +236,17 @@ export function start(options?: ClientOptions): Client {
           // need to report that the connection has failed to open.
           killAllJs();
           config.onConnectionReset("handshake data channel failed to open" + error ? " " + error.toString() : "");
+        } else if (handshakeDataChannel === dataChannel) {
+          // The handshake data channel has been closed before we reported it to smoldot. This
+          // isn't really a problem. We just update the state and continue running. If smoldot
+          // requests a substream, another one will be opened. It could be a valid implementation
+          // to also just kill the entire connection, however doing so is a bit too intrusive and
+          // punches through abstraction layers.
+          handshakeDataChannel.onopen = null;
+          handshakeDataChannel.onerror = null;
+          handshakeDataChannel.onclose = null;
+          handshakeDataChannel.onmessage = null;
+          handshakeDataChannel = undefined;
         } else if (!isOpen) {
           // Substream wasn't opened yet and thus has failed to open. The API has no mechanism to
           // report substream openings failures. We could try opening it again, but given that
