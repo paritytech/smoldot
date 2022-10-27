@@ -460,8 +460,8 @@ export function start(options?: ClientOptions): Client {
         // As explained above, we open a data channel ahead of time. If this data channel is still
         // there, we report it.
         if (handshakeDataChannel) {
-          // Use `setTimeout` because calling callbacks within callbacks is error-prone.
-          setTimeout(() => {
+          // Do this asynchronously because calling callbacks within callbacks is error-prone.
+          (async () => {
             // We need to check again if `handshakeDataChannel` is still defined, as the
             // connection might have been closed.
             if (handshakeDataChannel) {
@@ -469,7 +469,7 @@ export function start(options?: ClientOptions): Client {
               dataChannels.set(handshakeDataChannel.id!, handshakeDataChannel)
               handshakeDataChannel = undefined
             }
-          }, 1)
+          })()
         } else {
           // Note that the label passed to `createDataChannel` is required to be empty as per the
           // libp2p WebRTC specification.
