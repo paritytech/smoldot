@@ -12,6 +12,7 @@
 
 - Fix panic on Deno when a WebSocket connection abruptly closes. ([#2939](https://github.com/paritytech/smoldot/pull/2939))
 - Fix errors showing in the browser's console about WebSockets being already in the CLOSING or CLOSED state. ([#2925](https://github.com/paritytech/smoldot/pull/2925))
+- No longer panic when a WebRTC connection fails to open due to the browser calling callbacks in an unexpected order. ([#2936](https://github.com/paritytech/smoldot/pull/2936))
 
 ## 0.7.3 - 2022-10-19
 
