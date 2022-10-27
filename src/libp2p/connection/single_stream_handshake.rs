@@ -30,7 +30,6 @@
 //! TCP handshake), depending on the strategy used for the multistream-select protocol.
 
 // TODO: finish commenting on the number of round trips
-// TODO: this module's name ("handshake") is a bit vague considering that there are multiple different handshakes based on the protocol
 
 use super::{
     super::peer_id::PeerId,
@@ -64,9 +63,9 @@ pub enum Handshake {
 }
 
 impl Handshake {
-    /// Shortcut for [`HealthyHandshake::new`] wrapped in a [`Handshake`].
-    pub fn new(is_initiator: bool) -> Self {
-        HealthyHandshake::new(is_initiator).into()
+    /// Shortcut for [`HealthyHandshake::noise_yamux`] wrapped in a [`Handshake`].
+    pub fn noise_yamux(is_initiator: bool) -> Self {
+        HealthyHandshake::noise_yamux(is_initiator).into()
     }
 }
 
@@ -91,11 +90,11 @@ enum NegotiationState {
 }
 
 impl HealthyHandshake {
-    /// Initializes a new state machine.
+    /// Initializes a new state machine for a Noise + Yamux handshake.
     ///
     /// Must pass `true` if the connection has been opened by the local machine, or `false` if it
     /// has been opened by the remote.
-    pub fn new(is_initiator: bool) -> Self {
+    pub fn noise_yamux(is_initiator: bool) -> Self {
         let negotiation = multistream_select::InProgress::new(if is_initiator {
             multistream_select::Config::Dialer {
                 requested_protocol: noise::PROTOCOL_NAME,

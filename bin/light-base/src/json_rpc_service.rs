@@ -346,7 +346,7 @@ impl ServicePrototype {
                     Default::default(),
                 ),
             }),
-            genesis_block: config.genesis_block_hash,
+            genesis_block_hash: config.genesis_block_hash,
             next_subscription_id: atomic::AtomicU64::new(0),
             subscriptions: Mutex::new(Subscriptions {
                 misc: HashMap::with_capacity_and_hasher(
@@ -466,7 +466,7 @@ struct Background<TPlat: Platform> {
     /// Hash of the genesis block.
     /// Keeping the genesis block is important, as the genesis block hash is included in
     /// transaction signatures, and must therefore be queried by upper-level UIs.
-    genesis_block: [u8; 32],
+    genesis_block_hash: [u8; 32],
 
     /// Identifier to use for the next subscription.
     ///

@@ -44,13 +44,13 @@ fn perform_handshake(
     alice_config: Config<Duration>,
     bob_config: Config<Duration>,
 ) -> TwoEstablished {
-    use super::super::{handshake, NoiseKey};
+    use super::super::{single_stream_handshake, NoiseKey};
 
     assert_ne!(alice_to_bob_buffer_size, 0);
     assert_ne!(bob_to_alice_buffer_size, 0);
 
-    let mut alice = handshake::Handshake::new(true);
-    let mut bob = handshake::Handshake::new(false);
+    let mut alice = single_stream_handshake::Handshake::noise_yamux(true);
+    let mut bob = single_stream_handshake::Handshake::noise_yamux(false);
 
     let alice_key = NoiseKey::new(&rand::random());
     let bob_key = NoiseKey::new(&rand::random());
@@ -61,16 +61,16 @@ fn perform_handshake(
     while !matches!(
         (&alice, &bob),
         (
-            handshake::Handshake::Success { .. },
-            handshake::Handshake::Success { .. }
+            single_stream_handshake::Handshake::Success { .. },
+            single_stream_handshake::Handshake::Success { .. }
         )
     ) {
         match alice {
-            handshake::Handshake::Success { .. } => {}
-            handshake::Handshake::NoiseKeyRequired(key_req) => {
+            single_stream_handshake::Handshake::Success { .. } => {}
+            single_stream_handshake::Handshake::NoiseKeyRequired(key_req) => {
                 alice = key_req.resume(&alice_key).into()
             }
-            handshake::Handshake::Healthy(nego) => {
+            single_stream_handshake::Handshake::Healthy(nego) => {
                 let alice_to_bob_buffer_len = alice_to_bob_buffer.len();
                 if alice_to_bob_buffer_len < alice_to_bob_buffer.capacity() {
                     let cap = alice_to_bob_buffer.capacity();
@@ -98,11 +98,11 @@ fn perform_handshake(
         }
 
         match bob {
-            handshake::Handshake::Success { .. } => {}
-            handshake::Handshake::NoiseKeyRequired(key_req) => {
+            single_stream_handshake::Handshake::Success { .. } => {}
+            single_stream_handshake::Handshake::NoiseKeyRequired(key_req) => {
                 bob = key_req.resume(&bob_key).into()
             }
-            handshake::Handshake::Healthy(nego) => {
+            single_stream_handshake::Handshake::Healthy(nego) => {
                 let bob_to_alice_buffer_len = bob_to_alice_buffer.len();
                 if bob_to_alice_buffer_len < bob_to_alice_buffer.capacity() {
                     let cap = bob_to_alice_buffer.capacity();
@@ -132,13 +132,13 @@ fn perform_handshake(
 
     TwoEstablished {
         alice: match alice {
-            handshake::Handshake::Success { connection, .. } => {
+            single_stream_handshake::Handshake::Success { connection, .. } => {
                 connection.into_connection(alice_config)
             }
             _ => unreachable!(),
         },
         bob: match bob {
-            handshake::Handshake::Success { connection, .. } => {
+            single_stream_handshake::Handshake::Success { connection, .. } => {
                 connection.into_connection(bob_config)
             }
             _ => unreachable!(),
