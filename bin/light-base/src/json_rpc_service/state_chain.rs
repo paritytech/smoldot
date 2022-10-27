@@ -211,7 +211,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let response = {
             match height {
                 Some(0) => methods::Response::chain_getBlockHash(methods::HashHexString(
-                    self.genesis_block,
+                    self.genesis_block_hash,
                 ))
                 .to_json_response(request_id),
                 None => {

@@ -61,7 +61,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .respond(
                 state_machine_request_id,
                 methods::Response::chainHead_unstable_genesisHash(methods::HashHexString(
-                    self.genesis_block,
+                    self.genesis_block_hash,
                 ))
                 .to_json_response(request_id),
             )
@@ -93,7 +93,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .respond(
                 state_machine_request_id,
                 methods::Response::chainSpec_unstable_genesisHash(methods::HashHexString(
-                    self.genesis_block,
+                    self.genesis_block_hash,
                 ))
                 .to_json_response(request_id),
             )
