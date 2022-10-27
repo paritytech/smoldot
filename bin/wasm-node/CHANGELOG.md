@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.4 - 2022-10-27
+
 ### Changed
 
 - The `payment_queryInfo` JSON-RPC function now works with runtimes that have defined the type of `Balance` to be less than 16 bytes. ([#2914](https://github.com/paritytech/smoldot/pull/2914))
