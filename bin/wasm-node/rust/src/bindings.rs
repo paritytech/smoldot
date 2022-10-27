@@ -209,6 +209,11 @@ extern "C" {
     ///
     /// This function will only be called for multi-stream connections. The connection must
     /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
+    ///
+    /// > **Note**: No mechanism exists in this API to handle the situation where a substream fails
+    /// >           to open, as this is not supposed to happen. If you need to handle such a
+    /// >           situation, either try again opening a substream again or reset the entire
+    /// >           connection.
     pub fn connection_stream_open(connection_id: u32);
 
     /// Abruptly closes an existing substream of a multi-stream connection. The substream must

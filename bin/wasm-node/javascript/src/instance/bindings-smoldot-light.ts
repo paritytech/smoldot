@@ -107,6 +107,10 @@ export interface Config {
      * connections of type "multi-stream".
      *
      * The `onStreamOpened` callback must later be called with an outbound direction.
+     * 
+     * Note that no mechanism exists in this API to handle the situation where a substream fails
+     * to open, as this is not supposed to happen. If you need to handle such a situation, either
+     * try again opening a substream again or reset the entire connection.
      */
     openOutSubstream(): void;
 }

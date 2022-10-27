@@ -148,38 +148,115 @@ export function start(options?: ClientOptions): Client {
 
     // TODO: detect localhost for Firefox? https://bugzilla.mozilla.org/show_bug.cgi?id=1659672
 
-    let pc: RTCPeerConnection | null = null;
+    // Note that `pc` can be the connection, but also null or undefined.
+    // `undefined` means "certificate generation in progress", while `null` means "opening must
+    // be cancelled".
+    // While it would be better to use for example a string instead of `null`, using `null` lets
+    // us use the `!` operator more easily and leads to more readable code.
+    let pc: RTCPeerConnection | null | undefined = undefined;
+    // Contains the data channels that are open and have been reported to smoldot.
     const dataChannels = new Map<number, RTCDataChannel>();
-    // TODO: this system is a complete hack
-    let isFirstSubstream = true;
-    // The opening of the connection is asynchronous. If smoldot calls `close` in the meanwhile,
-    // this variable is set to `true`, and we interrupt the opening.
-    let cancelOpening = false;
+    // For various reasons explained below, we open a data channel in advance without reporting it
+    // to smoldot. This data channel is stored in this variable. Once it is reported to smoldot,
+    // it is inserted in `dataChannels`.
+    let handshakeDataChannel: RTCDataChannel | undefined;
+    // Multihash-encoded DTLS certificate of the local node. Unknown as long as it hasn't been
+    // generated.
+    // TODO: could be merged with `pc` in one variable, and maybe even the other fields as well
+    let localTlsCertificateMultihash: Uint8Array | undefined;
+
+    // Kills all the JavaScript objects (the connection and all its substreams), ensuring that no
+    // callback will be called again. Doesn't report anything to smoldot, as this should be done
+    // by the caller.
+    const killAllJs = () => {
+      // The `RTCPeerConnection` is created pretty quickly. It is however still possible for
+      // smoldot to cancel the opening, in which case `pc` will still be undefined.
+      if (!pc) {
+        console.assert(dataChannels.size === 0 && !handshakeDataChannel, "substreams exist while pc is undef")
+        pc = null;
+        return
+      }
+
+      pc!.onconnectionstatechange = null;
+      pc!.onnegotiationneeded = null;
+      pc!.ondatachannel = null;
+
+      for (const channel of Array.from(dataChannels.values())) {
+        channel.onopen = null;
+        channel.onerror = null;
+        channel.onclose = null;
+        channel.onmessage = null;
+      }
+      dataChannels.clear();
+      if (handshakeDataChannel) {
+        handshakeDataChannel.onopen = null;
+        handshakeDataChannel.onerror = null;
+        handshakeDataChannel.onclose = null;
+        handshakeDataChannel.onmessage = null;
+      }
+      handshakeDataChannel = undefined;
+
+      pc!.close();  // Not necessarily necessary, but it doesn't hurt to do so.
+    };
 
     // Function that configures a newly-opened channel and adds it to the map. Used for both
     // inbound and outbound substreams.
-    const addChannel = (dataChannel: RTCDataChannel, direction: 'inbound' | 'outbound') => {
+    const addChannel = (dataChannel: RTCDataChannel, direction: 'first-outbound' | 'inbound' | 'outbound') => {
       const dataChannelId = dataChannel.id!;
       dataChannel.binaryType = 'arraybuffer';
 
+      let isOpen = false;
+
       dataChannel.onopen = () => {
+        console.assert(!isOpen, "substream opened twice")
+        isOpen = true;
+
+        if (direction === 'first-outbound') {
+          console.assert(dataChannels.size === 0, "dataChannels not empty when opening");
+          console.assert(handshakeDataChannel === dataChannel, "handshake substream mismatch");
+          config.onOpen({
+            type: 'multi-stream',
+            handshake: 'webrtc',
+            // `addChannel` can never be called before the local certificate is generated, so this
+            // value is always defined.
+            localTlsCertificateMultihash: localTlsCertificateMultihash!,
+            remoteTlsCertificateMultihash: remoteCertMultihash
+          });
+        } else {
+          console.assert(direction !== 'outbound' || !handshakeDataChannel, "handshakeDataChannel still defined");
           config.onStreamOpened(dataChannelId, direction);
+        }
       };
 
-      dataChannel.onerror = (_error) => {
+      dataChannel.onerror = dataChannel.onclose = (error) => {
+        // A couple of different things could be happening here.
+        if (handshakeDataChannel === dataChannel && !isOpen) {
+          // The handshake data channel that we have opened ahead of time failed to open. As this
+          // happens before we have reported the WebRTC connection as a whole as being open, we
+          // need to report that the connection has failed to open.
+          killAllJs();
+          config.onConnectionReset("handshake data channel failed to open" + error ? " " + error.toString() : "");
+        } else if (!isOpen) {
+          // Substream wasn't opened yet and thus has failed to open. The API has no mechanism to
+          // report substream openings failures. We could try opening it again, but given that
+          // it's unlikely to succeed, we simply opt to kill the entire connection.
+          killAllJs();
+          config.onConnectionReset("data channel failed to open" + error ? " " + error.toString() : "");
+        } else {
+          // Substream was open and is now closed. Normal situation.
           config.onStreamReset(dataChannelId);
-      };
-
-      dataChannel.onclose = () => {
-          config.onStreamReset(dataChannelId);
+        }
       };
 
       dataChannel.onmessage = (m) => {
-          // The `data` field is an `ArrayBuffer`.
-          config.onMessage(new Uint8Array(m.data), dataChannelId);
+        // The `data` field is an `ArrayBuffer`.
+        config.onMessage(new Uint8Array(m.data), dataChannelId);
       }
 
-      dataChannels.set(dataChannelId, dataChannel);
+      if (direction !== 'first-outbound')
+        dataChannels.set(dataChannelId, dataChannel);
+      else
+        handshakeDataChannel = dataChannel
     }
 
     // It is possible for the browser to use multiple different certificates.
@@ -188,7 +265,7 @@ export function start(options?: ClientOptions): Client {
     // According to <https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-generatecertificate>,
     // browsers are guaranteed to support `{ name: "ECDSA", namedCurve: "P-256" }`.
     RTCPeerConnection.generateCertificate({ name: "ECDSA", namedCurve: "P-256", hash: "SHA-256" } as EcKeyGenParams).then(async (localCertificate) => {
-      if (cancelOpening)
+      if (pc === null)
         return;
 
       // Create a new WebRTC connection.
@@ -229,7 +306,7 @@ export function start(options?: ClientOptions): Client {
         config.onConnectionReset('Failed to obtain the browser certificate fingerprint');
         return;
       }
-      const localTlsCertificateMultihash = new Uint8Array(34);
+      localTlsCertificateMultihash = new Uint8Array(34);
       localTlsCertificateMultihash.set([0x12, 32], 0);
       localTlsCertificateMultihash.set(localTlsCertificateHex!.split(':').map((s) => parseInt(s, 16)), 2);
 
@@ -240,21 +317,8 @@ export function start(options?: ClientOptions): Client {
       // open.
       pc.onconnectionstatechange = (_event) => {
         if (pc!.connectionState == "closed" || pc!.connectionState == "disconnected" || pc!.connectionState == "failed") {
+          killAllJs();
           config.onConnectionReset("WebRTC state transitioned to " + pc!.connectionState);
-
-          pc!.onconnectionstatechange = null;
-          pc!.onnegotiationneeded = null;
-          pc!.ondatachannel = null;
-
-          for (const channel of Array.from(dataChannels.values())) {
-            channel.onopen = null;
-            channel.onerror = null;
-            channel.onclose = null;
-            channel.onmessage = null;
-          }
-
-          pc!.close();  // Not necessarily necessary, but it doesn't hurt to do so.
-          dataChannels.clear();
         }
       };
 
@@ -342,49 +406,27 @@ export function start(options?: ClientOptions): Client {
       };
 
       pc.ondatachannel = ({ channel }) => {
+        // TODO: is the substream maybe already open? according to the Internet it seems that no but it's unclear
         addChannel(channel, 'inbound')
       };
 
-      // Creating a `RTCPeerConnection` doesn't actually do anything before a channel is created.
-      // The connection is therefore immediately reported as opened to smoldot so that it starts
-      // opening substreams.
-      // One concern might be that smoldot will think that the remote is reachable at this address
-      // (because we report the connection as being open) even when it might not be the case.
-      // However, WebRTC has a handshake to perform, and smoldot will only consider a connection
-      // as "actually open" once the handshake has finished.
-      config.onOpen({
-        type: 'multi-stream',
-        handshake: 'webrtc',
-        localTlsCertificateMultihash,
-        remoteTlsCertificateMultihash: remoteCertMultihash
-      });
+      // Creating a `RTCPeerConnection` doesn't actually do anything before `createDataChannel` is
+      // called. Smoldot's API, however, requires you to treat entire connections as open or
+      // closed. We know, according to the libp2p WebRTC specification, that every connection
+      // always starts with a substream where a handshake is performed. After we've reported that
+      // the connection is open, smoldot will open a substream in order to perform the handshake.
+      // Instead of following this API, we open this substream in advance, and will notify smoldot
+      // that the connection is open when the substream is open.
+      // Note that the label passed to `createDataChannel` is required to be empty as per the
+      // libp2p WebRTC specification.
+      addChannel(pc!.createDataChannel("", { id: 0, negotiated: true }), 'first-outbound')
     });
 
     return {
       reset: (streamId: number | undefined): void => {
         // If `streamId` is undefined, then the whole connection must be destroyed.
         if (streamId === undefined) {
-          // The `RTCPeerConnection` is created at the same time as we report the connection as
-          // being open. It is however possible for smoldot to cancel the opening, in which case
-          // `pc` will still be undefined.
-          if (!pc) {
-            cancelOpening = true;
-            return;
-          }
-
-          pc.onconnectionstatechange = null;
-          pc.onnegotiationneeded = null;
-          pc.ondatachannel = null;
-
-          for (const channel of Array.from(dataChannels.values())) {
-            channel.onopen = null;
-            channel.onerror = null;
-            channel.onclose = null;
-            channel.onmessage = null;
-          }
-
-          pc.close();
-          dataChannels.clear();
+          killAllJs();
 
         } else {
           const channel = dataChannels.get(streamId)!;
@@ -404,12 +446,22 @@ export function start(options?: ClientOptions): Client {
       openOutSubstream: () => {
         // `openOutSubstream` can only be called after we have called `config.onOpen`, therefore
         // `pc` is guaranteed to be non-null.
-        // Note that the label passed to `createDataChannel` is required to be empty as per the
-        // libp2p WebRTC specification.
-        if (isFirstSubstream) {
-          isFirstSubstream = false;
-          addChannel(pc!.createDataChannel("", { id: 0, negotiated: true }), 'outbound')
+        // As explained above, we open a data channel ahead of time. If this data channel is still
+        // there, we report it.
+        if (handshakeDataChannel) {
+          // Use `setTimeout` because calling callbacks within callbacks is error-prone.
+          setTimeout(() => {
+            // We need to check again if `handshakeDataChannel` is still defined, as the
+            // connection might have been closed.
+            if (handshakeDataChannel) {
+              config.onStreamOpened(handshakeDataChannel.id!, 'outbound')
+              dataChannels.set(handshakeDataChannel.id!, handshakeDataChannel)
+              handshakeDataChannel = undefined
+            }
+          }, 1)
         } else {
+          // Note that the label passed to `createDataChannel` is required to be empty as per the
+          // libp2p WebRTC specification.
           addChannel(pc!.createDataChannel(""), 'outbound')
         }
       }
