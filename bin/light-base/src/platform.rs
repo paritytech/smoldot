@@ -107,11 +107,7 @@ pub trait Platform: Send + 'static {
     fn wait_more_data(stream: &mut Self::Stream) -> Self::StreamDataFuture;
 
     /// Gives access to the content of the read buffer of the given stream.
-    ///
-    /// Returns `None` if the remote has closed their sending side or if the stream has been
-    /// reset. In the case of [`PlatformConnection::MultiStreamWebRtc`], only the stream having
-    /// been reset applies.
-    fn read_buffer(stream: &mut Self::Stream) -> Option<&[u8]>;
+    fn read_buffer(stream: &mut Self::Stream) -> ReadBuffer;
 
     /// Discards the first `bytes` bytes of the read buffer of this stream. This makes it
     /// possible for the remote to send more data.
@@ -169,4 +165,20 @@ pub struct ConnectError {
 
     /// `true` if the error is caused by the address to connect to being forbidden or unsupported.
     pub is_bad_addr: bool,
+}
+
+/// State of the read buffer, as returned by [`Platform::read_buffer`].
+#[derive(Debug)]
+pub enum ReadBuffer<'a> {
+    /// Reading side of the stream is fully open. Contains the data waiting to be processed.
+    Open(&'a [u8]),
+
+    /// The reading side of the stream has been closed by the remote.
+    ///
+    /// Note that this is forbidden for connections of
+    /// type [`PlatformConnection::MultiStreamWebRtc`].
+    Closed,
+
+    /// The stream has been abruptly closed by the remote.
+    Reset,
 }

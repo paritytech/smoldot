@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::Shared;
-use crate::platform::{Platform, PlatformConnection, PlatformSubstreamDirection};
+use crate::platform::{Platform, PlatformConnection, PlatformSubstreamDirection, ReadBuffer};
 
 use alloc::{string::ToString as _, sync::Arc, vec, vec::Vec};
 use core::{iter, pin::Pin};
@@ -221,35 +221,57 @@ async fn single_stream_connection_task<TPlat: Platform>(
             connection_task.inject_coordinator_message(message);
         }
 
-        // TODO: `TPlat::read_buffer` can return `None` if the connection has been abruptly closed, should we handle this and stop reading/writing? cc https://github.com/paritytech/smoldot/issues/2782
-
-        // Perform a read-write. This updates the internal state of the connection task.
         let now = TPlat::now();
-        let mut read_write = ReadWrite {
-            now: now.clone(),
-            incoming_buffer: TPlat::read_buffer(&mut connection),
-            outgoing_buffer: Some((&mut write_buffer, &mut [])), // TODO: this should be None if a previous read_write() produced None
-            read_bytes: 0,
-            written_bytes: 0,
-            wake_up_after: None,
-        };
-        connection_task.read_write(&mut read_write);
 
-        // Because the `read_write` object borrows the connection, we need to drop it before we
-        // can modify the connection. Before dropping the `read_write`, clone some important
-        // information from it.
-        let read_buffer_has_data = read_write.incoming_buffer.map_or(false, |b| !b.is_empty());
-        let read_buffer_closed = read_write.incoming_buffer.is_none();
-        let read_bytes = read_write.read_bytes;
-        let written_bytes = read_write.written_bytes;
-        let wake_up_after = read_write.wake_up_after.clone();
-        drop(read_write);
+        let (read_bytes, read_buffer_has_data, read_buffer_closed, written_bytes, wake_up_after) =
+            if !connection_task.is_reset_called() {
+                let incoming_buffer = match TPlat::read_buffer(&mut connection) {
+                    ReadBuffer::Reset => {
+                        connection_task.reset();
+                        continue;
+                    }
+                    ReadBuffer::Open(b) => Some(b),
+                    ReadBuffer::Closed => None,
+                };
 
-        // Now update the connection.
-        if written_bytes != 0 {
-            TPlat::send(&mut connection, &write_buffer[..written_bytes]);
-        }
-        TPlat::advance_read_cursor(&mut connection, read_bytes);
+                // Perform a read-write. This updates the internal state of the connection task.
+                let mut read_write = ReadWrite {
+                    now: now.clone(),
+                    incoming_buffer,
+                    outgoing_buffer: Some((&mut write_buffer, &mut [])), // TODO: this should be None if a previous read_write() produced None
+                    read_bytes: 0,
+                    written_bytes: 0,
+                    wake_up_after: None,
+                };
+                connection_task.read_write(&mut read_write);
+
+                // Because the `read_write` object borrows the connection, we need to drop it before we
+                // can modify the connection. Before dropping the `read_write`, clone some important
+                // information from it.
+                let read_buffer_has_data =
+                    read_write.incoming_buffer.map_or(false, |b| !b.is_empty());
+                let read_buffer_closed = read_write.incoming_buffer.is_none();
+                let read_bytes = read_write.read_bytes;
+                let written_bytes = read_write.written_bytes;
+                let wake_up_after = read_write.wake_up_after.clone();
+                drop(read_write);
+
+                // Now update the connection.
+                if written_bytes != 0 {
+                    TPlat::send(&mut connection, &write_buffer[..written_bytes]);
+                }
+                TPlat::advance_read_cursor(&mut connection, read_bytes);
+
+                (
+                    read_bytes,
+                    read_buffer_has_data,
+                    read_buffer_closed,
+                    written_bytes,
+                    wake_up_after,
+                )
+            } else {
+                (0, false, true, 0, None)
+            };
 
         // Try pull message to send to the coordinator.
 
@@ -439,11 +461,10 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
                 let substream = &mut open_substreams[substream_id];
 
                 let incoming_buffer = match TPlat::read_buffer(substream) {
-                    Some(buf) => buf,
-                    None => {
-                        // In the case of WebRTC, `read_buffer` returns `None` only if the
-                        // substream has been reset by the remote. We inform the connection task,
-                        // and the substream is now considered dead.
+                    ReadBuffer::Open(buf) => buf,
+                    ReadBuffer::Closed => panic!(), // Forbidden for WebRTC.
+                    ReadBuffer::Reset => {
+                        // Inform the connection task. The substream is now considered dead.
                         connection_task.reset_substream(&substream_id);
                         open_substreams.remove(substream_id);
                         break;

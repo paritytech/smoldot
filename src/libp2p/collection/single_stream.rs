@@ -482,6 +482,18 @@ where
         }
     }
 
+    /// Returns `true` if [`SingleStreamConnectionTask::reset`] has been called in the past.
+    pub fn is_reset_called(&self) -> bool {
+        matches!(
+            self.connection,
+            SingleStreamConnectionTaskInner::ShutdownWaitingAck {
+                initiator: ShutdownInitiator::Api,
+            } | SingleStreamConnectionTaskInner::ShutdownAcked {
+                initiator: ShutdownInitiator::Api,
+            }
+        )
+    }
+
     /// Reads data coming from the connection, updates the internal state machine, and writes data
     /// destined to the connection through the [`ReadWrite`].
     ///

@@ -108,14 +108,14 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
         };
         socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
-            config.onConnectionClose(message);
+            config.onConnectionReset(message);
             socket.onopen = () => { };
             socket.onclose = () => { };
             socket.onmessage = () => { };
             socket.onerror = () => { };
         };
         socket.onerror = (event) => {
-            config.onConnectionClose(event.message);
+            config.onConnectionReset(event.message);
             socket.onopen = () => { };
             socket.onclose = () => { };
             socket.onmessage = () => { };
@@ -150,7 +150,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             // NodeJS doesn't provide a reason why the closing happened, but only
             // whether it was caused by an error.
             const message = hasError ? "Error" : "Closed gracefully";
-            config.onConnectionClose(message);
+            config.onConnectionReset(message);
         });
         connection.socket.on('error', () => { });
         connection.socket.on('data', (message) => {
@@ -163,7 +163,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
     }
 
     return {
-        close: (): void => {
+        reset: (): void => {
             if (connection.ty == 'websocket') {
                 // WebSocket
                 // We can't set these fields to null because the TypeScript definitions don't
