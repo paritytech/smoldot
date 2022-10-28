@@ -24,7 +24,7 @@ use super::{
     },
     ConfigRequestResponse, ConnectionToCoordinator, ConnectionToCoordinatorInner,
     CoordinatorToConnection, CoordinatorToConnectionInner, MultiStreamHandshakeKind,
-    NotificationsOutErr, OverlayNetwork, PeerId, ShutdownCause, SubstreamId,
+    NotificationsOutErr, OverlayNetwork, PeerId, ShutdownCause, SubstreamFate, SubstreamId,
 };
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc, vec, vec::Vec};
@@ -775,12 +775,12 @@ where
     /// Panics if there is no substream with that identifier.
     /// Panics if this is a WebRTC connection, and the reading or writing side is closed.
     ///
-    // TODO: better return value
+    #[must_use]
     pub fn substream_read_write(
         &mut self,
         substream_id: &TSubId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
-    ) -> bool {
+    ) -> SubstreamFate {
         // In WebRTC, the reading and writing sides are never closed.
         // Note that the `established::MultiStream` state machine also performs this check, but
         // we do it here again because we're not necessarily in the ̀`established` state.
@@ -847,7 +847,7 @@ where
                         Err(_) => {
                             // Message decoding error.
                             // TODO: no, handshake failed
-                            return true;
+                            return SubstreamFate::Reset;
                         }
                     }
                 };
@@ -934,7 +934,7 @@ where
                 match handshake_outcome {
                     Ok(noise::NoiseHandshake::InProgress(handshake_update)) => {
                         *handshake = Some(handshake_update);
-                        false
+                        SubstreamFate::Continue
                     }
                     Err(_err) => todo!("{:?}", _err), // TODO: /!\
                     Ok(noise::NoiseHandshake::Success {
@@ -976,7 +976,11 @@ where
                             ),
                         };
 
-                        !handshake_substream_still_open
+                        if handshake_substream_still_open {
+                            SubstreamFate::Continue
+                        } else {
+                            SubstreamFate::Reset
+                        }
                     }
                 }
             }
@@ -994,9 +998,9 @@ where
                 read_write.close_write_if_empty();
                 if read_write.incoming_buffer.is_none() {
                     *handshake_substream = None;
-                    true
+                    SubstreamFate::Reset
                 } else {
-                    false
+                    SubstreamFate::Continue
                 }
             }
             MultiStreamConnectionTaskInner::Established { established, .. } => {
@@ -1009,12 +1013,12 @@ where
                 assert!(extra_open_substreams.contains_key(substream_id));
                 // Don't do anything. Don't read or write. Instead we wait for the handshake to
                 // be finished.
-                false
+                SubstreamFate::Continue
             }
             MultiStreamConnectionTaskInner::ShutdownAcked { .. }
             | MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. } => {
                 // TODO: panic if substream id invalid?
-                true
+                SubstreamFate::Reset
             }
         }
     }

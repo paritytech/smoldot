@@ -288,11 +288,12 @@ where
     /// Panics if there is no substream with that identifier.
     /// Panics if this is a WebRTC connection, and the reading or writing side is closed.
     ///
+    #[must_use]
     pub fn substream_read_write(
         &mut self,
         substream_id: &TSubId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
-    ) -> bool {
+    ) -> SubstreamFate {
         let mut substream = self.in_substreams.get_mut(substream_id).unwrap();
 
         // In WebRTC, the reading and writing side is never closed.
@@ -318,7 +319,7 @@ where
         loop {
             // Don't process any more data before events are pulled.
             if self.pending_events.len() >= MAX_PENDING_EVENTS {
-                return false;
+                return SubstreamFate::Continue;
             }
 
             // In the situation where there's not enough space in the outgoing buffer to write an
@@ -327,7 +328,7 @@ where
             // close message.
             // TODO: this is error-prone, as we have no guarantee that the outgoing buffer will ever be > 6 bytes, for example in principle the API user could decide to use only a write buffer of 2 bytes, although that would be a very stupid thing to do
             if read_write.outgoing_buffer_available() < 6 {
-                return false;
+                return SubstreamFate::Continue;
             }
 
             // If this flag is still `false` at the end of the loop, we break out of it.
@@ -385,7 +386,7 @@ where
                     Err(_) => {
                         // Message decoding error.
                         // TODO: no, must ask the state machine to reset
-                        return true;
+                        return SubstreamFate::Reset;
                     }
                 }
             };
@@ -598,9 +599,9 @@ where
                 }
                 self.out_in_substreams_map.remove(&substream.id);
                 self.in_substreams.remove(&substream_id);
-                break true;
+                break SubstreamFate::Reset;
             } else if !continue_looping {
-                break false;
+                break SubstreamFate::Continue;
             }
         }
     }
@@ -990,4 +991,14 @@ impl<TNow, TSubId, TRqUd, TNotifUd> fmt::Debug for MultiStream<TNow, TSubId, TRq
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("Established").finish()
     }
+}
+
+/// Whether a substream should remain open or be killed.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum SubstreamFate {
+    /// Substream remains open.
+    Continue,
+    /// Substream is now considered dead and has been removed from the state machine. Its
+    /// identifier is now invalid.
+    Reset,
 }
