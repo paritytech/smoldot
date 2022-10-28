@@ -58,11 +58,11 @@ export interface Config {
  *
  * - `Opening` (initial state)
  * - `Open`
- * - `Closed`
+ * - `Reset`
  *
- * When in the `Opening` or `Open` state, the connection can transition to the `Closed` state
+ * When in the `Opening` or `Open` state, the connection can transition to the `Reset` state
  * if the remote closes the connection or refuses the connection altogether. When that
- * happens, `config.onClosed` is called. Once in the `Closed` state, the connection cannot
+ * happens, `config.onReset` is called. Once in the `Reset` state, the connection cannot
  * transition back to another state.
  *
  * Initially in the `Opening` state, the connection can transition to the `Open` state if the
@@ -75,20 +75,20 @@ export interface Config {
  */
  export interface Connection {
     /**
-     * Transitions the connection or one of its substreams to the `Closed` state.
+     * Transitions the connection or one of its substreams to the `Reset` state.
      *
      * If the connection is of type "single-stream", the whole connection must be shut down.
      * If the connection is of type "multi-stream", a `streamId` can be provided, in which case
      * only the given substream is shut down.
      *
-     * The `config.onClose` or `config.onStreamClose` callbacks are **not** called.
+     * The `config.onReset` or `config.onStreamReset` callbacks are **not** called.
      *
      * The transition is performed in the background.
      * If the whole connection is to be shut down, none of the callbacks passed to the `Config`
-     * must be called again. If only a substream is shut down, the `onStreamClose` and `onMessage`
+     * must be called again. If only a substream is shut down, the `onStreamReset` and `onMessage`
      * callbacks must not be called again with that substream.
      */
-    close(streamId?: number): void;
+    reset(streamId?: number): void;
 
     /**
      * Queues data to be sent on the given connection.
@@ -107,6 +107,10 @@ export interface Config {
      * connections of type "multi-stream".
      *
      * The `onStreamOpened` callback must later be called with an outbound direction.
+     * 
+     * Note that no mechanism exists in this API to handle the situation where a substream fails
+     * to open, as this is not supposed to happen. If you need to handle such a situation, either
+     * try again opening a substream again or reset the entire connection.
      */
     openOutSubstream(): void;
 }
@@ -139,11 +143,11 @@ export interface ConnectionConfig {
     ) => void;
 
     /**
-     * Callback called when the connection transitions to the `Closed` state.
+     * Callback called when the connection transitions to the `Reset` state.
      *
-     * It it **not** called if `Connection.close` is manually called by the API user.
+     * It it **not** called if `Connection.reset` is manually called by the API user.
      */
-    onConnectionClose: (message: string) => void;
+    onConnectionReset: (message: string) => void;
 
     /**
      * Callback called when a new substream has been opened.
@@ -153,13 +157,13 @@ export interface ConnectionConfig {
     onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound') => void;
 
     /**
-     * Callback called when a stream transitions to the `Closed` state.
+     * Callback called when a stream transitions to the `Reset` state.
      *
-     * It it **not** called if `Connection.closeStream` is manually called by the API user.
+     * It it **not** called if `Connection.resetStream` is manually called by the API user.
      *
      * This function must only be called for connections of type "multi-stream".
      */
-    onStreamClose: (streamId: number) => void;
+    onStreamReset: (streamId: number) => void;
 
     /**
      * Callback called when a message sent by the remote has been received.
@@ -196,7 +200,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         killedTracked.killed = true;
         // TODO: kill timers as well?
         for (const connection in connections) {
-            connections[connection]!.close()
+            connections[connection]!.reset()
             delete connections[connection]
         }
     };
@@ -322,13 +326,13 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                             }
                         } catch(_error) {}
                     },
-                    onConnectionClose: (message: string) => {
+                    onConnectionReset: (message: string) => {
                         if (killedTracked.killed) return;
                         try {
                             const encoded = new TextEncoder().encode(message)
                             const ptr = instance.exports.alloc(encoded.length) >>> 0;
                             new Uint8Array(instance.exports.memory.buffer).set(encoded, ptr);
-                            instance.exports.connection_closed(connectionId, ptr, encoded.length);
+                            instance.exports.connection_reset(connectionId, ptr, encoded.length);
                         } catch(_error) {}
                     },
                     onMessage: (message: Uint8Array, streamId?: number) => {
@@ -349,10 +353,10 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                             );
                         } catch(_error) {}
                     },
-                    onStreamClose: (streamId: number) => {
+                    onStreamReset: (streamId: number) => {
                         if (killedTracked.killed) return;
                         try {
-                            instance.exports.stream_closed(connectionId, streamId);
+                            instance.exports.stream_reset(connectionId, streamId);
                         } catch(_error) {}
                     }
                 
@@ -379,10 +383,10 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         },
 
         // Must close and destroy the connection object.
-        connection_close: (connectionId: number) => {
+        reset_connection: (connectionId: number) => {
             if (killedTracked.killed) return;
             const connection = connections[connectionId]!;
-            connection.close();
+            connection.reset();
             delete connections[connectionId];
         },
 
@@ -393,9 +397,9 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         },
 
         // Closes a substream on a multi-stream connection.
-        connection_stream_close: (connectionId: number, streamId: number) => {
+        connection_stream_reset: (connectionId: number, streamId: number) => {
             const connection = connections[connectionId]!;
-            connection.close(streamId)
+            connection.reset(streamId)
         },
 
         // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed

@@ -2,9 +2,19 @@
 
 ## Unreleased
 
+## 0.7.4 - 2022-10-27
+
 ### Changed
 
+- The `payment_queryInfo` JSON-RPC function now works with runtimes that have defined the type of `Balance` to be less than 16 bytes. ([#2914](https://github.com/paritytech/smoldot/pull/2914))
 - The parameter of `chainHead_unstable_finalizedDatabase` has been renamed from `max_size_bytes` to `maxSizeBytes`. ([#2923](https://github.com/paritytech/smoldot/pull/2923))
+- The database now contains the hash of the genesis block header. This hash is verified when the database is loaded, and the database is ignored if there is a mismatch. This prevents accidents where the wrong database is provided, which would lead to the chain not working and would be hard to debug. ([#2928](https://github.com/paritytech/smoldot/pull/2928))
+
+### Fixed
+
+- Fix panic on Deno when a WebSocket connection abruptly closes. ([#2939](https://github.com/paritytech/smoldot/pull/2939))
+- Fix errors showing in the browser's console about WebSockets being already in the CLOSING or CLOSED state. ([#2925](https://github.com/paritytech/smoldot/pull/2925))
+- No longer panic when a WebRTC connection fails to open due to the browser calling callbacks in an unexpected order. ([#2936](https://github.com/paritytech/smoldot/pull/2936))
 
 ### Fixed
 

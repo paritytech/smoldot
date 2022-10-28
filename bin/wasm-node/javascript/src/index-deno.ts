@@ -141,7 +141,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
         };
         connection.socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
-            config.onConnectionClose(message);
+            config.onConnectionReset(message);
         };
         connection.socket.onmessage = (msg) => {
             config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
@@ -191,7 +191,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                     // The socket is reported closed, but `socket.destroyed` is still `false` (see
                     // check above). As such, we must inform the inner layers.
                     socket.destroyed = true;
-                    config.onConnectionClose(outcome === null ? "EOF when reading socket" : outcome);
+                    config.onConnectionReset(outcome === null ? "EOF when reading socket" : outcome);
                     return;
                 }
                 console.assert(outcome !== 0); // `read` guarantees to return a non-zero value.
@@ -208,7 +208,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
     }
 
     return {
-        close: (): void => {
+        reset: (): void => {
             if (connection.ty == 'websocket') {
                 // WebSocket
                 // We can't set these fields to null because the TypeScript definitions don't
@@ -228,7 +228,14 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
         send: (data: Uint8Array): void => {
             if (connection.ty == 'websocket') {
                 // WebSocket
-                connection.socket.send(data);
+                // The WebSocket library that we use seems to spontaneously transition connections
+                // to the "closed" state but not call the `onclosed` callback immediately. Calling
+                // `send` on that object throws an exception. In order to avoid panicking smoldot,
+                // we thus absorb any exception thrown here.
+                // See also <https://github.com/paritytech/smoldot/issues/2937>.
+                try {
+                    connection.socket.send(data);
+                } catch(_error) {}
             } else {
                 // TCP
                 // TODO: at the moment, sending data doesn't have any back-pressure mechanism; as such, we just buffer data indefinitely
@@ -249,7 +256,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                             // The socket is reported closed, but `socket.destroyed` is still
                             // `false` (see check above). As such, we must inform the inner layers.
                             socket.destroyed = true;
-                            config.onConnectionClose(outcome);
+                            config.onConnectionReset(outcome);
                             return c;
                         }
                         // Note that, contrary to `read`, it is possible for `outcome` to be 0.

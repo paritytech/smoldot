@@ -39,8 +39,8 @@ export interface SmoldotWasmExports extends WebAssembly.Exports {
     connection_open_multi_stream: (connectionId: number, handshakeTyPtr: number, handshakeTyLen: number) => void,
     stream_message: (connectionId: number, streamId: number, ptr: number, len: number) => void,
     connection_stream_opened: (connectionId: number, streamId: number, outbound: number) => void,
-    connection_closed: (connectionId: number, ptr: number, len: number) => void,
-    stream_closed: (connectionId: number, streamId: number) => void,
+    connection_reset: (connectionId: number, ptr: number, len: number) => void,
+    stream_reset: (connectionId: number, streamId: number) => void,
 }
 
 export interface SmoldotWasmInstance extends WebAssembly.Instance {
