@@ -763,9 +763,9 @@ where
 
     /// Reads/writes data on the substream.
     ///
-    /// If the method returns `true`, then the substream is now considered dead according to the
-    /// state machine and its identifier is now invalid. If the reading or writing side of the
-    /// substream was still open, then the user should reset that substream.
+    /// If the method returns [`SubstreamFate::Reset`], then the substream is now considered dead
+    /// according to the state machine and its identifier is now invalid. If the reading or
+    /// writing side of the substream was still open, then the user should reset that substream.
     ///
     /// In the case of a WebRTC connection, the [`ReadWrite::incoming_buffer`] and
     /// [`ReadWrite::outgoing_buffer`] must always be `Some`.

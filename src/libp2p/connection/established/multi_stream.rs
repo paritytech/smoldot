@@ -273,9 +273,9 @@ where
 
     /// Reads/writes data on the substream.
     ///
-    /// If the method returns `true`, then the substream is now considered dead according to the
-    /// state machine and its identifier is now invalid. If the reading or writing side of the
-    /// substream was still open, then the user should reset that substream.
+    /// If the method returns [`SubstreamFate::Reset`], then the substream is now considered dead
+    /// according to the state machine and its identifier is now invalid. If the reading or
+    /// writing side of the substream was still open, then the user should reset that substream.
     ///
     /// This method will refuse to accept data if too many events are already queued. Use
     /// [`MultiStream::pull_event`] to empty the queue of events between calls to this method.
