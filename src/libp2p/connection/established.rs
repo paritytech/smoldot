@@ -24,7 +24,7 @@ use super::yamux;
 use alloc::{string::String, vec::Vec};
 use core::time::Duration;
 
-pub use multi_stream::MultiStream;
+pub use multi_stream::{MultiStream, SubstreamFate};
 pub use single_stream::{ConnectionPrototype, Error, SingleStream};
 pub use substream::{
     InboundError, NotificationsInClosedErr, NotificationsOutErr, RequestError,

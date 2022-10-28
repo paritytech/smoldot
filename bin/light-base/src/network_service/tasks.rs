@@ -21,7 +21,10 @@ use crate::platform::{Platform, PlatformConnection, PlatformSubstreamDirection, 
 use alloc::{string::ToString as _, sync::Arc, vec, vec::Vec};
 use core::{iter, pin::Pin};
 use futures::{channel::mpsc, prelude::*};
-use smoldot::{libp2p::read_write::ReadWrite, network::service};
+use smoldot::{
+    libp2p::{collection::SubstreamFate, read_write::ReadWrite},
+    network::service,
+};
 
 /// Asynchronous task managing a specific connection, including the connection process and the
 /// processing of the connection after it's been open.
@@ -482,7 +485,7 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
 
                 debug_assert!(read_write.outgoing_buffer.is_some());
 
-                let kill_substream =
+                let substream_fate =
                     connection_task.substream_read_write(&substream_id, &mut read_write);
 
                 // Because the `read_write` object borrows the stream, we need to drop it before we
@@ -501,7 +504,7 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
 
                 // If the `connection_task` requires this substream to be killed, we drop the
                 // `Stream` object.
-                if kill_substream {
+                if matches!(substream_fate, SubstreamFate::Reset) {
                     open_substreams.remove(substream_id);
                     break;
                 }
