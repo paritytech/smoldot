@@ -347,10 +347,11 @@ export function start(options?: ClientOptions): Client {
           // While we could randomly generate a new string, we just grab the one that the
           // browser has generated, in order to make sure that it respects the constraints
           // of the ICE protocol.
-          const ufragPwd = "libp2p-webrtc-v1:" + sdpOffer.match(/^a=ice-pwd:(.+)$/m)?.at(1);
-          if (ufragPwd === undefined) {
+          const browserGeneratedPwd = sdpOffer.match(/^a=ice-pwd:(.+)$/m)?.at(1);
+          if (browserGeneratedPwd === undefined) {
             console.error("Failed to set ufrag to pwd. WebRTC connections will likely fail. Please report this issue.");
           }
+          const ufragPwd = "libp2p-webrtc-v1:" + browserGeneratedPwd;
           sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:' + ufragPwd);
           sdpOffer = sdpOffer.replace(/^a=ice-pwd.*$/m, 'a=ice-pwd:' + ufragPwd);
           await pc!.setLocalDescription({ type: 'offer', sdp: sdpOffer });
