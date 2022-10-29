@@ -30,7 +30,7 @@
 use super::{nibble, proof_verify};
 
 use alloc::{vec, vec::Vec};
-use core::{fmt, iter};
+use core::{fmt, iter, mem};
 
 /// Configuration to pass to [`prefix_scan`].
 pub struct Config<'a> {
@@ -76,30 +76,44 @@ impl PrefixScan {
         mut self,
         proof: impl Iterator<Item = &'a [u8]> + Clone + 'a,
     ) -> Result<ResumeOutcome, (Self, proof_verify::Error)> {
+        let mut non_terminal_queries = mem::take(&mut self.next_queries);
+
         // The entire body is executed as long as verifying at least one proof succeeds.
         for is_first_iteration in iter::once(true).chain(iter::repeat(false)) {
             // Filled with the queries to perform at the next iteration.
             // Capacity assumes a maximum of 2 children per node on average. This value was chosen
             // completely arbitrarily.
-            let mut next = Vec::with_capacity(self.next_queries.len() * 2);
+            let mut next = Vec::with_capacity(non_terminal_queries.len() * 2);
 
-            // True if any proof verification has succeeded during this iteration.
-            // Controls whether we continue iterating.
-            let mut any_successful_proof = false;
+            debug_assert!(!non_terminal_queries.is_empty());
+            // TODO: iterating like that is very inefficient, as we verify the proof dozens of times
+            loop {
+                let query = match non_terminal_queries.pop() {
+                    Some(q) => q,
+                    None => break,
+                };
 
-            debug_assert!(!self.next_queries.is_empty());
-            for query in &self.next_queries {
                 let info = match proof_verify::trie_node_info(proof_verify::TrieNodeInfoConfig {
                     requested_key: query.iter().copied(),
                     trie_root_hash: &self.trie_root_hash,
                     proof: proof.clone(),
                 }) {
                     Ok(info) => info,
-                    Err(err) if is_first_iteration => return Err((self, err)),
-                    Err(_) => continue,
+                    Err(proof_verify::Error::MissingProofEntry { .. }) if !is_first_iteration => {
+                        // Node not in the proof. There's no point in adding this node to `next`
+                        // as we will fail again if we try to verify the proof again.
+                        // If `is_first_iteration`, it means that the proof is incorrect.
+                        self.next_queries.push(query);
+                        continue;
+                    }
+                    Err(err) => {
+                        // Push all the non-processed queries back to `next_queries` before
+                        // returning the error, so that we can try again.
+                        self.next_queries.push(query);
+                        self.next_queries.extend(non_terminal_queries);
+                        return Err((self, err));
+                    }
                 };
-
-                any_successful_proof = true;
 
                 if matches!(
                     info.storage_value,
@@ -119,31 +133,28 @@ impl PrefixScan {
                     self.final_result.push(key);
                 }
 
-                for child_nibble in info.children.next_nibbles() {
-                    let mut next_query = Vec::with_capacity(query.len() + 1);
-                    next_query.extend_from_slice(query);
-                    next_query.push(child_nibble);
-                    next.push(next_query);
-                }
-            }
-
-            // If we have failed to make any progress during this iteration, return `InProgress`.
-            if !any_successful_proof {
-                debug_assert!(next.is_empty());
-                // Errors are immediately returned if `is_first_iteration`.
-                debug_assert!(!is_first_iteration);
-                break;
+                // For each child of the node, put into `next` the key that goes towards this
+                // child.
+                next.extend(info.children.unfold_append_to_key(query));
             }
 
             // Finished when nothing more to request.
-            if next.is_empty() {
+            if next.is_empty() && self.next_queries.is_empty() {
                 return Ok(ResumeOutcome::Success {
                     keys: self.final_result,
                 });
             }
 
-            // Update `next_queries` for the next iteration.
-            self.next_queries = next;
+            // If we have failed to make any progress during this iteration, return `InProgress`.
+            if next.is_empty() {
+                debug_assert!(!self.next_queries.is_empty());
+                // Errors are immediately returned if `is_first_iteration`.
+                debug_assert!(!is_first_iteration);
+                break;
+            }
+
+            // Update `non_terminal_queries` for the next iteration.
+            non_terminal_queries = next;
         }
 
         Ok(ResumeOutcome::InProgress(self))
@@ -167,3 +178,5 @@ pub enum ResumeOutcome {
         keys: Vec<Vec<u8>>,
     },
 }
+
+// TODO: needs tests
