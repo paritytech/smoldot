@@ -43,11 +43,11 @@ use alloc::vec::Vec;
 
 /// Response to a GrandPa warp sync request.
 #[derive(Debug)]
-pub struct GrandpaWarpSyncResponse {
+pub struct GrandpaWarpSyncResponse<'a> {
     /// List of fragments that consist in the proof.
     ///
     /// The fragments must be ordered by ascending block height.
-    pub fragments: Vec<GrandpaWarpSyncResponseFragment>,
+    pub fragments: Vec<GrandpaWarpSyncResponseFragment<'a>>,
 
     /// If `true`, the last fragment corresponds to the highest finalized block known to the
     /// responder. If `false`, the requested is encouraged to start a follow-up GrandPa warp sync
@@ -57,16 +57,16 @@ pub struct GrandpaWarpSyncResponse {
 
 /// Response to a GrandPa warp sync request.
 #[derive(Debug)]
-pub struct GrandpaWarpSyncResponseFragment {
+pub struct GrandpaWarpSyncResponseFragment<'a> {
     /// Header of a block in the chain.
     ///
     /// Must always contain a change in the list of authorities, except for the last fragment
     /// if [`GrandpaWarpSyncResponse::is_finished`] is `true`.
-    pub scale_encoded_header: Vec<u8>,
+    pub scale_encoded_header: &'a [u8],
 
     /// Justification that proves the finality of
     /// [`GrandpaWarpSyncResponseFragment::scale_encoded_header`].
-    pub scale_encoded_justification: Vec<u8>,
+    pub scale_encoded_justification: &'a [u8],
 }
 
 /// Error potentially returned by [`decode_grandpa_warp_sync_response`].
@@ -75,7 +75,6 @@ pub struct GrandpaWarpSyncResponseFragment {
 pub struct DecodeGrandpaWarpSyncResponseError;
 
 /// Decodes a SCALE-encoded GrandPa warp sync response.
-// TODO: make this a zero-cost API
 pub fn decode_grandpa_warp_sync_response(
     encoded: &[u8],
     block_number_bytes: usize,
@@ -122,9 +121,11 @@ fn decode_fragment<'a>(
                     })
             }),
         )),
-        move |(header, justification)| GrandpaWarpSyncResponseFragment {
-            scale_encoded_header: header.into(),
-            scale_encoded_justification: justification.into(),
+        move |(scale_encoded_header, scale_encoded_justification)| {
+            GrandpaWarpSyncResponseFragment {
+                scale_encoded_header,
+                scale_encoded_justification,
+            }
         },
     )
 }
