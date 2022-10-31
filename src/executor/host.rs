@@ -2337,9 +2337,9 @@ impl SignatureVerification {
             .unwrap()
     }
 
-    /// Verify the signature and resume execution.
-    pub fn verify_and_resume(self) -> HostVm {
-        let success = match self.algorithm {
+    /// Verify the signature. Returns `true` if it is valid.
+    pub fn is_valid(&self) -> bool {
+        match self.algorithm {
             SignatureVerificationAlgorithm::Ed25519 => {
                 let public_key =
                     ed25519_zebra::VerificationKey::try_from(self.public_key().as_ref());
@@ -2430,8 +2430,12 @@ impl SignatureVerification {
                     false
                 }
             }
-        };
+        }
+    }
 
+    /// Verify the signature and resume execution.
+    pub fn verify_and_resume(self) -> HostVm {
+        let success = self.is_valid();
         self.resume(success)
     }
 
