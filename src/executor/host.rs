@@ -1265,31 +1265,12 @@ impl ReadyToRun {
                 }
             }
             HostFunction::ext_crypto_ecdsa_verify_prehashed_version_1 => {
-                let success = {
-                    let message =
-                        libsecp256k1::Message::parse(&expect_pointer_constant_size!(0, 32));
-
-                    // signature (64 bytes) + recovery ID (1 byte)
-                    let sig_bytes = expect_pointer_constant_size!(0, 65);
-                    if let Ok(sig) = libsecp256k1::Signature::parse_standard_slice(&sig_bytes[..64])
-                    {
-                        if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes[64]) {
-                            if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
-                                expect_pointer_constant_size!(2, 33)[..]
-                                    == actual.serialize_compressed()[..]
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                };
-
-                HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                HostVm::SignatureVerification(SignatureVerification {
+                    algorithm: SignatureVerificationAlgorithm::EcdsaPrehashed,
+                    signature_ptr: expect_pointer_constant_size_raw!(0, 65),
+                    public_key_ptr: expect_pointer_constant_size_raw!(2, 33),
+                    message_ptr: expect_pointer_constant_size_raw!(1, 32),
+                    message_size: 32,
                     inner: self.inner,
                 })
             }
@@ -2306,6 +2287,7 @@ enum SignatureVerificationAlgorithm {
     Sr25519V1,
     Sr25519V2,
     Ecdsa,
+    EcdsaPrehashed,
 }
 
 impl SignatureVerification {
@@ -2327,6 +2309,7 @@ impl SignatureVerification {
             SignatureVerificationAlgorithm::Sr25519V1 => 64,
             SignatureVerificationAlgorithm::Sr25519V2 => 64,
             SignatureVerificationAlgorithm::Ecdsa => 65,
+            SignatureVerificationAlgorithm::EcdsaPrehashed => 65,
         };
 
         self.inner
@@ -2345,6 +2328,7 @@ impl SignatureVerification {
             SignatureVerificationAlgorithm::Sr25519V1 => 32,
             SignatureVerificationAlgorithm::Sr25519V2 => 32,
             SignatureVerificationAlgorithm::Ecdsa => 33,
+            SignatureVerificationAlgorithm::EcdsaPrehashed => 33,
         };
 
         self.inner
@@ -2402,6 +2386,27 @@ impl SignatureVerification {
                 )
                 .unwrap();
                 let message = libsecp256k1::Message::parse(&data);
+
+                // signature (64 bytes) + recovery ID (1 byte)
+                let sig_bytes = self.signature();
+                if let Ok(sig) =
+                    libsecp256k1::Signature::parse_standard_slice(&sig_bytes.as_ref()[..64])
+                {
+                    if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes.as_ref()[64]) {
+                        if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
+                            self.public_key().as_ref()[..] == actual.serialize_compressed()[..]
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            SignatureVerificationAlgorithm::EcdsaPrehashed => {
+                let message = libsecp256k1::Message::parse(self.message().as_ref());
 
                 // signature (64 bytes) + recovery ID (1 byte)
                 let sig_bytes = self.signature();
