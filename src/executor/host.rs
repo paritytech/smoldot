@@ -2287,12 +2287,13 @@ impl fmt::Debug for ExternalStorageNextKey {
 /// Must verify whether a signature is correct.
 pub struct SignatureVerification {
     inner: Inner,
-    /// Which algorithm.
+    /// Which cryptographic algorithm.
     algorithm: SignatureVerificationAlgorithm,
     /// Pointer to the signature. The size of the signature depends on the algorithm. Guaranteed
     /// to be in range.
     signature_ptr: u32,
-    /// Pointer to the public key. Guaranteed to be in range.
+    /// Pointer to the public key. The size of the public key depends on the algorithm. Guaranteed
+    /// to be in range.
     public_key_ptr: u32,
     /// Pointer to the message. Guaranteed to be in range.
     message_ptr: u32,
