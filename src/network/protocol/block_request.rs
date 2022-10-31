@@ -139,7 +139,7 @@ pub fn decode_block_request(
 ) -> Result<BlocksRequestConfig, DecodeBlockRequestError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
-            fields = 1 => protobuf::uint32_tag_decode,
+            #[required] fields = 1 => protobuf::uint32_tag_decode,
             #[optional] hash = 2 => protobuf::bytes_tag_decode,
             #[optional] number = 3 => protobuf::bytes_tag_decode,
             #[optional] direction = 5 => protobuf::enum_tag_decode,
@@ -277,8 +277,8 @@ pub fn decode_block_response(
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
             #[repeated(max = 32768)] blocks = 1 => protobuf::message_tag_decode(protobuf::message_decode!{
-                hash = 1 => protobuf::bytes_tag_decode,
-                header = 2 => protobuf::bytes_tag_decode,
+                #[required] hash = 1 => protobuf::bytes_tag_decode,
+                #[required] header = 2 => protobuf::bytes_tag_decode,
                 #[repeated(max = usize::max_value())] body = 3 => protobuf::bytes_tag_decode,
                 #[optional] justifications = 8 => protobuf::bytes_tag_decode,
             }),
