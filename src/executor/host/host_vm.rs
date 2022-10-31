@@ -656,10 +656,19 @@ impl ReadyToRun {
                         expect_pointer_constant_size!(2, 32),
                     );
                     if let Ok(public_key) = public_key {
-                        let signature =
-                            ed25519_zebra::Signature::from(expect_pointer_constant_size!(0, 64));
+                        let signature = expect_pointer_constant_size!(0, 64);
                         let message = expect_pointer_size!(1);
-                        public_key.verify(&signature, message.as_ref()).is_ok()
+
+                        if self.inner.mock_signature_verification_host_functions {
+                            is_magic_signature(signature.as_ref())
+                        } else {
+                            public_key
+                                .verify(
+                                    &ed25519_zebra::Signature::from(signature),
+                                    message.as_ref(),
+                                )
+                                .is_ok()
+                        }
                     } else {
                         false
                     }
@@ -684,13 +693,17 @@ impl ReadyToRun {
                     let signature = expect_pointer_constant_size!(0, 64);
                     let message = expect_pointer_size!(1);
 
-                    signing_public_key
-                        .verify_simple_preaudit_deprecated(
-                            b"substrate",
-                            message.as_ref(),
-                            &signature,
-                        )
-                        .is_ok()
+                    if self.inner.mock_signature_verification_host_functions {
+                        is_magic_signature(signature.as_ref())
+                    } else {
+                        signing_public_key
+                            .verify_simple_preaudit_deprecated(
+                                b"substrate",
+                                message.as_ref(),
+                                &signature,
+                            )
+                            .is_ok()
+                    }
                 };
 
                 HostVm::ReadyToRun(ReadyToRun {
@@ -705,13 +718,21 @@ impl ReadyToRun {
                     let signing_public_key =
                         schnorrkel::PublicKey::from_bytes(&expect_pointer_constant_size!(2, 32))
                             .unwrap();
-                    let signature =
-                        schnorrkel::Signature::from_bytes(&expect_pointer_constant_size!(0, 64))
-                            .unwrap();
+                    let signature = expect_pointer_constant_size!(0, 64);
 
-                    signing_public_key
-                        .verify_simple(b"substrate", expect_pointer_size!(1).as_ref(), &signature)
-                        .is_ok()
+                    if self.inner.mock_signature_verification_host_functions {
+                        is_magic_signature(signature.as_ref())
+                    } else {
+                        let signature = schnorrkel::Signature::from_bytes(&signature).unwrap();
+
+                        signing_public_key
+                            .verify_simple(
+                                b"substrate",
+                                expect_pointer_size!(1).as_ref(),
+                                &signature,
+                            )
+                            .is_ok()
+                    }
                 };
 
                 HostVm::ReadyToRun(ReadyToRun {
@@ -759,20 +780,25 @@ impl ReadyToRun {
 
                     // signature (64 bytes) + recovery ID (1 byte)
                     let sig_bytes = expect_pointer_constant_size!(0, 65);
-                    if let Ok(sig) = libsecp256k1::Signature::parse_standard_slice(&sig_bytes[..64])
-                    {
-                        if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes[64]) {
-                            if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
-                                expect_pointer_constant_size!(2, 33)[..]
-                                    == actual.serialize_compressed()[..]
+                    if self.inner.mock_signature_verification_host_functions {
+                        is_magic_signature(sig_bytes.as_ref())
+                    } else {
+                        if let Ok(sig) =
+                            libsecp256k1::Signature::parse_standard_slice(&sig_bytes[..64])
+                        {
+                            if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes[64]) {
+                                if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
+                                    expect_pointer_constant_size!(2, 33)[..]
+                                        == actual.serialize_compressed()[..]
+                                } else {
+                                    false
+                                }
                             } else {
                                 false
                             }
                         } else {
                             false
                         }
-                    } else {
-                        false
                     }
                 };
 
@@ -2113,6 +2139,8 @@ pub struct Inner {
 
     /// Memory allocator in order to answer the calls to `malloc` and `free`.
     pub(crate) allocator: allocator::FreeingBumpHeapAllocator,
+
+    pub(crate) mock_signature_verification_host_functions: bool,
 }
 
 impl Inner {
@@ -2278,6 +2306,8 @@ impl Inner {
             heap_pages: self.heap_pages,
             allow_unresolved_imports: self.allow_unresolved_imports,
             memory_total_pages: self.memory_total_pages,
+            mock_signature_verification_host_functions: self
+                .mock_signature_verification_host_functions,
         }
     }
 }
@@ -2551,13 +2581,31 @@ impl<'a> allocator::Memory for MemAccess<'a> {
     }
 }
 
+fn is_magic_signature(signature: &[u8]) -> bool {
+    signature.starts_with(&[0xde, 0xad, 0xbe, 0xef]) && signature[4..].iter().all(|&b| b == 0xcd)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::HostVm;
+    use super::{is_magic_signature, HostVm};
 
     #[test]
     fn is_send() {
         fn req<T: Send>() {}
         req::<HostVm>();
+    }
+
+    #[test]
+    fn is_magic_signature_works() {
+        assert!(is_magic_signature(&[0xde, 0xad, 0xbe, 0xef, 0xcd, 0xcd]));
+        assert!(is_magic_signature(&[
+            0xde, 0xad, 0xbe, 0xef, 0xcd, 0xcd, 0xcd, 0xcd
+        ]));
+        assert!(!is_magic_signature(&[
+            0xde, 0xad, 0xbe, 0xef, 0xcd, 0xcd, 0xcd, 0x00
+        ]));
+        assert!(!is_magic_signature(&[
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        ]));
     }
 }

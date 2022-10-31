@@ -105,6 +105,7 @@ impl ChainSpec {
             heap_pages,
             exec_hint: executor::vm::ExecHint::Oneshot,
             allow_unresolved_imports: true,
+            mock_signature_verification_host_functions: false,
         })
         .map_err(FromGenesisStorageError::VmInitialization)?;
 

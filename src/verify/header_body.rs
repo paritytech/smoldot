@@ -675,6 +675,7 @@ impl RuntimeCompilation {
             heap_pages: self.heap_pages,
             exec_hint: vm::ExecHint::CompileAheadOfTime,
             allow_unresolved_imports: false,
+            mock_signature_verification_host_functions: false,
         }) {
             Ok(vm) => vm,
             Err(err) => {

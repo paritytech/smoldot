@@ -668,6 +668,7 @@ impl Inner {
                         heap_pages: executor::DEFAULT_HEAP_PAGES,
                         exec_hint: vm::ExecHint::Oneshot,
                         allow_unresolved_imports: false, // TODO: what is a correct value here?
+                        mock_signature_verification_host_functions: false,
                     }) {
                         Ok(w) => w,
                         Err(_) => {

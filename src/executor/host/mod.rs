@@ -228,6 +228,12 @@ pub struct Config<TModule> {
     /// a [`Error::UnresolvedFunctionCalled`] error will be generated if the module tries to call
     /// an unresolved function.
     pub allow_unresolved_imports: bool,
+
+    /// Replace the signature verification related host functions with a mock implementation.
+    /// The mock implementation will return true IF the signature is true OR the signature is
+    /// magic value `0xdeadbeef` follow by `0xcd` filling the rest of bytes.
+    /// NOTE: This should only enabled for testing purposes.
+    pub mock_signature_verification_host_functions: bool,
 }
 
 /// Prototype for an [`HostVm`].
@@ -269,6 +275,12 @@ pub struct HostVmPrototype {
     /// Total number of pages of Wasm memory. This is equal to `heap_base / 64k` (rounded up) plus
     /// `heap_pages`.
     memory_total_pages: HeapPages,
+
+    /// Replace the signature verification related host functions with a mock implementation.
+    /// The mock implementation will return true IF the signature is true OR the signature is
+    /// magic value `0xdeadbeef` follow by `0xcd`.
+    /// NOTE: This should only enabled for testing purposes.
+    mock_signature_verification_host_functions: bool,
 }
 
 impl HostVmPrototype {
@@ -353,6 +365,7 @@ impl HostVmPrototype {
             heap_pages,
             allow_unresolved_imports,
             memory_total_pages,
+            mock_signature_verification_host_functions: false,
         };
 
         // Call `Core_version` if no runtime version is known yet.
@@ -484,6 +497,8 @@ impl HostVmPrototype {
                 registered_functions: self.registered_functions,
                 storage_transaction_depth: 0,
                 allocator,
+                mock_signature_verification_host_functions: self
+                    .mock_signature_verification_host_functions,
             },
         })
     }

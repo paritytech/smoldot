@@ -1105,6 +1105,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 heap_pages: decoded_heap_pages,
                 exec_hint,
                 allow_unresolved_imports,
+                mock_signature_verification_host_functions: false,
             }) {
                 Ok(runtime) => runtime,
                 Err(err) => {

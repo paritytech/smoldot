@@ -237,6 +237,7 @@ impl ConsensusService {
                             heap_pages,
                             exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
                             allow_unresolved_imports: false,
+                            mock_signature_verification_host_functions: false,
                         })
                         .unwrap()
                     },
