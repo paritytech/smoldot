@@ -479,6 +479,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
 
             // TODO: better peers selection ; don't just take the first
             // TODO: handle max_parallel
+            // TODO: is the number of keys is large, split into multiple requests
             for target in self
                 .peers_assumed_know_blocks(block_number, block_hash)
                 .await

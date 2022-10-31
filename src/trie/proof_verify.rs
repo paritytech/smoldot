@@ -306,6 +306,30 @@ impl Children {
             ),
         }
     }
+
+    /// Iterators over all the children of the node. Returns an iterator producing one element per
+    /// child, where the element is `key` plus the nibble of this child.
+    pub fn unfold_append_to_key(
+        &self,
+        mut key: Vec<nibble::Nibble>,
+    ) -> impl Iterator<Item = Vec<nibble::Nibble>> {
+        match *self {
+            Children::None => either::Left(None.into_iter()),
+            Children::One(nibble) => {
+                key.push(nibble);
+                either::Left(Some(key).into_iter())
+            }
+            Children::Multiple { children_bitmap } => either::Right(
+                nibble::all_nibbles()
+                    .filter(move |n| (children_bitmap & (1 << u8::from(*n)) != 0))
+                    .map(move |nibble| {
+                        let mut k = key.clone();
+                        k.push(nibble);
+                        k
+                    }),
+            ),
+        }
+    }
 }
 
 /// Possible error returned by [`verify_proof`]
