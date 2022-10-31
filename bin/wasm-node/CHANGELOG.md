@@ -7,6 +7,7 @@
 ### Fixed
 
 - Fix the `state_getKeysPaged` JSON-RPC function returning incorrect results in some situations. ([#2947](https://github.com/paritytech/smoldot/pull/2947))
+- When opening a WebRTC connection, the ufrag and password of SDP requests are now properly set according to the WebRTC libp2p specification. ([#2924](https://github.com/paritytech/smoldot/pull/2924))
 
 ## 0.7.4 - 2022-10-27
 

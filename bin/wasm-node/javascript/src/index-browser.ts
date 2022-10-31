@@ -342,13 +342,18 @@ export function start(options?: ClientOptions): Client {
             console.error("Local offer doesn't contain UDP data channel. WebRTC connections will likely fail. Please report this issue.");
           }
           // According to the libp2p WebRTC spec, the ufrag and pwd are the same
-          // randomly-generated string. We modify the local description to ensure that.
-          const pwd = sdpOffer.match(/^a=ice-pwd:(.+)$/m);
-          if (pwd != null) {
-            sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:' + pwd[1]);
-          } else {
+          // randomly-generated string on both sides, and must be prefixed with
+          // `libp2p-webrtc-v1:`. We modify the local description to ensure that.
+          // While we could randomly generate a new string, we just grab the one that the
+          // browser has generated, in order to make sure that it respects the constraints
+          // of the ICE protocol.
+          const browserGeneratedPwd = sdpOffer.match(/^a=ice-pwd:(.+)$/m)?.at(1);
+          if (browserGeneratedPwd === undefined) {
             console.error("Failed to set ufrag to pwd. WebRTC connections will likely fail. Please report this issue.");
           }
+          const ufragPwd = "libp2p+webrtc+v1/" + browserGeneratedPwd;
+          sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:' + ufragPwd);
+          sdpOffer = sdpOffer.replace(/^a=ice-pwd.*$/m, 'a=ice-pwd:' + ufragPwd);
           await pc!.setLocalDescription({ type: 'offer', sdp: sdpOffer });
 
           // Transform certificate hash into fingerprint (upper-hex; each byte separated by ":").
@@ -390,10 +395,9 @@ export function start(options?: ClientOptions): Client {
               "a=ice-options:ice2" + "\n" +
               // ICE username and password, which are used for establishing and
               // maintaining the ICE connection. (RFC8839)
-              // MUST match ones used by the answerer (server).
               // These values are set according to the libp2p WebRTC specification.
-              "a=ice-ufrag:" + remoteCertMultibase + "\n" +
-              "a=ice-pwd:" + remoteCertMultibase + "\n" +
+              "a=ice-ufrag:" + ufragPwd + "\n" +
+              "a=ice-pwd:" + ufragPwd + "\n" +
               // Fingerprint of the certificate that the server will use during the TLS
               // handshake. (RFC8122)
               // MUST be derived from the certificate used by the answerer (server).
