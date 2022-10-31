@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.5 - 2022-10-31
+
 ### Fixed
 
 - Fix the `state_getKeysPaged` JSON-RPC function returning incorrect results in some situations. ([#2947](https://github.com/paritytech/smoldot/pull/2947))
