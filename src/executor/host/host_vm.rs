@@ -28,11 +28,11 @@ use core::{fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
 
+use super::host_function::HostFunction;
 use super::runtime_version::{CoreVersion, CoreVersionError};
 use super::vm::HeapPages;
 use super::zstd::Error as ModuleFormatError;
-use super::host_function::HostFunction;
-use super::{HostVmPrototype};
+use super::HostVmPrototype;
 
 /// Running virtual machine.
 #[must_use]
@@ -2456,7 +2456,6 @@ pub enum Error {
         function: &'static str,
     },
 }
-
 
 // Glue between the `allocator` module and the `vm` module.
 //

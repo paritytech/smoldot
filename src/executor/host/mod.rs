@@ -193,24 +193,20 @@
 
 use super::{allocator, vm};
 
-
-use alloc::{
-    borrow::ToOwned as _,
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{fmt, iter, str};
 
 pub mod runtime_version;
 
+pub use host_function::HostFunction;
+pub use host_vm::*;
 pub use runtime_version::{CoreVersion, CoreVersionError, CoreVersionRef};
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
-pub use host_function::HostFunction;
-pub use host_vm::*;
 
-mod zstd;
 mod host_function;
 mod host_vm;
+mod zstd;
 
 /// Configuration for [`HostVmPrototype::new`].
 pub struct Config<TModule> {
@@ -513,4 +509,3 @@ impl fmt::Debug for HostVmPrototype {
         f.debug_tuple("HostVmPrototype").finish()
     }
 }
-
