@@ -2,9 +2,12 @@
 
 ## Unreleased
 
+## 0.7.5 - 2022-10-31
+
 ### Fixed
 
 - Fix the `state_getKeysPaged` JSON-RPC function returning incorrect results in some situations. ([#2947](https://github.com/paritytech/smoldot/pull/2947))
+- When opening a WebRTC connection, the ufrag and password of SDP requests are now properly set according to the WebRTC libp2p specification. ([#2924](https://github.com/paritytech/smoldot/pull/2924))
 
 ## 0.7.4 - 2022-10-27
 
@@ -19,10 +22,6 @@
 - Fix panic on Deno when a WebSocket connection abruptly closes. ([#2939](https://github.com/paritytech/smoldot/pull/2939))
 - Fix errors showing in the browser's console about WebSockets being already in the CLOSING or CLOSED state. ([#2925](https://github.com/paritytech/smoldot/pull/2925))
 - No longer panic when a WebRTC connection fails to open due to the browser calling callbacks in an unexpected order. ([#2936](https://github.com/paritytech/smoldot/pull/2936))
-
-### Fixed
-
-- When opening a WebRTC connection, the ufrag and password of SDP requests are now properly set according to the WebRTC libp2p specification. ([#2924](https://github.com/paritytech/smoldot/pull/2924))
 
 ## 0.7.3 - 2022-10-19
 
