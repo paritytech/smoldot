@@ -46,7 +46,7 @@ pub fn decode_find_node_response(
 ) -> Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, DecodeFindNodeResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
-            #[required] response_ty = 1 => protobuf::enum_tag_decode,
+            #[optional] response_ty = 1 => protobuf::enum_tag_decode,
             #[repeated(max = 1024)] peers = 8 => protobuf::message_tag_decode(protobuf::message_decode!{
                 #[required] peer_id = 1 => protobuf::bytes_tag_decode,
                 #[repeated(max = 1024)] addrs = 2 => protobuf::bytes_tag_decode,
@@ -55,7 +55,7 @@ pub fn decode_find_node_response(
     );
 
     let closer_peers = match nom::Finish::finish(parser(response_bytes)) {
-        Ok((_, out)) if out.response_ty == 4 => out.peers,
+        Ok((_, out)) if out.response_ty.unwrap_or(0) == 4 => out.peers,
         Ok((_, _)) => return Err(DecodeFindNodeResponseError::BadResponseTy),
         Err(_) => {
             return Err(DecodeFindNodeResponseError::ProtobufDecode(

@@ -278,7 +278,7 @@ pub fn decode_block_response(
         nom::combinator::complete(protobuf::message_decode! {
             #[repeated(max = 32768)] blocks = 1 => protobuf::message_tag_decode(protobuf::message_decode!{
                 #[required] hash = 1 => protobuf::bytes_tag_decode,
-                #[required] header = 2 => protobuf::bytes_tag_decode,
+                #[optional] header = 2 => protobuf::bytes_tag_decode,
                 #[repeated(max = usize::max_value())] body = 3 => protobuf::bytes_tag_decode,
                 #[optional] justifications = 8 => protobuf::bytes_tag_decode,
             }),
@@ -298,8 +298,8 @@ pub fn decode_block_response(
 
         blocks_out.push(BlockData {
             hash: <[u8; 32]>::try_from(block.hash).unwrap(),
-            header: if !block.header.is_empty() {
-                Some(block.header.to_vec())
+            header: if let Some(header) = block.header {
+                Some(header.to_vec())
             } else {
                 None
             },
