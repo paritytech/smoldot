@@ -290,6 +290,10 @@ impl Inner {
                     return RuntimeHostVm::NextKey(NextKey { inner: self });
                 }
 
+                host::HostVm::SignatureVerification(sig) => {
+                    self.vm = sig.verify_and_resume();
+                }
+
                 host::HostVm::CallRuntimeVersion(req) => {
                     // TODO: make the user execute this ; see https://github.com/paritytech/smoldot/issues/144
                     // The code below compiles the provided WebAssembly runtime code, which is a
