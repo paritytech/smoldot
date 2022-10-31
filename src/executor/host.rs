@@ -2406,7 +2406,11 @@ impl SignatureVerification {
                 }
             }
             SignatureVerificationAlgorithm::EcdsaPrehashed => {
-                let message = libsecp256k1::Message::parse(self.message().as_ref());
+                // We can safely unwrap, as the size is checked when the `SignatureVerification`
+                // is constructed.
+                let message = libsecp256k1::Message::parse(
+                    &<[u8; 32]>::try_from(self.message().as_ref()).unwrap(),
+                );
 
                 // signature (64 bytes) + recovery ID (1 byte)
                 let sig_bytes = self.signature();
