@@ -2427,16 +2427,18 @@ impl SignatureVerification {
 
     /// Resume the execution assuming that the signature is valid.
     ///
-    /// > **Note**: You are strongly encouraged to call [`SignatureVerification::verify`]. This
-    /// >           function is meant to be used only in debugging situations.
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`SignatureVerification::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
     pub fn resume_success(self) -> HostVm {
         self.resume(true)
     }
 
     /// Resume the execution assuming that the signature is invalid.
     ///
-    /// > **Note**: You are strongly encouraged to call [`SignatureVerification::verify`]. This
-    /// >           function is meant to be used only in debugging situations.
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`SignatureVerification::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
     pub fn resume_failed(self) -> HostVm {
         self.resume(false)
     }
