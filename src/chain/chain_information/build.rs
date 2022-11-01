@@ -694,6 +694,9 @@ impl ChainInformationBuild {
                         call, inner,
                     )))
                 }
+                read_only_runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                    call = sig.verify_and_resume();
+                }
             }
         }
     }

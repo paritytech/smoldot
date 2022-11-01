@@ -1588,6 +1588,9 @@ impl<TPlat: Platform> Background<TPlat> {
                 read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
                     runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
                 }
+                read_only_runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                    runtime_call = sig.verify_and_resume();
+                }
             }
         }
     }
