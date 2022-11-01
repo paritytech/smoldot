@@ -1583,14 +1583,23 @@ where
                         });
                     }
                     (OutRequestTy::GrandpaWarpSync, chain_index) => {
+                        let block_number_bytes =
+                            self.chains[chain_index].chain_config.block_number_bytes;
+
                         let response = response
                             .map_err(GrandpaWarpSyncRequestError::Request)
-                            .and_then(|payload| {
-                                protocol::decode_grandpa_warp_sync_response(
-                                    &payload,
-                                    self.chains[chain_index].chain_config.block_number_bytes,
-                                )
-                                .map_err(GrandpaWarpSyncRequestError::Decode)
+                            .and_then(|message| {
+                                if let Err(err) = protocol::decode_grandpa_warp_sync_response(
+                                    &message,
+                                    block_number_bytes,
+                                ) {
+                                    Err(GrandpaWarpSyncRequestError::Decode(err))
+                                } else {
+                                    Ok(EncodedGrandpaWarpSyncResponse {
+                                        message,
+                                        block_number_bytes,
+                                    })
+                                }
                             });
 
                         break Some(Event::GrandpaWarpSyncRequestResult {
@@ -2576,7 +2585,7 @@ pub enum Event {
 
     GrandpaWarpSyncRequestResult {
         request_id: OutRequestId,
-        response: Result<protocol::GrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
+        response: Result<EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
     },
 
     StateRequestResult {
@@ -2789,6 +2798,34 @@ impl EncodedGrandpaCommitMessage {
 }
 
 impl fmt::Debug for EncodedGrandpaCommitMessage {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
+/// Undecoded but valid GrandPa warp sync response.
+#[derive(Clone)]
+pub struct EncodedGrandpaWarpSyncResponse {
+    message: Vec<u8>,
+    block_number_bytes: usize,
+}
+
+impl EncodedGrandpaWarpSyncResponse {
+    /// Returns the encoded bytes of the warp sync message.
+    pub fn as_encoded(&self) -> &[u8] {
+        &self.message
+    }
+
+    /// Returns the decoded version of the warp sync message.
+    pub fn decode(&self) -> protocol::GrandpaWarpSyncResponse {
+        match protocol::decode_grandpa_warp_sync_response(&self.message, self.block_number_bytes) {
+            Ok(msg) => msg,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl fmt::Debug for EncodedGrandpaWarpSyncResponse {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.decode(), f)
     }

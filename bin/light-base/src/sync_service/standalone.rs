@@ -250,17 +250,18 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 // machine.
                 match result {
                     Ok(Ok(result)) => {
-                        let fragments = result.fragments
+                        let decoded = result.decode();
+                        let fragments = decoded.fragments
                             .into_iter()
                             .map(|f| all::WarpSyncFragment {
-                                scale_encoded_header: f.scale_encoded_header,
-                                scale_encoded_justification: f.scale_encoded_justification,
+                                scale_encoded_header: f.scale_encoded_header.to_vec(),
+                                scale_encoded_justification: f.scale_encoded_justification.to_vec(),
                             })
                             .collect();
                         task.sync.grandpa_warp_sync_response_ok(
                             request_id,
                             fragments,
-                            result.is_finished,
+                            decoded.is_finished,
                         ).1
                     }
                     Ok(Err(_)) => {
@@ -412,7 +413,7 @@ struct Task<TPlat: Platform> {
                 all::RequestId,
                 Result<
                     Result<
-                        protocol::GrandpaWarpSyncResponse,
+                        network::service::EncodedGrandpaWarpSyncResponse,
                         network_service::GrandpaWarpSyncRequestError,
                     >,
                     future::Aborted,

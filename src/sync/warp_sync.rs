@@ -769,6 +769,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     /// Panics if the [`RequestId`] is invalid.
     /// Panics if the [`RequestId`] doesn't correspond to a warp sync request.
     ///
+    // TODO: more zero cost API w.r.t. the fragments
     pub fn warp_sync_request_success(
         &mut self,
         request_id: RequestId,
