@@ -552,6 +552,9 @@ pub enum HostVm {
     /// Must the set value of an off-chain storage entry.
     #[from]
     ExternalOffchainStorageSet(ExternalOffchainStorageSet),
+    /// Need to verify whether a signature is valid.
+    #[from]
+    SignatureVerification(SignatureVerification),
     /// Need to call `Core_version` on the given Wasm code and return the raw output (i.e.
     /// still SCALE-encoded), or an error if the call has failed.
     #[from]
@@ -594,6 +597,7 @@ impl HostVm {
             HostVm::ExternalStorageRoot(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageNextKey(inner) => inner.inner.into_prototype(),
             HostVm::ExternalOffchainStorageSet(inner) => inner.inner.into_prototype(),
+            HostVm::SignatureVerification(inner) => inner.inner.into_prototype(),
             HostVm::CallRuntimeVersion(inner) => inner.inner.into_prototype(),
             HostVm::StartStorageTransaction(inner) => inner.inner.into_prototype(),
             HostVm::EndStorageTransaction { resume, .. } => resume.inner.into_prototype(),
@@ -848,6 +852,41 @@ impl ReadyToRun {
                         };
                     }
                 }
+            }};
+        }
+
+        macro_rules! expect_pointer_constant_size_raw {
+            ($num:expr, $size:expr) => {{
+                let ptr = match params[$num] {
+                    vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
+                    v => {
+                        return HostVm::Error {
+                            error: Error::WrongParamTy {
+                                function: host_fn.name(),
+                                param_num: $num,
+                                expected: vm::ValueType::I32,
+                                actual: v.ty(),
+                            },
+                            prototype: self.inner.into_prototype(),
+                        }
+                    }
+                };
+
+                if u32::saturating_add($size, ptr)
+                    > u32::from(self.inner.vm.memory_size()) * 64 * 1024
+                {
+                    return HostVm::Error {
+                        error: Error::ParamOutOfRange {
+                            function: host_fn.name(),
+                            param_num: $num,
+                            pointer: ptr,
+                            length: $size,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
+
+                ptr
             }};
         }
 
@@ -1131,22 +1170,13 @@ impl ReadyToRun {
             HostFunction::ext_crypto_ed25519_generate_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_sign_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_verify_version_1 => {
-                let success = {
-                    let public_key = ed25519_zebra::VerificationKey::try_from(
-                        expect_pointer_constant_size!(2, 32),
-                    );
-                    if let Ok(public_key) = public_key {
-                        let signature =
-                            ed25519_zebra::Signature::from(expect_pointer_constant_size!(0, 64));
-                        let message = expect_pointer_size!(1);
-                        public_key.verify(&signature, message.as_ref()).is_ok()
-                    } else {
-                        false
-                    }
-                };
-
-                HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                let (message_ptr, message_size) = expect_pointer_size_raw!(1);
+                HostVm::SignatureVerification(SignatureVerification {
+                    algorithm: SignatureVerificationAlgorithm::Ed25519,
+                    signature_ptr: expect_pointer_constant_size_raw!(0, 64),
+                    public_key_ptr: expect_pointer_constant_size_raw!(2, 32),
+                    message_ptr,
+                    message_size,
                     inner: self.inner,
                 })
             }
@@ -1154,48 +1184,24 @@ impl ReadyToRun {
             HostFunction::ext_crypto_sr25519_generate_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_sr25519_sign_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_sr25519_verify_version_1 => {
-                let success = {
-                    // The `unwrap()` below can only panic if the input is the wrong length, which
-                    // we know can't happen.
-                    let signing_public_key =
-                        schnorrkel::PublicKey::from_bytes(&expect_pointer_constant_size!(2, 32))
-                            .unwrap();
-
-                    let signature = expect_pointer_constant_size!(0, 64);
-                    let message = expect_pointer_size!(1);
-
-                    signing_public_key
-                        .verify_simple_preaudit_deprecated(
-                            b"substrate",
-                            message.as_ref(),
-                            &signature,
-                        )
-                        .is_ok()
-                };
-
-                HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                let (message_ptr, message_size) = expect_pointer_size_raw!(1);
+                HostVm::SignatureVerification(SignatureVerification {
+                    algorithm: SignatureVerificationAlgorithm::Sr25519V1,
+                    signature_ptr: expect_pointer_constant_size_raw!(0, 64),
+                    public_key_ptr: expect_pointer_constant_size_raw!(2, 32),
+                    message_ptr,
+                    message_size,
                     inner: self.inner,
                 })
             }
             HostFunction::ext_crypto_sr25519_verify_version_2 => {
-                let success = {
-                    // The two `unwrap()`s below can only panic if the input is the wrong
-                    // length, which we know can't happen.
-                    let signing_public_key =
-                        schnorrkel::PublicKey::from_bytes(&expect_pointer_constant_size!(2, 32))
-                            .unwrap();
-                    let signature =
-                        schnorrkel::Signature::from_bytes(&expect_pointer_constant_size!(0, 64))
-                            .unwrap();
-
-                    signing_public_key
-                        .verify_simple(b"substrate", expect_pointer_size!(1).as_ref(), &signature)
-                        .is_ok()
-                };
-
-                HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                let (message_ptr, message_size) = expect_pointer_size_raw!(1);
+                HostVm::SignatureVerification(SignatureVerification {
+                    algorithm: SignatureVerificationAlgorithm::Sr25519V2,
+                    signature_ptr: expect_pointer_constant_size_raw!(0, 64),
+                    public_key_ptr: expect_pointer_constant_size_raw!(2, 32),
+                    message_ptr,
+                    message_size,
                     inner: self.inner,
                 })
             }
@@ -1228,36 +1234,13 @@ impl ReadyToRun {
             }
             HostFunction::ext_crypto_ecdsa_public_keys_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ecdsa_verify_version_1 => {
-                let success = {
-                    // NOTE: safe to unwrap here because we supply the nn to blake2b fn
-                    let data = <[u8; 32]>::try_from(
-                        blake2_rfc::blake2b::blake2b(32, &[], expect_pointer_size!(0).as_ref())
-                            .as_bytes(),
-                    )
-                    .unwrap();
-                    let message = libsecp256k1::Message::parse(&data);
-
-                    // signature (64 bytes) + recovery ID (1 byte)
-                    let sig_bytes = expect_pointer_constant_size!(0, 65);
-                    if let Ok(sig) = libsecp256k1::Signature::parse_standard_slice(&sig_bytes[..64])
-                    {
-                        if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes[64]) {
-                            if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
-                                expect_pointer_constant_size!(2, 33)[..]
-                                    == actual.serialize_compressed()[..]
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                };
-
-                HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                let (message_ptr, message_size) = expect_pointer_size_raw!(1);
+                HostVm::SignatureVerification(SignatureVerification {
+                    algorithm: SignatureVerificationAlgorithm::Ecdsa,
+                    signature_ptr: expect_pointer_constant_size_raw!(0, 65),
+                    public_key_ptr: expect_pointer_constant_size_raw!(2, 33),
+                    message_ptr,
+                    message_size,
                     inner: self.inner,
                 })
             }
@@ -1282,31 +1265,12 @@ impl ReadyToRun {
                 }
             }
             HostFunction::ext_crypto_ecdsa_verify_prehashed_version_1 => {
-                let success = {
-                    let message =
-                        libsecp256k1::Message::parse(&expect_pointer_constant_size!(0, 32));
-
-                    // signature (64 bytes) + recovery ID (1 byte)
-                    let sig_bytes = expect_pointer_constant_size!(0, 65);
-                    if let Ok(sig) = libsecp256k1::Signature::parse_standard_slice(&sig_bytes[..64])
-                    {
-                        if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes[64]) {
-                            if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
-                                expect_pointer_constant_size!(2, 33)[..]
-                                    == actual.serialize_compressed()[..]
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                };
-
-                HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                HostVm::SignatureVerification(SignatureVerification {
+                    algorithm: SignatureVerificationAlgorithm::EcdsaPrehashed,
+                    signature_ptr: expect_pointer_constant_size_raw!(0, 65),
+                    public_key_ptr: expect_pointer_constant_size_raw!(2, 33),
+                    message_ptr: expect_pointer_constant_size_raw!(1, 32),
+                    message_size: 32,
                     inner: self.inner,
                 })
             }
@@ -2298,6 +2262,217 @@ impl ExternalStorageNextKey {
 impl fmt::Debug for ExternalStorageNextKey {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("ExternalStorageNextKey").finish()
+    }
+}
+
+/// Must verify whether a signature is correct.
+pub struct SignatureVerification {
+    inner: Inner,
+    /// Which cryptographic algorithm.
+    algorithm: SignatureVerificationAlgorithm,
+    /// Pointer to the signature. The size of the signature depends on the algorithm. Guaranteed
+    /// to be in range.
+    signature_ptr: u32,
+    /// Pointer to the public key. The size of the public key depends on the algorithm. Guaranteed
+    /// to be in range.
+    public_key_ptr: u32,
+    /// Pointer to the message. Guaranteed to be in range.
+    message_ptr: u32,
+    /// Size of the message. Guaranteed to be in range.
+    message_size: u32,
+}
+
+enum SignatureVerificationAlgorithm {
+    Ed25519,
+    Sr25519V1,
+    Sr25519V2,
+    Ecdsa,
+    EcdsaPrehashed,
+}
+
+impl SignatureVerification {
+    /// Returns the message that the signature is expected to sign.
+    pub fn message(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner
+            .vm
+            .read_memory(self.message_ptr, self.message_size)
+            .unwrap()
+    }
+
+    /// Returns the signature.
+    ///
+    /// > **Note**: Be aware that this signature is untrusted input and might not be part of the
+    /// >           set of valid signatures.
+    pub fn signature(&'_ self) -> impl AsRef<[u8]> + '_ {
+        let signature_size = match self.algorithm {
+            SignatureVerificationAlgorithm::Ed25519 => 64,
+            SignatureVerificationAlgorithm::Sr25519V1 => 64,
+            SignatureVerificationAlgorithm::Sr25519V2 => 64,
+            SignatureVerificationAlgorithm::Ecdsa => 65,
+            SignatureVerificationAlgorithm::EcdsaPrehashed => 65,
+        };
+
+        self.inner
+            .vm
+            .read_memory(self.signature_ptr, signature_size)
+            .unwrap()
+    }
+
+    /// Returns the public key the signature is against.
+    ///
+    /// > **Note**: Be aware that this public key is untrusted input and might not be part of the
+    /// >           set of valid public keys.
+    pub fn public_key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        let public_key_size = match self.algorithm {
+            SignatureVerificationAlgorithm::Ed25519 => 32,
+            SignatureVerificationAlgorithm::Sr25519V1 => 32,
+            SignatureVerificationAlgorithm::Sr25519V2 => 32,
+            SignatureVerificationAlgorithm::Ecdsa => 33,
+            SignatureVerificationAlgorithm::EcdsaPrehashed => 33,
+        };
+
+        self.inner
+            .vm
+            .read_memory(self.public_key_ptr, public_key_size)
+            .unwrap()
+    }
+
+    /// Verify the signature. Returns `true` if it is valid.
+    pub fn is_valid(&self) -> bool {
+        match self.algorithm {
+            SignatureVerificationAlgorithm::Ed25519 => {
+                let public_key =
+                    ed25519_zebra::VerificationKey::try_from(self.public_key().as_ref());
+
+                if let Ok(public_key) = public_key {
+                    let signature = ed25519_zebra::Signature::from(
+                        <[u8; 64]>::try_from(self.signature().as_ref()).unwrap(),
+                    );
+                    public_key
+                        .verify(&signature, self.message().as_ref())
+                        .is_ok()
+                } else {
+                    false
+                }
+            }
+            SignatureVerificationAlgorithm::Sr25519V1 => {
+                // The `unwrap()` below can only panic if the input is the wrong length, which
+                // we know can't happen.
+                schnorrkel::PublicKey::from_bytes(&self.public_key().as_ref())
+                    .unwrap()
+                    .verify_simple_preaudit_deprecated(
+                        b"substrate",
+                        self.message().as_ref(),
+                        self.signature().as_ref(),
+                    )
+                    .is_ok()
+            }
+            SignatureVerificationAlgorithm::Sr25519V2 => {
+                // The two `unwrap()`s below can only panic if the input is the wrong
+                // length, which we know can't happen.
+                schnorrkel::PublicKey::from_bytes(&self.public_key().as_ref())
+                    .unwrap()
+                    .verify_simple(
+                        b"substrate",
+                        self.message().as_ref(),
+                        &schnorrkel::Signature::from_bytes(self.signature().as_ref()).unwrap(),
+                    )
+                    .is_ok()
+            }
+            SignatureVerificationAlgorithm::Ecdsa => {
+                // NOTE: safe to unwrap here because we supply the nn to blake2b fn
+                let data = <[u8; 32]>::try_from(
+                    blake2_rfc::blake2b::blake2b(32, &[], self.message().as_ref()).as_bytes(),
+                )
+                .unwrap();
+                let message = libsecp256k1::Message::parse(&data);
+
+                // signature (64 bytes) + recovery ID (1 byte)
+                let sig_bytes = self.signature();
+                if let Ok(sig) =
+                    libsecp256k1::Signature::parse_standard_slice(&sig_bytes.as_ref()[..64])
+                {
+                    if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes.as_ref()[64]) {
+                        if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
+                            self.public_key().as_ref()[..] == actual.serialize_compressed()[..]
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            SignatureVerificationAlgorithm::EcdsaPrehashed => {
+                // We can safely unwrap, as the size is checked when the `SignatureVerification`
+                // is constructed.
+                let message = libsecp256k1::Message::parse(
+                    &<[u8; 32]>::try_from(self.message().as_ref()).unwrap(),
+                );
+
+                // signature (64 bytes) + recovery ID (1 byte)
+                let sig_bytes = self.signature();
+                if let Ok(sig) =
+                    libsecp256k1::Signature::parse_standard_slice(&sig_bytes.as_ref()[..64])
+                {
+                    if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes.as_ref()[64]) {
+                        if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
+                            self.public_key().as_ref()[..] == actual.serialize_compressed()[..]
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Verify the signature and resume execution.
+    pub fn verify_and_resume(self) -> HostVm {
+        let success = self.is_valid();
+        self.resume(success)
+    }
+
+    /// Resume the execution assuming that the signature is valid.
+    ///
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`SignatureVerification::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
+    pub fn resume_success(self) -> HostVm {
+        self.resume(true)
+    }
+
+    /// Resume the execution assuming that the signature is invalid.
+    ///
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`SignatureVerification::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
+    pub fn resume_failed(self) -> HostVm {
+        self.resume(false)
+    }
+
+    fn resume(self, success: bool) -> HostVm {
+        // All signature-related host functions work the same way in terms of return value.
+        HostVm::ReadyToRun(ReadyToRun {
+            resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+            inner: self.inner,
+        })
+    }
+}
+
+impl fmt::Debug for SignatureVerification {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("SignatureVerification")
+            .field("message", &self.message().as_ref())
+            .field("signature", &self.signature().as_ref())
+            .field("public_key", &self.public_key().as_ref())
+            .finish()
     }
 }
 

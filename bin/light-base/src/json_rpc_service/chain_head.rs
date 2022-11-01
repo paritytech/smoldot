@@ -274,6 +274,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                                 }
                                                 .to_json_call_object_parameters(None);
                                         }
+                                        runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                                            runtime_call = sig.verify_and_resume();
+                                        }
                                     }
                                 }
                             }
