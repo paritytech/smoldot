@@ -177,7 +177,7 @@ struct SharedGuarded<TPlat: Platform> {
     grandpa_warp_sync_requests: HashMap<
         service::OutRequestId,
         oneshot::Sender<
-            Result<protocol::GrandpaWarpSyncResponse, service::GrandpaWarpSyncRequestError>,
+            Result<service::EncodedGrandpaWarpSyncResponse, service::GrandpaWarpSyncRequestError>,
         >,
         fnv::FnvBuildHasher,
     >,
@@ -484,7 +484,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         chain_index: usize,
         begin_hash: [u8; 32],
         timeout: Duration,
-    ) -> Result<protocol::GrandpaWarpSyncResponse, GrandpaWarpSyncRequestError> {
+    ) -> Result<service::EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
 
@@ -519,13 +519,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         match &result {
             Ok(response) => {
                 // TODO: print total bytes size
+                let decoded = response.decode();
                 log::debug!(
                     target: "network",
                     "Connection({}) => GrandpaWarpSyncRequest(chain={}, num_fragments={}, finished={:?})",
                     target,
                     self.shared.log_chain_names[chain_index],
-                    response.fragments.len(),
-                    response.is_finished,
+                    decoded.fragments.len(),
+                    decoded.is_finished,
                 );
             }
             Err(err) => {
