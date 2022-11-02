@@ -117,7 +117,12 @@ pub fn decode_state_response(
 ) -> Result<Vec<&[u8]>, DecodeStateResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
-            #[repeated(max = usize::max_value())] proof = 2 => protobuf::bytes_tag_decode,
+            #[required] proof = 2 => nom::combinator::map_parser(protobuf::bytes_tag_decode, nom::combinator::flat_map(
+                crate::util::nom_scale_compact_usize,
+                move |num_elems| {
+                    nom::multi::many_m_n(num_elems, num_elems, nom::multi::length_data(crate::util::nom_scale_compact_usize))
+                },
+            )),
         }),
     );
 
