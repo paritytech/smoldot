@@ -25,7 +25,6 @@ import { Connection, ConnectionError, ConnectionConfig } from './instance/instan
 import { WebSocket } from 'ws';
 import { inflate } from 'pako';
 
-import { hrtime } from 'node:process';
 import { createConnection as nodeCreateConnection } from 'node:net';
 import type { Socket as TcpSocket } from 'node:net';
 import { randomFillSync } from 'node:crypto';
@@ -59,8 +58,7 @@ export function start(options?: ClientOptions): Client {
         return Promise.resolve(inflate(Buffer.from(input, 'base64')))
     },
     performanceNow: () => {
-      const time = hrtime();
-      return ((time[0] * 1e3) + (time[1] / 1e6));
+        return performance.now()
     },
     getRandomValues: (buffer) => {
       if (buffer.length >= 65536)
