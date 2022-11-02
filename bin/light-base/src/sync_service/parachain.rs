@@ -377,15 +377,14 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                         finalized_block_runtime: None,
                         non_finalized_blocks_ancestry_order: {
                             let mut list =
-                                HashMap::<_, super::BlockNotification, _>::with_capacity_and_hasher(
+                                Vec::<([u8; 32], super::BlockNotification)>::with_capacity(
                                     runtime_subscription
                                         .async_tree
                                         .num_input_non_finalized_blocks(),
-                                    fnv::FnvBuildHasher::default(),
                                 );
 
                             for relay_block in
-                                runtime_subscription.async_tree.input_iter_unordered()
+                                runtime_subscription.async_tree.input_iter_ancestry_order()
                             {
                                 let parablock = match relay_block.async_op_user_data {
                                     Some(b) => b.as_ref().unwrap(),
@@ -395,52 +394,58 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                                 let parablock_hash =
                                     header::hash_from_scale_encoded_header(&parablock);
 
-                                match list.entry(parablock_hash) {
-                                    hashbrown::hash_map::Entry::Occupied(entry) => {
-                                        if relay_block.is_output_best {
-                                            entry.into_mut().is_new_best = true;
-                                        }
+                                if let Some((_, entry)) =
+                                    list.iter_mut().find(|(h, _)| *h == parablock_hash)
+                                {
+                                    if relay_block.is_output_best {
+                                        entry.is_new_best = true;
                                     }
-                                    hashbrown::hash_map::Entry::Vacant(entry) => {
-                                        let parent_hash = runtime_subscription
-                                            .async_tree
-                                            .ancestors(relay_block.id)
-                                            .find_map(|idx| {
-                                                let hash = header::hash_from_scale_encoded_header(
-                                                    &runtime_subscription
-                                                        .async_tree
-                                                        .block_async_user_data(idx)
-                                                        .unwrap()
-                                                        .as_ref()
-                                                        .unwrap(),
+                                } else {
+                                    let parent_hash = runtime_subscription
+                                        .async_tree
+                                        .ancestors(relay_block.id)
+                                        .find_map(|idx| {
+                                            let hash = header::hash_from_scale_encoded_header(
+                                                &runtime_subscription
+                                                    .async_tree
+                                                    .block_async_user_data(idx)
+                                                    .unwrap()
+                                                    .as_ref()
+                                                    .unwrap(),
+                                            );
+                                            if hash != parablock_hash {
+                                                Some(hash)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .or_else(|| {
+                                            let finalized_parahash =
+                                                header::hash_from_scale_encoded_header(
+                                                    &finalized_parahead,
                                                 );
-                                                if hash != parablock_hash {
-                                                    Some(hash)
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                            .or_else(|| {
-                                                let finalized_parahash =
-                                                    header::hash_from_scale_encoded_header(
-                                                        &finalized_parahead,
-                                                    );
-                                                if finalized_parahash != parablock_hash {
-                                                    Some(finalized_parahash)
-                                                } else {
-                                                    None
-                                                }
-                                            });
+                                            if finalized_parahash != parablock_hash {
+                                                Some(finalized_parahash)
+                                            } else {
+                                                None
+                                            }
+                                        });
 
-                                        // `parent_hash` is `None` if the parablock is
-                                        // the same as the finalized parablock.
-                                        if let Some(parent_hash) = parent_hash {
-                                            entry.insert(super::BlockNotification {
+                                    // `parent_hash` is `None` if the parablock is
+                                    // the same as the finalized parablock.
+                                    if let Some(parent_hash) = parent_hash {
+                                        debug_assert_eq!(
+                                            list.iter().filter(|(h, _)| *h == parent_hash).count(),
+                                            1
+                                        );
+                                        list.push((
+                                            parablock_hash,
+                                            super::BlockNotification {
                                                 is_new_best: relay_block.is_output_best,
                                                 scale_encoded_header: parablock.clone(),
                                                 parent_hash,
-                                            });
-                                        }
+                                            },
+                                        ));
                                     }
                                 }
                             }
