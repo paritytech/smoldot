@@ -244,14 +244,14 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 ///
 /// # About `optional` fields
 ///
-/// A field can be either "required" (if marked with ̀`#[required]`) or "optional" (if marked
+/// A field can be either "required" (if marked with `#[required]`) or "optional" (if marked
 /// with `#[optional]` or `#[repeated]`).
 ///
 /// When translating Protobuf definitions into a decoder using this macro, it can be tricky to
 /// know whether to mark fields as `#[optional]`. If the definition uses `proto2`, then all fields
 /// of the definition are always serialized, meaning that they will always be found in the encoded
 /// message. If the definition uses `proto3`, however, then fields that contain their default value
-/// (typically `0` or an empty string/bytes) are intentionally ommitted unless they are marked as
+/// (typically `0` or an empty string/bytes) are intentionally omitted unless they are marked as
 /// `optional`.
 ///
 /// In general, you probably want to mark as `#[optional]` all the fields where `0` or an empty
