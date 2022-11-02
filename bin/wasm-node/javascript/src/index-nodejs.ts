@@ -25,6 +25,7 @@ import { Connection, ConnectionError, ConnectionConfig } from './instance/instan
 import { WebSocket } from 'ws';
 import { inflate } from 'pako';
 
+import { performance } from 'node:perf_hooks';
 import { createConnection as nodeCreateConnection } from 'node:net';
 import type { Socket as TcpSocket } from 'node:net';
 import { randomFillSync } from 'node:crypto';
