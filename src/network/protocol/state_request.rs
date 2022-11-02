@@ -30,9 +30,31 @@ pub struct StateRequest<'a> {
 
     /// Response shouldn't contain any key lexicographically inferior to this key.
     ///
-    /// > **Note**: Because a response has a limited size, this value lets you send additional
+    /// > **Note**: Because a response has a limited size, this field lets you send additional
     /// >           requests that start where the previous response has ended.
     pub start_key: &'a [u8],
+}
+
+/// Description of a state request that can be sent to a peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateResponse<'a> {
+    /// List of keys and values.
+    pub entries: Vec<StateResponseEntry<'a>>,
+
+    /// `true` if the list of entries contains all remaining entries.
+    pub complete: bool,
+}
+
+/// Entry sent in a state response.
+///
+/// > **Note**: Assuming that this response comes from the network, the information in this struct
+/// >           can be erroneous and shouldn't be trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateResponseEntry<'a> {
+    /// Storage key concerned by the entry.
+    pub key: &'a [u8],
+    /// Storage value concerned by the entry.
+    pub value: &'a [u8],
 }
 
 // See https://github.com/paritytech/substrate/blob/c8653447fc8ef8d95a92fe164c96dffb37919e85/client/network/light/src/schema/light.v1.proto
@@ -55,18 +77,18 @@ pub fn build_state_request(
 
 /// Decodes a response into a state request response.
 pub fn decode_state_response(
-    response_bytes: &'_ [u8],
-) -> Result<Vec<StateResponseEntry<'_>>, DecodeStateResponseError> {
+    response_bytes: &[u8],
+) -> Result<StateResponse, DecodeStateResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
-            #[repeated(max = 1)] entries = 1 => protobuf::message_decode!{
-                _state_root = 1 => protobuf::bytes_tag_decode,
-                #[repeated(max = 4 * 1024 * 1024)] entries = 2 => protobuf::message_tag_decode(protobuf::message_decode!{
+            #[repeated(max = 2048)] entries = 1 => protobuf::message_tag_decode(protobuf::message_decode!{
+                #[optional] _state_root = 1 => protobuf::bytes_tag_decode,
+                #[repeated(max = 4 * 1024 * 1024)] key_values = 2 => protobuf::message_tag_decode(protobuf::message_decode!{
                     key = 1 => protobuf::bytes_tag_decode,
                     value = 2 => protobuf::bytes_tag_decode,
                 }),
-                _complete = 3 => protobuf::bool_tag_decode,
-            }
+                #[optional] complete = 3 => protobuf::bool_tag_decode,
+            })
         }),
     );
 
@@ -75,35 +97,50 @@ pub fn decode_state_response(
         Err(_) => return Err(DecodeStateResponseError::ProtobufDecode),
     };
 
-    let entries = decoded
-        .entries
+    let entry = if decoded.entries.len() == 1 {
+        decoded.entries.into_iter().next().unwrap()
+    } else {
+        return Err(DecodeStateResponseError::UnexpectedEntriesCount);
+    };
+
+    let key_values = entry
+        .key_values
         .into_iter()
-        .flat_map(|entries| entries.entries.into_iter())
-        .map(|entry| StateResponseEntry {
-            key: entry.key,
-            value: entry.value,
+        .map(|key_value| StateResponseEntry {
+            key: key_value.key,
+            value: key_value.value,
         })
         .collect();
 
-    Ok(entries)
-}
-
-/// Entry sent in a state response.
-///
-/// > **Note**: Assuming that this response comes from the network, the information in this struct
-/// >           can be erroneous and shouldn't be trusted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StateResponseEntry<'a> {
-    /// Storage key concerned by the entry.
-    pub key: &'a [u8],
-    /// Storage value concerned by the entry.
-    pub value: &'a [u8],
+    Ok(StateResponse {
+        entries: key_values,
+        complete: entry.complete.unwrap_or(false),
+    })
 }
 
 /// Error potentially returned by [`decode_state_response`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 #[display(fmt = "Failed to decode response")]
 pub enum DecodeStateResponseError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,
+    /// Response contains a different number of entries than expected.
+    UnexpectedEntriesCount,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn example_response() {
+        // This is an actual response from the Polkadot chain that failed to parse in the past.
+        super::decode_state_response(&include_bytes!("./state_request/example-response")[..])
+            .unwrap();
+    }
+
+    #[test]
+    fn example_response_2() {
+        // This is an actual response from the Polkadot chain that failed to parse in the past.
+        super::decode_state_response(&include_bytes!("./state_request/example-response-2")[..])
+            .unwrap();
+    }
 }

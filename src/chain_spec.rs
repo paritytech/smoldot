@@ -137,8 +137,7 @@ impl ChainSpec {
                                 trie::calculate_root::RootMerkleValueCalculation::StorageValue(
                                     val,
                                 ) => {
-                                    let key: alloc::vec::Vec<u8> = val.key().collect();
-                                    let value = genesis_storage.value(&key[..]);
+                                    let value = genesis_storage.value(&val.key_as_vec()[..]);
                                     calculation = val.inject(state_version, value);
                                 }
                             }

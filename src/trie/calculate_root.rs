@@ -448,6 +448,13 @@ impl StorageValue {
         })
     }
 
+    /// Returns the key whose value is being requested.
+    ///
+    /// This function is a shortcut for [`StorageValue::key`] and collecting the bytes.
+    pub fn key_as_vec(&self) -> Vec<u8> {
+        self.key().collect()
+    }
+
     /// Indicates the storage value and advances the calculation.
     pub fn inject(
         mut self,
