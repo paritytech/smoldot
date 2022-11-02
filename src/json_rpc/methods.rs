@@ -484,7 +484,7 @@ define_methods! {
     network_unstable_event(subscription: Cow<'a, str>, result: NetworkEvent<'a>) -> (),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct HexString(pub Vec<u8>);
 
 impl AsRef<[u8]> for HexString {
@@ -513,6 +513,12 @@ impl<'a> serde::Deserialize<'a> for HexString {
 
         let bytes = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
         Ok(HexString(bytes))
+    }
+}
+
+impl fmt::Debug for HexString {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "0x{}", hex::encode(&self.0))
     }
 }
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix the `ext_crypto_ecdsa_verify_version_1` and `ext_crypto_ecdsa_verify_prehashed_version_1` host functions mixing their parameters and thus always failing. ([#2955](https://github.com/paritytech/smoldot/pull/2955))
+
 ## 0.7.5 - 2022-10-31
 
 ### Fixed

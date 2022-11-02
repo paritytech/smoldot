@@ -119,6 +119,8 @@ pub enum RuntimeHostVm {
     NextKey(NextKey),
     /// Fetching the storage trie root is required in order to continue.
     StorageRoot(StorageRoot),
+    /// Verifying whether a signature is correct is required in order to continue.
+    SignatureVerification(SignatureVerification),
 }
 
 impl RuntimeHostVm {
@@ -130,6 +132,7 @@ impl RuntimeHostVm {
             RuntimeHostVm::StorageGet(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::NextKey(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::StorageRoot(inner) => inner.inner.vm.into_prototype(),
+            RuntimeHostVm::SignatureVerification(inner) => inner.inner.vm.into_prototype(),
         }
     }
 }
@@ -247,6 +250,90 @@ impl StorageRoot {
     }
 }
 
+/// Verifying whether a signature is correct is required in order to continue.
+#[must_use]
+pub struct SignatureVerification {
+    inner: Inner,
+}
+
+impl SignatureVerification {
+    /// Returns the message that the signature is expected to sign.
+    pub fn message(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(ref sig) => sig.message(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the signature.
+    ///
+    /// > **Note**: Be aware that this signature is untrusted input and might not be part of the
+    /// >           set of valid signatures.
+    pub fn signature(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(ref sig) => sig.signature(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the public key the signature is against.
+    ///
+    /// > **Note**: Be aware that this public key is untrusted input and might not be part of the
+    /// >           set of valid public keys.
+    pub fn public_key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(ref sig) => sig.public_key(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Verify the signature. Returns `true` if it is valid.
+    pub fn is_valid(&self) -> bool {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(ref sig) => sig.is_valid(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Verify the signature and resume execution.
+    pub fn verify_and_resume(mut self) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(sig) => self.inner.vm = sig.verify_and_resume(),
+            _ => unreachable!(),
+        }
+
+        self.inner.run()
+    }
+
+    /// Resume the execution assuming that the signature is valid.
+    ///
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`SignatureVerification::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
+    pub fn resume_success(mut self) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(sig) => self.inner.vm = sig.resume_success(),
+            _ => unreachable!(),
+        }
+
+        self.inner.run()
+    }
+
+    /// Resume the execution assuming that the signature is invalid.
+    ///
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`SignatureVerification::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
+    pub fn resume_failed(mut self) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(sig) => self.inner.vm = sig.resume_failed(),
+            _ => unreachable!(),
+        }
+
+        self.inner.run()
+    }
+}
+
 /// Implementation detail of the execution. Shared by all the variants of [`RuntimeHostVm`]
 /// other than [`RuntimeHostVm::Finished`].
 struct Inner {
@@ -288,6 +375,13 @@ impl Inner {
                 host::HostVm::ExternalStorageNextKey(req) => {
                     self.vm = req.into();
                     return RuntimeHostVm::NextKey(NextKey { inner: self });
+                }
+
+                host::HostVm::SignatureVerification(req) => {
+                    self.vm = req.into();
+                    return RuntimeHostVm::SignatureVerification(SignatureVerification {
+                        inner: self,
+                    });
                 }
 
                 host::HostVm::CallRuntimeVersion(req) => {

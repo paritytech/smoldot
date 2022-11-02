@@ -428,102 +428,116 @@ impl Query {
         }
     }
 
-    fn from_step1(inner: runtime_host::RuntimeHostVm, info: Stage1) -> Self {
-        match inner {
-            runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                // No output expected from `Core_initialize_block`.
-                if !success.virtual_machine.value().as_ref().is_empty() {
-                    return Query::Finished {
-                        result: Err(Error::OutputDecodeError(DecodeError())),
+    fn from_step1(mut inner: runtime_host::RuntimeHostVm, info: Stage1) -> Self {
+        loop {
+            break match inner {
+                runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                    // No output expected from `Core_initialize_block`.
+                    if !success.virtual_machine.value().as_ref().is_empty() {
+                        return Query::Finished {
+                            result: Err(Error::OutputDecodeError(DecodeError())),
+                            virtual_machine: success.virtual_machine.into_prototype(),
+                        };
+                    }
+
+                    let vm = runtime_host::run(runtime_host::Config {
                         virtual_machine: success.virtual_machine.into_prototype(),
-                    };
-                }
+                        function_to_call: VALIDATION_FUNCTION_NAME,
+                        parameter: validate_transaction_runtime_parameters_v2(
+                            iter::once(info.scale_encoded_transaction),
+                            info.transaction_source,
+                        ),
+                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        offchain_storage_changes: success.offchain_storage_changes,
+                        top_trie_root_calculation_cache: Some(
+                            success.top_trie_root_calculation_cache,
+                        ),
+                    });
 
-                let vm = runtime_host::run(runtime_host::Config {
-                    virtual_machine: success.virtual_machine.into_prototype(),
-                    function_to_call: VALIDATION_FUNCTION_NAME,
-                    parameter: validate_transaction_runtime_parameters_v2(
-                        iter::once(info.scale_encoded_transaction),
-                        info.transaction_source,
-                    ),
-                    storage_top_trie_changes: success.storage_top_trie_changes,
-                    offchain_storage_changes: success.offchain_storage_changes,
-                    top_trie_root_calculation_cache: Some(success.top_trie_root_calculation_cache),
-                });
-
-                match vm {
-                    Ok(vm) => Query::from_step2(vm, Stage2 {}),
-                    Err((err, virtual_machine)) => Query::Finished {
-                        result: Err(Error::WasmStart(err)),
-                        virtual_machine,
-                    },
+                    match vm {
+                        Ok(vm) => Query::from_step2(vm, Stage2 {}),
+                        Err((err, virtual_machine)) => Query::Finished {
+                            result: Err(Error::WasmStart(err)),
+                            virtual_machine,
+                        },
+                    }
                 }
-            }
-            runtime_host::RuntimeHostVm::Finished(Err(err)) => Query::Finished {
-                result: Err(Error::WasmVmReadWrite(err.detail)),
-                virtual_machine: err.prototype,
-            },
-            runtime_host::RuntimeHostVm::StorageGet(i) => {
-                Query::StorageGet(StorageGet(StorageGetInner::Stage1(i, info)))
-            }
-            runtime_host::RuntimeHostVm::PrefixKeys(i) => {
-                Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage1(i, info)))
-            }
-            runtime_host::RuntimeHostVm::NextKey(inner) => {
-                Query::NextKey(NextKey(NextKeyInner::Stage1(inner, info)))
-            }
+                runtime_host::RuntimeHostVm::Finished(Err(err)) => Query::Finished {
+                    result: Err(Error::WasmVmReadWrite(err.detail)),
+                    virtual_machine: err.prototype,
+                },
+                runtime_host::RuntimeHostVm::StorageGet(i) => {
+                    Query::StorageGet(StorageGet(StorageGetInner::Stage1(i, info)))
+                }
+                runtime_host::RuntimeHostVm::PrefixKeys(i) => {
+                    Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage1(i, info)))
+                }
+                runtime_host::RuntimeHostVm::NextKey(inner) => {
+                    Query::NextKey(NextKey(NextKeyInner::Stage1(inner, info)))
+                }
+                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                    inner = sig.verify_and_resume();
+                    continue;
+                }
+            };
         }
     }
 
-    fn from_step2(inner: runtime_host::RuntimeHostVm, info: Stage2) -> Self {
-        match inner {
-            runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                // This decoding is done in multiple steps in order to solve borrow checking
-                // errors.
-                let result = {
-                    let output = success.virtual_machine.value();
-                    decode_validate_transaction_return_value(output.as_ref())
-                        .map_err(Error::OutputDecodeError)
-                };
+    fn from_step2(mut inner: runtime_host::RuntimeHostVm, info: Stage2) -> Self {
+        loop {
+            break match inner {
+                runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                    // This decoding is done in multiple steps in order to solve borrow checking
+                    // errors.
+                    let result = {
+                        let output = success.virtual_machine.value();
+                        decode_validate_transaction_return_value(output.as_ref())
+                            .map_err(Error::OutputDecodeError)
+                    };
 
-                let result = match result {
-                    Ok(res) => {
-                        if let Ok(res) = res.as_ref() {
-                            if res.provides.is_empty() {
-                                return Query::Finished {
-                                    result: Err(Error::EmptyProvidedTags),
-                                    virtual_machine: success.virtual_machine.into_prototype(),
-                                };
+                    let result = match result {
+                        Ok(res) => {
+                            if let Ok(res) = res.as_ref() {
+                                if res.provides.is_empty() {
+                                    return Query::Finished {
+                                        result: Err(Error::EmptyProvidedTags),
+                                        virtual_machine: success.virtual_machine.into_prototype(),
+                                    };
+                                }
+                            }
+                            res
+                        }
+                        Err(err) => {
+                            return Query::Finished {
+                                result: Err(err),
+                                virtual_machine: success.virtual_machine.into_prototype(),
                             }
                         }
-                        res
-                    }
-                    Err(err) => {
-                        return Query::Finished {
-                            result: Err(err),
-                            virtual_machine: success.virtual_machine.into_prototype(),
-                        }
-                    }
-                };
+                    };
 
-                Query::Finished {
-                    result: Ok(result),
-                    virtual_machine: success.virtual_machine.into_prototype(),
+                    Query::Finished {
+                        result: Ok(result),
+                        virtual_machine: success.virtual_machine.into_prototype(),
+                    }
                 }
-            }
-            runtime_host::RuntimeHostVm::Finished(Err(err)) => Query::Finished {
-                result: Err(Error::WasmVmReadOnly(err.detail)),
-                virtual_machine: err.prototype,
-            },
-            runtime_host::RuntimeHostVm::StorageGet(i) => {
-                Query::StorageGet(StorageGet(StorageGetInner::Stage2(i, info)))
-            }
-            runtime_host::RuntimeHostVm::PrefixKeys(i) => {
-                Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage2(i, info)))
-            }
-            runtime_host::RuntimeHostVm::NextKey(inner) => {
-                Query::NextKey(NextKey(NextKeyInner::Stage2(inner, info)))
-            }
+                runtime_host::RuntimeHostVm::Finished(Err(err)) => Query::Finished {
+                    result: Err(Error::WasmVmReadOnly(err.detail)),
+                    virtual_machine: err.prototype,
+                },
+                runtime_host::RuntimeHostVm::StorageGet(i) => {
+                    Query::StorageGet(StorageGet(StorageGetInner::Stage2(i, info)))
+                }
+                runtime_host::RuntimeHostVm::PrefixKeys(i) => {
+                    Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage2(i, info)))
+                }
+                runtime_host::RuntimeHostVm::NextKey(inner) => {
+                    Query::NextKey(NextKey(NextKeyInner::Stage2(inner, info)))
+                }
+                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                    inner = sig.verify_and_resume();
+                    continue;
+                }
+            };
         }
     }
 }

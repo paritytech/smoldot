@@ -549,6 +549,9 @@ impl VerifyInner {
                         consensus_success: self.consensus_success,
                     })
                 }
+                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                    self.inner = sig.verify_and_resume();
+                }
             }
         }
     }
