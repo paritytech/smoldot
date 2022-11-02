@@ -224,9 +224,9 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 /// This macro expects a list of fields, each field has one of the three following formats:
 ///
 /// ```ignore
-/// field_name = num => parser
+/// #[required] field_name = num => parser
 /// #[optional] field_name = num => parser
-/// #[repeated] field_name = num => parser
+/// #[repeated(max = expr)] field_name = num => parser
 /// ```
 ///
 /// `field_name` must be an identifier, `num` the field number according to the Protobuf
@@ -242,16 +242,33 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 /// The macro produces a `nom` parser that outputs an anonymous struct whose field correspond
 /// to the provided field names.
 ///
+/// # About `optional` fields
+///
+/// A field can be either "required" (if marked with `#[required]`) or "optional" (if marked
+/// with `#[optional]` or `#[repeated]`).
+///
+/// When translating Protobuf definitions into a decoder using this macro, it can be tricky to
+/// know whether to mark fields as `#[optional]`. If the definition uses `proto2`, then all fields
+/// of the definition are always serialized, meaning that they will always be found in the encoded
+/// message. If the definition uses `proto3`, however, then fields that contain their default value
+/// (typically `0` or an empty string/bytes) are intentionally omitted unless they are marked as
+/// `optional`.
+///
+/// In general, you probably want to mark as `#[optional]` all the fields where `0` or an empty
+/// string/bytes is a valid value.
+///
+/// See also <https://github.com/protocolbuffers/protobuf/blob/main/docs/field_presence.md>.
+///
 /// # Example
 ///
 /// ```ignore
 /// let _parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
 ///     nom::combinator::complete(protobuf::message_decode! {
 ///         #[repeated(max = 4)] entries = 1 => protobuf::message_decode!{
-///             state_root = 1 => protobuf::bytes_tag_decode(1),
+///             #[required] state_root = 1 => protobuf::bytes_tag_decode(1),
 ///             #[repeated(max = 10)] entries = 2 => protobuf::message_tag_decode(2, protobuf::message_decode!{
-///                 key = 1 => protobuf::bytes_tag_decode(1),
-///                 value = 2 => protobuf::bytes_tag_decode(2),
+///                 #[required] key = 1 => protobuf::bytes_tag_decode(1),
+///                 #[required] value = 2 => protobuf::bytes_tag_decode(2),
 ///             }),
 ///             #[optional] complete = 3 => protobuf::bool_tag_decode(3),
 ///         }
@@ -259,7 +276,6 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 /// );
 /// ```
 ///
-// TODO: maybe optional should be default?
 macro_rules! message_decode {
     ($($(#[$($attrs:tt)*])* $field_name:ident = $field_num:expr => $parser:expr),*,) => {
         $crate::util::protobuf::message_decode!($($(#[$($attrs)*])* $field_name = $field_num => $parser),*)
@@ -324,13 +340,13 @@ macro_rules! message_decode {
 }
 
 macro_rules! message_decode_helper_ty {
-    ($ty:ty;) => { Option<$ty> };
+    ($ty:ty; required) => { Option<$ty> };
     ($ty:ty; optional) => { Option<$ty> };
     ($ty:ty; repeated(max = $max:expr)) => { Vec<$ty> };
 }
 
 macro_rules! message_decode_helper_store {
-    ($input_data:expr, $value:expr => $dest:expr;) => {
+    ($input_data:expr, $value:expr => $dest:expr; required) => {
         if $dest.is_some() {
             // Make sure that the field is only found once in the message.
             return core::result::Result::Err(nom::Err::Error(
@@ -368,7 +384,7 @@ macro_rules! message_decode_helper_store {
 }
 
 macro_rules! message_decode_helper_unwrap {
-    ($value:expr;) => {
+    ($value:expr; required) => {
         $value.ok_or_else(|| {
             nom::Err::Error(nom::error::ParseError::<&[u8]>::from_error_kind(
                 &[][..],
