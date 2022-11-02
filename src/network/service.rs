@@ -2957,7 +2957,7 @@ pub enum GrandpaWarpSyncRequestError {
     Decode(protocol::DecodeGrandpaWarpSyncResponseError),
 }
 
-/// Error returned by [`ChainNetwork::start_state_request_unchecked`].
+/// Error returned by [`ChainNetwork::start_state_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum StateRequestError {
     #[display(fmt = "{}", _0)]
