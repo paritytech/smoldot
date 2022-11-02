@@ -712,10 +712,14 @@ impl SyncBackground {
                         // in full mode, in which case we shouldn't have reached this code.
                         let best_block_storage_access = self.sync.best_block_storage().unwrap();
 
-                        let key = get.key_as_vec(); // TODO: overhead?
-                        let value = best_block_storage_access.get(&key, || {
-                            self.finalized_block_storage.get(&key).map(|v| &v[..])
-                        });
+                        let value = {
+                            let key = get.key();
+                            best_block_storage_access.get(key.as_ref(), || {
+                                self.finalized_block_storage
+                                    .get(key.as_ref())
+                                    .map(|v| &v[..])
+                            })
+                        };
                         block_authoring = get.inject_value(value.map(iter::once));
                         continue;
                     }
@@ -1089,7 +1093,7 @@ impl SyncBackground {
                             all::BlockVerification::FinalizedStorageGet(req) => {
                                 let value = self
                                     .finalized_block_storage
-                                    .get(&req.key_as_vec())
+                                    .get(req.key().as_ref())
                                     .map(|v| &v[..]);
                                 verify = req.inject_value(value);
                             }

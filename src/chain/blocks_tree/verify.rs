@@ -897,15 +897,8 @@ pub struct StorageGet<T> {
 
 impl<T> StorageGet<T> {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         self.inner.key()
-    }
-
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    ///
-    /// This method is a shortcut for calling `key` and concatenating the returned slices.
-    pub fn key_as_vec(&self) -> Vec<u8> {
-        self.inner.key_as_vec()
     }
 
     /// Access to the Nth ancestor's information and hierarchy. Returns `None` if `n` is too

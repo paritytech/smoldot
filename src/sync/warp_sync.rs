@@ -1238,7 +1238,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
 
                         let value =
                             match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                requested_key: &get.key_as_vec(), // TODO: allocating vec
+                                requested_key: get.key().as_ref(),
                                 trie_root_hash: &header.state_root,
                                 proof: proof.iter().map(|v| &v[..]),
                             }) {
