@@ -345,6 +345,9 @@ where
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/state/2", chain.protocol_id),
                 inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
+                // The sender tries to cap the response to 2MiB. However, if one storage item
+                // is larger than 2MiB, the response is allowed to be bigger, as otherwise it
+                // wouldn't be possible to make progress.
                 max_response_size: 16 * 1024 * 1024,
                 // We don't support inbound state requests (yet).
                 inbound_allowed: false,
@@ -691,14 +694,13 @@ where
     ///
     /// This function might generate a message destined a connection. Use
     /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
-    // TODO: does an empty response mean that `start_key` is the last key of the storage? unclear
-    pub fn start_state_request_unchecked(
+    pub fn start_state_request(
         &mut self,
         now: TNow,
         target: &PeerId,
         chain_index: usize,
         block_hash: &[u8; 32],
-        start_key: &[u8],
+        start_key: protocol::StateRequestStart,
         timeout: Duration,
     ) -> OutRequestId {
         let request_data = protocol::build_state_request(protocol::StateRequest {
@@ -2837,7 +2839,7 @@ pub struct EncodedStateResponse(Vec<u8>);
 
 impl EncodedStateResponse {
     /// Returns the decoded version of the state response.
-    pub fn decode(&self) -> Vec<protocol::StateResponseEntry> {
+    pub fn decode(&self) -> Vec<&[u8]> {
         match protocol::decode_state_response(&self.0) {
             Ok(r) => r,
             Err(_) => unreachable!(),
