@@ -60,12 +60,12 @@ pub fn decode_state_response(
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
             #[repeated(max = 1)] entries = 1 => protobuf::message_decode!{
-                _state_root = 1 => protobuf::bytes_tag_decode,
+                #[required] _state_root = 1 => protobuf::bytes_tag_decode,
                 #[repeated(max = 4 * 1024 * 1024)] entries = 2 => protobuf::message_tag_decode(protobuf::message_decode!{
-                    key = 1 => protobuf::bytes_tag_decode,
-                    value = 2 => protobuf::bytes_tag_decode,
+                    #[required] key = 1 => protobuf::bytes_tag_decode,
+                    #[required] value = 2 => protobuf::bytes_tag_decode,
                 }),
-                _complete = 3 => protobuf::bool_tag_decode,
+                #[required] _complete = 3 => protobuf::bool_tag_decode,
             }
         }),
     );
