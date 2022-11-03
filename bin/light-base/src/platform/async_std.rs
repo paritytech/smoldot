@@ -36,6 +36,7 @@ use std::{
 /// and WebSocket connections.
 pub struct AsyncStdTcpWebSocket;
 
+// TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
 impl Platform for AsyncStdTcpWebSocket {
     type Delay = future::BoxFuture<'static, ()>;
     type Instant = std::time::Instant;
@@ -45,8 +46,9 @@ impl Platform for AsyncStdTcpWebSocket {
         'static,
         Result<PlatformConnection<Self::Stream, Self::Connection>, ConnectError>,
     >;
-    type StreamDataFuture = future::BoxFuture<'static, ()>;
-    type NextSubstreamFuture = future::Pending<Option<(Self::Stream, PlatformSubstreamDirection)>>;
+    type StreamDataFuture<'a> = future::BoxFuture<'a, ()>;
+    type NextSubstreamFuture<'a> =
+        future::Pending<Option<(Self::Stream, PlatformSubstreamDirection)>>;
 
     fn now_from_unix_epoch() -> Duration {
         // Intentionally panic if the time is configured earlier than the UNIX EPOCH.
@@ -268,13 +270,13 @@ impl Platform for AsyncStdTcpWebSocket {
         match *c {}
     }
 
-    fn next_substream(c: &mut Self::Connection) -> Self::NextSubstreamFuture {
+    fn next_substream(c: &'_ mut Self::Connection) -> Self::NextSubstreamFuture<'_> {
         // This function can only be called with so-called "multi-stream" connections. We never
         // open such connection.
         match *c {}
     }
 
-    fn wait_more_data(stream: &mut Self::Stream) -> Self::StreamDataFuture {
+    fn wait_more_data(stream: &'_ mut Self::Stream) -> Self::StreamDataFuture<'_> {
         if stream.read_buffer.as_ref().map_or(true, |b| !b.is_empty()) {
             return Box::pin(future::ready(()));
         }

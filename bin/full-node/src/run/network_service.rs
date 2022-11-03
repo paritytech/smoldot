@@ -1036,12 +1036,9 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                 .next()
                 .cloned();
 
-            if let Some(peer_to_assign) = peer_to_assign {
-                tracing::debug!(peer_id = %peer_to_assign, %chain_index, "slot-assigned");
-                guarded.network.assign_out_slot(chain_index, peer_to_assign);
-            } else {
-                break;
-            }
+            let Some(peer_to_assign) = peer_to_assign else { break };
+            tracing::debug!(peer_id = %peer_to_assign, %chain_index, "slot-assigned");
+            guarded.network.assign_out_slot(chain_index, peer_to_assign);
         }
     }
 
