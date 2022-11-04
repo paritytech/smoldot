@@ -15,6 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#![allow(unused)] // Some of the functions here might not actually be in use.
+
 use super::leb128;
 use alloc::vec::Vec;
 use core::{iter, str};

@@ -4,7 +4,9 @@
 
 ### Fixed
 
+- On NodeJS, the usage of `hrtime` has been replaced with `performance.now()`. While this doesn't change anything for NodeJS users, Deno users that were importing smoldot through the <https://esm.sh> website will no longer get an error due to Deno's compatibility layer not supporting `hrtime`. As a reminder, smoldot is also published on the Deno/x registry and using <https://esm.sh> is unnecessary. ([#2964](https://github.com/paritytech/smoldot/pull/2964))
 - Fix the `ext_crypto_ecdsa_verify_version_1` and `ext_crypto_ecdsa_verify_prehashed_version_1` host functions mixing their parameters and thus always failing. ([#2955](https://github.com/paritytech/smoldot/pull/2955))
+- Fix an occasional panic in `runtime_service.rs` when adding a parachain. ([#2965](https://github.com/paritytech/smoldot/pull/2965))
 
 ## 0.7.5 - 2022-10-31
 
