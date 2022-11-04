@@ -44,7 +44,7 @@ use crate::{
 };
 
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
-use core::{fmt, iter};
+use core::fmt;
 use hashbrown::{hash_map::Entry, HashMap, HashSet};
 
 /// Configuration for [`run`].
@@ -192,20 +192,31 @@ pub struct StorageGet {
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
-        match &self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => {
-                either::Left(iter::once(either::Left(either::Left(req.key()))))
-            }
-            host::HostVm::ExternalStorageAppend(req) => {
-                either::Left(iter::once(either::Left(either::Right(req.key()))))
-            }
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        enum Three<A, B, C> {
+            A(A),
+            B(B),
+            C(C),
+        }
 
+        impl<A: AsRef<[u8]>, B: AsRef<[u8]>, C: AsRef<[u8]>> AsRef<[u8]> for Three<A, B, C> {
+            fn as_ref(&self) -> &[u8] {
+                match self {
+                    Three::A(a) => a.as_ref(),
+                    Three::B(b) => b.as_ref(),
+                    Three::C(c) => c.as_ref(),
+                }
+            }
+        }
+
+        match &self.inner.vm {
+            host::HostVm::ExternalStorageGet(req) => Three::A(req.key()),
+            host::HostVm::ExternalStorageAppend(req) => Three::B(req.key()),
             host::HostVm::ExternalStorageRoot(_) => {
                 if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
                     self.inner.root_calculation.as_ref().unwrap()
                 {
-                    either::Right(value_request.key().map(|v| [v]).map(either::Right))
+                    Three::C(value_request.key().collect::<Vec<_>>())
                 } else {
                     // We only create a `StorageGet` if the state is `StorageValue`.
                     panic!()
@@ -215,16 +226,6 @@ impl StorageGet {
             // We only create a `StorageGet` if the state is one of the above.
             _ => unreachable!(),
         }
-    }
-
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    ///
-    /// This method is a shortcut for calling `key` and concatenating the returned slices.
-    pub fn key_as_vec(&self) -> Vec<u8> {
-        self.key().fold(Vec::new(), |mut a, b| {
-            a.extend_from_slice(b.as_ref());
-            a
-        })
     }
 
     /// Injects the corresponding storage value.

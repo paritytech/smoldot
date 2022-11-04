@@ -2356,28 +2356,24 @@ impl SignatureVerification {
                 }
             }
             SignatureVerificationAlgorithm::Sr25519V1 => {
-                // The `unwrap()` below can only panic if the input is the wrong length, which
-                // we know can't happen.
-                schnorrkel::PublicKey::from_bytes(&self.public_key().as_ref())
-                    .unwrap()
-                    .verify_simple_preaudit_deprecated(
+                schnorrkel::PublicKey::from_bytes(&self.public_key().as_ref()).map_or(false, |pk| {
+                    pk.verify_simple_preaudit_deprecated(
                         b"substrate",
                         self.message().as_ref(),
                         self.signature().as_ref(),
                     )
                     .is_ok()
+                })
             }
             SignatureVerificationAlgorithm::Sr25519V2 => {
-                // The two `unwrap()`s below can only panic if the input is the wrong
-                // length, which we know can't happen.
-                schnorrkel::PublicKey::from_bytes(&self.public_key().as_ref())
-                    .unwrap()
-                    .verify_simple(
+                schnorrkel::PublicKey::from_bytes(&self.public_key().as_ref()).map_or(false, |pk| {
+                    pk.verify_simple(
                         b"substrate",
                         self.message().as_ref(),
                         &schnorrkel::Signature::from_bytes(self.signature().as_ref()).unwrap(),
                     )
                     .is_ok()
+                })
             }
             SignatureVerificationAlgorithm::Ecdsa => {
                 // NOTE: safe to unwrap here because we supply the nn to blake2b fn
@@ -2389,21 +2385,14 @@ impl SignatureVerification {
 
                 // signature (64 bytes) + recovery ID (1 byte)
                 let sig_bytes = self.signature();
-                if let Ok(sig) =
-                    libsecp256k1::Signature::parse_standard_slice(&sig_bytes.as_ref()[..64])
-                {
-                    if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes.as_ref()[64]) {
-                        if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
-                            self.public_key().as_ref()[..] == actual.serialize_compressed()[..]
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
+                libsecp256k1::Signature::parse_standard_slice(&sig_bytes.as_ref()[..64])
+                    .and_then(|sig| {
+                        libsecp256k1::RecoveryId::parse(sig_bytes.as_ref()[64])
+                            .and_then(|ri| libsecp256k1::recover(&message, &sig, &ri))
+                    })
+                    .map_or(false, |actual| {
+                        self.public_key().as_ref()[..] == actual.serialize_compressed()[..]
+                    })
             }
             SignatureVerificationAlgorithm::EcdsaPrehashed => {
                 // We can safely unwrap, as the size is checked when the `SignatureVerification`
