@@ -22,7 +22,7 @@
 use crate::executor::{self, host, vm};
 
 use alloc::{string::String, vec::Vec};
-use core::{fmt, iter};
+use core::fmt;
 
 /// Configuration for [`run`].
 pub struct Config<'a, TParams> {
@@ -145,23 +145,13 @@ pub struct StorageGet {
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => iter::once(req.key()),
+            host::HostVm::ExternalStorageGet(req) => req.key(),
 
             // We only create a `StorageGet` if the state is one of the above.
             _ => unreachable!(),
         }
-    }
-
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    ///
-    /// This method is a shortcut for calling `key` and concatenating the returned slices.
-    pub fn key_as_vec(&self) -> Vec<u8> {
-        self.key().fold(Vec::new(), |mut a, b| {
-            a.extend_from_slice(b.as_ref());
-            a
-        })
     }
 
     /// Injects the corresponding storage value.

@@ -1131,11 +1131,11 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     // As such, the requested value is either found in one of this diff, in which
                     // case it can be returned immediately to continue the verification, or in
                     // the finalized block, in which case the user needs to be queried.
-                    if let Some(value) = shared
+                    let value = shared
                         .inner
                         .best_to_finalized_storage_diff
-                        .diff_get(&req.key_as_vec())
-                    {
+                        .diff_get(req.key().as_ref());
+                    if let Some(value) = value {
                         inner = Inner::Step2(
                             req.inject_value(value.as_ref().map(|v| iter::once(&v[..]))),
                         );
@@ -1417,15 +1417,8 @@ pub struct StorageGet<TRq, TSrc, TBl> {
 
 impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         self.inner.key()
-    }
-
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    ///
-    /// This method is a shortcut for calling `key` and concatenating the returned slices.
-    pub fn key_as_vec(&self) -> Vec<u8> {
-        self.inner.key_as_vec()
     }
 
     /// Injects the corresponding storage value.
