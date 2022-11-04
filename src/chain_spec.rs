@@ -153,9 +153,8 @@ impl ChainSpec {
         let (chain_info, vm_prototype) = loop {
             match chain_information_build {
                 build::ChainInformationBuild::InProgress(build::InProgress::StorageGet(get)) => {
-                    let key = get.key_as_vec();
-                    chain_information_build =
-                        get.inject_value(genesis_storage.value(&key).map(iter::once));
+                    let value = genesis_storage.value(get.key().as_ref());
+                    chain_information_build = get.inject_value(value.map(iter::once));
                 }
                 build::ChainInformationBuild::InProgress(build::InProgress::NextKey(_nk)) => {
                     todo!() // TODO:

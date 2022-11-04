@@ -223,9 +223,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                         }
                                         runtime_host::RuntimeHostVm::StorageGet(get) => {
                                             // TODO: what if the remote lied to us?
-                                            let storage_value = match runtime_call_lock
-                                                .storage_entry(&get.key_as_vec())
-                                            {
+                                            let storage_value =
+                                                runtime_call_lock.storage_entry(get.key().as_ref());
+                                            let storage_value = match storage_value {
                                                 Ok(v) => v,
                                                 Err(error) => {
                                                     runtime_call_lock.unlock(

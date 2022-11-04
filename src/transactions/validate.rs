@@ -562,20 +562,10 @@ enum StorageGetInner {
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.0 {
-            StorageGetInner::Stage1(inner, _) => either::Left(inner.key().map(either::Left)),
-            StorageGetInner::Stage2(inner, _) => either::Right(inner.key().map(either::Right)),
-        }
-    }
-
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    ///
-    /// This method is a shortcut for calling `key` and concatenating the returned slices.
-    pub fn key_as_vec(&self) -> Vec<u8> {
-        match &self.0 {
-            StorageGetInner::Stage1(inner, _) => inner.key_as_vec(),
-            StorageGetInner::Stage2(inner, _) => inner.key_as_vec(),
+            StorageGetInner::Stage1(inner, _) => either::Left(inner.key()),
+            StorageGetInner::Stage2(inner, _) => either::Right(inner.key()),
         }
     }
 

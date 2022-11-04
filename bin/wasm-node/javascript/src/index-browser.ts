@@ -228,14 +228,15 @@ export function start(options?: ClientOptions): Client {
         }
       };
 
-      dataChannel.onerror = dataChannel.onclose = (error) => {
+      dataChannel.onerror = dataChannel.onclose = (_error) => {
         // A couple of different things could be happening here.
         if (handshakeDataChannel === dataChannel && !isOpen) {
           // The handshake data channel that we have opened ahead of time failed to open. As this
           // happens before we have reported the WebRTC connection as a whole as being open, we
           // need to report that the connection has failed to open.
           killAllJs();
-          config.onConnectionReset("handshake data channel failed to open" + error ? " " + error.toString() : "");
+          // Note that the event doesn't give any additional reason for the failure.
+          config.onConnectionReset("handshake data channel failed to open");
         } else if (handshakeDataChannel === dataChannel) {
           // The handshake data channel has been closed before we reported it to smoldot. This
           // isn't really a problem. We just update the state and continue running. If smoldot
@@ -252,7 +253,8 @@ export function start(options?: ClientOptions): Client {
           // report substream openings failures. We could try opening it again, but given that
           // it's unlikely to succeed, we simply opt to kill the entire connection.
           killAllJs();
-          config.onConnectionReset("data channel failed to open" + error ? " " + error.toString() : "");
+          // Note that the event doesn't give any additional reason for the failure.
+          config.onConnectionReset("data channel failed to open");
         } else {
           // Substream was open and is now closed. Normal situation.
           config.onStreamReset(dataChannelId);
