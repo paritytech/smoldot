@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.6 - 2022-11-04
+
 ### Fixed
 
 - On NodeJS, the usage of `hrtime` has been replaced with `performance.now()`. While this doesn't change anything for NodeJS users, Deno users that were importing smoldot through the <https://esm.sh> website will no longer get an error due to Deno's compatibility layer not supporting `hrtime`. As a reminder, smoldot is also published on the Deno/x registry and using <https://esm.sh> is unnecessary. ([#2964](https://github.com/paritytech/smoldot/pull/2964))
