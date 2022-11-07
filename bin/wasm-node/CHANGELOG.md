@@ -4,7 +4,7 @@
 
 ### Changed
 
-- The `enableExperimentalWebRTC` field has been removed from `ClientConfig`, and replaced with a `forbidWebRtc` option. WebRTC is now considered stable enough to be enabled by default.
+- The `enableExperimentalWebRTC` field has been removed from `ClientConfig`, and replaced with a `forbidWebRtc` option. WebRTC is now considered stable enough to be enabled by default ([#2977](https://github.com/paritytech/smoldot/pull/2977)).
 
 ## 0.7.6 - 2022-11-04
 
