@@ -122,6 +122,25 @@ pub struct SourceId(usize);
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct RequestId(usize);
 
+/// Status of the synchronization.
+#[derive(Debug)]
+pub enum Status<'a, TSrc> {
+    /// Regular syncing mode.
+    Sync,
+    /// Warp syncing algorithm is downloading Grandpa warp sync fragments containing a finality
+    /// proof.
+    WarpSyncFragments {
+        /// Source from which the fragments are currently being downloaded, if any.
+        source: Option<(SourceId, &'a TSrc)>,
+    },
+    /// Warp syncing algorithm has reached the head of the finalized chain and is downloading and
+    /// building the chain information.
+    WarpSyncChainInformation {
+        /// Source from which the chain information is being downloaded.
+        source: (SourceId, &'a TSrc),
+    },
+}
+
 pub struct AllSync<TRq, TSrc, TBl> {
     inner: AllSyncInner<TRq, TSrc, TBl>,
     shared: Shared<TRq>,
@@ -205,6 +224,30 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             AllSyncInner::AllForks(sync) => sync.as_chain_information(),
             AllSyncInner::GrandpaWarpSync { inner: sync } => sync.as_chain_information(),
             AllSyncInner::Optimistic { inner } => inner.as_chain_information(),
+            AllSyncInner::Poisoned => unreachable!(),
+        }
+    }
+
+    /// Returns the current status of the syncing.
+    pub fn status(&self) -> Status<TSrc> {
+        match &self.inner {
+            AllSyncInner::AllForks(_) => Status::Sync,
+            AllSyncInner::GrandpaWarpSync { inner: sync } => match sync.status() {
+                warp_sync::Status::Fragments { source: None } => {
+                    Status::WarpSyncFragments { source: None }
+                }
+                warp_sync::Status::Fragments {
+                    source: Some((_, user_data)),
+                } => Status::WarpSyncFragments {
+                    source: Some((user_data.outer_source_id, &user_data.user_data)),
+                },
+                warp_sync::Status::ChainInformation {
+                    source: (_, user_data),
+                } => Status::WarpSyncChainInformation {
+                    source: (user_data.outer_source_id, &user_data.user_data),
+                },
+            },
+            AllSyncInner::Optimistic { .. } => Status::Sync, // TODO: right now we don't differentiate between AllForks and Optimistic, as they're kind of similar anyway
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
