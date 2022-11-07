@@ -1540,7 +1540,6 @@ impl<TPlat: Platform> Background<TPlat> {
             .find(|rt| rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages);
 
         // If no identical runtime was found, try compiling the runtime.
-        // TODO: use a let-else construct here once stable
         let runtime = if let Some(existing_runtime) = existing_runtime {
             existing_runtime
         } else {

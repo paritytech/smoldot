@@ -39,6 +39,7 @@ pub static TOTAL_BYTES_SENT: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) struct Platform;
 
+// TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
 impl smoldot_light::platform::Platform for Platform {
     type Delay = Delay;
     type Instant = crate::Instant;
@@ -51,9 +52,9 @@ impl smoldot_light::platform::Platform for Platform {
             ConnectError,
         >,
     >;
-    type StreamDataFuture = future::BoxFuture<'static, ()>;
-    type NextSubstreamFuture = future::BoxFuture<
-        'static,
+    type StreamDataFuture<'a> = future::BoxFuture<'a, ()>;
+    type NextSubstreamFuture<'a> = future::BoxFuture<
+        'a,
         Option<(
             Self::Stream,
             smoldot_light::platform::PlatformSubstreamDirection,
@@ -184,8 +185,8 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn next_substream(
-        ConnectionWrapper(connection_id): &mut Self::Connection,
-    ) -> Self::NextSubstreamFuture {
+        ConnectionWrapper(connection_id): &'_ mut Self::Connection,
+    ) -> Self::NextSubstreamFuture<'_> {
         let connection_id = *connection_id;
 
         async move {
@@ -250,8 +251,8 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn wait_more_data(
-        StreamWrapper(stream_id, read_buffer): &mut Self::Stream,
-    ) -> Self::StreamDataFuture {
+        StreamWrapper(stream_id, read_buffer): &'_ mut Self::Stream,
+    ) -> Self::StreamDataFuture<'_> {
         if read_buffer.buffer_first_offset < read_buffer.buffer.len() {
             return async move {}.boxed();
         }
