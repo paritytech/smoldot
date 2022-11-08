@@ -197,8 +197,9 @@ where
     /// If the remote supports the requested protocol, then doing so will save one networking
     /// round-trip. If however the remote doesn't support the requested protocol, then doing so
     /// will lead to confusing errors on the remote, as it will interpret the protocol-specific
-    /// data as being from the multistream-select protocol. Overall, saving a round-trip is
-    /// usually seen as preferable over confusing errors.
+    /// data as being from the multistream-select protocol, and the substream will be rendered
+    /// unusable. Overall, saving a round-trip is usually seen as preferable over confusing
+    /// errors.
     pub fn can_write_protocol_data(&self) -> bool {
         matches!(self.state, InProgressState::ProtocolRequestAnswerExpected)
     }
