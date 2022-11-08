@@ -496,6 +496,30 @@ where
         )
     }
 
+    /// Adds a multi-stream incoming connection to the state machine.
+    ///
+    /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
+    /// yet.
+    ///
+    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
+    /// to determine when the handshake timeout expires.
+    ///
+    /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
+    /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
+    /// libp2p protocol, its own address, in which case we send it.
+    pub fn add_multi_stream_incoming_connection<TSubId>(
+        &mut self,
+        when_connected: TNow,
+        handshake_kind: MultiStreamHandshakeKind,
+        remote_addr: multiaddr::Multiaddr,
+    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
+    where
+        TSubId: Clone + PartialEq + Eq + Hash,
+    {
+        self.inner
+            .add_multi_stream_incoming_connection(when_connected, handshake_kind, remote_addr)
+    }
+
     pub fn pull_message_to_connection(
         &mut self,
     ) -> Option<(ConnectionId, CoordinatorToConnection<TNow>)> {
