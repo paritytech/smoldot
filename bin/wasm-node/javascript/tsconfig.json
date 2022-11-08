@@ -1,8 +1,6 @@
 {
     "compilerOptions": {
         "declaration": true,
-        "allowJs": true,
-        "allowSyntheticDefaultImports": true,
         "strict": true,
         "allowUnreachableCode": false,
         "allowUnusedLabels": false,

@@ -1,5 +1,6 @@
 153
 ABI
+ACK
 API
 APIs
 BIP39
@@ -10,6 +11,7 @@ ChaCha20
 Deno
 Deserialize/S
 DoS
+DTLS
 ECDH
 Ed25519
 Endian
@@ -37,6 +39,7 @@ Namespace
 POV
 Polkadot
 PolkadotJS
+PRNG
 Protobuf
 QUIC
 RPC
@@ -59,6 +62,7 @@ VRF
 Wasi
 Wasm
 WebAssembly
+WebRTC
 WebSocket/M
 Westend
 Yamux
@@ -71,6 +75,7 @@ benchmarked
 blockchain
 boolean/S
 bootnode
+borked
 broadcasted
 bytecode
 checksum

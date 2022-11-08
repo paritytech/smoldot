@@ -2,6 +2,172 @@
 
 ## Unreleased
 
+## 0.7.6 - 2022-11-04
+
+### Fixed
+
+- On NodeJS, the usage of `hrtime` has been replaced with `performance.now()`. While this doesn't change anything for NodeJS users, Deno users that were importing smoldot through the <https://esm.sh> website will no longer get an error due to Deno's compatibility layer not supporting `hrtime`. As a reminder, smoldot is also published on the Deno/x registry and using <https://esm.sh> is unnecessary. ([#2964](https://github.com/paritytech/smoldot/pull/2964))
+- Fix the `ext_crypto_ecdsa_verify_version_1` and `ext_crypto_ecdsa_verify_prehashed_version_1` host functions mixing their parameters and thus always failing. ([#2955](https://github.com/paritytech/smoldot/pull/2955))
+- Fix an occasional panic in `runtime_service.rs` when adding a parachain. ([#2965](https://github.com/paritytech/smoldot/pull/2965))
+
+## 0.7.5 - 2022-10-31
+
+### Fixed
+
+- Fix the `state_getKeysPaged` JSON-RPC function returning incorrect results in some situations. ([#2947](https://github.com/paritytech/smoldot/pull/2947))
+- When opening a WebRTC connection, the ufrag and password of SDP requests are now properly set according to the WebRTC libp2p specification. ([#2924](https://github.com/paritytech/smoldot/pull/2924))
+
+## 0.7.4 - 2022-10-27
+
+### Changed
+
+- The `payment_queryInfo` JSON-RPC function now works with runtimes that have defined the type of `Balance` to be less than 16 bytes. ([#2914](https://github.com/paritytech/smoldot/pull/2914))
+- The parameter of `chainHead_unstable_finalizedDatabase` has been renamed from `max_size_bytes` to `maxSizeBytes`. ([#2923](https://github.com/paritytech/smoldot/pull/2923))
+- The database now contains the hash of the genesis block header. This hash is verified when the database is loaded, and the database is ignored if there is a mismatch. This prevents accidents where the wrong database is provided, which would lead to the chain not working and would be hard to debug. ([#2928](https://github.com/paritytech/smoldot/pull/2928))
+
+### Fixed
+
+- Fix panic on Deno when a WebSocket connection abruptly closes. ([#2939](https://github.com/paritytech/smoldot/pull/2939))
+- Fix errors showing in the browser's console about WebSockets being already in the CLOSING or CLOSED state. ([#2925](https://github.com/paritytech/smoldot/pull/2925))
+- No longer panic when a WebRTC connection fails to open due to the browser calling callbacks in an unexpected order. ([#2936](https://github.com/paritytech/smoldot/pull/2936))
+
+## 0.7.3 - 2022-10-19
+
+### Changed
+
+- The WebRTC protocol implementation is now up to date with the specification. While the specification hasn't been finalized yet and could still evolve, the current version is believed to be likely to be final. ([#2896](https://github.com/paritytech/smoldot/pull/2896))
+
+### Fixed
+
+- Fix timeout not being checked when opening a notifications substream. ([#2323](https://github.com/paritytech/smoldot/pull/2323))
+- Fix inbound notifications substreams close requests being ignored. ([#2323](https://github.com/paritytech/smoldot/pull/2323))
+- Fix closed inbound notifications substreams still being considered as open when closed gracefully by the remote. ([#2323](https://github.com/paritytech/smoldot/pull/2323))
+
+## 0.7.2 - 2022-10-12
+
+### Changed
+
+- The warp syncing algorithm no longer downloads the runtime code and the runtime call proofs at the same time. Instead, it now first downloads the runtime, then checks the list of available functions, then downloads runtime call proofs. While this slightly degrades the warp syncing time by adding a round-trip time, it is more correct to first analyze the runtime instead of blindly assuming that it supports a certain set of functions. ([#2845](https://github.com/paritytech/smoldot/pull/2845))
+
+### Fixed
+
+- Fix smoldot trying to send requests to peers whose connection is shutting down, leading to a panic. ([#2847](https://github.com/paritytech/smoldot/pull/2847))
+- Fix the responses to libp2p identify requests being wrongly empty. ([#2840](https://github.com/paritytech/smoldot/pull/2840))
+- Fix some Merkle proofs and SCALE-encoded structures being accepted as correct when they are actually invalid. This is a very minor fix that can presumably not be used as an attack vector. ([#2819](https://github.com/paritytech/smoldot/pull/2819))
+
+## 0.7.1 - 2022-10-04
+
+### Fixed
+
+- Syncing no longer stalls if the gap between the finalized and latest block is more than 100 blocks. ([#2801](https://github.com/paritytech/smoldot/pull/2801))
+- No longer silently discard justifications when receive a block from the network that was already known locally. ([#2800](https://github.com/paritytech/smoldot/pull/2800))
+- CPU-heavy operations such as verifying finality proofs or compiling the runtime will now better respect the CPU rate limit. ([#2803](https://github.com/paritytech/smoldot/pull/2803))
+- Fix the `finalizedBlockHashes` and `prunedBlockHashes` fields having wrong names in `chainHead_unstable_followEvent` events. ([#2812](https://github.com/paritytech/smoldot/pull/2812))
+- Remove "type" parameter from `chainHead_unstable_storage` JSON-RPC method, in accordance with the update in the JSON-RPC specification. ([#2818](https://github.com/paritytech/smoldot/pull/2818))
+- The `chainHead_unstable_storage` JSON-RPC method now returns an `error` notification if the block's header couldn't be decoded instead of a `disjoint` notification. ([#2818](https://github.com/paritytech/smoldot/pull/2818))
+
+## 0.7.0 - 2022-09-28
+
+### Removed
+
+- Removed `Chain.databaseContent` function. Use the `chainHead_unstable_finalizedDatabase` JSON-RPC function to obtain the database content instead. ([#2791](https://github.com/paritytech/smoldot/pull/2791))
+
+### Changed
+
+- `Chain.sendJsonRpc` now throws a `MalformedJsonRpcError` exception if the JSON-RPC request is too large or malformed, or a `QueueFullError` if the queue of JSON-RPC requests of the chain is full. ([#2778](https://github.com/paritytech/smoldot/pull/2778))
+- Removed `AddChainOptions.jsonRpcCallback`. Use the new `Chain.nextJsonRpcResponse` asynchronous function to pull JSON-RPC responses instead of registering a callback. A `AddChainOptions.disableJsonRpc` flag is now supported in order to bring the same effects as not passing any `jsonRpcCallback`. ([#2778](https://github.com/paritytech/smoldot/pull/2778))
+- Removed the `version` field of the struct returned by the `rpc_methods` function. ([#2756](https://github.com/paritytech/smoldot/pull/2756))
+
+### Fixed
+
+- Fix several panics related to cancelling the opening of incoming substreams. ([#2785](https://github.com/paritytech/smoldot/pull/2785))
+- Fix old runtimes not being cleaned up properly and runtimes being downloaded multiple times after an on-chain runtime upgrade. ([#2781](https://github.com/paritytech/smoldot/pull/2781))
+
+## 0.6.34 - 2022-09-20
+
+### Added
+
+- Add experimental support for WebRTC according to the in-progress specification for libp2p-webrtc. For now this feature must explicitly be enabled by passing `enableExperimentalWebRTC: true` as part of the ̀`ClientConfig`. The multiaddress format for WebRTC is `/ip4/.../udp/.../webrtc/certhash/...` (or `/ip6/...`), where the payload behind `/certhash` is a multibase-encoded multihash-encoded SHA256 of the DTLS certificate used by the remote. ([#2579](https://github.com/paritytech/smoldot/pull/2579))
+- Add support for the `chainHead_unstable_finalizedDatabase` JSON-RPC method. This JSON-RPC method aims to be a replacement for the `databaseContent` method of the `Chain` and is expected to remain a permanently unstable smoldot-specific function. ([#2749](https://github.com/paritytech/smoldot/pull/2749))
+
+### Changed
+
+- No longer try to connect to a peer for 20 seconds after failing to connect to it. This prevents loops where we keep trying to connect to the same address(es) over and over again. ([#2747](https://github.com/paritytech/smoldot/pull/2747))
+
+### Fixed
+
+- Fix potential infinite loop in networking connection task. ([#2751](https://github.com/paritytech/smoldot/pull/2751))
+- Fix panic when trying to perform a runtime call on an old block while having no networking connection. ([#2764](https://github.com/paritytech/smoldot/pull/2764))
+
+## 0.6.33 - 2022-09-13
+
+### Added
+
+- Add support for the `system_nodeRoles` JSON-RPC method. ([#2725](https://github.com/paritytech/smoldot/pull/2725))
+
+### Changed
+
+- A limit to the number of substreams a remote can maintain open over a connection is now enforced. ([#2724](https://github.com/paritytech/smoldot/pull/2724))
+
+### Fixed
+
+- No longer panic when calling `state_getRuntimeVersion` is unable to download the runtime code of an old block from the network. ([#2736](https://github.com/paritytech/smoldot/pull/2736))
+
+## 0.6.32 - 2022-09-07
+
+### Fixed
+
+- Fix occasional panic when connecting to a parachain with forks and/or missed slots. ([#2703](https://github.com/paritytech/smoldot/pull/2703))
+- Fix parachain initialization unnecessarily waiting for its corresponding relay chain initialization to be finished. ([#2705](https://github.com/paritytech/smoldot/pull/2705))
+- Fix panic when broadcasting a transaction to a peer while its connection is shutting down. ([#2717](https://github.com/paritytech/smoldot/pull/2717))
+- Fix crash when receiving a Yamux GoAway frame. ([#2708](https://github.com/paritytech/smoldot/pull/2708))
+
+## 0.6.31 - 2022-08-30
+
+### Changed
+
+- In case of protocol error, or if a peer refuses a block announces substream, no new substream with the same peer will be attempted for 20 seconds. This avoids loops where the same peer is tried over and over again. ([#2633](https://github.com/paritytech/smoldot/pull/2633))
+
+### Fixed
+
+- Fix inability to decode addresses with prefixes longer than 1 byte when calling `system_accountNextIndex`. ([#2686](https://github.com/paritytech/smoldot/pull/2686))
+
+## 0.6.30 - 2022-08-12
+
+### Fixed
+
+- Fix panic that occured when connecting to a peer, then discovering it through the background discovery process, then disconnecting from it. ([#2616](https://github.com/paritytech/smoldot/pull/2616))
+- Fix circular dependency between JavaScript modules. ([#2614](https://github.com/paritytech/smoldot/pull/2614))
+- Fix panic when a handshake timeout or protocol error happens on a connection at the same time as the local node tries to shut it down. ([#2620](https://github.com/paritytech/smoldot/pull/2620))
+- Fix panic when a runtime call is made at the same time as a warp sync succeeds or that the limit to the number of blocks in memory is exceeded. ([#2621](https://github.com/paritytech/smoldot/pull/2621))
+
+## 0.6.29 - 2022-08-09
+
+### Fixed
+
+- Fix sometimes erroneously reporting a very old `parent_hash` (usually the genesis block hash) in `chainHead_unstable_follow` when following a parachain. ([#2602](https://github.com/paritytech/smoldot/pull/2602))
+- After smoldot has downloaded the runtime of an old parachain block, it would sometimes erroneously consider that this runtime hasn't changed since then. This would lead to issues such as `state_getRuntimeVersion` and `state_subscribeRuntimeVersion` returning information about an old runtime, or `state_getMetadata` or `state_call` using an old runtime. ([#2602](https://github.com/paritytech/smoldot/pull/2602))
+- Fix WebSocket errors leading to the program stopping while running in NodeJS. ([#2604](https://github.com/paritytech/smoldot/pull/2604))
+
+## 0.6.28 - 2022-08-08
+
+### Changed
+
+- The GRANDPA warp sync algorithm now downloads Merkle proofs of all the necessary storage items at once, rather than one by one sequentially. This removes approximately 11 networking round-trips and thus significantly reduces the time the warp syncing takes. ([#2578](https://github.com/paritytech/smoldot/pull/2578))
+- The GRANDPA warp sync algorithm now works on AURA-based chains. It previously only worked for chains that are using BABE. Note that GRANDPA warp sync is irrelevant for parachains. ([#2581](https://github.com/paritytech/smoldot/pull/2581))
+- The GRANDPA warp sync implementation has been considerably refactored. It is possible that unintended changes in behaviour have accidentally been introduced. ([#2578](https://github.com/paritytech/smoldot/pull/2578))
+- A warning is now printed if the `badBlocks` field in a chain specification is not empty. Bad blocks are not supported by the smoldot light client. ([#2585](https://github.com/paritytech/smoldot/pull/2585))
+
+### Fixed
+
+- Fix WebSockets not working in the CommonJS bindings for NodeJS due to a problematic import. ([#2589](https://github.com/paritytech/smoldot/pull/2589)).
+
+## 0.6.27 - 2022-07-29
+
+### Changed
+
+- The JavaScript code now targets ES6. This should ensure compatibility on a wider range of platforms. ([#2565](https://github.com/paritytech/smoldot/pull/2565))
+
 ## 0.6.26 - 2022-07-20
 
 ### Added

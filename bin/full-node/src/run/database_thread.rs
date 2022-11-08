@@ -26,11 +26,18 @@ use futures::{
 use smoldot::database::full_sqlite::SqliteFullDatabase;
 use std::thread;
 
+/// Handle to the thread were the database accesses are performed.
+///
+/// Destroying this object stops the thread.
+///
+/// Use the `From` trait implementation to build a [`DatabaseThread`].
 pub struct DatabaseThread {
     sender: Mutex<mpsc::Sender<Box<dyn FnOnce(&SqliteFullDatabase) + Send>>>,
 }
 
 impl DatabaseThread {
+    /// Sends a closure to the database thread, executes it, then returns the value that the
+    /// closure returned.
     pub async fn with_database<T: Send + 'static>(
         &self,
         closure: impl FnOnce(&SqliteFullDatabase) -> T + Send + 'static,
@@ -47,6 +54,8 @@ impl DatabaseThread {
         rx.await.unwrap()
     }
 
+    /// Similar to [`DatabaseThread::with_database`], but without any return value. This function
+    /// is slightly more optimized for this use case.
     pub async fn with_database_detached(
         &self,
         closure: impl FnOnce(&SqliteFullDatabase) + Send + 'static,
@@ -69,6 +78,8 @@ impl From<SqliteFullDatabase> for DatabaseThread {
         thread::Builder::new()
             .name("sqlite-database".into())
             .spawn(move || {
+                // When the `DatabaseThread` is dropped, the sender will close, `rx.next()`
+                // will return `None`, and the closure here will finish, ending the thread.
                 while let Some(closure) = futures::executor::block_on(rx.next()) {
                     closure(&db)
                 }

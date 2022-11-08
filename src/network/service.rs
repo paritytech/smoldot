@@ -38,13 +38,14 @@ use core::{
     ops::{Add, Sub},
     time::Duration,
 };
-use rand::{seq::SliceRandom as _, Rng as _, SeedableRng as _};
+use rand::{Rng as _, SeedableRng as _};
 
 pub use crate::libp2p::{
     collection::ReadWrite,
     peers::{
         ConnectionId, ConnectionToCoordinator, CoordinatorToConnection, InRequestId, InboundError,
-        MultiStreamConnectionTask, OutRequestId, SingleStreamConnectionTask,
+        MultiStreamConnectionTask, MultiStreamHandshakeKind, OutRequestId,
+        SingleStreamConnectionTask, SingleStreamHandshakeKind,
     },
 };
 
@@ -158,6 +159,9 @@ pub struct ChainNetwork<TNow> {
     /// See [`Config::max_addresses_per_peer`].
     max_addresses_per_peer: NonZeroUsize,
 
+    /// Contains an entry for each peer present in at least one k-bucket of a chain.
+    kbuckets_peers: hashbrown::HashMap<PeerId, KBucketsPeer, SipHasherBuild>,
+
     /// Tuples of `(peer_id, chain_index)` that have been reported as open to the API user.
     ///
     /// This is a subset of the block announce notification protocol substreams that are open.
@@ -213,11 +217,32 @@ struct Chain<TNow> {
     ///
     /// Used in order to hold the list of peers that are known to be part of this chain.
     ///
-    /// A peer is marked as "connected" in the k-buckets when a block announces substream is open,
-    /// and disconnected when it is closed.
+    /// A peer is marked as "connected" in the k-buckets when a block announces substream is open
+    /// and that the remote's handshake is valid (i.e. can be parsed and containing a correct
+    /// genesis hash), and disconnected when it is closed or that the remote's handshake isn't
+    /// satisfactory.
+    kbuckets: kademlia::kbuckets::KBuckets<PeerId, (), TNow, 20>,
+}
+
+struct KBucketsPeer {
+    /// Number of k-buckets containing this peer. Used to know when to remove this entry.
+    num_references: NonZeroUsize,
+
+    /// List of addresses known for this peer, and whether we currently have an outgoing connection
+    /// to each of them. In this context, "connected" means "outgoing connection whose handshake is
+    /// finished and is not shutting down".
     ///
-    /// For each peer, a list of addresses is hold. This list must never become empty.
-    kbuckets: kademlia::kbuckets::KBuckets<PeerId, addresses::Addresses, TNow, 20>,
+    /// It is not possible to have multiple outgoing connections for a single address.
+    /// Incoming connections are not taken into account at all.
+    ///
+    /// An address is marked as pending when there is a "pending connection" (see
+    /// [`ChainNetwork::pending_ids`]) to it, or if there is an outgoing connection to it that is
+    /// still handshaking.
+    ///
+    /// An address is marked as disconnected as soon as the shutting down is starting.
+    ///
+    /// Must never be empty.
+    addresses: addresses::Addresses,
 }
 
 enum InRequestTy {
@@ -256,13 +281,11 @@ where
             .flat_map(|chain| {
                 iter::once(peers::NotificationProtocolConfig {
                     protocol_name: format!("/{}/block-announces/1", chain.protocol_id),
-                    fallback_protocol_names: Vec::new(),
                     max_handshake_size: 1024 * 1024, // TODO: arbitrary
                     max_notification_size: 1024 * 1024,
                 })
                 .chain(iter::once(peers::NotificationProtocolConfig {
                     protocol_name: format!("/{}/transactions/1", chain.protocol_id),
-                    fallback_protocol_names: Vec::new(),
                     max_handshake_size: 4,
                     max_notification_size: 16 * 1024 * 1024,
                 }))
@@ -273,7 +296,6 @@ where
                     // comprehensible.
                     iter::once(peers::NotificationProtocolConfig {
                         protocol_name: "/paritytech/grandpa/1".to_string(),
-                        fallback_protocol_names: Vec::new(),
                         max_handshake_size: 4,
                         max_notification_size: 1024 * 1024,
                     })
@@ -323,6 +345,9 @@ where
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/state/2", chain.protocol_id),
                 inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
+                // The sender tries to cap the response to 2MiB. However, if one storage item
+                // is larger than 2MiB, the response is allowed to be bigger, as otherwise it
+                // wouldn't be possible to make progress.
                 max_response_size: 16 * 1024 * 1024,
                 // We don't support inbound state requests (yet).
                 inbound_allowed: false,
@@ -358,10 +383,22 @@ where
             })
             .collect::<Vec<_>>();
 
+        // Maximum number that each remote is allowed to open.
+        // Note that this maximum doesn't have to be precise. There only needs to be *a* limit
+        // that is not exaggerately large, and this limit shouldn't be too low as to cause
+        // legitimate substreams to be refused.
+        // According to the protocol, a remote can only open one substream of each protocol at
+        // a time. However, we multiply this value by 2 in order to be generous. We also add 1
+        // to account for the ping protocol.
+        let max_inbound_substreams = chains.len()
+            * (1 + REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN + NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+            * 2;
+
         ChainNetwork {
             inner: peers::Peers::new(peers::Config {
                 connections_capacity: config.connections_capacity,
                 peers_capacity: config.peers_capacity,
+                max_inbound_substreams,
                 request_response_protocols,
                 noise_key: config.noise_key,
                 randomness_seed: randomness.sample(rand::distributions::Standard),
@@ -371,6 +408,10 @@ where
             }),
             open_chains: hashbrown::HashSet::with_capacity_and_hasher(
                 config.peers_capacity * chains.len(),
+                SipHasherBuild::new(randomness.gen()),
+            ),
+            kbuckets_peers: hashbrown::HashMap::with_capacity_and_hasher(
+                config.peers_capacity,
                 SipHasherBuild::new(randomness.gen()),
             ),
             num_pending_per_peer: hashbrown::HashMap::with_capacity_and_hasher(
@@ -445,10 +486,14 @@ where
     pub fn add_single_stream_incoming_connection(
         &mut self,
         when_connected: TNow,
+        handshake_kind: SingleStreamHandshakeKind,
         remote_addr: multiaddr::Multiaddr,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
-        self.inner
-            .add_single_stream_incoming_connection(when_connected, remote_addr)
+        self.inner.add_single_stream_incoming_connection(
+            when_connected,
+            handshake_kind,
+            remote_addr,
+        )
     }
 
     pub fn pull_message_to_connection(
@@ -649,19 +694,18 @@ where
     ///
     /// This function might generate a message destined a connection. Use
     /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
-    // TODO: does an empty response mean that `start_key` is the last key of the storage? unclear
-    pub fn start_state_request_unchecked(
+    pub fn start_state_request(
         &mut self,
         now: TNow,
         target: &PeerId,
         chain_index: usize,
-        block_hash: [u8; 32],
-        start_key: &[u8],
+        block_hash: &[u8; 32],
+        start_key: protocol::StateRequestStart,
         timeout: Duration,
     ) -> OutRequestId {
-        let request_data = protocol::build_state_request(protocol::StateRequestConfig {
+        let request_data = protocol::build_state_request(protocol::StateRequest {
             block_hash,
-            start_key: start_key.to_vec(),
+            start_key,
         })
         .fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
@@ -693,7 +737,7 @@ where
         now: TNow,
         target: &PeerId,
         chain_index: usize,
-        config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
+        config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
         timeout: Duration,
     ) -> OutRequestId {
         let request_data =
@@ -787,6 +831,26 @@ where
         )
     }
 
+    /// Returns `true` if it is allowed to call [`ChainNetwork::send_block_announce`], in other
+    /// words if there is an outbound block announces substream currently open with the target.
+    ///
+    /// If this function returns `false`, calling [`ChainNetwork::send_block_announce`] will
+    /// panic.
+    pub fn can_send_block_announces(&self, target: &PeerId, chain_index: usize) -> bool {
+        self.inner
+            .can_queue_notification(target, chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+    }
+
+    /// Returns the list of peers for which we have a fully established notifications protocol of
+    /// the given protocol.
+    pub fn opened_transactions_substream(
+        &'_ self,
+        chain_index: usize,
+    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+        self.inner
+            .opened_out_notifications(chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1)
+    }
+
     ///
     ///
     /// Must be passed the SCALE-encoded transaction.
@@ -815,37 +879,122 @@ where
         &mut self,
         now: &TNow,
         chain_index: usize,
-        list: impl IntoIterator<Item = (PeerId, impl IntoIterator<Item = multiaddr::Multiaddr>)>,
+        peer_id: PeerId,
+        discovered_addrs: impl IntoIterator<Item = multiaddr::Multiaddr>,
     ) {
         let kbuckets = &mut self.chains[chain_index].kbuckets;
 
-        for (peer_id, discovered_addrs) in list {
-            let mut discovered_addrs = discovered_addrs.into_iter().peekable();
+        let mut discovered_addrs = discovered_addrs.into_iter().peekable();
 
-            // Check whether there is any address in the iterator at all before inserting the
-            // node in the buckets.
-            if discovered_addrs.peek().is_none() {
+        // Check whether there is any address in the iterator at all before inserting the
+        // node in the buckets.
+        if discovered_addrs.peek().is_none() {
+            return;
+        }
+
+        let kbuckets_peer = match kbuckets.entry(&peer_id) {
+            kademlia::kbuckets::Entry::LocalKey => return, // TODO: return some diagnostic?
+            kademlia::kbuckets::Entry::Vacant(entry) => {
+                match entry.insert((), now, kademlia::kbuckets::PeerState::Disconnected) {
+                    Err(kademlia::kbuckets::InsertError::Full) => return, // TODO: return some diagnostic?
+                    Ok((_, removed_entry)) => {
+                        // `removed_entry` is the peer that was removed the k-buckets as the
+                        // result of the new insertion. Purge it from `self.kbuckets_peers`
+                        // if necessary.
+                        if let Some((removed_peer_id, _)) = removed_entry {
+                            match self.kbuckets_peers.entry(removed_peer_id) {
+                                hashbrown::hash_map::Entry::Occupied(e)
+                                    if e.get().num_references.get() == 1 =>
+                                {
+                                    e.remove();
+                                }
+                                hashbrown::hash_map::Entry::Occupied(e) => {
+                                    let num_refs = &mut e.into_mut().num_references;
+                                    *num_refs = NonZeroUsize::new(num_refs.get() - 1).unwrap();
+                                }
+                                hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
+                            }
+                        }
+
+                        match self.kbuckets_peers.entry(peer_id) {
+                            hashbrown::hash_map::Entry::Occupied(e) => {
+                                let e = e.into_mut();
+                                e.num_references = e.num_references.checked_add(1).unwrap();
+                                e
+                            }
+                            hashbrown::hash_map::Entry::Vacant(e) => {
+                                // The peer was not in the k-buckets, but it is possible that
+                                // we already have existing connections to it.
+                                let mut addresses = addresses::Addresses::with_capacity(
+                                    self.max_addresses_per_peer.get(),
+                                );
+
+                                for connection_id in
+                                    self.inner.established_peer_connections(&e.key())
+                                {
+                                    let state = self.inner.connection_state(connection_id);
+                                    debug_assert!(state.established);
+                                    // Because we mark addresses as disconnected when the
+                                    // shutdown process starts, we ignore shutting down
+                                    // connections.
+                                    if state.shutting_down {
+                                        continue;
+                                    }
+                                    if state.outbound {
+                                        addresses
+                                            .insert_discovered(self.inner[connection_id].clone());
+                                        addresses.set_connected(&self.inner[connection_id]);
+                                    }
+                                }
+
+                                for connection_id in
+                                    self.inner.handshaking_peer_connections(&e.key())
+                                {
+                                    let state = self.inner.connection_state(connection_id);
+                                    debug_assert!(!state.established);
+                                    debug_assert!(state.outbound);
+                                    // Because we mark addresses as disconnected when the
+                                    // shutdown process starts, we ignore shutting down
+                                    // connections.
+                                    if state.shutting_down {
+                                        continue;
+                                    }
+                                    addresses.insert_discovered(self.inner[connection_id].clone());
+                                    addresses.set_pending(&self.inner[connection_id]);
+                                }
+
+                                // TODO: O(n)
+                                for (_, (p, addr, _)) in &self.pending_ids {
+                                    if p == e.key() {
+                                        addresses.insert_discovered(addr.clone());
+                                        addresses.set_pending(addr);
+                                    }
+                                }
+
+                                e.insert(KBucketsPeer {
+                                    num_references: NonZeroUsize::new(1).unwrap(),
+                                    addresses,
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+            kademlia::kbuckets::Entry::Occupied(_) => {
+                self.kbuckets_peers.get_mut(&peer_id).unwrap()
+            }
+        };
+
+        for to_insert in discovered_addrs {
+            if kbuckets_peer.addresses.len() >= self.max_addresses_per_peer.get() {
                 continue;
             }
 
-            // TODO: also insert addresses in kbuckets of other chains? a bit unclear
-            if let Ok(mut kbuckets_addrs) = kbuckets.entry(&peer_id).or_insert(
-                addresses::Addresses::with_capacity(self.max_addresses_per_peer.get()),
-                now,
-                kademlia::kbuckets::PeerState::Disconnected,
-            ) {
-                for to_insert in discovered_addrs {
-                    if kbuckets_addrs.get_mut().len() >= self.max_addresses_per_peer.get() {
-                        continue;
-                    }
-
-                    kbuckets_addrs.get_mut().insert_discovered(to_insert);
-                }
-
-                // List of addresses must never be empty.
-                debug_assert!(!kbuckets_addrs.get_mut().is_empty());
-            }
+            kbuckets_peer.addresses.insert_discovered(to_insert);
         }
+
+        // List of addresses must never be empty.
+        debug_assert!(!kbuckets_peer.addresses.is_empty());
     }
 
     /// Returns a list of nodes (their [`PeerId`] and multiaddresses) that we know are part of
@@ -860,9 +1009,12 @@ where
     ) -> impl Iterator<Item = (&'_ PeerId, impl Iterator<Item = &'_ multiaddr::Multiaddr>)> + '_
     {
         let kbuckets = &self.chains[chain_index].kbuckets;
-        kbuckets
-            .iter_ordered()
-            .map(|(peer_id, addresses)| (peer_id, addresses.iter()))
+        kbuckets.iter_ordered().map(move |(peer_id, _)| {
+            (
+                peer_id,
+                self.kbuckets_peers.get(peer_id).unwrap().addresses.iter(),
+            )
+        })
     }
 
     /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
@@ -877,6 +1029,7 @@ where
     pub fn pending_outcome_ok_single_stream(
         &mut self,
         id: PendingId,
+        handshake_kind: SingleStreamHandshakeKind,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
@@ -884,6 +1037,7 @@ where
 
         let (connection_id, connection_task) = self.inner.add_single_stream_outgoing_connection(
             when_connected.clone(),
+            handshake_kind,
             expected_peer_id,
             multiaddr.clone(),
         );
@@ -898,14 +1052,6 @@ where
             }
         }
 
-        // Update the list of addresses.
-        // TODO: O(n)
-        for chain in &mut self.chains {
-            if let Some(addrs) = chain.kbuckets.get_mut(expected_peer_id) {
-                addrs.set_connected(multiaddr);
-            }
-        }
-
         self.pending_ids.remove(id.0);
 
         (connection_id, connection_task)
@@ -916,34 +1062,28 @@ where
     ///
     /// See also [`ChainNetwork::pending_outcome_err`].
     ///
-    /// No [`Event::Connected`] will be generated. Calling this function implicitly acts as if
-    /// this event was generated.
-    ///
     /// # Panic
     ///
     /// Panics if the [`PendingId`] is invalid.
     ///
-    // TODO: not generating the Connected event is tricky, as the user needs to do an extra effort to know if there was already a connection to that peer
     pub fn pending_outcome_ok_multi_stream<TSubId>(
         &mut self,
         id: PendingId,
-        now: TNow,
-        peer_id: &PeerId,
+        handshake_kind: MultiStreamHandshakeKind,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
         TSubId: Clone + PartialEq + Eq + Hash,
     {
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
-        let (expected_peer_id, multiaddr, _when_connected) = self.pending_ids.get(id.0).unwrap();
+        let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.get(id.0).unwrap();
 
-        if expected_peer_id != peer_id {
-            todo!() // TODO: return an error or something
-        }
-
-        let (connection_id, connection_task) =
-            self.inner
-                .add_multi_stream_outgoing_connection(now, peer_id, multiaddr.clone());
+        let (connection_id, connection_task) = self.inner.add_multi_stream_outgoing_connection(
+            when_connected.clone(),
+            handshake_kind,
+            expected_peer_id,
+            multiaddr.clone(),
+        );
 
         // Update `self.peers`.
         {
@@ -952,14 +1092,6 @@ where
                 *value = new_value;
             } else {
                 self.num_pending_per_peer.remove(expected_peer_id).unwrap();
-            }
-        }
-
-        // Update the list of addresses.
-        // TODO: O(n)
-        for chain in &mut self.chains {
-            if let Some(addrs) = chain.kbuckets.get_mut(expected_peer_id) {
-                addrs.set_connected(multiaddr);
             }
         }
 
@@ -995,7 +1127,13 @@ where
             != 1;
 
         // If the peer is completely unreachable, unassign all of its slots.
-        if !has_any_attempt_left && !self.inner.has_established_connection(expected_peer_id) {
+        if !has_any_attempt_left
+            && self
+                .inner
+                .established_peer_connections(expected_peer_id)
+                .count()
+                == 0
+        {
             let expected_peer_id = expected_peer_id.clone(); // Necessary for borrowck reasons.
 
             for chain_index in 0..self.chains.len() {
@@ -1011,25 +1149,24 @@ where
         let (expected_peer_id, _, _) = self.pending_ids.remove(id.0);
 
         // Updates the addresses book.
-        // TODO: O(n)
-        for chain in &mut self.chains {
-            if let Some(addrs) = chain.kbuckets.get_mut(&expected_peer_id) {
-                if is_unreachable {
-                    // Do not remove last remaining address, in order to prevent the addresses
-                    // list from ever becoming empty.
-                    debug_assert!(!addrs.is_empty());
-                    if addrs.len() <= 1 {
-                        continue;
-                    }
-
-                    addrs.remove(&multiaddr);
+        if let Some(KBucketsPeer { addresses, .. }) = self.kbuckets_peers.get_mut(&expected_peer_id)
+        {
+            if is_unreachable {
+                // Do not remove last remaining address, in order to prevent the addresses
+                // list from ever becoming empty.
+                debug_assert!(!addresses.is_empty());
+                if addresses.len() > 1 {
+                    addresses.remove(&multiaddr);
                 } else {
-                    addrs.set_disconnected(&multiaddr);
-
-                    // Shuffle the known addresses, otherwise the same address might get picked
-                    // again.
-                    addrs.shuffle();
+                    // TODO: remove peer from k-buckets instead?
+                    addresses.set_disconnected(&multiaddr);
                 }
+            } else {
+                addresses.set_disconnected(&multiaddr);
+
+                // Shuffle the known addresses, otherwise the same address might get picked
+                // again.
+                addresses.shuffle();
             }
         }
 
@@ -1057,28 +1194,110 @@ where
         }
 
         let event_to_return = loop {
-            let inner_event = match self.inner.next_event() {
-                Some(ev) => ev,
-                None => break None,
+            // Instead of simply calling `next_event()` from the inner state machine to grab the
+            // inner event, we first call `fulfilled_undesired_outbound_substreams` and determine
+            // whether there is any already-open or opening-in-progress substream to close. If so,
+            // we perform the closing, then continue running the body of `next_event` but pretend
+            // that the underlying state machine has generated an event corresponding to that
+            // substream having been closed.
+            let inner_event = {
+                let event = loop {
+                    let to_close = self
+                        .inner
+                        .fulfilled_undesired_outbound_substreams()
+                        .next()
+                        .map(|(peer_id, idx, _)| (peer_id.clone(), idx));
+                    if let Some((peer_id, notifications_protocol_index)) = to_close {
+                        let open_or_pending = self
+                            .inner
+                            .close_out_notification(&peer_id, notifications_protocol_index);
+                        match open_or_pending {
+                            peers::OpenOrPending::Pending => {
+                                // Intentionally ignored, as it concerns a peer that is no longer
+                                // desired, and thus didn't have a slot.
+                            }
+                            peers::OpenOrPending::Open => {
+                                break Some(peers::Event::NotificationsOutClose {
+                                    notifications_protocol_index,
+                                    peer_id,
+                                })
+                            }
+                        }
+                    } else {
+                        break None;
+                    }
+                };
+
+                // No event due to closing substreams. Grab the "actual" inner event.
+                match event {
+                    Some(ev) => ev,
+                    None => match self.inner.next_event() {
+                        Some(ev) => ev,
+                        None => break None,
+                    },
+                }
             };
 
             match inner_event {
-                peers::Event::Connected {
+                peers::Event::HandshakeFinished {
+                    connection_id,
                     peer_id,
-                    num_peer_connections,
-                    ..
-                } if num_peer_connections.get() == 1 => {
-                    break Some(Event::Connected(peer_id));
-                }
-                peers::Event::Connected { .. } => {
-                    // When `num_peer_connections` != 1 we don't care about this event.
+                    num_healthy_peer_connections,
+                    expected_peer_id,
+                } => {
+                    let multiaddr = &self.inner[connection_id];
+
+                    debug_assert_eq!(
+                        self.inner.connection_state(connection_id).outbound,
+                        expected_peer_id.is_some()
+                    );
+
+                    if let Some(expected_peer_id) = expected_peer_id.as_ref() {
+                        if *expected_peer_id != peer_id {
+                            if let Some(KBucketsPeer { addresses, .. }) =
+                                self.kbuckets_peers.get_mut(expected_peer_id)
+                            {
+                                debug_assert!(!addresses.is_empty());
+                                if addresses.len() > 1 {
+                                    addresses.remove(multiaddr);
+                                } else {
+                                    // TODO: remove peer from k-buckets instead?
+                                    addresses.set_disconnected(multiaddr);
+                                }
+                            }
+                        }
+
+                        // Mark the address as connected.
+                        // Note that this is done only for outgoing connections.
+                        if let Some(KBucketsPeer { addresses, .. }) =
+                            self.kbuckets_peers.get_mut(&peer_id)
+                        {
+                            if *expected_peer_id != peer_id {
+                                addresses.insert_discovered(multiaddr.clone());
+                            }
+
+                            addresses.set_connected(multiaddr);
+                        }
+                    }
+
+                    if num_healthy_peer_connections.get() == 1 {
+                        break Some(Event::Connected(peer_id));
+                    }
                 }
 
-                peers::Event::Disconnected {
-                    peer_id,
-                    num_peer_connections,
-                    user_data: address,
-                } if num_peer_connections == 0 => {
+                peers::Event::Shutdown { .. } => {
+                    // TODO:
+                }
+
+                peers::Event::StartShutdown {
+                    connection_id,
+                    peer:
+                        peers::ShutdownPeer::Established {
+                            peer_id,
+                            num_healthy_peer_connections,
+                        },
+                    ..
+                } if num_healthy_peer_connections == 0 => {
                     // TODO: O(n)
                     let chain_indices = self
                         .open_chains
@@ -1092,12 +1311,14 @@ where
                         self.unassign_slot(*idx, &peer_id);
                     }
 
-                    // Update the k-buckets.
-                    // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
-                    for chain in &mut self.chains {
-                        if let Some(mut entry) = chain.kbuckets.entry(&peer_id).into_occupied() {
-                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
-                            entry.get_mut().set_disconnected(&address);
+                    // Update the list of addresses of this peer.
+                    if self.inner.connection_state(connection_id).outbound {
+                        let address = &self.inner[connection_id];
+                        if let Some(KBucketsPeer { addresses, .. }) =
+                            self.kbuckets_peers.get_mut(&peer_id)
+                        {
+                            addresses.set_disconnected(&address);
+                            debug_assert_eq!(addresses.iter_connected().count(), 0);
                         }
                     }
 
@@ -1110,20 +1331,42 @@ where
                         chain_indices,
                     });
                 }
-                peers::Event::Disconnected {
-                    peer_id,
-                    user_data: address,
+                peers::Event::StartShutdown {
+                    connection_id,
+                    peer: peers::ShutdownPeer::Established { peer_id, .. },
                     ..
                 } => {
-                    // Update the k-buckets.
-                    // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
-                    for chain in &mut self.chains {
-                        if let Some(mut entry) = chain.kbuckets.entry(&peer_id).into_occupied() {
-                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
-                            entry.get_mut().set_disconnected(&address);
+                    // Update the list of addresses of this peer.
+                    if self.inner.connection_state(connection_id).outbound {
+                        let address = &self.inner[connection_id];
+                        if let Some(KBucketsPeer { addresses, .. }) =
+                            self.kbuckets_peers.get_mut(&peer_id)
+                        {
+                            addresses.set_disconnected(&address);
+                            debug_assert_ne!(addresses.iter_connected().count(), 0);
                         }
                     }
                 }
+                peers::Event::StartShutdown {
+                    connection_id,
+                    peer:
+                        peers::ShutdownPeer::OutgoingHandshake {
+                            expected_peer_id, ..
+                        },
+                    ..
+                } => {
+                    // Update the k-buckets.
+                    let address = &self.inner[connection_id];
+                    if let Some(KBucketsPeer { addresses, .. }) =
+                        self.kbuckets_peers.get_mut(&expected_peer_id)
+                    {
+                        addresses.set_disconnected(&address);
+                    }
+                }
+                peers::Event::StartShutdown {
+                    peer: peers::ShutdownPeer::IngoingHandshake,
+                    ..
+                } => {}
 
                 // Insubstantial error for diagnostic purposes.
                 peers::Event::InboundError { peer_id, error, .. } => {
@@ -1267,7 +1510,10 @@ where
                             });
                         }
 
-                        // Update the k-buckets.
+                        // Update the k-buckets to mark the peer as connected.
+                        // Note that this is done after having made sure that the handshake
+                        // was correct.
+                        // TODO: should we not insert the entry in the k-buckets as well? seems important for incoming connections
                         if let Some(mut entry) = self.chains[chain_index]
                             .kbuckets
                             .entry(&peer_id)
@@ -1339,14 +1585,23 @@ where
                         });
                     }
                     (OutRequestTy::GrandpaWarpSync, chain_index) => {
+                        let block_number_bytes =
+                            self.chains[chain_index].chain_config.block_number_bytes;
+
                         let response = response
                             .map_err(GrandpaWarpSyncRequestError::Request)
-                            .and_then(|payload| {
-                                protocol::decode_grandpa_warp_sync_response(
-                                    &payload,
-                                    self.chains[chain_index].chain_config.block_number_bytes,
-                                )
-                                .map_err(GrandpaWarpSyncRequestError::Decode)
+                            .and_then(|message| {
+                                if let Err(err) = protocol::decode_grandpa_warp_sync_response(
+                                    &message,
+                                    block_number_bytes,
+                                ) {
+                                    Err(GrandpaWarpSyncRequestError::Decode(err))
+                                } else {
+                                    Ok(EncodedGrandpaWarpSyncResponse {
+                                        message,
+                                        block_number_bytes,
+                                    })
+                                }
                             });
 
                         break Some(Event::GrandpaWarpSyncRequestResult {
@@ -1359,8 +1614,11 @@ where
                             response
                                 .map_err(StateRequestError::Request)
                                 .and_then(|payload| {
-                                    protocol::decode_state_response(&payload)
-                                        .map_err(StateRequestError::Decode)
+                                    if let Err(err) = protocol::decode_state_response(&payload) {
+                                        Err(StateRequestError::Decode(err))
+                                    } else {
+                                        Ok(EncodedStateResponse(payload))
+                                    }
                                 });
 
                         break Some(Event::StateRequestResult {
@@ -1531,6 +1789,7 @@ where
                     );
 
                     // The chain is now considered as closed.
+                    // TODO: can was_open ever be false?
                     let was_open = self.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
 
                     if was_open {
@@ -1544,6 +1803,9 @@ where
                                 .entry(&peer_id)
                                 .into_occupied()
                             {
+                                // Note that the state might have already be `Disconnected`, which
+                                // can happen for example in case of a problem in the handshake
+                                // sent back by the remote.
                                 entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             }
 
@@ -1581,9 +1843,27 @@ where
                     }
                 }
 
-                // Remote closes a substream.
-                // There isn't anything to do as long as the remote doesn't close our local
-                // outbound substream.
+                // Remote closes a block announce substream.
+                peers::Event::NotificationsInClose {
+                    peer_id,
+                    notifications_protocol_index,
+                    ..
+                } if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
+                    let chain_index =
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    // We unassign the inbound slot of the peer if it had one.
+                    // If the peer had an outbound slot, then this does nothing.
+                    if self.chains[chain_index].in_peers.remove(&peer_id) {
+                        self.inner.set_peer_notifications_out_desired(
+                            &peer_id,
+                            notifications_protocol_index,
+                            peers::DesiredState::NotDesired,
+                        );
+                    }
+                }
+
+                // Remote closes another substream.
                 peers::Event::NotificationsInClose { .. } => {}
 
                 // Received a block announce.
@@ -1699,10 +1979,10 @@ where
                 // Remote wants to open a block announces substream.
                 // The block announces substream is the main substream that determines whether
                 // a "chain" is open.
-                peers::Event::DesiredInNotification {
+                peers::Event::NotificationsInOpen {
                     peer_id,
                     handshake,
-                    id: desired_in_notification_id,
+                    id: substream_id,
                     notifications_protocol_index,
                 } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 => {
                     let chain_index =
@@ -1713,8 +1993,7 @@ where
                         self.chains[chain_index].chain_config.block_number_bytes,
                         &handshake,
                     ) {
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
 
                         break Some(Event::ProtocolError {
                             error: ProtocolError::BadBlockAnnouncesHandshake(err),
@@ -1731,8 +2010,7 @@ where
                                 .unwrap_or(usize::max_value())
                     {
                         // All in slots are occupied. Refuse the substream.
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
                         continue;
                     }
 
@@ -1756,12 +2034,9 @@ where
                         })
                     };
 
-                    if self
-                        .inner
-                        .in_notification_accept(desired_in_notification_id, handshake)
-                        .is_ok()
-                        && !has_out_slot
-                    {
+                    self.inner.in_notification_accept(substream_id, handshake);
+
+                    if !has_out_slot {
                         // TODO: future cancellation issue; if this future is cancelled, then trying to do the `in_notification_accept` again next time will panic
                         self.inner.set_peer_notifications_out_desired(
                             &peer_id,
@@ -1783,9 +2058,9 @@ where
                 }
 
                 // Remote wants to open a transactions substream.
-                peers::Event::DesiredInNotification {
+                peers::Event::NotificationsInOpen {
                     peer_id,
-                    id: desired_in_notification_id,
+                    id: substream_id,
                     notifications_protocol_index,
                     ..
                 } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 1 => {
@@ -1797,20 +2072,16 @@ where
                         .open_chains // TODO: clone :-/
                         .contains(&(peer_id.clone(), chain_index))
                     {
-                        // It doesn't matter if the substream is obsolete.
-                        let _ = self
-                            .inner
-                            .in_notification_accept(desired_in_notification_id, Vec::new());
+                        self.inner.in_notification_accept(substream_id, Vec::new());
                     } else {
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
                     }
                 }
 
                 // Remote wants to open a grandpa substream.
-                peers::Event::DesiredInNotification {
+                peers::Event::NotificationsInOpen {
                     peer_id,
-                    id: desired_in_notification_id,
+                    id: substream_id,
                     notifications_protocol_index,
                     ..
                 } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 => {
@@ -1822,8 +2093,7 @@ where
                         .open_chains // TODO: clone :-/
                         .contains(&(peer_id.clone(), chain_index))
                     {
-                        self.inner
-                            .in_notification_refuse(desired_in_notification_id);
+                        self.inner.in_notification_refuse(substream_id);
                         continue;
                     }
 
@@ -1838,19 +2108,18 @@ where
                             .to_vec()
                     };
 
-                    // It doesn't matter if the substream is obsolete.
-                    let _ = self
-                        .inner
-                        .in_notification_accept(desired_in_notification_id, handshake);
+                    self.inner.in_notification_accept(substream_id, handshake);
                 }
 
-                peers::Event::DesiredInNotification { .. } => {
+                peers::Event::NotificationsInOpen { .. } => {
                     // Unrecognized notifications protocol.
                     unreachable!();
                 }
 
-                peers::Event::DesiredInNotificationCancel { .. } => {
-                    // TODO: do something
+                peers::Event::NotificationsInOpenCancel { .. } => {
+                    // Because we always accept/refuse incoming notification substreams instantly,
+                    // there's no possibility for a cancellation to happen.
+                    unreachable!()
                 }
             }
         };
@@ -1859,11 +2128,14 @@ where
         // to open.
         loop {
             // Note: we can't use a `while let` due to borrow checker errors.
-            let (id, _, notifications_protocol_index) =
-                match self.inner.next_unfulfilled_desired_outbound_substream() {
-                    Some(v) => v,
-                    None => break,
-                };
+            let (peer_id, notifications_protocol_index) = match self
+                .inner
+                .unfulfilled_desired_outbound_substream(false)
+                .next()
+            {
+                Some((peer_id, idx)) => (peer_id.clone(), idx),
+                None => break,
+            };
 
             let chain_config = &self.chains
                 [notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN]
@@ -1892,7 +2164,12 @@ where
                 unreachable!()
             };
 
-            self.inner.open_out_notification(id, now.clone(), handshake);
+            self.inner.open_out_notification(
+                &peer_id,
+                notifications_protocol_index,
+                now.clone(),
+                handshake,
+            );
         }
 
         event_to_return
@@ -1920,7 +2197,16 @@ where
                 .kbuckets
                 .closest_entries(&random_peer_id)
                 // TODO: instead of filtering by connectd only, connect to nodes if not connected
-                .find(|(_, addresses)| addresses.iter_connected().count() != 0)
+                // TODO: additionally, this only takes outgoing connections into account
+                .find(|(peer_id, _)| {
+                    self.kbuckets_peers
+                        .get(peer_id)
+                        .unwrap()
+                        .addresses
+                        .iter_connected()
+                        .next()
+                        .is_some()
+                })
                 .map(|(peer_id, _)| peer_id.clone());
             peer_id
         };
@@ -1929,20 +2215,18 @@ where
         self.next_kademlia_operation_id.0 += 1;
 
         if let Some(queried_peer) = queried_peer {
-            // TODO: this check for `has_established_connection` is a hack because the connected/disconnected state in the k-buckets doesn't actually reflect the state of connection even though it should; this if is normally not necessary at all
-            if self.inner.has_established_connection(&queried_peer) {
-                self.start_kademlia_find_node_inner(
-                    &queried_peer,
-                    now,
-                    chain_index,
-                    random_peer_id.as_bytes(),
-                    Some(kademlia_operation_id),
-                );
-            } else {
-                // TODO: the NoPeer error isn't appropriate, but as explained above this is a hack
-                self.pending_kademlia_errors
-                    .push_back((kademlia_operation_id, DiscoveryError::NoPeer))
-            }
+            debug_assert!(self
+                .inner
+                .established_peer_connections(&queried_peer)
+                .any(|cid| !self.inner.connection_state(cid).shutting_down));
+
+            self.start_kademlia_find_node_inner(
+                &queried_peer,
+                now,
+                chain_index,
+                random_peer_id.as_bytes(),
+                Some(kademlia_operation_id),
+            );
         } else {
             self.pending_kademlia_errors
                 .push_back((kademlia_operation_id, DiscoveryError::NoPeer))
@@ -2038,19 +2322,18 @@ where
                     .iter_mut()
                     .flat_map(|chain| chain.kbuckets.iter_mut_ordered())
                     .find(|(p, _)| **p == *entry.key())
-                    .and_then(|(_, addrs)| addrs.addr_to_pending());
+                    .and_then(|(peer_id, _)| {
+                        self.kbuckets_peers
+                            .get_mut(peer_id)
+                            .unwrap()
+                            .addresses
+                            .addr_to_pending()
+                    });
                 match potential {
                     Some(a) => a.clone(),
                     None => continue,
                 }
             };
-
-            // TODO: O(n)
-            for chain in &mut self.chains {
-                if let Some(_) = chain.kbuckets.get_mut(entry.key()) {
-                    // TODO: mark address as pending
-                }
-            }
 
             let now = now();
             let pending_id = PendingId(self.pending_ids.insert((
@@ -2075,9 +2358,16 @@ where
         None
     }
 
-    /// Returns `true` if there exists an established connection with the given peer.
-    pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
-        self.inner.has_established_connection(peer_id)
+    /// Returns `true` if if it possible to send requests (i.e. through
+    /// [`ChainNetwork::start_grandpa_warp_sync_request`],
+    /// [`ChainNetwork::start_blocks_request`], etc.) to the given peer.
+    ///
+    /// If `false` is returned, starting a request will panic.
+    ///
+    /// In other words, returns `true` if there exists an established connection non-shutting-down
+    /// connection with the given peer.
+    pub fn can_start_requests(&self, peer_id: &PeerId) -> bool {
+        self.inner.can_start_requests(peer_id)
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
@@ -2086,48 +2376,54 @@ where
         self.inner.peers_list()
     }
 
-    ///
-    ///
-    /// Returns the [`PeerId`] that now has an outbound slot.
-    // TODO: docs
-    // TODO: when to call this?
-    pub fn assign_slots(&mut self, chain_index: usize) -> Option<PeerId> {
-        let chain = &mut self.chains[chain_index];
+    // TODO: docs and appropriate naming
+    pub fn slots_to_assign(&'_ self, chain_index: usize) -> impl Iterator<Item = &'_ PeerId> + '_ {
+        let chain = &self.chains[chain_index];
 
-        let list = {
-            let mut list = chain.kbuckets.iter_ordered().collect::<Vec<_>>();
-            list.shuffle(&mut self.randomness);
-            list
-        };
-
-        for (peer_id, _) in list {
-            // Check if maximum number of slots is reached.
-            if chain.out_peers.len()
-                >= usize::try_from(chain.chain_config.out_slots).unwrap_or(usize::max_value())
-            {
-                break;
-            }
-
-            // Don't assign slots to peers that already have a slot.
-            if chain.out_peers.contains(peer_id) || chain.in_peers.contains(peer_id) {
-                continue;
-            }
-
-            // It is now guaranteed that this peer will be assigned an outbound slot.
-
-            // The peer is marked as desired before inserting it in `out_peers`, to handle
-            // potential future cancellation issues.
-            self.inner.set_peer_notifications_out_desired(
-                peer_id,
-                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-                peers::DesiredState::DesiredReset, // TODO: ?
-            );
-            chain.out_peers.insert(peer_id.clone());
-
-            return Some(peer_id.clone());
+        // Check if maximum number of slots is reached.
+        if chain.out_peers.len()
+            >= usize::try_from(chain.chain_config.out_slots).unwrap_or(usize::max_value())
+        {
+            return either::Right(iter::empty());
         }
 
-        None
+        // TODO: return in some specific order?
+        either::Left(
+            chain
+                .kbuckets
+                .iter_ordered()
+                .map(|(peer_id, _)| peer_id)
+                .filter(|peer_id| {
+                    // Don't assign slots to peers that already have a slot.
+                    !chain.out_peers.contains(peer_id) && !chain.in_peers.contains(peer_id)
+                }),
+        )
+    }
+
+    // TODO: docs
+    // TODO: when to call this?
+    pub fn assign_out_slot(&mut self, chain_index: usize, peer_id: PeerId) {
+        let chain = &mut self.chains[chain_index];
+
+        // Check if maximum number of slots is reached.
+        if chain.out_peers.len()
+            >= usize::try_from(chain.chain_config.out_slots).unwrap_or(usize::max_value())
+        {
+            return; // TODO: return error?
+        }
+
+        // Don't assign slots to peers that already have a slot.
+        if chain.out_peers.contains(&peer_id) || chain.in_peers.contains(&peer_id) {
+            return; // TODO: return error?
+        }
+
+        self.inner.set_peer_notifications_out_desired(
+            &peer_id,
+            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
+            peers::DesiredState::DesiredReset, // TODO: ?
+        );
+
+        chain.out_peers.insert(peer_id);
     }
 
     ///
@@ -2199,7 +2495,7 @@ where
     }
 
     /// Removes the slot assignment of the given peer, if any.
-    fn unassign_slot(&mut self, chain_index: usize, peer_id: &PeerId) -> Option<SlotTy> {
+    pub fn unassign_slot(&mut self, chain_index: usize, peer_id: &PeerId) -> Option<SlotTy> {
         self.inner.set_peer_notifications_out_desired(
             peer_id,
             chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
@@ -2291,12 +2587,12 @@ pub enum Event {
 
     GrandpaWarpSyncRequestResult {
         request_id: OutRequestId,
-        response: Result<protocol::GrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
+        response: Result<EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
     },
 
     StateRequestResult {
         request_id: OutRequestId,
-        response: Result<Vec<protocol::StateResponseEntry>, StateRequestError>,
+        response: Result<EncodedStateResponse, StateRequestError>,
     },
 
     StorageProofRequestResult {
@@ -2482,8 +2778,15 @@ pub struct EncodedGrandpaCommitMessage {
 
 impl EncodedGrandpaCommitMessage {
     /// Returns the encoded bytes of the commit message.
+    pub fn into_encoded(mut self) -> Vec<u8> {
+        // Skip the first byte because `self.message` is a `GrandpaNotificationRef`.
+        self.message.remove(0);
+        self.message
+    }
+
+    /// Returns the encoded bytes of the commit message.
     pub fn as_encoded(&self) -> &[u8] {
-        // Skip the first byte because `self.0` is a `GrandpaNotificationRef`.
+        // Skip the first byte because `self.message` is a `GrandpaNotificationRef`.
         &self.message[1..]
     }
 
@@ -2497,6 +2800,54 @@ impl EncodedGrandpaCommitMessage {
 }
 
 impl fmt::Debug for EncodedGrandpaCommitMessage {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
+/// Undecoded but valid GrandPa warp sync response.
+#[derive(Clone)]
+pub struct EncodedGrandpaWarpSyncResponse {
+    message: Vec<u8>,
+    block_number_bytes: usize,
+}
+
+impl EncodedGrandpaWarpSyncResponse {
+    /// Returns the encoded bytes of the warp sync message.
+    pub fn as_encoded(&self) -> &[u8] {
+        &self.message
+    }
+
+    /// Returns the decoded version of the warp sync message.
+    pub fn decode(&self) -> protocol::GrandpaWarpSyncResponse {
+        match protocol::decode_grandpa_warp_sync_response(&self.message, self.block_number_bytes) {
+            Ok(msg) => msg,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl fmt::Debug for EncodedGrandpaWarpSyncResponse {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
+/// Undecoded but valid state response.
+#[derive(Clone)]
+pub struct EncodedStateResponse(Vec<u8>);
+
+impl EncodedStateResponse {
+    /// Returns the decoded version of the state response.
+    pub fn decode(&self) -> Vec<&[u8]> {
+        match protocol::decode_state_response(&self.0) {
+            Ok(r) => r,
+            Err(_) => unreachable!(),
+        }
+    }
+}
+
+impl fmt::Debug for EncodedStateResponse {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.decode(), f)
     }
@@ -2606,7 +2957,7 @@ pub enum GrandpaWarpSyncRequestError {
     Decode(protocol::DecodeGrandpaWarpSyncResponseError),
 }
 
-/// Error returned by [`ChainNetwork::start_state_request_unchecked`].
+/// Error returned by [`ChainNetwork::start_state_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum StateRequestError {
     #[display(fmt = "{}", _0)]

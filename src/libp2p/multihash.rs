@@ -62,6 +62,17 @@ impl<'a> MultihashRef<'a> {
         }
     }
 
+    /// Checks whether `input` is a valid multihash.
+    ///
+    /// Contrary to [`MultihashRef::from_bytes`], doesn't return an error if the slice is too long
+    /// but returns the remainder.
+    pub fn from_bytes_partial(input: &'a [u8]) -> Result<(MultihashRef, &'a [u8]), FromBytesError> {
+        match multihash::<nom::error::Error<&[u8]>>(input) {
+            Ok((rest, multihash)) => Ok((multihash, rest)),
+            Err(_) => Err(FromBytesError::DecodeError),
+        }
+    }
+
     /// Returns an iterator to a list of buffers that, when concatenated together, form the
     /// binary representation of this multihash.
     pub fn as_bytes(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {

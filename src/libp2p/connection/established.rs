@@ -18,12 +18,13 @@
 mod multi_stream;
 mod single_stream;
 pub mod substream;
+mod tests;
 
 use super::yamux;
 use alloc::{string::String, vec::Vec};
 use core::time::Duration;
 
-pub use multi_stream::MultiStream;
+pub use multi_stream::{MultiStream, SubstreamFate};
 pub use single_stream::{ConnectionPrototype, Error, SingleStream};
 pub use substream::{
     InboundError, NotificationsInClosedErr, NotificationsOutErr, RequestError,
@@ -69,6 +70,11 @@ impl SubstreamId {
 #[must_use]
 #[derive(Debug)]
 pub enum Event<TRqUd, TNotifUd> {
+    /// The connection is now in a mode where opening new substreams (i.e. starting requests
+    /// and opening notifications substreams) is forbidden, but the remote is still able to open
+    /// substreams and messages on existing substreams are still allowed to be sent and received.
+    NewOutboundSubstreamsForbidden,
+
     /// Received an incoming substream, but this substream has produced an error.
     ///
     /// > **Note**: This event exists only for diagnostic purposes. No action is expected in
@@ -188,6 +194,8 @@ pub enum Event<TRqUd, TNotifUd> {
 // TODO: this struct isn't zero-cost, but making it zero-cost is kind of hard and annoying
 #[derive(Debug, Clone)]
 pub struct Config<TNow> {
+    /// Maximum number of substreams that the remote can have simultaneously opened.
+    pub max_inbound_substreams: usize,
     /// List of request-response protocols supported for incoming substreams.
     pub request_protocols: Vec<ConfigRequestResponse>,
     /// List of notifications protocols supported for incoming substreams.

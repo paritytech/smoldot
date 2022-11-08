@@ -90,8 +90,7 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
             _ => return None,
         };
 
-        verif_queue_front.block_height =
-            NonZeroU64::new(verif_queue_front.block_height.get() + 1).unwrap();
+        verif_queue_front.block_height = verif_queue_front.block_height.checked_add(1).unwrap();
 
         if blocks_now_empty {
             self.verification_queue.pop_front().unwrap();
@@ -212,17 +211,21 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
         self.verification_queue[insert_pos].ty =
             VerificationQueueEntryTy::Requested { source, user_data };
 
+        // Check that there's no two "Missing" in a row.
+        debug_assert!(!self
+            .verification_queue
+            .iter()
+            .tuple_windows::<(_, _)>()
+            .any(|(a, b)| matches!(a.ty, VerificationQueueEntryTy::Missing)
+                && matches!(b.ty, VerificationQueueEntryTy::Missing)));
+
         // `verification_queue` must always end with an entry of type `Missing`. Add it, if
         // necessary.
         if insert_pos == self.verification_queue.len() - 1 {
             self.verification_queue.push_back(VerificationQueueEntry {
-                block_height: NonZeroU64::new(
-                    block_height
-                        .get()
-                        .checked_add(u64::from(num_blocks.get()))
-                        .unwrap(),
-                )
-                .unwrap(),
+                block_height: block_height
+                    .checked_add(u64::from(num_blocks.get()))
+                    .unwrap(),
                 ty: VerificationQueueEntryTy::Missing,
             });
         }
@@ -255,7 +258,7 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
                     self.verification_queue.insert(
                         insert_pos + 1,
                         VerificationQueueEntry {
-                            block_height: NonZeroU64::new(block_height.get() + n).unwrap(),
+                            block_height: block_height.checked_add(n).unwrap(),
                             ty: VerificationQueueEntryTy::Missing,
                         },
                     );
@@ -263,6 +266,18 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
             }
             None => unreachable!(),
         }
+
+        // Check again the internal state of the queue.
+        debug_assert!(!self
+            .verification_queue
+            .iter()
+            .tuple_windows::<(_, _)>()
+            .any(|(a, b)| matches!(a.ty, VerificationQueueEntryTy::Missing)
+                && matches!(b.ty, VerificationQueueEntryTy::Missing)));
+        debug_assert!(matches!(
+            self.verification_queue.back().unwrap().ty,
+            VerificationQueueEntryTy::Missing
+        ));
 
         Ok(())
     }
@@ -331,10 +346,10 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
                         self.verification_queue.insert(
                             index + 1,
                             VerificationQueueEntry {
-                                block_height: NonZeroU64::new(
-                                    self.verification_queue[index].block_height.get() + n,
-                                )
-                                .unwrap(),
+                                block_height: self.verification_queue[index]
+                                    .block_height
+                                    .checked_add(n)
+                                    .unwrap(),
                                 ty: VerificationQueueEntryTy::Missing,
                             },
                         );
@@ -347,15 +362,16 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
             // `Missing` at the end.
             if index == self.verification_queue.len() - 1 {
                 let back = self.verification_queue.back().unwrap();
-                let next_block_height = NonZeroU64::new(
-                    back.block_height.get()
-                        + u64::try_from(match &back.ty {
+                let next_block_height = back
+                    .block_height
+                    .checked_add(
+                        u64::try_from(match &back.ty {
                             VerificationQueueEntryTy::Queued { blocks, .. } => blocks.len(),
                             _ => unreachable!(),
                         })
                         .unwrap(),
-                )
-                .unwrap();
+                    )
+                    .unwrap();
                 self.verification_queue.push_back(VerificationQueueEntry {
                     block_height: next_block_height,
                     ty: VerificationQueueEntryTy::Missing,
@@ -381,7 +397,31 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
 
                 self.verification_queue.remove(index + 1);
             }
+
+            // We must also check whether `index - 1` was not also `Missing`.
+            // This is done after having checking `index + 1`, otherwise the indices would be
+            // wrong.
+            if index != 0
+                && matches!(
+                    self.verification_queue[index - 1].ty,
+                    VerificationQueueEntryTy::Missing
+                )
+            {
+                self.verification_queue.remove(index);
+            }
         };
+
+        // Check the internal state of the queue.
+        debug_assert!(!self
+            .verification_queue
+            .iter()
+            .tuple_windows::<(_, _)>()
+            .any(|(a, b)| matches!(a.ty, VerificationQueueEntryTy::Missing)
+                && matches!(b.ty, VerificationQueueEntryTy::Missing)));
+        debug_assert!(self
+            .verification_queue
+            .back()
+            .map_or(true, |e| matches!(e.ty, VerificationQueueEntryTy::Missing)));
 
         (
             match prev_value {
@@ -473,6 +513,20 @@ impl<'a, TRq, TBl> Drop for SourceDrain<'a, TRq, TBl> {
                 self.queue.verification_queue.remove(index);
             }
         }
+
+        // Check the internal state of the queue.
+        debug_assert!(!self
+            .queue
+            .verification_queue
+            .iter()
+            .tuple_windows::<(_, _)>()
+            .any(|(a, b)| matches!(a.ty, VerificationQueueEntryTy::Missing)
+                && matches!(b.ty, VerificationQueueEntryTy::Missing)));
+        debug_assert!(self
+            .queue
+            .verification_queue
+            .back()
+            .map_or(true, |e| matches!(e.ty, VerificationQueueEntryTy::Missing)));
     }
 }
 

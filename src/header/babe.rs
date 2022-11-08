@@ -38,7 +38,7 @@ pub enum BabeConsensusLogRef<'a> {
 impl<'a> BabeConsensusLogRef<'a> {
     /// Decodes a [`BabeConsensusLogRef`] from a slice of bytes.
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, Error> {
-        Ok(match slice.get(0) {
+        Ok(match slice.first() {
             Some(1) => {
                 BabeConsensusLogRef::NextEpochData(BabeNextEpochRef::from_slice(&slice[1..])?)
             }
@@ -380,7 +380,7 @@ pub enum BabeAllowedSlots {
 impl BabeAllowedSlots {
     /// Decodes a [`BabeAllowedSlots`] from a slice of bytes.
     pub fn from_slice(slice: &[u8]) -> Result<Self, Error> {
-        Ok(match slice.get(0) {
+        Ok(match slice.first() {
             Some(0) => BabeAllowedSlots::PrimarySlots,
             Some(1) => BabeAllowedSlots::PrimaryAndSecondaryPlainSlots,
             Some(2) => BabeAllowedSlots::PrimaryAndSecondaryVrfSlots,
@@ -415,7 +415,7 @@ pub enum BabePreDigestRef<'a> {
 impl<'a> BabePreDigestRef<'a> {
     /// Decodes a [`BabePreDigestRef`] from a slice of bytes.
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, Error> {
-        Ok(match slice.get(0) {
+        Ok(match slice.first() {
             Some(1) => BabePreDigestRef::Primary(BabePrimaryPreDigestRef::from_slice(&slice[1..])?),
             Some(2) => BabePreDigestRef::SecondaryPlain(BabeSecondaryPlainPreDigest::from_slice(
                 &slice[1..],

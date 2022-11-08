@@ -58,10 +58,9 @@ fn block_building_works() {
                 builder = ext.inject_inherents(inherents::InherentData { timestamp: 1234 });
             }
             super::BlockBuild::StorageGet(get) => {
-                let key = get.key_as_vec();
                 let value = genesis_storage
                     .iter()
-                    .find(|(k, _)| *k == key)
+                    .find(|(k, _)| *k == get.key().as_ref())
                     .map(|(_, v)| iter::once(v));
                 builder = get.inject_value(value);
             }

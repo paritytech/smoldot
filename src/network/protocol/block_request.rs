@@ -38,9 +38,13 @@ pub struct BlocksRequestConfig {
 /// number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlocksRequestDirection {
-    /// Blocks should be returned in ascending number, starting from the requested one.
+    /// Blocks should be returned in ascending number, starting from the requested one. In other
+    /// words, amongst all the blocks in the response, the requested block must be the one with
+    /// the lowest block number, and all the other blocks are its descendants.
     Ascending,
-    /// Blocks should be returned in descending number, starting from the requested one.
+    /// Blocks should be returned in descending number, starting from the requested one. In other
+    /// words, amongst all the blocks in the response, the requested block must be the one with
+    /// the highest block number, and all the other blocks are its ancestors.
     Descending,
 }
 
@@ -134,27 +138,22 @@ pub fn decode_block_request(
     request_bytes: &[u8],
 ) -> Result<BlocksRequestConfig, DecodeBlockRequestError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-        nom::combinator::complete(protobuf::message_decode::<
-            ((_,), Option<_>, Option<_>, (_,), Option<_>),
-            _,
-            _,
-        >((
-            protobuf::uint32_tag_decode(1),
-            protobuf::bytes_tag_decode(2),
-            protobuf::bytes_tag_decode(3),
-            protobuf::enum_tag_decode(5),
-            protobuf::uint32_tag_decode(6),
-        ))),
+        nom::combinator::complete(protobuf::message_decode! {
+            #[required] fields = 1 => protobuf::uint32_tag_decode,
+            #[optional] hash = 2 => protobuf::bytes_tag_decode,
+            #[optional] number = 3 => protobuf::bytes_tag_decode,
+            #[optional] direction = 5 => protobuf::enum_tag_decode,
+            #[optional] max_blocks = 6 => protobuf::uint32_tag_decode,
+        }),
     );
 
-    let ((fields,), hash, number, (direction,), max_blocks) =
-        match nom::Finish::finish(parser(request_bytes)) {
-            Ok((_, rq)) => rq,
-            Err(_) => return Err(DecodeBlockRequestError::ProtobufDecode),
-        };
+    let decoded = match nom::Finish::finish(parser(request_bytes)) {
+        Ok((_, rq)) => rq,
+        Err(_) => return Err(DecodeBlockRequestError::ProtobufDecode),
+    };
 
     Ok(BlocksRequestConfig {
-        start: match (hash, number) {
+        start: match (decoded.hash, decoded.number) {
             (Some(h), None) => BlocksRequestConfigStart::Hash(
                 <[u8; 32]>::try_from(h)
                     .map_err(|_| DecodeBlockRequestError::InvalidBlockHashLength)?,
@@ -189,18 +188,25 @@ pub fn decode_block_request(
             (Some(_), Some(_)) => return Err(DecodeBlockRequestError::ProtobufDecode),
             (None, None) => return Err(DecodeBlockRequestError::MissingStartBlock),
         },
-        desired_count: NonZeroU32::new(max_blocks.unwrap_or(u32::max_value()))
-            .ok_or(DecodeBlockRequestError::ZeroBlocksRequested)?,
-        direction: match direction {
-            0 => BlocksRequestDirection::Ascending,
-            1 => BlocksRequestDirection::Descending,
-            _ => return Err(DecodeBlockRequestError::InvalidDirection),
+        desired_count: {
+            // A missing field or a `0` field are both interpreted as "no limit".
+            NonZeroU32::new(decoded.max_blocks.unwrap_or(u32::max_value()))
+                .unwrap_or(NonZeroU32::new(u32::max_value()).unwrap())
         },
-        // TODO: should detect and error if unknown field bit
-        fields: BlocksRequestFields {
-            header: (fields & (1 << 24)) != 0,
-            body: (fields & (1 << 25)) != 0,
-            justifications: (fields & (1 << 28)) != 0,
+        direction: match decoded.direction {
+            None | Some(0) => BlocksRequestDirection::Ascending,
+            Some(1) => BlocksRequestDirection::Descending,
+            Some(_) => return Err(DecodeBlockRequestError::InvalidDirection),
+        },
+        fields: {
+            if (decoded.fields & !(1 << 24 | 1 << 25 | 1 << 28)) != 0 {
+                return Err(DecodeBlockRequestError::UnknownFieldBits);
+            }
+            BlocksRequestFields {
+                header: (decoded.fields & (1 << 24)) != 0,
+                body: (decoded.fields & (1 << 25)) != 0,
+                justifications: (decoded.fields & (1 << 28)) != 0,
+            }
         },
     })
 }
@@ -229,10 +235,9 @@ pub fn build_block_response(response: Vec<BlockData>) -> impl Iterator<Item = im
                     );
                     j.extend_from_slice(justification);
                 }
-                j
+                Some(j)
             } else {
-                // TODO: no; should simply not send the field
-                Vec::new()
+                None
             };
 
             protobuf::bytes_tag_encode(1, block.hash)
@@ -252,7 +257,12 @@ pub fn build_block_response(response: Vec<BlockData>) -> impl Iterator<Item = im
                         .flat_map(|b| b.into_iter())
                         .flat_map(|tx| protobuf::bytes_tag_encode(3, tx))
                         .map(either::Left)
-                        .chain(protobuf::bytes_tag_encode(8, justifications).map(either::Right))
+                        .chain(
+                            justifications
+                                .into_iter()
+                                .flat_map(|j| protobuf::bytes_tag_encode(8, j))
+                                .map(either::Right),
+                        )
                         .map(either::Right),
                 )
         })
@@ -265,38 +275,37 @@ pub fn decode_block_response(
     response_bytes: &[u8],
 ) -> Result<Vec<BlockData>, DecodeBlockResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-        nom::combinator::complete(protobuf::message_decode((protobuf::message_tag_decode(
-            1,
-            protobuf::message_decode::<((_,), (_,), Vec<_>, Option<_>), _, _>((
-                protobuf::bytes_tag_decode(1),
-                protobuf::bytes_tag_decode(2),
-                protobuf::bytes_tag_decode(3),
-                protobuf::bytes_tag_decode(8),
-            )),
-        ),))),
+        nom::combinator::complete(protobuf::message_decode! {
+            #[repeated(max = 32768)] blocks = 1 => protobuf::message_tag_decode(protobuf::message_decode!{
+                #[required] hash = 1 => protobuf::bytes_tag_decode,
+                #[optional] header = 2 => protobuf::bytes_tag_decode,
+                #[repeated(max = usize::max_value())] body = 3 => protobuf::bytes_tag_decode,
+                #[optional] justifications = 8 => protobuf::bytes_tag_decode,
+            }),
+        }),
     );
 
-    let blocks: Vec<_> = match nom::Finish::finish(parser(response_bytes)) {
-        Ok((_, (blocks,))) => blocks,
+    let blocks = match nom::Finish::finish(parser(response_bytes)) {
+        Ok((_, out)) => out.blocks,
         Err(_) => return Err(DecodeBlockResponseError::ProtobufDecode),
     };
 
     let mut blocks_out = Vec::with_capacity(blocks.len());
-    for ((hash,), (header,), body, justifications) in blocks {
-        if hash.len() != 32 {
+    for block in blocks {
+        if block.hash.len() != 32 {
             return Err(DecodeBlockResponseError::InvalidHashLength);
         }
 
         blocks_out.push(BlockData {
-            hash: <[u8; 32]>::try_from(hash).unwrap(),
-            header: if !header.is_empty() {
+            hash: <[u8; 32]>::try_from(block.hash).unwrap(),
+            header: if let Some(header) = block.header {
                 Some(header.to_vec())
             } else {
                 None
             },
             // TODO: no; we might not have asked for the body
-            body: Some(body.into_iter().map(|tx| tx.to_vec()).collect()),
-            justifications: if let Some(justifications) = justifications {
+            body: Some(block.body.into_iter().map(|tx| tx.to_vec()).collect()),
+            justifications: if let Some(justifications) = block.justifications {
                 let result: nom::IResult<_, _> = nom::combinator::all_consuming(
                     nom::combinator::complete(decode_justifications),
                 )(justifications);
@@ -365,6 +374,8 @@ pub enum DecodeBlockRequestError {
     InvalidBlockNumber,
     /// Block hash length isn't correct.
     InvalidBlockHashLength,
+    /// Requested fields contains bits that are unknown.
+    UnknownFieldBits,
 }
 
 /// Error potentially returned by [`decode_block_response`].
@@ -476,5 +487,21 @@ mod tests {
             1, 8, 105, 105, 105, 105, 105, 105, 97, 105, 105, 105, 88, 88, 88, 88, 88, 88, 2, 0, 0,
             0, 0, 1, 255, 2, 105, 88, 88, 88, 88, 88, 88, 88, 88, 88, 88, 88,
         ]);
+    }
+
+    #[test]
+    fn regression_2833() {
+        // Regression test for https://github.com/paritytech/smoldot/issues/2833.
+        let decoded = super::decode_block_request(
+            4,
+            &[
+                8, 128, 128, 128, 136, 1, 26, 4, 237, 91, 33, 0, 48, 1, 56, 1,
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            decoded.direction,
+            super::BlocksRequestDirection::Ascending
+        ));
     }
 }

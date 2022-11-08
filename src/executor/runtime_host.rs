@@ -43,12 +43,8 @@ use crate::{
     util,
 };
 
-use alloc::{
-    borrow::ToOwned as _,
-    string::{String, ToString as _},
-    vec::Vec,
-};
-use core::{fmt, iter};
+use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
+use core::fmt;
 use hashbrown::{hash_map::Entry, HashMap, HashSet};
 
 /// Configuration for [`run`].
@@ -86,7 +82,7 @@ pub fn run(
             .run_vectored(config.function_to_call, config.parameter)?
             .into(),
         top_trie_changes: config.storage_top_trie_changes,
-        top_trie_transaction_revert: None,
+        top_trie_transaction_revert: Vec::new(),
         offchain_storage_changes: config.offchain_storage_changes,
         top_trie_root_calculation_cache: Some(
             config.top_trie_root_calculation_cache.unwrap_or_default(),
@@ -170,6 +166,8 @@ pub enum RuntimeHostVm {
     PrefixKeys(PrefixKeys),
     /// Fetching the key that follows a given one is required in order to continue.
     NextKey(NextKey),
+    /// Verifying whether a signature is correct is required in order to continue.
+    SignatureVerification(SignatureVerification),
 }
 
 impl RuntimeHostVm {
@@ -181,6 +179,7 @@ impl RuntimeHostVm {
             RuntimeHostVm::StorageGet(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::PrefixKeys(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::NextKey(inner) => inner.inner.vm.into_prototype(),
+            RuntimeHostVm::SignatureVerification(inner) => inner.inner.vm.into_prototype(),
         }
     }
 }
@@ -193,20 +192,31 @@ pub struct StorageGet {
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
-        match &self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => {
-                either::Left(iter::once(either::Left(either::Left(req.key()))))
-            }
-            host::HostVm::ExternalStorageAppend(req) => {
-                either::Left(iter::once(either::Left(either::Right(req.key()))))
-            }
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        enum Three<A, B, C> {
+            A(A),
+            B(B),
+            C(C),
+        }
 
+        impl<A: AsRef<[u8]>, B: AsRef<[u8]>, C: AsRef<[u8]>> AsRef<[u8]> for Three<A, B, C> {
+            fn as_ref(&self) -> &[u8] {
+                match self {
+                    Three::A(a) => a.as_ref(),
+                    Three::B(b) => b.as_ref(),
+                    Three::C(c) => c.as_ref(),
+                }
+            }
+        }
+
+        match &self.inner.vm {
+            host::HostVm::ExternalStorageGet(req) => Three::A(req.key()),
+            host::HostVm::ExternalStorageAppend(req) => Three::B(req.key()),
             host::HostVm::ExternalStorageRoot(_) => {
                 if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
                     self.inner.root_calculation.as_ref().unwrap()
                 {
-                    either::Right(value_request.key().map(|v| [v]).map(either::Right))
+                    Three::C(value_request.key().collect::<Vec<_>>())
                 } else {
                     // We only create a `StorageGet` if the state is `StorageValue`.
                     panic!()
@@ -216,16 +226,6 @@ impl StorageGet {
             // We only create a `StorageGet` if the state is one of the above.
             _ => unreachable!(),
         }
-    }
-
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    ///
-    /// This method is a shortcut for calling `key` and concatenating the returned slices.
-    pub fn key_as_vec(&self) -> Vec<u8> {
-        self.key().fold(Vec::new(), |mut a, b| {
-            a.extend_from_slice(b.as_ref());
-            a
-        })
     }
 
     /// Injects the corresponding storage value.
@@ -351,7 +351,7 @@ impl PrefixKeys {
                     let previous_value = self.inner.top_trie_changes.diff_insert_erase(key.clone());
 
                     if let Some(top_trie_transaction_revert) =
-                        self.inner.top_trie_transaction_revert.as_mut()
+                        self.inner.top_trie_transaction_revert.last_mut()
                     {
                         if let Entry::Vacant(entry) = top_trie_transaction_revert.entry(key) {
                             entry.insert(previous_value);
@@ -468,6 +468,90 @@ impl NextKey {
     }
 }
 
+/// Verifying whether a signature is correct is required in order to continue.
+#[must_use]
+pub struct SignatureVerification {
+    inner: Inner,
+}
+
+impl SignatureVerification {
+    /// Returns the message that the signature is expected to sign.
+    pub fn message(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(ref sig) => sig.message(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the signature.
+    ///
+    /// > **Note**: Be aware that this signature is untrusted input and might not be part of the
+    /// >           set of valid signatures.
+    pub fn signature(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(ref sig) => sig.signature(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the public key the signature is against.
+    ///
+    /// > **Note**: Be aware that this public key is untrusted input and might not be part of the
+    /// >           set of valid public keys.
+    pub fn public_key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(ref sig) => sig.public_key(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Verify the signature. Returns `true` if it is valid.
+    pub fn is_valid(&self) -> bool {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(ref sig) => sig.is_valid(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Verify the signature and resume execution.
+    pub fn verify_and_resume(mut self) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(sig) => self.inner.vm = sig.verify_and_resume(),
+            _ => unreachable!(),
+        }
+
+        self.inner.run()
+    }
+
+    /// Resume the execution assuming that the signature is valid.
+    ///
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`SignatureVerification::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
+    pub fn resume_success(mut self) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(sig) => self.inner.vm = sig.resume_success(),
+            _ => unreachable!(),
+        }
+
+        self.inner.run()
+    }
+
+    /// Resume the execution assuming that the signature is invalid.
+    ///
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`SignatureVerification::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
+    pub fn resume_failed(mut self) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(sig) => self.inner.vm = sig.resume_failed(),
+            _ => unreachable!(),
+        }
+
+        self.inner.run()
+    }
+}
+
 /// Implementation detail of the execution. Shared by all the variants of [`RuntimeHostVm`]
 /// other than [`RuntimeHostVm::Finished`].
 struct Inner {
@@ -477,13 +561,14 @@ struct Inner {
     /// Pending changes to the top storage trie that this execution performs.
     top_trie_changes: storage_diff::StorageDiff,
 
-    /// `Some` if and only if we're within a storage transaction. When changes are applied to
-    /// [`Inner::top_trie_changes`], the reverse operation is added here.
+    /// Contains pending storage reverts if and only if we're within a storage transaction.
+    /// When changes are applied to [`Inner::top_trie_changes`], the reverse operation is
+    /// added here.
     ///
     /// When the storage transaction ends, either this hash map is entirely discarded (to commit
     /// changes), or applied to [`Inner::top_trie_changes`] (to revert).
     top_trie_transaction_revert:
-        Option<HashMap<Vec<u8>, Option<Option<Vec<u8>>>, fnv::FnvBuildHasher>>,
+        Vec<HashMap<Vec<u8>, Option<Option<Vec<u8>>>, fnv::FnvBuildHasher>>,
 
     /// Pending changes to the off-chain storage that this execution performs.
     offchain_storage_changes: storage_diff::StorageDiff,
@@ -552,7 +637,7 @@ impl Inner {
                     };
 
                     if let Some(top_trie_transaction_revert) =
-                        self.top_trie_transaction_revert.as_mut()
+                        self.top_trie_transaction_revert.last_mut()
                     {
                         if let Entry::Vacant(entry) =
                             top_trie_transaction_revert.entry(req.key().as_ref().to_vec())
@@ -578,7 +663,7 @@ impl Inner {
                             .top_trie_changes
                             .diff_insert(req.key().as_ref().to_vec(), current_value);
                         if let Some(top_trie_transaction_revert) =
-                            self.top_trie_transaction_revert.as_mut()
+                            self.top_trie_transaction_revert.last_mut()
                         {
                             if let Entry::Vacant(entry) =
                                 top_trie_transaction_revert.entry(req.key().as_ref().to_vec())
@@ -657,6 +742,13 @@ impl Inner {
                     self.vm = req.resume();
                 }
 
+                host::HostVm::SignatureVerification(req) => {
+                    self.vm = req.into();
+                    return RuntimeHostVm::SignatureVerification(SignatureVerification {
+                        inner: self,
+                    });
+                }
+
                 host::HostVm::CallRuntimeVersion(req) => {
                     // TODO: make the user execute this ; see https://github.com/paritytech/smoldot/issues/144
                     // The code below compiles the provided WebAssembly runtime code, which is a
@@ -683,17 +775,18 @@ impl Inner {
                 }
 
                 host::HostVm::StartStorageTransaction(tx) => {
-                    self.top_trie_transaction_revert = Some(Default::default());
+                    self.top_trie_transaction_revert.push(Default::default());
                     self.vm = tx.resume();
                 }
 
                 host::HostVm::EndStorageTransaction { resume, rollback } => {
                     // The inner implementation guarantees that a storage transaction can only
                     // end if it has earlier been started.
-                    debug_assert!(self.top_trie_transaction_revert.is_some());
+                    debug_assert!(!self.top_trie_transaction_revert.is_empty());
+                    let last = self.top_trie_transaction_revert.pop().unwrap();
 
                     if rollback {
-                        for (key, value) in self.top_trie_transaction_revert.take().unwrap() {
+                        for (key, value) in last {
                             if let Some(value) = value {
                                 if let Some(value) = value {
                                     let _ = self.top_trie_changes.diff_insert(key, value);
@@ -709,7 +802,6 @@ impl Inner {
                         self.top_trie_root_calculation_cache = Some(Default::default());
                     }
 
-                    self.top_trie_transaction_revert = None;
                     self.vm = resume.resume();
                 }
 
@@ -724,16 +816,32 @@ impl Inner {
                     // rarely log more than a few hundred bytes. This limit is hardcoded rather
                     // than configurable because it is not expected to be reachable unless
                     // something is very wrong.
-                    // TODO: optimize somehow? don't create an intermediary String?
-                    let message = req.to_string();
-                    if self.logs.len().saturating_add(message.len()) >= 1024 * 1024 {
-                        return RuntimeHostVm::Finished(Err(Error {
-                            detail: ErrorDetail::LogsTooLong,
-                            prototype: host::HostVm::LogEmit(req).into_prototype(),
-                        }));
+                    struct WriterWithMax<'a>(&'a mut String);
+                    impl<'a> fmt::Write for WriterWithMax<'a> {
+                        fn write_str(&mut self, s: &str) -> fmt::Result {
+                            if self.0.len().saturating_add(s.len()) >= 1024 * 1024 {
+                                return Err(fmt::Error);
+                            }
+                            self.0.push_str(s);
+                            Ok(())
+                        }
+                        fn write_char(&mut self, c: char) -> fmt::Result {
+                            if self.0.len().saturating_add(1) >= 1024 * 1024 {
+                                return Err(fmt::Error);
+                            }
+                            self.0.push(c);
+                            Ok(())
+                        }
                     }
-
-                    self.logs.push_str(&message);
+                    match fmt::write(&mut WriterWithMax(&mut self.logs), format_args!("{}", req)) {
+                        Ok(()) => {}
+                        Err(fmt::Error) => {
+                            return RuntimeHostVm::Finished(Err(Error {
+                                detail: ErrorDetail::LogsTooLong,
+                                prototype: host::HostVm::LogEmit(req).into_prototype(),
+                            }));
+                        }
+                    }
                     self.vm = req.resume();
                 }
             }

@@ -198,8 +198,9 @@ CREATE TABLE IF NOT EXISTS aura_finalized_authorities(
     let is_empty = {
         let mut statement = database
             .prepare("SELECT COUNT(*) FROM meta WHERE key = ?")
+            .unwrap()
+            .bind(1, "best")
             .unwrap();
-        statement.bind(1, "best").unwrap();
         statement.next().unwrap();
         statement.read::<i64>(0).unwrap() == 0
     };
@@ -293,10 +294,9 @@ impl DatabaseEmpty {
                 .prepare("INSERT INTO finalized_storage_top_trie(key, value) VALUES(?, ?)")
                 .unwrap();
             for (key, value) in finalized_block_storage_top_trie_entries {
-                statement.bind(1, key).unwrap();
-                statement.bind(2, value).unwrap();
+                statement = statement.bind(1, key).unwrap().bind(2, value).unwrap();
                 statement.next().unwrap();
-                statement.reset().unwrap();
+                statement = statement.reset().unwrap();
             }
         }
 
@@ -306,23 +306,22 @@ impl DatabaseEmpty {
                 .prepare(
                     "INSERT INTO blocks(hash, number, header, justification) VALUES(?, ?, ?, ?)",
                 )
-                .unwrap();
-            statement.bind(1, &finalized_block_hash[..]).unwrap();
-            statement
+                .unwrap()
+                .bind(1, &finalized_block_hash[..])
+                .unwrap()
                 .bind(
                     2,
                     i64::try_from(chain_information.finalized_block_header.number).unwrap(),
                 )
-                .unwrap();
-            statement
+                .unwrap()
                 .bind(3, &scale_encoded_finalized_block_header[..])
                 .unwrap();
             if let Some(finalized_block_justification) = &finalized_block_justification {
-                statement
+                statement = statement
                     .bind(4, &finalized_block_justification[..])
                     .unwrap();
             } else {
-                statement.bind(4, ()).unwrap();
+                statement = statement.bind(4, ()).unwrap();
             }
             statement.next().unwrap();
         }
@@ -333,11 +332,15 @@ impl DatabaseEmpty {
                 .prepare("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES(?, ?, ?)")
                 .unwrap();
             for (index, item) in finalized_block_body.enumerate() {
-                statement.bind(1, &finalized_block_hash[..]).unwrap();
-                statement.bind(2, i64::try_from(index).unwrap()).unwrap();
-                statement.bind(3, item).unwrap();
+                statement = statement
+                    .bind(1, &finalized_block_hash[..])
+                    .unwrap()
+                    .bind(2, i64::try_from(index).unwrap())
+                    .unwrap()
+                    .bind(3, item)
+                    .unwrap();
                 statement.next().unwrap();
-                statement.reset().unwrap();
+                statement = statement.reset().unwrap();
             }
         }
 
@@ -368,13 +371,15 @@ impl DatabaseEmpty {
                     .prepare("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                     .unwrap();
                 for (index, item) in finalized_triggered_authorities.iter().enumerate() {
-                    statement.bind(1, i64::try_from(index).unwrap()).unwrap();
-                    statement.bind(2, &item.public_key[..]).unwrap();
-                    statement
+                    statement = statement
+                        .bind(1, i64::try_from(index).unwrap())
+                        .unwrap()
+                        .bind(2, &item.public_key[..])
+                        .unwrap()
                         .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
                         .unwrap();
                     statement.next().unwrap();
-                    statement.reset().unwrap();
+                    statement = statement.reset().unwrap();
                 }
 
                 if let Some((height, list)) = finalized_scheduled_change {
@@ -386,13 +391,15 @@ impl DatabaseEmpty {
                         .prepare("INSERT INTO grandpa_scheduled_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                         .unwrap();
                     for (index, item) in list.iter().enumerate() {
-                        statement.bind(1, i64::try_from(index).unwrap()).unwrap();
-                        statement.bind(2, &item.public_key[..]).unwrap();
-                        statement
+                        statement = statement
+                            .bind(1, i64::try_from(index).unwrap())
+                            .unwrap()
+                            .bind(2, &item.public_key[..])
+                            .unwrap()
                             .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
                             .unwrap();
                         statement.next().unwrap();
-                        statement.reset().unwrap();
+                        statement = statement.reset().unwrap();
                     }
                 }
             }
@@ -412,10 +419,13 @@ impl DatabaseEmpty {
                     .prepare("INSERT INTO aura_finalized_authorities(idx, public_key) VALUES(?, ?)")
                     .unwrap();
                 for (index, item) in finalized_authorities_list.clone().enumerate() {
-                    statement.bind(1, i64::try_from(index).unwrap()).unwrap();
-                    statement.bind(2, &item.public_key[..]).unwrap();
+                    statement = statement
+                        .bind(1, i64::try_from(index).unwrap())
+                        .unwrap()
+                        .bind(2, &item.public_key[..])
+                        .unwrap();
                     statement.next().unwrap();
-                    statement.reset().unwrap();
+                    statement = statement.reset().unwrap();
                 }
             }
             chain_information::ChainInformationConsensusRef::Babe {

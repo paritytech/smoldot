@@ -21,11 +21,11 @@ use super::{
     super::super::read_write::ReadWrite, substream, Config, ConfigNotifications,
     ConfigRequestResponse, ConfigRequestResponseIn, Event, SubstreamId, SubstreamIdInner,
 };
-use crate::util;
+use crate::util::{self, protobuf};
 
-use alloc::{collections::VecDeque, string::String, vec::Vec};
+use alloc::{collections::VecDeque, string::String, vec, vec::Vec};
 use core::{
-    fmt,
+    cmp, fmt,
     hash::Hash,
     iter,
     ops::{Add, Sub},
@@ -44,11 +44,8 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// to notifications and requests, and "in substreams", used for API purposes when it comes to
     /// raw data sent/received on a substream. When the user for example resets an "in substream",
     /// the "out substream" remains valid.
-    in_substreams: hashbrown::HashMap<
-        TSubId,
-        (substream::Substream<TNow, TRqUd, TNotifUd>, u32),
-        util::SipHasherBuild,
-    >,
+    in_substreams:
+        hashbrown::HashMap<TSubId, Substream<TNow, TRqUd, TNotifUd>, util::SipHasherBuild>,
 
     out_in_substreams_map: hashbrown::HashMap<u32, TSubId, fnv::FnvBuildHasher>,
 
@@ -59,11 +56,7 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// Every time an outgoing substream is opened, an item is pulled from this list.
     ///
     /// Does not include the ping substream.
-    desired_out_substreams: VecDeque<(substream::Substream<TNow, TRqUd, TNotifUd>, u32)>,
-
-    /// List of substreams that might have data to send out. Might contain substreams that are
-    /// still in [`MultiStream::desired_out_substreams`].
-    ready_substreams: hashbrown::HashSet<u32, fnv::FnvBuildHasher>,
+    desired_out_substreams: VecDeque<Substream<TNow, TRqUd, TNotifUd>>,
 
     /// Substream used for outgoing pings.
     ///
@@ -81,6 +74,9 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// unnecessary code being included in the binary and reduces the binary size.
     ping_payload_randomness: rand_chacha::ChaCha20Rng,
 
+    /// See [`Config::max_inbound_substreams`].
+    // TODO: not enforced at the moment
+    _max_inbound_substreams: usize,
     /// See [`Config::request_protocols`].
     request_protocols: Vec<ConfigRequestResponse>,
     /// See [`Config::notifications_protocols`].
@@ -93,6 +89,23 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     ping_timeout: Duration,
 }
 
+struct Substream<TNow, TRqUd, TNotifUd> {
+    id: u32,
+    /// Underlying state machine for the substream. Always `Some` while the substream is alive,
+    /// and `None` if it has been reset.
+    inner: Option<substream::Substream<TNow, TRqUd, TNotifUd>>,
+    /// All incoming data is first transferred to this buffer.
+    // TODO: this is very suboptimal code, instead the parsing should be done in a streaming way
+    read_buffer: Vec<u8>,
+    /// The buffer within `read_buffer` might contain a full Protobuf frame, but not all of the
+    /// data within that frame was processed by the underlying substream.
+    /// Contains the number of bytes of the message in `read_buffer` that the substream state
+    /// machine has already processed.
+    read_buffer_partial_read: usize,
+    remote_writing_side_closed: bool,
+    local_writing_side_closed: bool,
+}
+
 const MAX_PENDING_EVENTS: usize = 4;
 
 impl<TNow, TSubId, TRqUd, TNotifUd> MultiStream<TNow, TSubId, TRqUd, TNotifUd>
@@ -101,7 +114,7 @@ where
     TSubId: Clone + PartialEq + Eq + Hash,
 {
     /// Creates a new connection from the given configuration.
-    pub fn new(config: Config<TNow>) -> MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
+    pub fn webrtc(config: Config<TNow>) -> MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
         // TODO: check conflicts between protocol names?
 
         // We expect at maximum one parallel request per protocol, plus one substream per direction
@@ -132,13 +145,10 @@ where
             ),
             next_out_substream_id: 0,
             desired_out_substreams: VecDeque::with_capacity(num_expected_substreams),
-            ready_substreams: hashbrown::HashSet::with_capacity_and_hasher(
-                num_expected_substreams,
-                Default::default(),
-            ),
             ping_substream: None,
             next_ping: config.first_out_ping,
             ping_payload_randomness: randomness,
+            _max_inbound_substreams: config.max_inbound_substreams,
             request_protocols: config.request_protocols,
             notifications_protocols: config.notifications_protocols,
             ping_protocol: config.ping_protocol,
@@ -174,18 +184,18 @@ where
 
     /// Notifies the state machine that a new substream has been opened.
     ///
-    /// `inbound` indicates whether the substream has been opened by the remote (`true`) or
-    /// locally (`false`).
+    /// `outbound` indicates whether the substream has been opened by the remote (`false`) or
+    /// locally (`true`).
     ///
-    /// If `inbound` is `false`, then the value returned by
+    /// If `outbound` is `true`, then the value returned by
     /// [`MultiStream::desired_outbound_substreams`] will decrease by one.
     ///
     /// # Panic
     ///
     /// Panics if there already exists a substream with an identical identifier.
     ///
-    pub fn add_substream(&mut self, id: TSubId, inbound: bool) {
-        let (substream, out_substream_id) = if inbound {
+    pub fn add_substream(&mut self, id: TSubId, outbound: bool) {
+        let substream = if !outbound {
             let out_substream_id = self.next_out_substream_id;
             self.next_out_substream_id += 1;
 
@@ -198,20 +208,28 @@ where
                 .chain(iter::once(self.ping_protocol.clone()))
                 .collect::<Vec<_>>();
 
-            (
-                substream::Substream::ingoing(supported_protocols),
-                out_substream_id,
-            )
+            Substream {
+                id: out_substream_id,
+                inner: Some(substream::Substream::ingoing(supported_protocols)),
+                read_buffer: Vec::new(),
+                read_buffer_partial_read: 0,
+                local_writing_side_closed: false,
+                remote_writing_side_closed: false,
+            }
         } else if self.ping_substream.is_none() {
             let out_substream_id = self.next_out_substream_id;
             self.next_out_substream_id += 1;
 
             self.ping_substream = Some(id.clone());
 
-            (
-                substream::Substream::ping_out(self.ping_protocol.clone()),
-                out_substream_id,
-            )
+            Substream {
+                id: out_substream_id,
+                inner: Some(substream::Substream::ping_out(self.ping_protocol.clone())),
+                read_buffer: Vec::new(),
+                read_buffer_partial_read: 0,
+                local_writing_side_closed: false,
+                remote_writing_side_closed: false,
+            }
         } else if let Some(desired) = self.desired_out_substreams.pop_front() {
             desired
         } else {
@@ -219,35 +237,15 @@ where
             todo!()
         };
 
-        let previous_value = self.in_substreams.insert(id, (substream, out_substream_id));
+        let _prev_val = self.out_in_substreams_map.insert(substream.id, id.clone());
+        debug_assert!(_prev_val.is_none());
+
+        let previous_value = self.in_substreams.insert(id, substream);
         if previous_value.is_some() {
             // There is already a substream with that identifier. This is forbidden by the API of
             // this function.
             panic!()
         }
-    }
-
-    /// Returns a list of substreams that the state machine would like to see reset. The user is
-    /// encouraged to call [`MultiStream::substream_read_write`] with this list of
-    /// substream.
-    ///
-    /// This value doesn't change automatically over time but only after a call to
-    /// [`MultiStream::substream_read_write`],  [`MultiStream::add_substream`], or
-    /// [`MultiStream::reset_substream`].
-    ///
-    /// This mechanism is not a substitute for [`ReadWrite::wake_up_after`]. If calling
-    /// [`MultiStream::substream_read_write`] puts something in [`ReadWrite::wake_up_after`], then
-    /// the substream should be processed after this time, even if it isn't return by this
-    /// method.
-    /// TODO: it should be the case above it is currently too complicated from the user's perspective to handle a `wake_up_after` value for each substream
-    ///
-    /// > **Note**: An example situation is: a notification is queued, which leads to a message
-    /// >           being sent to a connection task, which, once injected, leads to a notifications
-    /// >           substream being "ready" because it needs to send more data.
-    pub fn ready_substreams(&self) -> impl Iterator<Item = &TSubId> {
-        self.ready_substreams
-            .iter()
-            .filter_map(|in_id| self.out_in_substreams_map.get(in_id))
     }
 
     /// Immediately destroys the substream with the given identifier.
@@ -259,122 +257,352 @@ where
     /// Panics if there is no substream with that identifier.
     ///
     pub fn reset_substream(&mut self, substream_id: &TSubId) {
-        let (substream, out_substream_id) = self.in_substreams.remove(substream_id).unwrap();
-        self.ready_substreams.remove(&out_substream_id);
+        let substream = self.in_substreams.remove(substream_id).unwrap();
+        let _was_in = self.out_in_substreams_map.remove(&substream.id);
+        debug_assert!(!_was_in.is_some());
 
         if Some(substream_id) == self.ping_substream.as_ref() {
             self.ping_substream = None;
         }
 
-        let maybe_event = substream.reset();
+        let maybe_event = substream.inner.unwrap().reset();
         if let Some(event) = maybe_event {
-            self.on_substream_event(out_substream_id, event);
+            Self::on_substream_event(&mut self.pending_events, substream.id, event);
         }
     }
 
     /// Reads/writes data on the substream.
     ///
-    /// If the method returns `true`, then the substream is now considered dead according to the
-    /// state machine and its identifier is now invalid. If the reading or writing side of the
-    /// substream was still open, then the user should reset that substream.
+    /// If the method returns [`SubstreamFate::Reset`], then the substream is now considered dead
+    /// according to the state machine and its identifier is now invalid. If the reading or
+    /// writing side of the substream was still open, then the user should reset that substream.
     ///
     /// This method will refuse to accept data if too many events are already queued. Use
     /// [`MultiStream::pull_event`] to empty the queue of events between calls to this method.
     ///
+    /// In the case of a WebRTC connection, the [`ReadWrite::incoming_buffer`] and
+    /// [`ReadWrite::outgoing_buffer`] must always be `Some`.
+    ///
     /// # Panic
     ///
     /// Panics if there is no substream with that identifier.
+    /// Panics if this is a WebRTC connection, and the reading or writing side is closed.
     ///
+    #[must_use]
     pub fn substream_read_write(
         &mut self,
         substream_id: &TSubId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
-    ) -> bool {
+    ) -> SubstreamFate {
+        let mut substream = self.in_substreams.get_mut(substream_id).unwrap();
+
+        // In WebRTC, the reading and writing side is never closed.
+        assert!(read_write.incoming_buffer.is_some() && read_write.outgoing_buffer.is_some());
+
+        // Reading/writing the ping substream is used to queue new outgoing pings.
+        if Some(substream_id) == self.ping_substream.as_ref() {
+            if read_write.now >= self.next_ping {
+                let payload = self
+                    .ping_payload_randomness
+                    .sample(rand::distributions::Standard);
+                substream
+                    .inner
+                    .as_mut()
+                    .unwrap()
+                    .queue_ping(&payload, read_write.now.clone() + self.ping_timeout);
+                self.next_ping = read_write.now.clone() + self.ping_interval;
+            }
+
+            read_write.wake_up_after(&self.next_ping);
+        }
+
         loop {
             // Don't process any more data before events are pulled.
             if self.pending_events.len() >= MAX_PENDING_EVENTS {
-                return false;
+                return SubstreamFate::Continue;
             }
 
-            // TODO: not great to remove then insert back the substream
-            let (substream_id, (mut substream, out_substream_id)) =
-                self.in_substreams.remove_entry(substream_id).unwrap();
+            // In the situation where there's not enough space in the outgoing buffer to write an
+            // outgoing Protobuf frame, we just return immediately.
+            // This is necessary because calling `substream.read_write` can generate a write
+            // close message.
+            // TODO: this is error-prone, as we have no guarantee that the outgoing buffer will ever be > 6 bytes, for example in principle the API user could decide to use only a write buffer of 2 bytes, although that would be a very stupid thing to do
+            if read_write.outgoing_buffer_available() < 6 {
+                return SubstreamFate::Continue;
+            }
 
-            // Reading/writing the ping substream is used to queue new outgoing pings.
-            if Some(&substream_id) == self.ping_substream.as_ref() {
-                if read_write.now >= self.next_ping {
-                    let payload = self
-                        .ping_payload_randomness
-                        .sample(rand::distributions::Standard);
-                    substream.queue_ping(&payload, read_write.now.clone() + self.ping_timeout);
-                    self.next_ping = read_write.now.clone() + self.ping_interval;
+            // If this flag is still `false` at the end of the loop, we break out of it.
+            let mut continue_looping = false;
+
+            // The incoming data is not directly the data of the substream. Instead, everything
+            // is wrapped within a Protobuf frame. For this reason, we first transfer the data to
+            // a buffer.
+            //
+            // According to the libp2p WebRTC spec, a frame and its length prefix must not be
+            // larger than 16kiB, meaning that the read buffer never has to exceed this size.
+            // TODO: this is very suboptimal; improve
+            if let Some(incoming_buffer) = read_write.incoming_buffer {
+                // TODO: reset the substream if `remote_writing_side_closed`
+                let max_to_transfer =
+                    cmp::min(incoming_buffer.len(), 16384 - substream.read_buffer.len());
+                substream
+                    .read_buffer
+                    .extend_from_slice(&incoming_buffer[..max_to_transfer]);
+                debug_assert!(substream.read_buffer.len() <= 16384);
+                if max_to_transfer != incoming_buffer.len() {
+                    continue_looping = true;
+                }
+                read_write.advance_read(max_to_transfer);
+            }
+
+            // Try to parse the content of `self.read_buffer`.
+            // If the content of `self.read_buffer` is an incomplete frame, the flags will be
+            // `None` and the message will be `&[]`.
+            let (protobuf_frame_size, flags, message_within_frame) = {
+                let mut parser = nom::combinator::complete::<_, _, nom::error::Error<&[u8]>, _>(
+                    nom::combinator::map_parser(
+                        nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+                        protobuf::message_decode! {
+                            #[optional] flags = 1 => protobuf::enum_tag_decode,
+                            #[optional] message = 2 => protobuf::bytes_tag_decode,
+                        },
+                    ),
+                );
+
+                match nom::Finish::finish(parser(&substream.read_buffer)) {
+                    Ok((rest, framed_message)) => {
+                        let protobuf_frame_size = substream.read_buffer.len() - rest.len();
+                        (
+                            protobuf_frame_size,
+                            framed_message.flags,
+                            framed_message.message.unwrap_or(&[][..]),
+                        )
+                    }
+                    Err(err) if err.code == nom::error::ErrorKind::Eof => {
+                        // TODO: reset the substream if incoming_buffer is full, as it means that the frame is too large, and remove the debug_assert below
+                        debug_assert!(substream.read_buffer.len() < 16384);
+                        (0, None, &[][..])
+                    }
+                    Err(_) => {
+                        // Message decoding error.
+                        // TODO: no, must ask the state machine to reset
+                        return SubstreamFate::Reset;
+                    }
+                }
+            };
+
+            let event = if protobuf_frame_size != 0
+                && message_within_frame.len() <= substream.read_buffer_partial_read
+            {
+                // If the substream state machine has already processed all the data within
+                // `read_buffer`, process the flags of the current protobuf frame, discard that
+                // protobuf frame, and loop again.
+                continue_looping = true;
+
+                // Discard the data.
+                substream.read_buffer_partial_read = 0;
+                substream.read_buffer = substream
+                    .read_buffer
+                    .split_at(protobuf_frame_size)
+                    .1
+                    .to_vec();
+
+                // Process the flags.
+                // Note that the `STOP_SENDING` flag is ignored.
+
+                // If the remote has sent a `FIN` or `RESET_STREAM` flag, mark the remote writing
+                // side as closed.
+                if flags.map_or(false, |f| f == 0 || f == 2) {
+                    substream.remote_writing_side_closed = true;
                 }
 
-                read_write.wake_up_after(&self.next_ping);
-            }
+                // If the remote has sent a `RESET_STREAM` flag, also reset the substream.
+                if flags.map_or(false, |f| f == 2) {
+                    substream.inner.take().unwrap().reset()
+                } else {
+                    None
+                }
+            } else {
+                // We allocate a buffer where the substream state machine will temporarily write
+                // out its data. The size of the buffer is capped in order to prevent the substream
+                // from generating data that wouldn't fit in a single protobuf frame.
+                let mut intermediary_write_buffer =
+                    vec![
+                        0;
+                        cmp::min(read_write.outgoing_buffer_available(), 16384).saturating_sub(10)
+                    ]; // TODO: this -10 calculation is hacky because we need to account for the variable length prefixes everywhere
 
-            let written_bytes_before = read_write.written_bytes;
+                let mut sub_read_write = ReadWrite {
+                    now: read_write.now.clone(),
+                    incoming_buffer: if substream.remote_writing_side_closed {
+                        None
+                    } else {
+                        Some(&message_within_frame[substream.read_buffer_partial_read..])
+                    },
+                    outgoing_buffer: if substream.local_writing_side_closed {
+                        None
+                    } else {
+                        Some((&mut intermediary_write_buffer, &mut []))
+                    },
+                    read_bytes: 0,
+                    written_bytes: 0,
+                    wake_up_after: None,
+                };
 
-            let (mut substream_update, event) = substream.read_write(read_write);
+                let (substream_update, event) = substream
+                    .inner
+                    .take()
+                    .unwrap()
+                    .read_write(&mut sub_read_write);
 
-            if event.is_none() && read_write.written_bytes == written_bytes_before {
-                self.ready_substreams.remove(&out_substream_id);
-            }
+                substream.inner = substream_update;
+                substream.read_buffer_partial_read += sub_read_write.read_bytes;
+                if let Some(wake_up_after) = &sub_read_write.wake_up_after {
+                    read_write.wake_up_after(wake_up_after)
+                }
 
-            match (event, substream_update.as_mut()) {
-                (None, _) => {}
-                (Some(substream::Event::InboundNegotiated(protocol)), Some(substream)) => {
+                // Continue looping as the substream might have more data to read or write.
+                if sub_read_write.read_bytes != 0 || sub_read_write.written_bytes != 0 {
+                    continue_looping = true;
+                }
+
+                // Determine whether we should send a message on that substream with a specific
+                // flag.
+                let flag_to_write_out = if substream.inner.is_none()
+                    && (!substream.remote_writing_side_closed
+                        || sub_read_write.outgoing_buffer.is_some())
+                {
+                    // Send a `RESET_STREAM` if the state machine has reset while a side was still
+                    // open.
+                    Some(2)
+                } else if !substream.local_writing_side_closed
+                    && sub_read_write.outgoing_buffer.is_none()
+                {
+                    // Send a `FIN` if the state machine has closed the writing side while it
+                    // wasn't closed before.
+                    substream.local_writing_side_closed = true;
+                    Some(0)
+                } else {
+                    None
+                };
+
+                // Send out message.
+                if flag_to_write_out.is_some() || sub_read_write.written_bytes != 0 {
+                    let written_bytes = sub_read_write.written_bytes;
+                    drop(sub_read_write);
+
+                    debug_assert!(written_bytes <= intermediary_write_buffer.len());
+
+                    let protobuf_frame = {
+                        let flag_out = flag_to_write_out
+                            .into_iter()
+                            .flat_map(|f| protobuf::enum_tag_encode(1, f));
+                        let message_out = if written_bytes != 0 {
+                            Some(&intermediary_write_buffer[..written_bytes])
+                        } else {
+                            None
+                        }
+                        .into_iter()
+                        .flat_map(|m| protobuf::bytes_tag_encode(2, m));
+                        flag_out
+                            .map(either::Left)
+                            .chain(message_out.map(either::Right))
+                    };
+
+                    let protobuf_frame_len = protobuf_frame.clone().fold(0, |mut l, b| {
+                        l += AsRef::<[u8]>::as_ref(&b).len();
+                        l
+                    });
+
+                    // The spec mentions that a frame plus its length prefix shouldn't exceed
+                    // 16kiB. This is normally ensured by forbidding the substream from writing
+                    // more data than would fit in 16kiB.
+                    debug_assert!(protobuf_frame_len <= 16384);
+                    debug_assert!(
+                        util::leb128::encode_usize(protobuf_frame_len).count() + protobuf_frame_len
+                            <= 16384
+                    );
+                    for byte in util::leb128::encode_usize(protobuf_frame_len) {
+                        read_write.write_out(&[byte]);
+                    }
+                    for buffer in protobuf_frame {
+                        read_write.write_out(AsRef::<[u8]>::as_ref(&buffer));
+                    }
+
+                    // We continue looping because the substream might have more data to send.
+                    continue_looping = true;
+                }
+
+                event
+            };
+
+            match event {
+                None => {}
+
+                Some(substream::Event::InboundNegotiated(protocol)) => {
+                    continue_looping = true;
+
                     if protocol == self.ping_protocol {
-                        substream.set_inbound_ty(substream::InboundTy::Ping);
+                        substream
+                            .inner
+                            .as_mut()
+                            .unwrap()
+                            .set_inbound_ty(substream::InboundTy::Ping);
                     } else if let Some(protocol_index) = self
                         .request_protocols
                         .iter()
                         .position(|p| p.name == protocol)
                     {
-                        substream.set_inbound_ty(substream::InboundTy::Request {
-                            protocol_index,
-                            request_max_size: if let ConfigRequestResponseIn::Payload { max_size } =
-                                self.request_protocols[protocol_index].inbound_config
-                            {
-                                Some(max_size)
-                            } else {
-                                None
+                        substream.inner.as_mut().unwrap().set_inbound_ty(
+                            substream::InboundTy::Request {
+                                protocol_index,
+                                request_max_size: if let ConfigRequestResponseIn::Payload {
+                                    max_size,
+                                } =
+                                    self.request_protocols[protocol_index].inbound_config
+                                {
+                                    Some(max_size)
+                                } else {
+                                    None
+                                },
                             },
-                        });
+                        );
                     } else if let Some(protocol_index) = self
                         .notifications_protocols
                         .iter()
                         .position(|p| p.name == protocol)
                     {
-                        substream.set_inbound_ty(substream::InboundTy::Notifications {
-                            protocol_index,
-                            max_handshake_size: self.notifications_protocols[protocol_index]
-                                .max_handshake_size,
-                        });
+                        substream.inner.as_mut().unwrap().set_inbound_ty(
+                            substream::InboundTy::Notifications {
+                                protocol_index,
+                                max_handshake_size: self.notifications_protocols[protocol_index]
+                                    .max_handshake_size,
+                            },
+                        );
                     } else {
                         unreachable!();
                     }
-
-                    // TODO: a bit crappy to put this insert here; DRY
-                    self.in_substreams
-                        .insert(substream_id, (substream_update.unwrap(), out_substream_id));
-                    continue;
                 }
-                (Some(substream::Event::InboundNegotiated(_)), None) => {}
-                (Some(other), _) => self.on_substream_event(out_substream_id, other),
+
+                Some(other) => {
+                    continue_looping = true;
+                    Self::on_substream_event(&mut self.pending_events, substream.id, other)
+                }
             }
 
-            break if let Some(substream_update) = substream_update {
-                self.in_substreams
-                    .insert(substream_id, (substream_update, out_substream_id));
-                false
-            } else {
-                if Some(&substream_id) == self.ping_substream.as_ref() {
+            // WebRTC never closes the writing side.
+            debug_assert!(read_write.outgoing_buffer.is_some());
+
+            if substream.inner.is_none() {
+                if Some(substream_id) == self.ping_substream.as_ref() {
                     self.ping_substream = None;
                 }
-                self.ready_substreams.remove(&out_substream_id);
-                true
-            };
+                self.out_in_substreams_map.remove(&substream.id);
+                self.in_substreams.remove(&substream_id);
+                break SubstreamFate::Reset;
+            } else if !continue_looping {
+                break SubstreamFate::Continue;
+            }
         }
     }
 
@@ -385,8 +613,12 @@ where
     /// Intentionally panics on [`substream::Event::InboundNegotiated`]. Please handle this
     /// variant separately.
     ///
-    fn on_substream_event(&mut self, substream_id: u32, event: substream::Event<TRqUd, TNotifUd>) {
-        self.pending_events.push_back(match event {
+    fn on_substream_event(
+        pending_events: &mut VecDeque<Event<TRqUd, TNotifUd>>,
+        substream_id: u32,
+        event: substream::Event<TRqUd, TNotifUd>,
+    ) {
+        pending_events.push_back(match event {
             substream::Event::InboundNegotiated(_) => panic!(),
             substream::Event::InboundError(error) => Event::InboundError(error),
             substream::Event::RequestIn {
@@ -485,8 +717,9 @@ where
         let substream_id = self.next_out_substream_id;
         self.next_out_substream_id += 1;
 
-        self.desired_out_substreams.push_back((
-            substream::Substream::request_out(
+        self.desired_out_substreams.push_back(Substream {
+            id: substream_id,
+            inner: Some(substream::Substream::request_out(
                 self.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
                 timeout,
                 if has_length_prefix {
@@ -496,11 +729,12 @@ where
                 },
                 self.request_protocols[protocol_index].max_response_size,
                 user_data,
-            ),
-            substream_id,
-        ));
-
-        self.ready_substreams.insert(substream_id);
+            )),
+            read_buffer: Vec::new(),
+            read_buffer_partial_read: 0,
+            local_writing_side_closed: false,
+            remote_writing_side_closed: false,
+        });
 
         // TODO: ? do this? substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
 
@@ -524,7 +758,9 @@ where
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()
-            .0
+            .inner
+            .as_mut()
+            .unwrap()
             .notifications_substream_user_data_mut()
     }
 
@@ -559,18 +795,20 @@ where
         let substream_id = self.next_out_substream_id;
         self.next_out_substream_id += 1;
 
-        self.desired_out_substreams.push_back((
-            substream::Substream::notifications_out(
+        self.desired_out_substreams.push_back(Substream {
+            id: substream_id,
+            inner: Some(substream::Substream::notifications_out(
                 timeout,
                 self.notifications_protocols[protocol_index].name.clone(), // TODO: clone :-/,
                 handshake,
                 max_handshake_size,
                 user_data,
-            ),
-            substream_id,
-        ));
-
-        self.ready_substreams.insert(substream_id);
+            )),
+            read_buffer: Vec::new(),
+            read_buffer_partial_read: 0,
+            local_writing_side_closed: false,
+            remote_writing_side_closed: false,
+        });
 
         SubstreamId(SubstreamIdInner::MultiStream(substream_id))
     }
@@ -600,10 +838,10 @@ where
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()
-            .0
+            .inner
+            .as_mut()
+            .unwrap()
             .accept_in_notifications_substream(handshake, max_notification_size, user_data);
-
-        self.ready_substreams.insert(substream_id);
     }
 
     /// Rejects an inbound notifications protocol. Must be called in response to a
@@ -625,10 +863,10 @@ where
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()
-            .0
+            .inner
+            .as_mut()
+            .unwrap()
             .reject_in_notifications_substream();
-
-        self.ready_substreams.insert(substream_id);
     }
 
     /// Queues a notification to be written out on the given substream.
@@ -663,10 +901,10 @@ where
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()
-            .0
+            .inner
+            .as_mut()
+            .unwrap()
             .write_notification_unbounded(notification);
-
-        self.ready_substreams.insert(substream_id);
     }
 
     /// Returns the number of bytes waiting to be sent out on that substream.
@@ -689,7 +927,9 @@ where
         self.in_substreams
             .get(inner_substream_id)
             .unwrap()
-            .0
+            .inner
+            .as_ref()
+            .unwrap()
             .notification_substream_queued_bytes()
     }
 
@@ -716,10 +956,10 @@ where
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()
-            .0
+            .inner
+            .as_mut()
+            .unwrap()
             .close_notifications_substream();
-
-        self.ready_substreams.insert(substream_id);
     }
 
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
@@ -737,12 +977,12 @@ where
 
         let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
 
-        self.ready_substreams.insert(substream_id);
-
         self.in_substreams
             .get_mut(inner_substream_id)
             .ok_or(substream::RespondInRequestError::SubstreamClosed)?
-            .0
+            .inner
+            .as_mut()
+            .unwrap()
             .respond_in_request(response)
     }
 }
@@ -751,4 +991,14 @@ impl<TNow, TSubId, TRqUd, TNotifUd> fmt::Debug for MultiStream<TNow, TSubId, TRq
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("Established").finish()
     }
+}
+
+/// Whether a substream should remain open or be killed.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum SubstreamFate {
+    /// Substream remains open.
+    Continue,
+    /// Substream is now considered dead and has been removed from the state machine. Its
+    /// identifier is now invalid.
+    Reset,
 }

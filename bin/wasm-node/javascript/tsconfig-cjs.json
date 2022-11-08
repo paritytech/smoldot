@@ -2,10 +2,11 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "lib": [
-      "es2015"
+      "es6"
     ],
-    "target": "es2015",
+    "target": "es6",
     "module": "commonjs",
+    "downlevelIteration": true,
     "outDir": "./dist/cjs",
   },
 }

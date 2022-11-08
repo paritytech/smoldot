@@ -393,7 +393,7 @@ define_methods! {
     /// Returns, as an opaque string, the name of the client serving these JSON-RPC requests.
     system_name() -> Cow<'a, str>,
     system_networkState() -> (), // TODO:
-    system_nodeRoles() -> (), // TODO:
+    system_nodeRoles() -> Cow<'a, [NodeRole]>,
     system_peers() -> Vec<SystemPeer>,
     system_properties() -> Box<serde_json::value::RawValue>,
     system_removeReservedPeer() -> (), // TODO:
@@ -435,7 +435,6 @@ define_methods! {
         hash: HashHexString,
         key: HexString,
         #[rename = "childKey"] child_key: Option<HexString>,
-        r#type: StorageQueryType,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
     chainHead_unstable_unfollow(
@@ -456,10 +455,12 @@ define_methods! {
     transaction_unstable_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
     transaction_unstable_unwatch(subscription: Cow<'a, str>) -> (),
 
-    // This function is a custom addition in smoldot. As of the writing of this comment, there is
-    // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
+    // These functions are a custom addition in smoldot. As of the writing of this comment, there
+    // is no plan to standardize them. See <https://github.com/paritytech/smoldot/issues/2245> and
+    // <https://github.com/paritytech/smoldot/issues/2456>.
     network_unstable_subscribeEvents() -> Cow<'a, str>,
     network_unstable_unsubscribeEvents(subscription: Cow<'a, str>) -> (),
+    chainHead_unstable_finalizedDatabase(#[rename = "maxSizeBytes"] max_size_bytes: Option<u64>) -> Cow<'a, str>,
 }
 
 define_methods! {
@@ -475,7 +476,7 @@ define_methods! {
     chainHead_unstable_bodyEvent(subscription: Cow<'a, str>, result: ChainHeadBodyEvent) -> (),
     chainHead_unstable_callEvent(subscription: Cow<'a, str>, result: ChainHeadCallEvent<'a>) -> (),
     chainHead_unstable_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
-    chainHead_unstable_storageEvent(subscription: Cow<'a, str>, result: ChainHeadStorageEvent) -> (),
+    chainHead_unstable_storageEvent(subscription: Cow<'a, str>, result: ChainHeadStorageEvent<'a>) -> (),
     transaction_unstable_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
 
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
@@ -483,7 +484,7 @@ define_methods! {
     network_unstable_event(subscription: Cow<'a, str>, result: NetworkEvent<'a>) -> (),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct HexString(pub Vec<u8>);
 
 impl AsRef<[u8]> for HexString {
@@ -512,6 +513,12 @@ impl<'a> serde::Deserialize<'a> for HexString {
 
         let bytes = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
         Ok(HexString(bytes))
+    }
+}
+
+impl fmt::Debug for HexString {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "0x{}", hex::encode(&self.0))
     }
 }
 
@@ -572,15 +579,18 @@ impl<'a> serde::Deserialize<'a> for AccountId {
             Err(_) => return Err(serde::de::Error::custom("AccountId isn't in base58 format")),
         };
 
-        // TODO: soon might be 36 bytes as well
-        if decoded.len() != 35 {
+        // TODO: retrieve the actual prefix length of the current chain
+        if decoded.len() < 35 {
             return Err(serde::de::Error::custom("unexpected length for AccountId"));
         }
 
         // TODO: finish implementing this properly ; must notably check checksum
         // see https://github.com/paritytech/substrate/blob/74a50abd6cbaad1253daf3585d5cdaa4592e9184/primitives/core/src/crypto.rs#L228
 
-        let account_id = <[u8; 32]>::try_from(&decoded[1..33]).unwrap();
+        // TODO: retrieve and use the actual prefix length of the current chain
+        let account_id =
+            <[u8; 32]>::try_from(&decoded[(decoded.len() - 34)..(decoded.len() - 2)]).unwrap();
+
         Ok(AccountId(account_id))
     }
 }
@@ -624,9 +634,9 @@ pub enum FollowEvent<'a> {
     },
     #[serde(rename = "finalized")]
     Finalized {
-        #[serde(rename = "finalizedBlocksHashes")]
+        #[serde(rename = "finalizedBlockHashes")]
         finalized_blocks_hashes: Vec<HashHexString>,
-        #[serde(rename = "prunedBlocksHashes")]
+        #[serde(rename = "prunedBlockHashes")]
         pruned_blocks_hashes: Vec<HashHexString>,
     },
     #[serde(rename = "stop")]
@@ -659,11 +669,13 @@ pub enum ChainHeadCallEvent<'a> {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
-pub enum ChainHeadStorageEvent {
+pub enum ChainHeadStorageEvent<'a> {
     #[serde(rename = "done")]
     Done { value: Option<String> },
     #[serde(rename = "inaccessible")]
     Inaccessible {},
+    #[serde(rename = "error")]
+    Error { error: Cow<'a, str> },
     #[serde(rename = "disjoint")]
     Disjoint {},
 }
@@ -884,7 +896,6 @@ pub struct NetworkConfig {
 
 #[derive(Debug, Clone)]
 pub struct RpcMethods {
-    pub version: u64,
     pub methods: Vec<String>,
 }
 
@@ -895,6 +906,17 @@ pub enum MaybeRuntimeSpec<'a> {
     Valid { spec: RuntimeSpec<'a> },
     #[serde(rename = "invalid")]
     Invalid { error: String }, // TODO: String because it's more convenient; improve
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum NodeRole {
+    // Note that "Light" isn't in the Substrate source code and is a custom addition.
+    #[serde(rename = "Light")]
+    Light,
+    #[serde(rename = "Full")]
+    Full,
+    #[serde(rename = "Authority")]
+    Authority,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -953,16 +975,6 @@ pub enum DispatchClass {
 pub struct StorageChangeSet {
     pub block: HashHexString,
     pub changes: Vec<(HexString, Option<HexString>)>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum StorageQueryType {
-    #[serde(rename = "value")]
-    Value,
-    #[serde(rename = "hash")]
-    Hash,
-    #[serde(rename = "size")]
-    Size,
 }
 
 #[derive(Debug, Clone)]
@@ -1038,12 +1050,10 @@ impl serde::Serialize for RpcMethods {
     {
         #[derive(serde::Serialize)]
         struct SerdeRpcMethods<'a> {
-            version: u64,
             methods: &'a [String],
         }
 
         SerdeRpcMethods {
-            version: self.version,
             methods: &self.methods,
         }
         .serialize(serializer)

@@ -21,11 +21,8 @@
 
 use crate::executor::{self, host, vm};
 
-use alloc::{
-    string::{String, ToString as _},
-    vec::Vec,
-};
-use core::{fmt, iter};
+use alloc::{string::String, vec::Vec};
+use core::fmt;
 
 /// Configuration for [`run`].
 pub struct Config<'a, TParams> {
@@ -122,6 +119,8 @@ pub enum RuntimeHostVm {
     NextKey(NextKey),
     /// Fetching the storage trie root is required in order to continue.
     StorageRoot(StorageRoot),
+    /// Verifying whether a signature is correct is required in order to continue.
+    SignatureVerification(SignatureVerification),
 }
 
 impl RuntimeHostVm {
@@ -133,6 +132,7 @@ impl RuntimeHostVm {
             RuntimeHostVm::StorageGet(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::NextKey(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::StorageRoot(inner) => inner.inner.vm.into_prototype(),
+            RuntimeHostVm::SignatureVerification(inner) => inner.inner.vm.into_prototype(),
         }
     }
 }
@@ -145,23 +145,13 @@ pub struct StorageGet {
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => iter::once(req.key()),
+            host::HostVm::ExternalStorageGet(req) => req.key(),
 
             // We only create a `StorageGet` if the state is one of the above.
             _ => unreachable!(),
         }
-    }
-
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    ///
-    /// This method is a shortcut for calling `key` and concatenating the returned slices.
-    pub fn key_as_vec(&self) -> Vec<u8> {
-        self.key().fold(Vec::new(), |mut a, b| {
-            a.extend_from_slice(b.as_ref());
-            a
-        })
     }
 
     /// Injects the corresponding storage value.
@@ -250,6 +240,90 @@ impl StorageRoot {
     }
 }
 
+/// Verifying whether a signature is correct is required in order to continue.
+#[must_use]
+pub struct SignatureVerification {
+    inner: Inner,
+}
+
+impl SignatureVerification {
+    /// Returns the message that the signature is expected to sign.
+    pub fn message(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(ref sig) => sig.message(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the signature.
+    ///
+    /// > **Note**: Be aware that this signature is untrusted input and might not be part of the
+    /// >           set of valid signatures.
+    pub fn signature(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(ref sig) => sig.signature(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the public key the signature is against.
+    ///
+    /// > **Note**: Be aware that this public key is untrusted input and might not be part of the
+    /// >           set of valid public keys.
+    pub fn public_key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(ref sig) => sig.public_key(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Verify the signature. Returns `true` if it is valid.
+    pub fn is_valid(&self) -> bool {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(ref sig) => sig.is_valid(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Verify the signature and resume execution.
+    pub fn verify_and_resume(mut self) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(sig) => self.inner.vm = sig.verify_and_resume(),
+            _ => unreachable!(),
+        }
+
+        self.inner.run()
+    }
+
+    /// Resume the execution assuming that the signature is valid.
+    ///
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`SignatureVerification::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
+    pub fn resume_success(mut self) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(sig) => self.inner.vm = sig.resume_success(),
+            _ => unreachable!(),
+        }
+
+        self.inner.run()
+    }
+
+    /// Resume the execution assuming that the signature is invalid.
+    ///
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`SignatureVerification::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
+    pub fn resume_failed(mut self) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::SignatureVerification(sig) => self.inner.vm = sig.resume_failed(),
+            _ => unreachable!(),
+        }
+
+        self.inner.run()
+    }
+}
+
 /// Implementation detail of the execution. Shared by all the variants of [`RuntimeHostVm`]
 /// other than [`RuntimeHostVm::Finished`].
 struct Inner {
@@ -293,6 +367,13 @@ impl Inner {
                     return RuntimeHostVm::NextKey(NextKey { inner: self });
                 }
 
+                host::HostVm::SignatureVerification(req) => {
+                    self.vm = req.into();
+                    return RuntimeHostVm::SignatureVerification(SignatureVerification {
+                        inner: self,
+                    });
+                }
+
                 host::HostVm::CallRuntimeVersion(req) => {
                     // TODO: make the user execute this ; see https://github.com/paritytech/smoldot/issues/144
                     // The code below compiles the provided WebAssembly runtime code, which is a
@@ -334,16 +415,32 @@ impl Inner {
                     // rarely log more than a few hundred bytes. This limit is hardcoded rather
                     // than configurable because it is not expected to be reachable unless
                     // something is very wrong.
-                    // TODO: optimize somehow? don't create an intermediary String?
-                    let message = req.to_string();
-                    if self.logs.len().saturating_add(message.len()) >= 1024 * 1024 {
-                        return RuntimeHostVm::Finished(Err(Error {
-                            detail: ErrorDetail::LogsTooLong,
-                            prototype: host::HostVm::LogEmit(req).into_prototype(),
-                        }));
+                    struct WriterWithMax<'a>(&'a mut String);
+                    impl<'a> fmt::Write for WriterWithMax<'a> {
+                        fn write_str(&mut self, s: &str) -> fmt::Result {
+                            if self.0.len().saturating_add(s.len()) >= 1024 * 1024 {
+                                return Err(fmt::Error);
+                            }
+                            self.0.push_str(s);
+                            Ok(())
+                        }
+                        fn write_char(&mut self, c: char) -> fmt::Result {
+                            if self.0.len().saturating_add(1) >= 1024 * 1024 {
+                                return Err(fmt::Error);
+                            }
+                            self.0.push(c);
+                            Ok(())
+                        }
                     }
-
-                    self.logs.push_str(&message);
+                    match fmt::write(&mut WriterWithMax(&mut self.logs), format_args!("{}", req)) {
+                        Ok(()) => {}
+                        Err(fmt::Error) => {
+                            return RuntimeHostVm::Finished(Err(Error {
+                                detail: ErrorDetail::LogsTooLong,
+                                prototype: host::HostVm::LogEmit(req).into_prototype(),
+                            }));
+                        }
+                    }
                     self.vm = req.resume();
                 }
 

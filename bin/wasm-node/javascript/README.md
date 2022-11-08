@@ -19,16 +19,13 @@ const chainSpec = fs.readFileSync('./westend.json', 'utf8');
 // A single client can be used to initialize multiple chains.
 const client = smoldot.start();
 
-const chain = await client.addChain({
-  chainSpec,
-  jsonRpcCallback: (jsonRpcResponse) => {
-      // Called whenever the client emits a response to a JSON-RPC request,
-      // or an incoming JSON-RPC notification.
-      console.log(jsonRpcResponse)
-  }
-});
+const chain = await client.addChain({ chainSpec });
 
 chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}');
+
+// Wait for a JSON-RPC response to come back. This is typically done in a loop in the background.
+const jsonRpcResponse = await chain.nextJsonRpcResponse();
+console.log(jsonRpcResponse)
 
 // Later:
 // chain.remove();
@@ -58,15 +55,12 @@ and [the list of requests that smoldot is capable of serving](https://polkadot.j
 Smoldot also has experimental support for an extra (still experimental at the time of writing of
 this comment) set of JSON-RPC functions [found here](https://github.com/paritytech/json-rpc-interface-spec/).
 
-If the request is well formatted, the client will send a response using the `jsonRpcCallback`
-callback that was passed to `addChain`. This callback takes as parameter the string JSON-RPC
-response.
+If the request is well formatted, the client will generate a response. This response can be pulled
+using the `nextJsonRpcResponse` asynchronous function. Calling this function waits until a response
+is available and returns it.
 
-If the request is a subscription, the notifications will also be sent back using the same
-`jsonRpcCallback`.
-
-If no `jsonRpcCallback` was passed to `addChain`, then this chain won't be capable of serving
-any JSON-RPC request at all. This can be used to save resources.
+If the request is a subscription, the notifications will also be sent back using the same mechanism
+and can be pulled using `nextJsonRpcResponse`.
 
 If the chain specification passed to `addChain` is a parachain, then the list of potential relay
 chains must be passed as parameter to `addChain` as well. In situations where the chain

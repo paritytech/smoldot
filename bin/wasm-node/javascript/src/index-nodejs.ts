@@ -15,13 +15,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+// Note: if you modify these imports, please test both the ModuleJS and CommonJS generated
+// bindings. JavaScript being JavaScript, some libraries (such as `websocket`) have issues working
+// with both at the same time.
+
 import { Client, ClientOptions, start as innerStart } from './client.js'
 import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
 
-import Websocket from 'websocket';
-import pako from 'pako';
+import { WebSocket } from 'ws';
+import { inflate } from 'pako';
 
-import { hrtime } from 'node:process';
+import { performance } from 'node:perf_hooks';
 import { createConnection as nodeCreateConnection } from 'node:net';
 import type { Socket as TcpSocket } from 'node:net';
 import { randomFillSync } from 'node:crypto';
@@ -34,7 +38,8 @@ export {
   Client,
   ClientOptions,
   CrashError,
-  JsonRpcCallback,
+  MalformedJsonRpcError,
+  QueueFullError,
   JsonRpcDisabledError,
   LogCallback
 } from './client.js';
@@ -50,12 +55,11 @@ export function start(options?: ClientOptions): Client {
   options = options || {};
 
   return innerStart(options || {}, {
-    base64DecodeAndZlibInflate: (input) => {
-        return Promise.resolve(pako.inflate(Buffer.from(input, 'base64')))
+    trustedBase64DecodeAndZlibInflate: (input) => {
+        return Promise.resolve(inflate(Buffer.from(input, 'base64')))
     },
     performanceNow: () => {
-      const time = hrtime();
-      return ((time[0] * 1e3) + (time[1] / 1e6));
+        return performance.now()
     },
     getRandomValues: (buffer) => {
       if (buffer.length >= 65536)
@@ -72,7 +76,7 @@ export function start(options?: ClientOptions): Client {
  * Tries to open a new connection using the given configuration.
  *
  * @see Connection
- * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
+ * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
 function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean, forbidNonLocalWs: boolean, forbidWss: boolean): Connection {
     let connection: TcpWrapped | WebSocketWrapped;
@@ -96,22 +100,31 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
             (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
 
-        connection = {
-            ty: 'websocket',
-            socket: new Websocket.w3cwebsocket(url)
+        const socket = new WebSocket(url);
+        socket.binaryType = 'arraybuffer';
+        socket.onopen = () => {
+            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
         };
-        connection.socket.binaryType = 'arraybuffer';
-
-        connection.socket.onopen = () => {
-            config.onOpen({ type: 'single-stream' });
-        };
-        connection.socket.onclose = (event) => {
+        socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
-            config.onConnectionClose(message);
+            config.onConnectionReset(message);
+            socket.onopen = () => { };
+            socket.onclose = () => { };
+            socket.onmessage = () => { };
+            socket.onerror = () => { };
         };
-        connection.socket.onmessage = (msg) => {
+        socket.onerror = (event) => {
+            config.onConnectionReset(event.message);
+            socket.onopen = () => { };
+            socket.onclose = () => { };
+            socket.onmessage = () => { };
+            socket.onerror = () => { };
+        };
+        socket.onmessage = (msg) => {
             config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
         };
+
+        connection = { ty: 'websocket', socket };
 
     } else if (tcpParsed != null) {
         // `net` module will be missing when we're not in NodeJS.
@@ -129,14 +142,14 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
 
         connection.socket.on('connect', () => {
             if (socket.destroyed) return;
-            config.onOpen({ type: 'single-stream' });
+            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
         });
         connection.socket.on('close', (hasError) => {
             if (socket.destroyed) return;
             // NodeJS doesn't provide a reason why the closing happened, but only
             // whether it was caused by an error.
             const message = hasError ? "Error" : "Closed gracefully";
-            config.onConnectionClose(message);
+            config.onConnectionReset(message);
         });
         connection.socket.on('error', () => { });
         connection.socket.on('data', (message) => {
@@ -149,7 +162,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
     }
 
     return {
-        close: (): void => {
+        reset: (): void => {
             if (connection.ty == 'websocket') {
                 // WebSocket
                 // We can't set these fields to null because the TypeScript definitions don't
@@ -186,5 +199,5 @@ interface TcpWrapped {
 
 interface WebSocketWrapped {
     ty: 'websocket',
-    socket: Websocket.w3cwebsocket,
+    socket: WebSocket,
 }

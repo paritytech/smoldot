@@ -18,7 +18,6 @@
 use crate::header;
 
 use alloc::vec;
-use core::iter;
 use nom::Finish as _;
 
 /// Decoded handshake sent or received when opening a block announces notifications substream.
@@ -41,12 +40,25 @@ pub struct BlockAnnouncesHandshakeRef<'a> {
 }
 
 /// Role a node reports playing on the network.
-// TODO: document why this is here and what this entails
+///
+/// This role can be seen more or less as a priority level. The role a node reports cannot be
+/// trusted but is used as a hint. For example, Grandpa votes can be broadcasted with a higher
+/// priority to the nodes that report themselves as authorities.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Role {
-    Full,
-    Light,
+    /// Authorities author blocks and participate in the consensus.
+    ///
+    /// This role is non-binding, and is used only as a hint to prioritize some nodes over others.
     Authority,
+
+    /// Full nodes store the state of the chain. They are part of the infrastructure of the chain
+    /// in the sense that light nodes benefit from having a lot of full nodes to connect to.
+    ///
+    /// This role is non-binding, and is used only as a hint to prioritize some nodes over others.
+    Full,
+
+    /// Light nodes are the lowest priority nodes.
+    Light,
 }
 
 impl Role {
@@ -145,9 +157,12 @@ pub fn encode_block_announces_handshake(
     // TODO: what to do if the best number doesn't fit in the given size? right now we just wrap around
     header[1..].copy_from_slice(&handshake.best_number.to_le_bytes()[..block_number_bytes]);
 
-    iter::once(either::Left(header))
-        .chain(iter::once(either::Right(handshake.best_hash)))
-        .chain(iter::once(either::Right(handshake.genesis_hash)))
+    [
+        either::Left(header),
+        either::Right(handshake.best_hash),
+        either::Right(handshake.genesis_hash),
+    ]
+    .into_iter()
 }
 
 /// Decodes a SCALE-encoded block announces handshake.

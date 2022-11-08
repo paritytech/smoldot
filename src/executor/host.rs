@@ -194,7 +194,12 @@
 use super::{allocator, vm};
 use crate::{trie, util};
 
-use alloc::{borrow::ToOwned as _, format, string::String, vec, vec::Vec};
+use alloc::{
+    borrow::ToOwned as _,
+    string::{String, ToString as _},
+    vec,
+    vec::Vec,
+};
 use core::{fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
@@ -481,7 +486,7 @@ impl HostVmPrototype {
                 allow_unresolved_imports: self.allow_unresolved_imports,
                 memory_total_pages: self.memory_total_pages,
                 registered_functions: self.registered_functions,
-                within_storage_transaction: false,
+                storage_transaction_depth: 0,
                 allocator,
             },
         })
@@ -511,7 +516,7 @@ impl fmt::Debug for HostVmPrototype {
 
 /// Running virtual machine.
 #[must_use]
-#[derive(derive_more::From)]
+#[derive(derive_more::From, Debug)]
 pub enum HostVm {
     /// Wasm virtual machine is ready to be run. Call [`ReadyToRun::run`] to make progress.
     #[from]
@@ -547,15 +552,14 @@ pub enum HostVm {
     /// Must the set value of an off-chain storage entry.
     #[from]
     ExternalOffchainStorageSet(ExternalOffchainStorageSet),
+    /// Need to verify whether a signature is valid.
+    #[from]
+    SignatureVerification(SignatureVerification),
     /// Need to call `Core_version` on the given Wasm code and return the raw output (i.e.
     /// still SCALE-encoded), or an error if the call has failed.
     #[from]
     CallRuntimeVersion(CallRuntimeVersion),
     /// Declares the start of a storage transaction. See [`HostVm::EndStorageTransaction`].
-    ///
-    /// Guaranteed by the code in this module to never happen while already within a transaction.
-    /// If the runtime attempts to start a nested transaction, an [`HostVm::Error`] is
-    /// generated instead.
     #[from]
     StartStorageTransaction(StartStorageTransaction),
     /// Ends a storage transaction. All changes made to the storage (e.g. through a
@@ -593,6 +597,7 @@ impl HostVm {
             HostVm::ExternalStorageRoot(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageNextKey(inner) => inner.inner.into_prototype(),
             HostVm::ExternalOffchainStorageSet(inner) => inner.inner.into_prototype(),
+            HostVm::SignatureVerification(inner) => inner.inner.into_prototype(),
             HostVm::CallRuntimeVersion(inner) => inner.inner.into_prototype(),
             HostVm::StartStorageTransaction(inner) => inner.inner.into_prototype(),
             HostVm::EndStorageTransaction { resume, .. } => resume.inner.into_prototype(),
@@ -632,7 +637,7 @@ impl ReadyToRun {
             }) => {
                 // Wasm virtual machine has successfully returned.
 
-                if self.inner.within_storage_transaction {
+                if self.inner.storage_transaction_depth > 0 {
                     return HostVm::Error {
                         prototype: self.inner.into_prototype(),
                         error: Error::FinishedWithPendingTransaction,
@@ -847,6 +852,41 @@ impl ReadyToRun {
                         };
                     }
                 }
+            }};
+        }
+
+        macro_rules! expect_pointer_constant_size_raw {
+            ($num:expr, $size:expr) => {{
+                let ptr = match params[$num] {
+                    vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
+                    v => {
+                        return HostVm::Error {
+                            error: Error::WrongParamTy {
+                                function: host_fn.name(),
+                                param_num: $num,
+                                expected: vm::ValueType::I32,
+                                actual: v.ty(),
+                            },
+                            prototype: self.inner.into_prototype(),
+                        }
+                    }
+                };
+
+                if u32::saturating_add($size, ptr)
+                    > u32::from(self.inner.vm.memory_size()) * 64 * 1024
+                {
+                    return HostVm::Error {
+                        error: Error::ParamOutOfRange {
+                            function: host_fn.name(),
+                            param_num: $num,
+                            pointer: ptr,
+                            length: $size,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
+
+                ptr
             }};
         }
 
@@ -1069,39 +1109,33 @@ impl ReadyToRun {
             HostFunction::ext_storage_child_root_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_child_next_key_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_start_transaction_version_1 => {
-                if self.inner.within_storage_transaction {
-                    return HostVm::Error {
-                        error: Error::NestedTransaction,
-                        prototype: self.inner.into_prototype(),
-                    };
-                }
-
-                self.inner.within_storage_transaction = true;
+                // TODO: a maximum depth is important in order to prevent a malicious runtime from crashing the client, but the depth needs to be the same as in Substrate; figure out
+                self.inner.storage_transaction_depth += 1;
                 HostVm::StartStorageTransaction(StartStorageTransaction { inner: self.inner })
             }
             HostFunction::ext_storage_rollback_transaction_version_1 => {
-                if !self.inner.within_storage_transaction {
+                if self.inner.storage_transaction_depth == 0 {
                     return HostVm::Error {
                         error: Error::NoActiveTransaction,
                         prototype: self.inner.into_prototype(),
                     };
                 }
 
-                self.inner.within_storage_transaction = false;
+                self.inner.storage_transaction_depth -= 1;
                 HostVm::EndStorageTransaction {
                     resume: EndStorageTransaction { inner: self.inner },
                     rollback: true,
                 }
             }
             HostFunction::ext_storage_commit_transaction_version_1 => {
-                if !self.inner.within_storage_transaction {
+                if self.inner.storage_transaction_depth == 0 {
                     return HostVm::Error {
                         error: Error::NoActiveTransaction,
                         prototype: self.inner.into_prototype(),
                     };
                 }
 
-                self.inner.within_storage_transaction = false;
+                self.inner.storage_transaction_depth -= 1;
                 HostVm::EndStorageTransaction {
                     resume: EndStorageTransaction { inner: self.inner },
                     rollback: false,
@@ -1136,22 +1170,13 @@ impl ReadyToRun {
             HostFunction::ext_crypto_ed25519_generate_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_sign_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_verify_version_1 => {
-                let success = {
-                    let public_key = ed25519_zebra::VerificationKey::try_from(
-                        expect_pointer_constant_size!(2, 32),
-                    );
-                    if let Ok(public_key) = public_key {
-                        let signature =
-                            ed25519_zebra::Signature::from(expect_pointer_constant_size!(0, 64));
-                        let message = expect_pointer_size!(1);
-                        public_key.verify(&signature, message.as_ref()).is_ok()
-                    } else {
-                        false
-                    }
-                };
-
-                HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                let (message_ptr, message_size) = expect_pointer_size_raw!(1);
+                HostVm::SignatureVerification(SignatureVerification {
+                    algorithm: SignatureVerificationAlgorithm::Ed25519,
+                    signature_ptr: expect_pointer_constant_size_raw!(0, 64),
+                    public_key_ptr: expect_pointer_constant_size_raw!(2, 32),
+                    message_ptr,
+                    message_size,
                     inner: self.inner,
                 })
             }
@@ -1159,48 +1184,24 @@ impl ReadyToRun {
             HostFunction::ext_crypto_sr25519_generate_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_sr25519_sign_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_sr25519_verify_version_1 => {
-                let success = {
-                    // The `unwrap()` below can only panic if the input is the wrong length, which
-                    // we know can't happen.
-                    let signing_public_key =
-                        schnorrkel::PublicKey::from_bytes(&expect_pointer_constant_size!(2, 32))
-                            .unwrap();
-
-                    let signature = expect_pointer_constant_size!(0, 64);
-                    let message = expect_pointer_size!(1);
-
-                    signing_public_key
-                        .verify_simple_preaudit_deprecated(
-                            b"substrate",
-                            message.as_ref(),
-                            &signature,
-                        )
-                        .is_ok()
-                };
-
-                HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                let (message_ptr, message_size) = expect_pointer_size_raw!(1);
+                HostVm::SignatureVerification(SignatureVerification {
+                    algorithm: SignatureVerificationAlgorithm::Sr25519V1,
+                    signature_ptr: expect_pointer_constant_size_raw!(0, 64),
+                    public_key_ptr: expect_pointer_constant_size_raw!(2, 32),
+                    message_ptr,
+                    message_size,
                     inner: self.inner,
                 })
             }
             HostFunction::ext_crypto_sr25519_verify_version_2 => {
-                let success = {
-                    // The two `unwrap()`s below can only panic if the input is the wrong
-                    // length, which we know can't happen.
-                    let signing_public_key =
-                        schnorrkel::PublicKey::from_bytes(&expect_pointer_constant_size!(2, 32))
-                            .unwrap();
-                    let signature =
-                        schnorrkel::Signature::from_bytes(&expect_pointer_constant_size!(0, 64))
-                            .unwrap();
-
-                    signing_public_key
-                        .verify_simple(b"substrate", expect_pointer_size!(1).as_ref(), &signature)
-                        .is_ok()
-                };
-
-                HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                let (message_ptr, message_size) = expect_pointer_size_raw!(1);
+                HostVm::SignatureVerification(SignatureVerification {
+                    algorithm: SignatureVerificationAlgorithm::Sr25519V2,
+                    signature_ptr: expect_pointer_constant_size_raw!(0, 64),
+                    public_key_ptr: expect_pointer_constant_size_raw!(2, 32),
+                    message_ptr,
+                    message_size,
                     inner: self.inner,
                 })
             }
@@ -1233,36 +1234,13 @@ impl ReadyToRun {
             }
             HostFunction::ext_crypto_ecdsa_public_keys_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ecdsa_verify_version_1 => {
-                let success = {
-                    // NOTE: safe to unwrap here because we supply the nn to blake2b fn
-                    let data = <[u8; 32]>::try_from(
-                        blake2_rfc::blake2b::blake2b(32, &[], expect_pointer_size!(0).as_ref())
-                            .as_bytes(),
-                    )
-                    .unwrap();
-                    let message = libsecp256k1::Message::parse(&data);
-
-                    // signature (64 bytes) + recovery ID (1 byte)
-                    let sig_bytes = expect_pointer_constant_size!(0, 65);
-                    if let Ok(sig) = libsecp256k1::Signature::parse_standard_slice(&sig_bytes[..64])
-                    {
-                        if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes[64]) {
-                            if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
-                                expect_pointer_constant_size!(2, 33)[..]
-                                    == actual.serialize_compressed()[..]
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                };
-
-                HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                let (message_ptr, message_size) = expect_pointer_size_raw!(1);
+                HostVm::SignatureVerification(SignatureVerification {
+                    algorithm: SignatureVerificationAlgorithm::Ecdsa,
+                    signature_ptr: expect_pointer_constant_size_raw!(0, 65),
+                    public_key_ptr: expect_pointer_constant_size_raw!(2, 33),
+                    message_ptr,
+                    message_size,
                     inner: self.inner,
                 })
             }
@@ -1287,31 +1265,12 @@ impl ReadyToRun {
                 }
             }
             HostFunction::ext_crypto_ecdsa_verify_prehashed_version_1 => {
-                let success = {
-                    let message =
-                        libsecp256k1::Message::parse(&expect_pointer_constant_size!(0, 32));
-
-                    // signature (64 bytes) + recovery ID (1 byte)
-                    let sig_bytes = expect_pointer_constant_size!(0, 65);
-                    if let Ok(sig) = libsecp256k1::Signature::parse_standard_slice(&sig_bytes[..64])
-                    {
-                        if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes[64]) {
-                            if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
-                                expect_pointer_constant_size!(2, 33)[..]
-                                    == actual.serialize_compressed()[..]
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                };
-
-                HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                HostVm::SignatureVerification(SignatureVerification {
+                    algorithm: SignatureVerificationAlgorithm::EcdsaPrehashed,
+                    signature_ptr: expect_pointer_constant_size_raw!(0, 65),
+                    public_key_ptr: expect_pointer_constant_size_raw!(2, 33),
+                    message_ptr: expect_pointer_constant_size_raw!(1, 32),
+                    message_size: 32,
                     inner: self.inner,
                 })
             }
@@ -1693,38 +1652,46 @@ impl ReadyToRun {
                     }
                 };
 
-                let log_entry = format!("{}", num);
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
-                    log_entry,
+                    log_entry: LogEmitInner::Num(num),
                 })
             }
             HostFunction::ext_misc_print_utf8_version_1 => {
-                let data = str::from_utf8(expect_pointer_size!(0).as_ref()).map(|s| s.to_owned());
-                let log_entry = match data {
-                    Ok(m) => m,
-                    Err(error) => {
-                        return HostVm::Error {
-                            error: Error::Utf8Error {
-                                function: host_fn.name(),
-                                param_num: 2,
-                                error,
-                            },
-                            prototype: self.inner.into_prototype(),
-                        };
-                    }
-                };
+                let (str_ptr, str_size) = expect_pointer_size_raw!(0);
+
+                let utf8_check = str::from_utf8(
+                    self.inner
+                        .vm
+                        .read_memory(str_ptr, str_size)
+                        .unwrap()
+                        .as_ref(),
+                )
+                .map(|_| ());
+                if let Err(error) = utf8_check {
+                    return HostVm::Error {
+                        error: Error::Utf8Error {
+                            function: host_fn.name(),
+                            param_num: 2,
+                            error,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
 
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
-                    log_entry,
+                    log_entry: LogEmitInner::Utf8 { str_ptr, str_size },
                 })
             }
             HostFunction::ext_misc_print_hex_version_1 => {
-                let log_entry = hex::encode(expect_pointer_size!(0));
+                let (data_ptr, data_size) = expect_pointer_size_raw!(0);
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
-                    log_entry,
+                    log_entry: LogEmitInner::Hex {
+                        data_ptr,
+                        data_size,
+                    },
                 })
             }
             HostFunction::ext_misc_runtime_version_version_1 => {
@@ -1778,28 +1745,57 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_logging_log_version_1 => {
-                let _log_level = expect_u32!(0);
-                // let _target = expect_pointer_size!(1);
+                let log_level = expect_u32!(0);
 
-                let message =
-                    str::from_utf8(expect_pointer_size!(2).as_ref()).map(|s| s.to_owned());
-                let log_entry = match message {
-                    Ok(m) => m,
-                    Err(error) => {
-                        return HostVm::Error {
-                            error: Error::Utf8Error {
-                                function: host_fn.name(),
-                                param_num: 2,
-                                error,
-                            },
-                            prototype: self.inner.into_prototype(),
-                        };
-                    }
-                };
+                let (target_str_ptr, target_str_size) = expect_pointer_size_raw!(1);
+                let target_utf8_check = str::from_utf8(
+                    self.inner
+                        .vm
+                        .read_memory(target_str_ptr, target_str_size)
+                        .unwrap()
+                        .as_ref(),
+                )
+                .map(|_| ());
+                if let Err(error) = target_utf8_check {
+                    return HostVm::Error {
+                        error: Error::Utf8Error {
+                            function: host_fn.name(),
+                            param_num: 2,
+                            error,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
+
+                let (msg_str_ptr, msg_str_size) = expect_pointer_size_raw!(2);
+                let msg_utf8_check = str::from_utf8(
+                    self.inner
+                        .vm
+                        .read_memory(msg_str_ptr, msg_str_size)
+                        .unwrap()
+                        .as_ref(),
+                )
+                .map(|_| ());
+                if let Err(error) = msg_utf8_check {
+                    return HostVm::Error {
+                        error: Error::Utf8Error {
+                            function: host_fn.name(),
+                            param_num: 2,
+                            error,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
 
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
-                    log_entry,
+                    log_entry: LogEmitInner::Log {
+                        _log_level: log_level,
+                        _target_str_ptr: target_str_ptr,
+                        _target_str_size: target_str_size,
+                        msg_str_ptr,
+                        msg_str_size,
+                    },
                 })
             }
             HostFunction::ext_logging_max_level_version_1 => {
@@ -2269,6 +2265,206 @@ impl fmt::Debug for ExternalStorageNextKey {
     }
 }
 
+/// Must verify whether a signature is correct.
+pub struct SignatureVerification {
+    inner: Inner,
+    /// Which cryptographic algorithm.
+    algorithm: SignatureVerificationAlgorithm,
+    /// Pointer to the signature. The size of the signature depends on the algorithm. Guaranteed
+    /// to be in range.
+    signature_ptr: u32,
+    /// Pointer to the public key. The size of the public key depends on the algorithm. Guaranteed
+    /// to be in range.
+    public_key_ptr: u32,
+    /// Pointer to the message. Guaranteed to be in range.
+    message_ptr: u32,
+    /// Size of the message. Guaranteed to be in range.
+    message_size: u32,
+}
+
+enum SignatureVerificationAlgorithm {
+    Ed25519,
+    Sr25519V1,
+    Sr25519V2,
+    Ecdsa,
+    EcdsaPrehashed,
+}
+
+impl SignatureVerification {
+    /// Returns the message that the signature is expected to sign.
+    pub fn message(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner
+            .vm
+            .read_memory(self.message_ptr, self.message_size)
+            .unwrap()
+    }
+
+    /// Returns the signature.
+    ///
+    /// > **Note**: Be aware that this signature is untrusted input and might not be part of the
+    /// >           set of valid signatures.
+    pub fn signature(&'_ self) -> impl AsRef<[u8]> + '_ {
+        let signature_size = match self.algorithm {
+            SignatureVerificationAlgorithm::Ed25519 => 64,
+            SignatureVerificationAlgorithm::Sr25519V1 => 64,
+            SignatureVerificationAlgorithm::Sr25519V2 => 64,
+            SignatureVerificationAlgorithm::Ecdsa => 65,
+            SignatureVerificationAlgorithm::EcdsaPrehashed => 65,
+        };
+
+        self.inner
+            .vm
+            .read_memory(self.signature_ptr, signature_size)
+            .unwrap()
+    }
+
+    /// Returns the public key the signature is against.
+    ///
+    /// > **Note**: Be aware that this public key is untrusted input and might not be part of the
+    /// >           set of valid public keys.
+    pub fn public_key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        let public_key_size = match self.algorithm {
+            SignatureVerificationAlgorithm::Ed25519 => 32,
+            SignatureVerificationAlgorithm::Sr25519V1 => 32,
+            SignatureVerificationAlgorithm::Sr25519V2 => 32,
+            SignatureVerificationAlgorithm::Ecdsa => 33,
+            SignatureVerificationAlgorithm::EcdsaPrehashed => 33,
+        };
+
+        self.inner
+            .vm
+            .read_memory(self.public_key_ptr, public_key_size)
+            .unwrap()
+    }
+
+    /// Verify the signature. Returns `true` if it is valid.
+    pub fn is_valid(&self) -> bool {
+        match self.algorithm {
+            SignatureVerificationAlgorithm::Ed25519 => {
+                let public_key =
+                    ed25519_zebra::VerificationKey::try_from(self.public_key().as_ref());
+
+                if let Ok(public_key) = public_key {
+                    let signature = ed25519_zebra::Signature::from(
+                        <[u8; 64]>::try_from(self.signature().as_ref()).unwrap(),
+                    );
+                    public_key
+                        .verify(&signature, self.message().as_ref())
+                        .is_ok()
+                } else {
+                    false
+                }
+            }
+            SignatureVerificationAlgorithm::Sr25519V1 => {
+                schnorrkel::PublicKey::from_bytes(&self.public_key().as_ref()).map_or(false, |pk| {
+                    pk.verify_simple_preaudit_deprecated(
+                        b"substrate",
+                        self.message().as_ref(),
+                        self.signature().as_ref(),
+                    )
+                    .is_ok()
+                })
+            }
+            SignatureVerificationAlgorithm::Sr25519V2 => {
+                schnorrkel::PublicKey::from_bytes(&self.public_key().as_ref()).map_or(false, |pk| {
+                    pk.verify_simple(
+                        b"substrate",
+                        self.message().as_ref(),
+                        &schnorrkel::Signature::from_bytes(self.signature().as_ref()).unwrap(),
+                    )
+                    .is_ok()
+                })
+            }
+            SignatureVerificationAlgorithm::Ecdsa => {
+                // NOTE: safe to unwrap here because we supply the nn to blake2b fn
+                let data = <[u8; 32]>::try_from(
+                    blake2_rfc::blake2b::blake2b(32, &[], self.message().as_ref()).as_bytes(),
+                )
+                .unwrap();
+                let message = libsecp256k1::Message::parse(&data);
+
+                // signature (64 bytes) + recovery ID (1 byte)
+                let sig_bytes = self.signature();
+                libsecp256k1::Signature::parse_standard_slice(&sig_bytes.as_ref()[..64])
+                    .and_then(|sig| {
+                        libsecp256k1::RecoveryId::parse(sig_bytes.as_ref()[64])
+                            .and_then(|ri| libsecp256k1::recover(&message, &sig, &ri))
+                    })
+                    .map_or(false, |actual| {
+                        self.public_key().as_ref()[..] == actual.serialize_compressed()[..]
+                    })
+            }
+            SignatureVerificationAlgorithm::EcdsaPrehashed => {
+                // We can safely unwrap, as the size is checked when the `SignatureVerification`
+                // is constructed.
+                let message = libsecp256k1::Message::parse(
+                    &<[u8; 32]>::try_from(self.message().as_ref()).unwrap(),
+                );
+
+                // signature (64 bytes) + recovery ID (1 byte)
+                let sig_bytes = self.signature();
+                if let Ok(sig) =
+                    libsecp256k1::Signature::parse_standard_slice(&sig_bytes.as_ref()[..64])
+                {
+                    if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes.as_ref()[64]) {
+                        if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
+                            self.public_key().as_ref()[..] == actual.serialize_compressed()[..]
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Verify the signature and resume execution.
+    pub fn verify_and_resume(self) -> HostVm {
+        let success = self.is_valid();
+        self.resume(success)
+    }
+
+    /// Resume the execution assuming that the signature is valid.
+    ///
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`SignatureVerification::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
+    pub fn resume_success(self) -> HostVm {
+        self.resume(true)
+    }
+
+    /// Resume the execution assuming that the signature is invalid.
+    ///
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`SignatureVerification::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
+    pub fn resume_failed(self) -> HostVm {
+        self.resume(false)
+    }
+
+    fn resume(self, success: bool) -> HostVm {
+        // All signature-related host functions work the same way in terms of return value.
+        HostVm::ReadyToRun(ReadyToRun {
+            resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+            inner: self.inner,
+        })
+    }
+}
+
+impl fmt::Debug for SignatureVerification {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("SignatureVerification")
+            .field("message", &self.message().as_ref())
+            .field("signature", &self.signature().as_ref())
+            .field("public_key", &self.public_key().as_ref())
+            .finish()
+    }
+}
+
 /// Must provide the runtime version obtained by calling the `Core_version` entry point of a Wasm
 /// blob.
 pub struct CallRuntimeVersion {
@@ -2374,7 +2570,35 @@ impl fmt::Debug for ExternalOffchainStorageSet {
 /// call [`alloc::string::ToString::to_string`] to turn it into a `String`.
 pub struct LogEmit {
     inner: Inner,
-    log_entry: String,
+    log_entry: LogEmitInner,
+}
+
+enum LogEmitInner {
+    Num(u64),
+    Utf8 {
+        /// Pointer to the string. Guaranteed to be in range and to be UTF-8.
+        str_ptr: u32,
+        /// Size of the string. Guaranteed to be in range and to be UTF-8.
+        str_size: u32,
+    },
+    Hex {
+        /// Pointer to the data. Guaranteed to be in range.
+        data_ptr: u32,
+        /// Size of the data. Guaranteed to be in range.
+        data_size: u32,
+    },
+    Log {
+        /// Log level. Arbitrary number indicated by runtime, but typically in the `1..=5` range.
+        _log_level: u32,
+        /// Pointer to the string of the log target. Guaranteed to be in range and to be UTF-8.
+        _target_str_ptr: u32,
+        /// Size of the string of the log target. Guaranteed to be in range and to be UTF-8.
+        _target_str_size: u32,
+        /// Pointer to the string of the log message. Guaranteed to be in range and to be UTF-8.
+        msg_str_ptr: u32,
+        /// Size of the string of the log message. Guaranteed to be in range and to be UTF-8.
+        msg_str_size: u32,
+    },
 }
 
 impl LogEmit {
@@ -2389,14 +2613,42 @@ impl LogEmit {
 
 impl fmt::Display for LogEmit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", &self.log_entry)
+        match self.log_entry {
+            LogEmitInner::Num(num) => write!(f, "{}", num),
+            LogEmitInner::Utf8 { str_ptr, str_size } => {
+                let str = self.inner.vm.read_memory(str_ptr, str_size).unwrap();
+                let str = str::from_utf8(str.as_ref()).unwrap();
+                write!(f, "{}", str)
+            }
+            LogEmitInner::Hex {
+                data_ptr,
+                data_size,
+            } => {
+                let data = self.inner.vm.read_memory(data_ptr, data_size).unwrap();
+                write!(f, "{}", hex::encode(data.as_ref()))
+            }
+            LogEmitInner::Log {
+                msg_str_ptr,
+                msg_str_size,
+                ..
+            } => {
+                let str = self
+                    .inner
+                    .vm
+                    .read_memory(msg_str_ptr, msg_str_size)
+                    .unwrap();
+                let str = str::from_utf8(str.as_ref()).unwrap();
+                // TODO: don't just ignore the target and log level? better log representation? more control?
+                write!(f, "{}", str)
+            }
+        }
     }
 }
 
 impl fmt::Debug for LogEmit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("LogEmit")
-            .field("message", &self.log_entry)
+            .field("message", &self.to_string())
             .finish()
     }
 }
@@ -2420,6 +2672,12 @@ impl GetMaxLogLevel {
     }
 }
 
+impl fmt::Debug for GetMaxLogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("GetMaxLogLevel").finish()
+    }
+}
+
 /// Declares the start of a transaction.
 pub struct StartStorageTransaction {
     inner: Inner,
@@ -2435,6 +2693,12 @@ impl StartStorageTransaction {
     }
 }
 
+impl fmt::Debug for StartStorageTransaction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("StartStorageTransaction").finish()
+    }
+}
+
 /// Declares the end of a transaction.
 pub struct EndStorageTransaction {
     inner: Inner,
@@ -2447,6 +2711,12 @@ impl EndStorageTransaction {
             inner: self.inner,
             resume_value: None,
         })
+    }
+}
+
+impl fmt::Debug for EndStorageTransaction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("EndStorageTransaction").finish()
     }
 }
 
@@ -2479,9 +2749,8 @@ struct Inner {
     /// Value passed to [`HostVmPrototype::new`].
     allow_unresolved_imports: bool,
 
-    /// If true, a transaction has been started using `ext_storage_start_transaction_version_1`.
-    /// No further transaction start is allowed before the current one ends.
-    within_storage_transaction: bool,
+    /// The depth of storage transaction started with `ext_storage_start_transaction_version_1`.
+    storage_transaction_depth: u32,
 
     /// See [`HostVmPrototype::registered_functions`].
     registered_functions: Vec<FunctionImport>,
@@ -2794,10 +3063,6 @@ pub enum Error {
         /// Decoding error that happened.
         error: core::str::Utf8Error,
     },
-    /// Called `ext_storage_start_transaction_version_1` with a transaction was already in
-    /// progress.
-    #[display(fmt = "Attempted to start a transaction while one is already in progress")]
-    NestedTransaction,
     /// Called `ext_storage_rollback_transaction_version_1` or
     /// `ext_storage_commit_transaction_version_1` but no transaction was in progress.
     #[display(fmt = "Attempted to end a transaction while none is in progress")]
@@ -2829,6 +3094,7 @@ pub enum Error {
     },
     /// The host function isn't implemented.
     // TODO: this variant should eventually disappear as all functions are implemented
+    #[display(fmt = "Host function not implemented: {}", function)]
     HostFunctionNotImplemented {
         /// Name of the function being called.
         function: &'static str,

@@ -1190,17 +1190,17 @@ impl<'a> From<&'a DigestItem> for DigestItemRef<'a> {
             DigestItem::GrandpaConsensus(v) => DigestItemRef::GrandpaConsensus(v.into()),
             DigestItem::UnknownConsensus { engine, opaque } => DigestItemRef::UnknownConsensus {
                 engine: *engine,
-                opaque: &*opaque,
+                opaque,
             },
             DigestItem::UnknownSeal { engine, opaque } => DigestItemRef::UnknownSeal {
                 engine: *engine,
-                opaque: &*opaque,
+                opaque,
             },
             DigestItem::UnknownPreRuntime { engine, opaque } => DigestItemRef::UnknownPreRuntime {
                 engine: *engine,
-                opaque: &*opaque,
+                opaque,
             },
-            DigestItem::Other(v) => DigestItemRef::Other(&*v),
+            DigestItem::Other(v) => DigestItemRef::Other(v),
             DigestItem::RuntimeEnvironmentUpdated => DigestItemRef::RuntimeEnvironmentUpdated,
         }
     }
@@ -1293,7 +1293,7 @@ fn decode_item(
     mut slice: &[u8],
     block_number_bytes: usize,
 ) -> Result<(DigestItemRef, &[u8]), Error> {
-    let index = *slice.get(0).ok_or(Error::TooShort)?;
+    let index = *slice.first().ok_or(Error::TooShort)?;
     slice = &slice[1..];
 
     match index {

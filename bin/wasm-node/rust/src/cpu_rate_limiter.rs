@@ -41,8 +41,8 @@ pub struct CpuRateLimiter<T> {
 
 impl<T> CpuRateLimiter<T> {
     /// Wraps around `inner`. The `rate_limit` represents the upper bound, where
-    /// `u32::max_value()` represents "one CPU". For example passing `rate_limit / 2` represents
-    /// "`50%` of one CPU".
+    /// `u32::max_value()` represents "one CPU". For example passing `u32::max_value() / 2`
+    /// represents "`50%` of one CPU".
     pub fn new(inner: T, rate_limit: u32) -> Self {
         let max_divided_by_rate_limit_minus_one =
             (f64::from(u32::max_value()) / f64::from(rate_limit)) - 1.0;
@@ -66,19 +66,19 @@ impl<T: Future> Future for CpuRateLimiter<T> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let mut this = self.project();
 
-        // Note that `crate::times::Delay` is a `FusedFuture`, making it ok to call `poll` even
+        // Note that `crate::timers::Delay` is a `FusedFuture`, making it ok to call `poll` even
         // if it is possible for the `Delay` to already be resolved.
         // We add a small zero-cost shim to ensure at compile time that this is indeed the case.
         fn enforce_fused<T: futures::future::FusedFuture>(_: &T) {}
         enforce_fused(&this.prevent_poll_until);
-        if let Poll::Pending = Future::poll(this.prevent_poll_until.as_mut(), cx) {
+        if Future::poll(this.prevent_poll_until.as_mut(), cx).is_pending() {
             return Poll::Pending;
         }
 
         let before_polling = crate::Instant::now();
 
         match this.inner.poll(cx) {
-            Poll::Ready(value) => return Poll::Ready(value),
+            Poll::Ready(value) => Poll::Ready(value),
             Poll::Pending => {
                 let after_polling = crate::Instant::now();
 
@@ -95,7 +95,11 @@ impl<T: Future> Future for CpuRateLimiter<T> {
                     poll_duration.as_secs_f64() * *this.max_divided_by_rate_limit_minus_one;
                 debug_assert!(after_poll_sleep >= 0.0 && !after_poll_sleep.is_nan());
                 let max_duration_float: f64 = Duration::MAX.as_secs_f64(); // TODO: turn this into a `const` once `as_secs_f64` is `const`
-                if !(after_poll_sleep < max_duration_float) {
+                if after_poll_sleep
+                    .partial_cmp(&max_duration_float)
+                    .map(|ord| ord.is_ge())
+                    .unwrap_or(true)
+                {
                     after_poll_sleep = max_duration_float;
                 }
                 // TODO: use try_from_secs_f64 when it's stable https://github.com/rust-lang/rust/issues/83400

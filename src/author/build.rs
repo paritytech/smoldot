@@ -303,15 +303,8 @@ pub struct StorageGet(runtime::StorageGet, Shared);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         self.0.key()
-    }
-
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    ///
-    /// This method is a shortcut for calling `key` and concatenating the returned slices.
-    pub fn key_as_vec(&self) -> Vec<u8> {
-        self.0.key_as_vec()
     }
 
     /// Injects the corresponding storage value.

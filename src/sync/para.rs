@@ -33,15 +33,16 @@
 //! function. The first parameter is a `para_id` found in the chain specification of the
 //! parachain of parathread.
 
-use core::iter;
-
 /// Produces the input to pass to the `ParachainHost_persisted_validation_data` runtime call.
 pub fn persisted_validation_data_parameters(
     para_id: u32,
     assumption: OccupiedCoreAssumption,
 ) -> impl Iterator<Item = impl AsRef<[u8]>> + Clone {
-    iter::once(either::Left(para_id.to_le_bytes()))
-        .chain(iter::once(either::Right(assumption.scale_encoded())))
+    [
+        either::Left(para_id.to_le_bytes()),
+        either::Right(assumption.scale_encoded()),
+    ]
+    .into_iter()
 }
 
 /// Name of the runtime function to call in order to obtain the parachain heads.

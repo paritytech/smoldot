@@ -47,7 +47,7 @@
 //! the calls to [`Network::inject_connection_message`].
 //!
 
-use super::connection::{established, handshake, NoiseKey};
+use super::connection::{established, single_stream_handshake, NoiseKey};
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     string::String,
@@ -64,14 +64,39 @@ use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 pub use super::peer_id::PeerId;
 pub use super::read_write::ReadWrite;
-pub use established::{ConfigRequestResponse, ConfigRequestResponseIn, InboundError};
-pub use handshake::HandshakeError;
+pub use established::{
+    ConfigRequestResponse, ConfigRequestResponseIn, InboundError, SubstreamFate,
+};
+pub use single_stream_handshake::HandshakeError;
 
 pub use multi_stream::MultiStreamConnectionTask;
 pub use single_stream::SingleStreamConnectionTask;
 
 mod multi_stream;
 mod single_stream;
+
+/// What kind of handshake to perform on the newly-added connection.
+pub enum SingleStreamHandshakeKind {
+    /// Use the multistream-select protocol to negotiate the Noise encryption, then use the
+    /// multistream-select protocol to negotiate the Yamux multiplexing.
+    MultistreamSelectNoiseYamux,
+}
+
+/// What kind of handshake to perform on the newly-added connection.
+pub enum MultiStreamHandshakeKind {
+    /// The connection is a WebRTC connection.
+    ///
+    /// See <https://github.com/libp2p/specs/pull/412> for details.
+    ///
+    /// The reading and writing side of substreams must never be closed. Substreams can only be
+    /// abruptly destroyed by either side.
+    WebRtc {
+        /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
+        local_tls_certificate_multihash: Vec<u8>,
+        /// Multihash encoding of the TLS certificate used by the remote node at the DTLS layer.
+        remote_tls_certificate_multihash: Vec<u8>,
+    },
+}
 
 /// Configuration for a [`Network`].
 pub struct Config {
@@ -80,6 +105,12 @@ pub struct Config {
 
     /// Number of connections containers should initially allocate for.
     pub capacity: usize,
+
+    /// Maximum number of substreams that each remote can have simultaneously opened.
+    ///
+    /// > **Note**: This limit is necessary in order to avoid DoS attacks where a remote opens too
+    /// >           many substreams.
+    pub max_inbound_substreams: usize,
 
     pub notification_protocols: Vec<NotificationProtocolConfig>,
 
@@ -104,12 +135,6 @@ pub struct Config {
 pub struct NotificationProtocolConfig {
     /// Name of the protocol negotiated on the wire.
     pub protocol_name: String,
-
-    /// Optional alternative names for this protocol. Can represent different versions.
-    ///
-    /// Negotiated in order in which they are passed.
-    // TODO: presently unused
-    pub fallback_protocol_names: Vec<String>,
 
     /// Maximum size, in bytes, of the handshake that can be received.
     pub max_handshake_size: usize,
@@ -223,6 +248,9 @@ pub struct Network<TConn, TNow> {
     /// Generator for randomness seeds given to the established connections.
     randomness_seeds: ChaCha20Rng,
 
+    /// See [`Config::max_inbound_substreams`].
+    max_inbound_substreams: usize,
+
     /// See [`Config::handshake_timeout`].
     handshake_timeout: Duration,
 
@@ -326,6 +354,7 @@ where
             ingoing_notification_substreams_by_connection: BTreeMap::new(),
             randomness_seeds: ChaCha20Rng::from_seed(config.randomness_seed),
             noise_key: Arc::new(config.noise_key),
+            max_inbound_substreams: config.max_inbound_substreams,
             notification_protocols,
             request_response_protocols: config.request_response_protocols.into_iter().collect(), // TODO: stupid overhead
             ping_protocol: config.ping_protocol.into(),
@@ -342,6 +371,7 @@ where
     pub fn insert_single_stream(
         &mut self,
         when_connected: TNow,
+        handshake_kind: SingleStreamHandshakeKind,
         is_initiator: bool,
         user_data: TConn,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
@@ -351,8 +381,10 @@ where
         let connection_task = SingleStreamConnectionTask::new(
             self.randomness_seeds.gen(),
             is_initiator,
+            handshake_kind,
             when_connected + self.handshake_timeout,
             self.noise_key.clone(),
+            self.max_inbound_substreams,
             self.notification_protocols.clone(),
             self.request_response_protocols.clone(),
             self.ping_protocol.clone(),
@@ -371,9 +403,14 @@ where
     }
 
     /// Adds a new multi-stream connection to the collection.
+    ///
+    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
+    /// to determine when the handshake timeout expires.
+    // TODO: add an is_initiator parameter? right now we're always implicitly the initiator
     pub fn insert_multi_stream<TSubId>(
         &mut self,
         now: TNow,
+        handshake_kind: MultiStreamHandshakeKind,
         user_data: TConn,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
@@ -385,6 +422,9 @@ where
         let connection_task = MultiStreamConnectionTask::new(
             self.randomness_seeds.gen(),
             now,
+            handshake_kind,
+            self.max_inbound_substreams,
+            self.noise_key.clone(),
             self.notification_protocols.clone(),
             self.request_response_protocols.clone(),
             self.ping_protocol.clone(),
@@ -1236,18 +1276,38 @@ where
                         continue;
                     }
 
-                    let substream_id = self
+                    // The event might concern a substream that we have already accepted or
+                    // refused. In that situation, either reinterpret the event as
+                    // "NotificationsInClose" or discard it.
+                    if let Some(substream_id) = self
                         .ingoing_notification_substreams_by_connection
                         .remove(&(connection_id, inner_substream_id))
-                        .unwrap();
-                    let _was_in = self.ingoing_notification_substreams.remove(&substream_id);
-                    debug_assert!(_was_in.is_some());
-
-                    Event::NotificationsInClose {
-                        substream_id,
-                        outcome: Err(NotificationsInClosedErr::Substream(
-                            established::NotificationsInClosedErr::SubstreamReset,
-                        )),
+                    {
+                        let (_, state, _) = self
+                            .ingoing_notification_substreams
+                            .remove(&substream_id)
+                            .unwrap();
+                        match state {
+                            SubstreamState::Open => Event::NotificationsInClose {
+                                substream_id,
+                                outcome: Err(NotificationsInClosedErr::Substream(
+                                    established::NotificationsInClosedErr::SubstreamReset,
+                                )),
+                            },
+                            SubstreamState::Pending => {
+                                Event::NotificationsInOpenCancel { substream_id }
+                            }
+                        }
+                    } else {
+                        // Substream was refused. As documented, we must confirm the reception of
+                        // the event by sending back a rejection.
+                        self.messages_to_connections.push_back((
+                            connection_id,
+                            CoordinatorToConnectionInner::RejectInNotifications {
+                                substream_id: inner_substream_id,
+                            },
+                        ));
+                        continue;
                     }
                 }
                 ConnectionToCoordinatorInner::NotificationIn {
@@ -1472,6 +1532,26 @@ enum ConnectionToCoordinatorInner {
         handshake: Vec<u8>,
     },
     /// See the corresponding event in [`established::Event`].
+    ///
+    /// The coordinator should be aware that, due to the asynchronous nature of communications, it
+    /// might receive this event after having sent a
+    /// [`CoordinatorToConnectionInner::AcceptInNotifications`] or
+    /// [`CoordinatorToConnectionInner::RejectInNotifications`]. In that situation, the coordinator
+    /// should either reinterpret the message as a `NotificationsInClose` (if it had accepted it)
+    /// or ignore it (if it had rejected it).
+    ///
+    /// The connection should be aware that, due to the asynchronous nature of communications, it
+    /// might later receive an [`CoordinatorToConnectionInner::AcceptInNotifications`] or
+    /// [`CoordinatorToConnectionInner::RejectInNotifications`] concerning this substream. In that
+    /// situation, the connection should ignore this message.
+    ///
+    /// Because substream IDs can be reused, this introduces an ambiguity in the following sequence
+    /// of events: send `NotificationsInOpen`, send `NotificationsInOpenCancel`, send
+    /// `NotificationsInOpen`, receive `AcceptInNotifications`. Does the `AcceptInNotifications`
+    /// refer to the first `NotificationsInOpen` or to the second?
+    /// In order to solve this problem, the coordinator must always send back a
+    /// [`CoordinatorToConnectionInner::RejectInNotifications`] in order to acknowledge a
+    /// `NotificationsInOpenCancel`.
     NotificationsInOpenCancel {
         id: established::SubstreamId,
     },
@@ -1588,7 +1668,7 @@ enum CoordinatorToConnectionInner<TNow> {
 pub enum Event<TConn> {
     /// Handshake of the given connection has completed.
     ///
-    /// This event can only happen once per connection.
+    /// This event can only happen once per connection and only for single-stream connections.
     HandshakeFinished {
         /// Identifier of the connection whose handshake is finished.
         id: ConnectionId,
@@ -1676,7 +1756,6 @@ pub enum Event<TConn> {
     /// If `Ok`, it is now possible to send notifications on this substream.
     /// If `Err`, the substream no longer exists and the [`SubstreamId`] becomes invalid.
     NotificationsOutResult {
-        // TODO: what if fallback?
         substream_id: SubstreamId,
         /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
         /// scope of this module.
@@ -1715,6 +1794,15 @@ pub enum Event<TConn> {
         remote_handshake: Vec<u8>,
     },
 
+    /// The remote has canceled the opening an incoming notifications substream.
+    ///
+    /// This can only happen before the notification substream has been accepted or refused.
+    NotificationsInOpenCancel {
+        /// Substream that has been closed. Guaranteed to match a substream that was earlier
+        /// reported with a [`Event::NotificationsInOpen`].
+        substream_id: SubstreamId,
+    },
+
     /// Received a notification on a notifications substream of a connection.
     NotificationsIn {
         /// Substream on which the notification has been received. Guaranteed to be a substream
@@ -1727,9 +1815,7 @@ pub enum Event<TConn> {
 
     /// The remote has closed an incoming notifications substream.
     ///
-    /// This can happen both before or after the notification substream has been accepted. If it
-    /// happens before the substream has been accepted, this event should be interpreted as
-    /// canceling the opening.
+    /// This can only happen after the notification substream has been accepted.
     NotificationsInClose {
         /// Substream that has been closed. Guaranteed to match a substream that was earlier
         /// reported with a [`Event::NotificationsInOpen`].

@@ -45,7 +45,7 @@
 //! >           corresponding to the storage entries necessary for a certain runtime call.
 //!
 
-use super::{nibble, proof_node_decode};
+use super::{nibble, proof_node_codec};
 
 use alloc::vec::Vec;
 
@@ -176,7 +176,7 @@ pub fn trie_node_info<'a, 'b>(
     loop {
         // Decodes `node_value` into its components.
         let decoded_node_value =
-            proof_node_decode::decode(node_value).map_err(Error::InvalidNodeValue)?;
+            proof_node_codec::decode(node_value).map_err(Error::InvalidNodeValue)?;
 
         // Iterating over this partial key, checking if it matches `expected_nibbles_iter`.
         for nibble in decoded_node_value.partial_key.clone() {
@@ -236,7 +236,7 @@ pub fn trie_node_info<'a, 'b>(
             // The current node (i.e. `node_value`) exactly matches the requested key.
             return Ok(TrieNodeInfo {
                 storage_value: match decoded_node_value.storage_value {
-                    proof_node_decode::StorageValue::Hashed(hash) => {
+                    proof_node_codec::StorageValue::Hashed(hash) => {
                         // If the node contains a hash, the un-hashed value should also be found
                         // in the proof as a standalone item.
                         match merkle_values.iter().position(|v| v[..] == *hash) {
@@ -247,8 +247,8 @@ pub fn trie_node_info<'a, 'b>(
                             }
                         }
                     }
-                    proof_node_decode::StorageValue::Unhashed(v) => StorageValue::Known(v),
-                    proof_node_decode::StorageValue::None => StorageValue::None,
+                    proof_node_codec::StorageValue::Unhashed(v) => StorageValue::Known(v),
+                    proof_node_codec::StorageValue::None => StorageValue::None,
                 },
                 children: Children::Multiple {
                     children_bitmap: decoded_node_value.children_bitmap(),
@@ -306,6 +306,30 @@ impl Children {
             ),
         }
     }
+
+    /// Iterators over all the children of the node. Returns an iterator producing one element per
+    /// child, where the element is `key` plus the nibble of this child.
+    pub fn unfold_append_to_key(
+        &self,
+        mut key: Vec<nibble::Nibble>,
+    ) -> impl Iterator<Item = Vec<nibble::Nibble>> {
+        match *self {
+            Children::None => either::Left(None.into_iter()),
+            Children::One(nibble) => {
+                key.push(nibble);
+                either::Left(Some(key).into_iter())
+            }
+            Children::Multiple { children_bitmap } => either::Right(
+                nibble::all_nibbles()
+                    .filter(move |n| (children_bitmap & (1 << u8::from(*n)) != 0))
+                    .map(move |nibble| {
+                        let mut k = key.clone();
+                        k.push(nibble);
+                        k
+                    }),
+            ),
+        }
+    }
 }
 
 /// Possible error returned by [`verify_proof`]
@@ -316,7 +340,7 @@ pub enum Error {
     /// One of the node values in the proof has an invalid format.
     // TODO: indicate which one? complicated because of inline nodes
     #[display(fmt = "A node of the proof has an invalid format: {}", _0)]
-    InvalidNodeValue(proof_node_decode::Error),
+    InvalidNodeValue(proof_node_codec::Error),
     /// Missing an entry in the proof.
     #[display(
         fmt = "An entry is missing from the proof (closest ancestor nibbles: {})",

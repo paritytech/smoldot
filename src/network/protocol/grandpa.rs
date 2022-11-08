@@ -103,12 +103,13 @@ impl NeighborPacket {
             .any(|b| *b != 0));
         commit_finalized_height.resize(block_number_bytes, 0);
 
-        iter::once(either::Right(either::Left([1u8])))
-            .chain(iter::once(either::Left(self.round_number.to_le_bytes())))
-            .chain(iter::once(either::Left(self.set_id.to_le_bytes())))
-            .chain(iter::once(either::Right(either::Right(
-                commit_finalized_height,
-            ))))
+        [
+            either::Right(either::Left([1u8])),
+            either::Left(self.round_number.to_le_bytes()),
+            either::Left(self.set_id.to_le_bytes()),
+            either::Right(either::Right(commit_finalized_height)),
+        ]
+        .into_iter()
     }
 }
 

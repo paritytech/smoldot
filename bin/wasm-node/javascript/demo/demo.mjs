@@ -18,8 +18,7 @@
 // This file launches a WebSocket server that exposes JSON-RPC functions.
 
 import * as smoldot from '../dist/mjs/index-nodejs.js';
-import { default as websocket } from 'websocket';
-import * as http from 'node:http';
+import { WebSocketServer } from 'ws';
 import * as process from 'node:process';
 import * as fs from 'node:fs';
 
@@ -34,7 +33,6 @@ const chainSpecsFiles = [
     '../../kusama-statemine.json',
     '../../kusama-karura.json',
     '../../rococo.json',
-    '../../rococo-adz.json',
     '../../rococo-canvas.json',
 ];
 
@@ -86,36 +84,29 @@ client
     });
 
 // Start the WebSocket server listening on port 9944.
-let server = http.createServer(function (_request, response) {
-    response.writeHead(404);
-    response.end();
-});
-server.listen(9944, function () {
-    console.log('JSON-RPC server now listening on port 9944');
-    console.log('Please visit one of:');
-    for (const chainId in chainSpecsById) {
-        console.log('- ' + chainId + ': https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2F' + chainId);
-    }
-    console.log('');
-});
-let wsServer = new websocket.server({
-    httpServer: server,
-    autoAcceptConnections: false,
+let wsServer = new WebSocketServer({
+    port: 9944
 });
 
-wsServer.on('request', function (request) {
+console.log('JSON-RPC server now listening on port 9944');
+console.log('Please visit one of:');
+for (const chainId in chainSpecsById) {
+    console.log('- ' + chainId + ': https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2F' + chainId);
+}
+console.log('');
+
+wsServer.on('connection', function (connection, request) {
     // Received a new incoming WebSocket connection.
 
     // Note that we don't care too much about sanitizing input as this is just a demo.
-    const chainCfg = chainSpecsById[request.resource.substring(1)];
+    const chainCfg = chainSpecsById[request.url.substring(1)];
 
     if (!chainCfg) {
-        request.reject(404);
+        connection.close();
         return;
     }
 
-    const connection = request.accept(request.requestedProtocols[0], request.origin);
-    console.log('(demo) New JSON-RPC client connected: ' + request.remoteAddress + '.');
+    console.log('(demo) New JSON-RPC client connected: ' + request.socket.remoteAddress + '.');
 
     // Start loading the chain.
     let chain = (async () => {
@@ -125,25 +116,40 @@ wsServer.on('request', function (request) {
 
             const relay = await client.addChain({
                 chainSpec: chainSpecsById[chainCfg.relayChain].chainSpec,
+                disableJsonRpc: true
             });
 
             const para = await client.addChain({
                 chainSpec: chainCfg.chainSpec,
-                jsonRpcCallback: (resp) => {
-                    connection.sendUTF(resp);
-                },
                 potentialRelayChains: [relay]
             });
 
+            (async () => {
+                try {
+                    while(true) {
+                        const response = await para.nextJsonRpcResponse();
+                        connection.send(response);
+                    }
+                } catch(_error) {}
+            })()
+
             return { relay, para };
         } else {
+            const relay = await client.addChain({
+                chainSpec: chainCfg.chainSpec,
+            });
+
+            (async () => {
+                try {
+                    while(true) {
+                        const response = await relay.nextJsonRpcResponse();
+                        connection.send(response);
+                    }
+                } catch(_error) {}
+            })()
+
             return {
-                relay: await client.addChain({
-                    chainSpec: chainCfg.chainSpec,
-                    jsonRpcCallback: (resp) => {
-                        connection.sendUTF(resp);
-                    },
-                })
+                relay,
             };
         }
     })().catch((error) => {
@@ -152,14 +158,15 @@ wsServer.on('request', function (request) {
     });
 
     // Receiving a message from the connection. This is a JSON-RPC request.
-    connection.on('message', function (message) {
-        if (message.type === 'utf8') {
+    connection.on('message', function (data, isBinary) {
+        if (!isBinary) {
+            const message = data.toString('utf8');
             chain
                 .then(chain => {
                     if (chain.para)
-                        chain.para.sendJsonRpc(message.utf8Data);
+                        chain.para.sendJsonRpc(message);
                     else
-                        chain.relay.sendJsonRpc(message.utf8Data);
+                        chain.relay.sendJsonRpc(message);
                 })
                 .catch((error) => {
                     console.error("(demo) Error during JSON-RPC request: " + error);
@@ -172,7 +179,7 @@ wsServer.on('request', function (request) {
 
     // When the connection closes, remove the chains that have been added.
     connection.on('close', function (reasonCode, description) {
-        console.log("(demo) JSON-RPC client " + connection.remoteAddress + ' disconnected.');
+        console.log("(demo) JSON-RPC client " + request.socket.remoteAddress + ' disconnected.');
         chain.then(chain => {
             chain.relay.remove();
             if (chain.para)

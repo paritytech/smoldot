@@ -38,8 +38,7 @@ export interface Config {
      */
     onWasmPanic: (message: string) => void,
     logCallback: (level: number, target: string, message: string) => void,
-    jsonRpcCallback: (response: string, chainId: number) => void,
-    databaseContentCallback: (data: string, chainId: number) => void,
+    jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
     cpuRateLimit: number,
 }
@@ -58,7 +57,7 @@ export interface PlatformBindings {
      * This function is asynchronous because implementations might use the compression streams
      * Web API, which for whatever reason is asynchronous.
      */
-    base64DecodeAndZlibInflate: (input: string) => Promise<Uint8Array>,
+    trustedBase64DecodeAndZlibInflate: (input: string) => Promise<Uint8Array>,
 
     /**
      * Returns the number of milliseconds since an arbitrary epoch.
@@ -74,7 +73,7 @@ export interface PlatformBindings {
      * Tries to open a new connection using the given configuration.
      *
      * @see Connection
-     * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
+     * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
      */
      connect(config: ConnectionConfig): Connection;
 }
@@ -84,7 +83,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     // different file.
     // This is suboptimal compared to using `instantiateStreaming`, but it is the most
     // cross-platform cross-bundler approach.
-    const wasmBytecode = await platformBindings.base64DecodeAndZlibInflate(wasmBase64)
+    const wasmBytecode = await platformBindings.trustedBase64DecodeAndZlibInflate(wasmBase64)
 
     let killAll: () => void;
 

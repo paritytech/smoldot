@@ -34,17 +34,42 @@ use std::{
     task,
 };
 
-pub(crate) struct Client<TChain, TPlat: smoldot_light_base::Platform> {
-    pub(crate) smoldot: smoldot_light_base::Client<TChain, TPlat>,
+pub(crate) struct Client<TPlat: smoldot_light::platform::Platform, TChain> {
+    pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
 
-    pub(crate) new_tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+    /// List of all chains that have been added by the user.
+    pub(crate) chains: slab::Slab<Chain>,
 }
 
-pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
+pub(crate) enum Chain {
+    Healthy {
+        smoldot_chain_id: smoldot_light::ChainId,
+
+        /// JSON-RPC responses that is at the front of the queue according to the API. If `Some`,
+        /// a pointer to the string is referenced to within
+        /// [`Chain::Healthy::json_rpc_response_info`].
+        json_rpc_response: Option<String>,
+        /// Information about [`Chain::Healthy::json_rpc_response`]. A pointer to this struct is
+        /// sent over the FFI layer to the JavaScript. As such, the pointer must never be
+        /// invalidated.
+        json_rpc_response_info: Box<bindings::JsonRpcResponseInfo>,
+        /// Receiver for JSON-RPC responses sent by the client. `None` if JSON-RPC requests are
+        /// disabled on this chain.
+        /// While this could in principle be a [`smoldot_light::JsonRpcResponses`], we wrap it
+        /// within a [`futures::Stream`] in order to guarantee that the `waker` that we register
+        /// doesn't get cleaned up.
+        json_rpc_responses_rx: Option<stream::BoxStream<'static, String>>,
+    },
+    Erroneous {
+        error: String,
+    },
+}
+
+pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
     max_log_level: u32,
     enable_current_task: bool,
     cpu_rate_limit: u32,
-) -> Client<TChain, TPlat> {
+) -> Client<TPlat, TChain> {
     // Try initialize the logging and the panic hook.
     let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
         log::set_max_level(match max_log_level {
@@ -172,15 +197,17 @@ pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
         ))
         .unwrap();
 
-    let client = smoldot_light_base::Client::new(
-        new_task_tx.clone(),
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION"),
-    );
+    let client = smoldot_light::Client::new(smoldot_light::ClientConfig {
+        tasks_spawner: Box::new(move |name, task| {
+            new_task_tx.unbounded_send((name, task)).unwrap()
+        }),
+        system_name: env!("CARGO_PKG_NAME").into(),
+        system_version: env!("CARGO_PKG_VERSION").into(),
+    });
 
     Client {
         smoldot: client,
-        new_tasks_spawner: new_task_tx,
+        chains: slab::Slab::with_capacity(8),
     }
 }
 

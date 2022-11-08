@@ -26,8 +26,10 @@
 //!
 //! Use [`SyncService::subscribe_all`] to get notified about updates to the state of the chain.
 
-use crate::{network_service, runtime_service, Platform};
+use crate::{network_service, platform::Platform, runtime_service};
 
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use core::{fmt, num::NonZeroU32, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
     lock::Mutex,
@@ -40,7 +42,6 @@ use smoldot::{
     network::{protocol, service},
     trie::{self, prefix_proof, proof_verify},
 };
-use std::{fmt, num::NonZeroU32, sync::Arc, time::Duration};
 
 mod parachain;
 mod standalone;
@@ -192,6 +193,9 @@ impl<TPlat: Platform> SyncService<TPlat> {
     /// If `runtime_interest` is `false`, then [`SubscribeAll::finalized_block_runtime`] will
     /// always be `None`. Since the runtime can only be provided to one call to this function,
     /// only one subscriber should use `runtime_interest` equal to `true`.
+    ///
+    /// While this function is asynchronous, it is guaranteed to finish relatively quickly. Only
+    /// CPU operations are performed.
     pub async fn subscribe_all(&self, buffer_size: usize, runtime_interest: bool) -> SubscribeAll {
         let (send_back, rx) = oneshot::channel();
 
@@ -394,7 +398,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
         block_number: u64,
         block_hash: &[u8; 32],
         storage_trie_root: &[u8; 32],
-        requested_keys: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+        requested_keys: impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone,
         total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
@@ -475,6 +479,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
 
             // TODO: better peers selection ; don't just take the first
             // TODO: handle max_parallel
+            // TODO: is the number of keys is large, split into multiple requests
             for target in self
                 .peers_assumed_know_blocks(block_number, block_hash)
                 .await
@@ -489,7 +494,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                         protocol::StorageProofRequestConfig {
                             block_hash: *block_hash,
                             keys: prefix_scan.requested_keys().map(|nibbles| {
-                                trie::nibbles_to_bytes_extend(nibbles).collect::<Vec<_>>()
+                                trie::nibbles_to_bytes_suffix_extend(nibbles).collect::<Vec<_>>()
                             }),
                         },
                         timeout_per_request,

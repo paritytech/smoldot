@@ -1003,6 +1003,9 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     /// Fetching the key of the finalized block storage that follows a given one is required in
     /// order to continue.
     FinalizedStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
+
+    /// Compiling a runtime is required in order to continue.
+    RuntimeCompilation(RuntimeCompilation<TRq, TSrc, TBl>),
 }
 
 enum Inner<TBl> {
@@ -1128,11 +1131,11 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     // As such, the requested value is either found in one of this diff, in which
                     // case it can be returned immediately to continue the verification, or in
                     // the finalized block, in which case the user needs to be queried.
-                    if let Some(value) = shared
+                    let value = shared
                         .inner
                         .best_to_finalized_storage_diff
-                        .diff_get(&req.key_as_vec())
-                    {
+                        .diff_get(req.key().as_ref());
+                    if let Some(value) = value {
                         inner = Inner::Step2(
                             req.inject_value(value.as_ref().map(|v| iter::once(&v[..]))),
                         );
@@ -1171,8 +1174,10 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
 
                 Inner::Step2(blocks_tree::BodyVerifyStep2::RuntimeCompilation(c)) => {
                     // The underlying verification process requires compiling a runtime code.
-                    inner = Inner::Step2(c.build());
-                    continue 'verif_steps;
+                    break BlockVerification::RuntimeCompilation(RuntimeCompilation {
+                        inner: c,
+                        shared,
+                    });
                 }
 
                 // The three variants below correspond to problems during the verification.
@@ -1287,8 +1292,12 @@ pub struct JustificationVerify<TRq, TSrc, TBl> {
 
 impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
     /// Verify the justification.
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
     pub fn perform(
         mut self,
+        randomness_seed: [u8; 32],
     ) -> (
         OptimisticSync<TRq, TSrc, TBl>,
         JustificationVerification<TBl>,
@@ -1296,10 +1305,11 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
         let (consensus_engine_id, justification, source_id) =
             self.inner.pending_encoded_justifications.next().unwrap();
 
-        let mut apply = match self
-            .chain
-            .verify_justification(consensus_engine_id, &justification)
-        {
+        let mut apply = match self.chain.verify_justification(
+            consensus_engine_id,
+            &justification,
+            randomness_seed,
+        ) {
             Ok(a) => a,
             Err(error) => {
                 if let Some(source) = self.inner.sources.get_mut(&source_id) {
@@ -1407,15 +1417,8 @@ pub struct StorageGet<TRq, TSrc, TBl> {
 
 impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         self.inner.key()
-    }
-
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    ///
-    /// This method is a shortcut for calling `key` and concatenating the returned slices.
-    pub fn key_as_vec(&self) -> Vec<u8> {
-        self.inner.key_as_vec()
     }
 
     /// Injects the corresponding storage value.
@@ -1519,6 +1522,21 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
                 })
             }
         }
+    }
+}
+
+/// Compiling a new runtime is necessary as part of the verification.
+#[must_use]
+pub struct RuntimeCompilation<TRq, TSrc, TBl> {
+    inner: blocks_tree::RuntimeCompilation<Block<TBl>>,
+    shared: BlockVerificationShared<TRq, TSrc, TBl>,
+}
+
+impl<TRq, TSrc, TBl> RuntimeCompilation<TRq, TSrc, TBl> {
+    /// Builds the runtime.
+    pub fn build(self) -> BlockVerification<TRq, TSrc, TBl> {
+        let inner = self.inner.build();
+        BlockVerification::from(Inner::Step2(inner), self.shared)
     }
 }
 

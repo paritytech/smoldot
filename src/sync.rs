@@ -29,7 +29,9 @@
 //! The [`all`] module represents a good combination of all syncing strategies and should be the
 //! default choice for most clients.
 //!
-//! # About safety
+//! # Security considerations
+//!
+//! ## Eclipse attacks
 //!
 //! While there exists various trade-offs between syncing strategies, safety is never part of
 //! these trade-offs. All syncing strategies are safe, in the sense that malicious remotes cannot
@@ -47,6 +49,24 @@
 //! context of a peer-to-peer network, it is important to establish outgoing connections to other
 //! nodes and not only rely on incoming connections, as there is otherwise the possibility of a
 //! single actor controlling all said incoming connections.
+//!
+//! ## Malicious runtimes
+//!
+//! Synchronizing the chain requires executing a piece of WebAssembly code known as the runtime.
+//! Each chain has a different runtime, stored on chain, and this runtime can be modified as part
+//! of a the transactions in a block.
+//!
+//! There are two safety considerations concerning executing runtime code:
+//!
+//! - The execution could take a lot of time, or possibly be stuck in an infinite loop.
+//! - The execution could modify a lot of storage items. Smoldot needs to store every single
+//! storage item change, and a lot of modification could make the memory usage of smoldot explode.
+//!
+//! The Substrate model, and thus the smoldot implementation, intentionally do not do anything to
+//! address these two safety issues. In other words, the runtime of a chain is considered to never
+//! be malicious. After all, a chain whose runtime is intentionally trying to crash a client is
+//! borked and there is no reason to connect to it.
+//!
 
 pub mod all;
 pub mod all_forks;

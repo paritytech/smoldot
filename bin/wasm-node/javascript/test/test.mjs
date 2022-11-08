@@ -33,23 +33,17 @@ test('invalid chain spec throws error', async t => {
 });
 
 test('system_name works', async t => {
-  let promiseResolve;
-  const promise = new Promise((resolve, reject) => promiseResolve = resolve);
-
   const client = start({ logCallback: () => { } });
   await client
-    .addChain({
-      chainSpec: westendSpec,
-      jsonRpcCallback: (resp) => {
-        if (resp == '{"jsonrpc":"2.0","id":1,"result":"smoldot-light-wasm"}') {
-          promiseResolve();
-        }
-      }
-    })
+    .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}', 0, 0);
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}');
+      return chain;
     })
-    .then(() => promise)
-    .then(() => t.pass())
+    .then(async (chain) => {
+      const response = await chain.nextJsonRpcResponse();
+      t.assert(response === '{"jsonrpc":"2.0","id":1,"result":"smoldot-light-wasm"}');
+      t.pass();
+    })
     .then(() => client.terminate());
 });

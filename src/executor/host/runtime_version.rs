@@ -73,19 +73,43 @@ pub enum FindEmbeddedRuntimeVersionError {
 pub fn find_encoded_embedded_runtime_version_apis(
     binary_wasm_module: &[u8],
 ) -> Result<(Option<&[u8]>, Option<&[u8]>), FindEncodedEmbeddedRuntimeVersionApisError> {
-    // TODO: don't traverse twice, not efficient
-    let runtime_version = match nom::combinator::all_consuming(nom::combinator::complete(
-        wasm_module_with_custom(b"runtime_version"),
-    ))(binary_wasm_module)
-    {
-        Ok((_, content)) => content,
-        Err(_) => return Err(FindEncodedEmbeddedRuntimeVersionApisError::FailedToParse),
-    };
+    let mut parser =
+        nom::combinator::all_consuming(nom::combinator::complete(nom::sequence::preceded(
+            nom::sequence::tuple((
+                nom::bytes::complete::tag(b"\0asm"),
+                nom::bytes::complete::tag(&[0x1, 0x0, 0x0, 0x0]),
+            )),
+            nom::multi::fold_many0(
+                wasm_section,
+                || (None, None),
+                move |prev_found, in_section| {
+                    match (prev_found, in_section) {
+                        // Not a custom section.
+                        (prev_found, None) => prev_found,
 
-    let runtime_apis = match nom::combinator::all_consuming(nom::combinator::complete(
-        wasm_module_with_custom(b"runtime_apis"),
-    ))(binary_wasm_module)
-    {
+                        // We found a custom section with a name that interests us, but we already
+                        // parsed a custom section with that same name earlier. Continue with the
+                        // value that was parsed earlier.
+                        (prev_found @ (Some(_), _), Some((b"runtime_version", _))) => prev_found,
+                        (prev_found @ (_, Some(_)), Some((b"runtime_apis", _))) => prev_found,
+
+                        // Found a custom section that interests us, and we didn't find one
+                        // before.
+                        ((None, prev_rt_apis), Some((b"runtime_version", content))) => {
+                            (Some(content), prev_rt_apis)
+                        }
+                        ((prev_rt_version, None), Some((b"runtime_apis", content))) => {
+                            (prev_rt_version, Some(content))
+                        }
+
+                        // Found a custom section with a name that doesn't interest us.
+                        (prev_found, Some(_)) => prev_found,
+                    }
+                },
+            ),
+        )));
+
+    let (runtime_version, runtime_apis) = match parser(binary_wasm_module) {
         Ok((_, content)) => content,
         Err(_) => return Err(FindEncodedEmbeddedRuntimeVersionApisError::FailedToParse),
     };
@@ -250,6 +274,39 @@ impl<'a> CoreVersionApisRefIter<'a> {
             Ok((_, me)) => Ok(me),
             Err(_) => Err(()),
         }
+    }
+
+    /// Tries to find within this iterator the given API, and if found returns the version number.
+    ///
+    /// If multiple API versions are found, the highest one is returned.
+    ///
+    /// > **Note**: If you start iterating (for example by calling `next()`) then call this
+    /// >           function, the search will only be performed on the rest of the iterator,
+    /// >           which is typically not what you want. Preferably always call this function
+    /// >           on a fresh iterator.
+    pub fn find_version(&self, api: &str) -> Option<u32> {
+        self.find_versions([api])[0]
+    }
+
+    /// Similar to [`CoreVersionApisRefIter::find_version`], but allows passing multiple API names
+    /// at once. This is more optimized if multiple API names are to be queried.
+    pub fn find_versions<const N: usize>(&self, apis: [&str; N]) -> [Option<u32>; N] {
+        let hashed = core::array::from_fn::<_, N, _>(|n| hash_api_name(apis[n]));
+        let mut out = [None; N];
+
+        for api in self.clone() {
+            for (n, expected) in hashed.iter().enumerate() {
+                if *expected == api.name_hash {
+                    match out[n] {
+                        Some(ref mut v) if *v < api.version => *v = api.version,
+                        Some(_) => {}
+                        ref mut v @ None => *v = Some(api.version),
+                    }
+                }
+            }
+        }
+
+        out
     }
 
     /// Returns `true` if this iterator contains the API with the given name and its version is in
@@ -418,43 +475,8 @@ fn core_version_api<'a, E: nom::error::ParseError<&'a [u8]>>(
     )(bytes)
 }
 
-/// Parses a Wasm module, and returns the content of the first custom section with the given name,
-/// if any is found.
-///
-/// If multiple custom sections exist with that name, all but the first are ignored.
-fn wasm_module_with_custom<'a>(
-    desired_section_name: &'a [u8],
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], Option<&'a [u8]>> {
-    nom::sequence::preceded(
-        nom::sequence::tuple((
-            nom::bytes::complete::tag(b"\0asm"),
-            nom::bytes::complete::tag(&[0x1, 0x0, 0x0, 0x0]),
-        )),
-        nom::multi::fold_many0(
-            section,
-            || None,
-            move |prev_found, maybe_found| {
-                let (found_name, found_content) = match maybe_found {
-                    Some(f) => f,
-                    None => return prev_found,
-                };
-
-                if prev_found.is_some() {
-                    return prev_found;
-                }
-
-                if found_name == desired_section_name {
-                    Some(found_content)
-                } else {
-                    None
-                }
-            },
-        ),
-    )
-}
-
 /// Parses a Wasm section. If it is a custom section, returns its name and content.
-fn section<'a>(bytes: &'a [u8]) -> nom::IResult<&'a [u8], Option<(&'a [u8], &'a [u8])>> {
+fn wasm_section<'a>(bytes: &'a [u8]) -> nom::IResult<&'a [u8], Option<(&'a [u8], &'a [u8])>> {
     nom::branch::alt((
         nom::combinator::map(
             nom::combinator::map_parser(

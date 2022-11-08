@@ -60,7 +60,6 @@ pub(super) struct ClientSpec {
     pub(super) properties: Option<Box<serde_json::value::RawValue>>,
     // TODO: make use of this
     pub(super) fork_blocks: Option<Vec<(u64, HashHexString)>>,
-    // TODO: make use of this
     pub(super) bad_blocks: Option<HashSet<HashHexString, FnvBuildHasher>>,
     // Unused but for some reason still part of the chain specs.
     #[serde(default, skip_serializing)]

@@ -86,23 +86,15 @@ extern "C" {
     /// behave like `abort` and prevent any further execution.
     pub fn panic(message_ptr: u32, message_len: u32);
 
-    /// Client is emitting a response to a previous JSON-RPC request sent using [`json_rpc_send`].
-    /// Also used to send subscriptions notifications.
+    /// The queue of JSON-RPC responses of the given chain is no longer empty.
     ///
-    /// The response or notification is a UTF-8 string found in the memory of the WebAssembly
-    /// virtual machine at offset `ptr` and with length `len`. `chain_id` is the chain
-    /// that the request was made to.
-    pub fn json_rpc_respond(ptr: u32, len: u32, chain_id: u32);
-
-    /// This function is called by the client is response to calling [`database_content`].
+    /// Use [`json_rpc_responses_peek`] in order to obtain information about the responses in the
+    /// queue.
     ///
-    /// The database content is a UTF-8 string found in the memory of the WebAssembly virtual
-    /// machine at offset `ptr` and with length `len`.
-    ///
-    /// `chain_id` is the chain that the request was made to. It is guaranteed to always be valid.
-    /// This function is not called if the chain is removed with [`remove_chain`] while the fetch
-    /// is in progress.
-    pub fn database_content_ready(ptr: u32, len: u32, chain_id: u32);
+    /// This function might be called even when the queue wasn't empty before, however this
+    /// behavior must not be relied upon. The queue must be emptied by calling
+    /// [`json_rpc_responses_pop`] in order to have the guarantee that this function gets called.
+    pub fn json_rpc_responses_non_empty(chain_id: u32);
 
     /// Client is emitting a log entry.
     ///
@@ -181,11 +173,11 @@ extern "C" {
     ///
     /// - `Opening` (initial state)
     /// - `Open`
-    /// - `Closed`
+    /// - `Reset`
     ///
-    /// When in the `Opening` or `Open` state, the connection can transition to the `Closed` state
+    /// When in the `Opening` or `Open` state, the connection can transition to the `Reset` state
     /// if the remote closes the connection or refuses the connection altogether. When that
-    /// happens, [`connection_closed`] must be called. Once in the `Closed` state, the connection
+    /// happens, [`connection_reset`] must be called. Once in the `Reset` state, the connection
     /// cannot transition back to another state.
     ///
     /// Initially in the `Opening` state, the connection can transition to the `Open` state if the
@@ -195,11 +187,11 @@ extern "C" {
     /// There exists two kind of connections: single-stream and multi-stream. Single-stream
     /// connections are assumed to have a single stream open at all time and the encryption and
     /// multiplexing are handled internally by smoldot. Multi-stream connections open and close
-    /// streams over time using [`connection_stream_opened`] and [`stream_closed`], and the
+    /// streams over time using [`connection_stream_opened`] and [`stream_reset`], and the
     /// encryption and multiplexing are handled by the user of these bindings.
     pub fn connection_new(id: u32, addr_ptr: u32, addr_len: u32, error_ptr_ptr: u32) -> u32;
 
-    /// Close a connection previously initialized with [`connection_new`].
+    /// Abruptly close a connection previously initialized with [`connection_new`].
     ///
     /// This destroys the identifier passed as parameter. This identifier must never be passed
     /// through the FFI boundary, unless the same identifier is later allocated again with
@@ -210,21 +202,26 @@ extern "C" {
     ///
     /// > **Note**: In JavaScript, remember to unregister event handlers before calling for
     /// >           example `WebSocket.close()`.
-    pub fn connection_close(id: u32);
+    pub fn reset_connection(id: u32);
 
     /// Queues a new outbound substream opening. The [`connection_stream_opened`] function must
     /// later be called when the substream has been successfully opened.
     ///
     /// This function will only be called for multi-stream connections. The connection must
     /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
+    ///
+    /// > **Note**: No mechanism exists in this API to handle the situation where a substream fails
+    /// >           to open, as this is not supposed to happen. If you need to handle such a
+    /// >           situation, either try again opening a substream again or reset the entire
+    /// >           connection.
     pub fn connection_stream_open(connection_id: u32);
 
-    /// Closes an existing substream of a multi-stream connection. The substream must currently
-    /// be in the `Open` state.
+    /// Abruptly closes an existing substream of a multi-stream connection. The substream must
+    /// currently be in the `Open` state.
     ///
     /// This function will only be called for multi-stream connections. The connection must
     /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
-    pub fn connection_stream_close(connection_id: u32, stream_id: u32);
+    pub fn connection_stream_reset(connection_id: u32, stream_id: u32);
 
     /// Queues data on the given stream. The data is found in the memory of the WebAssembly
     /// virtual machine, at the given pointer. The data must be sent as a binary frame.
@@ -317,7 +314,7 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 /// the pointers and lengths (in bytes) as parameter to this function.
 ///
 /// > **Note**: The database content is an opaque string that can be obtained by calling
-/// >           [`database_content`].
+/// >           the `chainHead_unstable_finalizedDatabase` JSON-RPC function.
 ///
 /// Similarly, use [`alloc`] to allocate a buffer containing a list of 32-bits-little-endian chain
 /// ids. Pass the pointer and number of chain ids (*not* length in bytes of the buffer) to this
@@ -401,40 +398,66 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// A buffer containing a UTF-8 JSON-RPC request or notification must be passed as parameter. The
 /// format of the JSON-RPC requests and notifications is described in
 /// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification).
-/// Requests that are not valid JSON-RPC are silently ignored.
 ///
 /// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when
 /// this function is called.
 ///
-/// Responses and notifications are sent back using [`json_rpc_respond`].
+/// Responses and notifications are notified using [`json_rpc_responses_non_empty`], and can
+/// be read with [`json_rpc_responses_peek`].
+///
+/// It is forbidden to call this function on an erroneous chain or a chain that was created with
+/// `json_rpc_running` equal to 0.
+///
+/// This function returns:
+/// - 0 on success.
+/// - 1 if the request couldn't be parsed as a valid JSON-RPC request.
+/// - 2 if the chain is currently overloaded with JSON-RPC requests and refuses to queue another
+/// one.
+///
+#[no_mangle]
+pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) -> u32 {
+    super::json_rpc_send(text_ptr, text_len, chain_id)
+}
+
+/// Obtains information about the first response in the queue of JSON-RPC responses.
+///
+/// This function returns a pointer within the memory of the WebAssembly virtual machine where is
+/// stored a struct of type [`JsonRpcResponseInfo`]. This pointer remains valid until
+/// [`json_rpc_responses_pop`] or [`remove_chain`] is called with the same `chain_id`.
+///
+/// The response or notification is a UTF-8 string found in the memory of the WebAssembly
+/// virtual machine at offset `ptr` and with length `len`, where `ptr` and `len` are found in the
+/// [`JsonRpcResponseInfo`].
+///
+/// If `len` is equal to 0, this indicates that the queue of JSON-RPC responses is empty.
+///
+/// After having read the response or notification, use [`json_rpc_responses_pop`] to remove it
+/// from the queue. You can then call [`json_rpc_responses_peek`] again to read the next response.
+#[no_mangle]
+pub extern "C" fn json_rpc_responses_peek(chain_id: u32) -> u32 {
+    super::json_rpc_responses_peek(chain_id)
+}
+
+/// See [`json_rpc_responses_peek`].
+#[repr(C)]
+pub struct JsonRpcResponseInfo {
+    /// Pointer in memory where the JSON-RPC response can be found.
+    pub ptr: u32,
+    /// Length of the JSON-RPC response in bytes. If 0, indicates that the queue is empty.
+    pub len: u32,
+}
+
+/// Removes the first response from the queue of JSON-RPC responses. This is the response whose
+/// information can be retrieved using [`json_rpc_responses_peek`].
+///
+/// Calling this function invalidates the pointer previously returned by a call to
+/// [`json_rpc_responses_peek`] with the same `chain_id`.
 ///
 /// It is forbidden to call this function on an erroneous chain or a chain that was created with
 /// `json_rpc_running` equal to 0.
 #[no_mangle]
-pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
-    super::json_rpc_send(text_ptr, text_len, chain_id)
-}
-
-/// Starts generating the content of the database of the chain.
-///
-/// This function doesn't immediately return the content, but later calls
-/// [`database_content_ready`] with the content of the database.
-///
-/// Calling this function multiple times will lead to multiple calls to [`database_content_ready`],
-/// with potentially different values.
-///
-/// The `max_size` parameter contains the maximum length, in bytes, of the value that will be
-/// provided back. Please be aware that passing a `u32` across the FFI boundary can be tricky.
-/// From the Wasm perspective, the parameter of this function is actually a `i32` that is then
-/// reinterpreted as a `u32`.
-///
-/// [`database_content_ready`] will not be called if you remove the chain with [`remove_chain`]
-/// while the operation is in progress.
-///
-/// It is forbidden to call this function on an erroneous chain.
-#[no_mangle]
-pub extern "C" fn database_content(chain_id: u32, max_size: u32) {
-    super::database_content(chain_id, max_size)
+pub extern "C" fn json_rpc_responses_pop(chain_id: u32) {
+    super::json_rpc_responses_pop(chain_id)
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.
@@ -453,9 +476,12 @@ pub extern "C" fn timer_finished(timer_id: u32) {
 /// When in the `Open` state, the connection can receive messages. When a message is received,
 /// [`alloc`] must be called in order to allocate memory for this message, then
 /// [`stream_message`] must be called with the pointer returned by [`alloc`].
+///
+/// The `handshake_ty` parameter indicates the type of handshake. It must always be 0 at the
+/// moment, indicating a multistream-select+Noise+Yamux handshake.
 #[no_mangle]
-pub extern "C" fn connection_open_single_stream(connection_id: u32) {
-    crate::platform::connection_open_single_stream(connection_id);
+pub extern "C" fn connection_open_single_stream(connection_id: u32, handshake_ty: u32) {
+    crate::platform::connection_open_single_stream(connection_id, handshake_ty);
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection
@@ -465,24 +491,22 @@ pub extern "C" fn connection_open_single_stream(connection_id: u32) {
 ///
 /// See also [`connection_new`].
 ///
-/// The API user is responsible for determining the identity of the remote as part of the opening
-/// process of the connection. This identity must then be provided in the form of the binary
-/// representation of a peer ID, through `peer_id_ptr` and `peer_id_len`.
-/// See <https://github.com/libp2p/specs/blob/master/peer-ids/peer-ids.md#peer-ids> for a
-/// definition of the binary representation of a peer ID.
-/// The buffer **must** have been allocated with [`alloc`]. It is freed when this function is
-/// called.
-///
 /// When in the `Open` state, the connection can receive messages. When a message is received,
 /// [`alloc`] must be called in order to allocate memory for this message, then
 /// [`stream_message`] must be called with the pointer returned by [`alloc`].
+///
+/// A "handshake type" must be provided. To do so, allocate a buffer with [`alloc`] and pass a
+/// pointer to it. This buffer is freed when this function is called.
+/// The buffer must contain a single 0 byte (indicating WebRTC), followed with the multihash
+/// representation of the hash of the local node's TLS certificate, followed with the multihash
+/// representation of the hash of the remote node's TLS certificate.
 #[no_mangle]
 pub extern "C" fn connection_open_multi_stream(
     connection_id: u32,
-    peer_id_ptr: u32,
-    peer_id_len: u32,
+    handshake_ty_ptr: u32,
+    handshake_ty_len: u32,
 ) {
-    crate::platform::connection_open_multi_stream(connection_id, peer_id_ptr, peer_id_len)
+    crate::platform::connection_open_multi_stream(connection_id, handshake_ty_ptr, handshake_ty_len)
 }
 
 /// Notify of a message being received on the stream. The connection associated with that stream
@@ -511,11 +535,12 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, l
 /// For the `outbound` parameter, pass `0` if the substream has been opened by the remote, and any
 /// value other than `0` if the substream has been opened in response to a call to
 /// [`connection_stream_open`].
+#[no_mangle]
 pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
     crate::platform::connection_stream_opened(connection_id, stream_id, outbound)
 }
 
-/// Can be called at any point by the JavaScript code if the connection switches to the `Closed`
+/// Can be called at any point by the JavaScript code if the connection switches to the `Reset`
 /// state.
 ///
 /// Must only be called once per connection object.
@@ -525,11 +550,11 @@ pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, o
 ///
 /// See also [`connection_new`].
 #[no_mangle]
-pub extern "C" fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
-    crate::platform::connection_closed(connection_id, ptr, len)
+pub extern "C" fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
+    crate::platform::connection_reset(connection_id, ptr, len)
 }
 
-/// Can be called at any point by the JavaScript code if the stream switches to the `Closed`
+/// Can be called at any point by the JavaScript code if the stream switches to the `Reset`
 /// state.
 ///
 /// Must only be called once per stream.
@@ -540,6 +565,6 @@ pub extern "C" fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
 ///
 /// See also [`connection_open_multi_stream`].
 #[no_mangle]
-pub extern "C" fn stream_closed(connection_id: u32, stream_id: u32) {
-    crate::platform::stream_closed(connection_id, stream_id)
+pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32) {
+    crate::platform::stream_reset(connection_id, stream_id)
 }

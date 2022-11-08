@@ -35,14 +35,12 @@ use futures::{
     lock::Mutex,
     prelude::*,
 };
-use futures_timer::Delay;
 use hashbrown::HashMap;
 use smoldot::{
     database::full_sqlite,
     header,
     informant::HashDisplay,
     libp2p::{
-        async_std_connection::with_buffers,
         connection,
         multiaddr::{Multiaddr, ProtocolRef},
         peer_id::{self, PeerId},
@@ -60,6 +58,8 @@ use std::{
     time::Instant,
 };
 use tracing::Instrument as _;
+
+mod tasks;
 
 /// Configuration for a [`NetworkService`].
 pub struct Config<'a> {
@@ -182,6 +182,12 @@ struct Guarded {
         fnv::FnvBuildHasher,
     >,
 
+    /// List of peer and chain index tuples for which no outbound slot should be assigned.
+    ///
+    /// The values are the moment when the ban expires.
+    // TODO: use SipHasher
+    slots_assign_backoff: HashMap<(PeerId, usize), Instant, fnv::FnvBuildHasher>,
+
     messages_from_connections_tx:
         mpsc::Sender<(service::ConnectionId, service::ConnectionToCoordinator)>,
 
@@ -251,11 +257,7 @@ impl NetworkService {
         // Add the bootnodes to the inner state machine.
         for (chain_index, chain) in config.chains.into_iter().enumerate() {
             for (peer_id, addr) in chain.bootstrap_nodes {
-                network.discover(
-                    &Instant::now(),
-                    chain_index,
-                    iter::once((peer_id, iter::once(addr))),
-                );
+                network.discover(&Instant::now(), chain_index, peer_id, iter::once(addr));
             }
         }
 
@@ -283,6 +285,10 @@ impl NetworkService {
                     messages_from_connections_rx,
                     conn_tasks_tx: conn_tasks_tx.clone(),
                     network,
+                    slots_assign_backoff: hashbrown::HashMap::with_capacity_and_hasher(
+                        50, // TODO: ?
+                        Default::default(),
+                    ),
                     active_connections: hashbrown::HashMap::with_capacity_and_hasher(
                         100, // TODO: ?
                         Default::default(),
@@ -371,6 +377,7 @@ impl NetworkService {
                         }
                     }
                 } else {
+                    // TODO: support WebSocket server
                     return Err(InitError::BadListenMultiaddr(listen_address));
                 }
             };
@@ -393,6 +400,15 @@ impl NetworkService {
                             }
                         };
 
+                        // The Nagle algorithm, implemented in the kernel, consists in buffering the
+                        // data to be sent out and waiting a bit before actually sending it out, in
+                        // order to potentially merge multiple writes in a row into one packet. In
+                        // the implementation below, it is guaranteed that the buffer in `WithBuffers`
+                        // is filled with as much data as possible before the operating system gets
+                        // involved. As such, we disable the Nagle algorithm, in order to avoid adding
+                        // an artificial delay to all sends.
+                        let _ = socket.set_nodelay(true);
+
                         let multiaddr = [
                             match addr.ip() {
                                 IpAddr::V4(ip) => ProtocolRef::Ip4(ip.octets()),
@@ -410,13 +426,14 @@ impl NetworkService {
                             let (connection_id, connection_task) =
                                 guarded.network.add_single_stream_incoming_connection(
                                     Instant::now(),
+                                    service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
                                     multiaddr.clone(),
                                 );
 
                             let (tx, rx) = mpsc::channel(16); // TODO: ?!
                             guarded.active_connections.insert(connection_id, tx);
 
-                            established_connection_task(
+                            tasks::established_connection_task(
                                 socket,
                                 inner.clone(),
                                 connection_id,
@@ -538,7 +555,7 @@ impl NetworkService {
 
         // The call to `send_block_announce` below panics if we have no active connection.
         // TODO: not the correct check; must make sure that we have a substream open
-        if !guarded.network.has_established_connection(target) {
+        if !guarded.network.can_start_requests(target) {
             return Err(QueueNotificationError::NoConnection);
         }
 
@@ -607,7 +624,7 @@ impl NetworkService {
             let mut guarded = self.inner.guarded.lock().await;
 
             // The call to `start_blocks_request` below panics if we have no active connection.
-            if !guarded.network.has_established_connection(&target) {
+            if !guarded.network.can_start_requests(&target) {
                 return Err(BlocksRequestError::NoConnection);
             }
 
@@ -796,6 +813,9 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                                 %error,
                                 "block-announce-bad-header"
                             );
+
+                            guarded.unassign_slot_and_ban(chain_index, peer_id);
+                            inner.wake_up_main_background_task.notify(1);
                         }
                     }
                 }
@@ -825,16 +845,28 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     ..
                 } => {
                     tracing::debug!(%peer_id, "chain-disconnected");
+
+                    guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                    inner.wake_up_main_background_task.notify(1);
+
                     break Event::Disconnected {
                         chain_index,
                         peer_id,
                     };
                 }
-                service::Event::ChainConnectAttemptFailed { peer_id, error, .. } => {
+                service::Event::ChainConnectAttemptFailed {
+                    chain_index,
+                    peer_id,
+                    error,
+                    ..
+                } => {
                     tracing::debug!(
                         %peer_id, %error,
                         "chain-connect-attempt-failed"
                     );
+
+                    guarded.unassign_slot_and_ban(chain_index, peer_id);
+                    inner.wake_up_main_background_task.notify(1);
                 }
                 service::Event::InboundSlotAssigned { .. } => {
                     // TODO: log this
@@ -872,9 +904,14 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     match result {
                         Ok(nodes) => {
                             tracing::debug!(discovered = ?nodes, "discovered");
-                            guarded
-                                .network
-                                .discover(&Instant::now(), chain_index, nodes);
+                            for (peer_id, addrs) in nodes {
+                                guarded.network.discover(
+                                    &Instant::now(),
+                                    chain_index,
+                                    peer_id,
+                                    addrs,
+                                );
+                            }
                         }
                         Err(error) => {
                             tracing::debug!(%error, "discovery-error");
@@ -938,12 +975,16 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     );
                 }
                 service::Event::ProtocolError { peer_id, error } => {
-                    // TODO: handle properly?
                     tracing::warn!(
                         %peer_id,
                         %error,
                         "protocol-error"
                     );
+
+                    for chain_index in 0..guarded.network.num_chains() {
+                        guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                    }
+                    inner.wake_up_main_background_task.notify(1);
                 }
             }
         };
@@ -973,14 +1014,31 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
 
     // TODO: doc
     for chain_index in 0..guarded.network.num_chains() {
+        let now = Instant::now();
+
+        // Clean up the content of `slots_assign_backoff`.
+        // TODO: the background task should be woken up when the ban expires
+        // TODO: O(n)
+        guarded
+            .slots_assign_backoff
+            .retain(|_, expiration| *expiration > now);
+
+        // Assign outgoing slots.
         loop {
-            let assigned_peer = guarded.network.assign_slots(chain_index);
-            if let Some(assigned_peer) = assigned_peer {
-                // TODO: log slot de-assignments
-                tracing::debug!(peer_id = %assigned_peer, %chain_index, "slot-assigned");
-            } else {
-                break;
-            }
+            let peer_to_assign = guarded
+                .network
+                .slots_to_assign(chain_index)
+                .filter(|peer_id| {
+                    !guarded
+                        .slots_assign_backoff
+                        .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
+                })
+                .next()
+                .cloned();
+
+            let Some(peer_to_assign) = peer_to_assign else { break };
+            tracing::debug!(peer_id = %peer_to_assign, %chain_index, "slot-assigned");
+            guarded.network.assign_out_slot(chain_index, peer_to_assign);
         }
     }
 
@@ -1001,7 +1059,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
         guarded.num_pending_out_attempts += 1;
 
         // Perform the connection process in a separate task.
-        let task = opening_connection_task(
+        let task = tasks::opening_connection_task(
             start_connect,
             inner.clone(),
             guarded.messages_from_connections_tx.clone(),
@@ -1032,341 +1090,21 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
     }
 }
 
-/// Asynchronous task managing a specific connection, including the dialing process.
-#[tracing::instrument(level = "trace", skip(start_connect, inner, connection_to_coordinator))]
-async fn opening_connection_task(
-    start_connect: service::StartConnect<Instant>,
-    inner: Arc<Inner>,
-    connection_to_coordinator: mpsc::Sender<(
-        service::ConnectionId,
-        service::ConnectionToCoordinator,
-    )>,
-) {
-    let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
-    let _enter = span.enter();
+impl Guarded {
+    fn unassign_slot_and_ban(&mut self, chain_index: usize, peer_id: PeerId) {
+        self.network.unassign_slot(chain_index, &peer_id);
 
-    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
-    // a `Future<dyn Output = Result<TcpStream, ...>>`.
-    let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
-        Ok(socket) => socket,
-        Err(_) => {
-            tracing::debug!(%start_connect.multiaddr, "not-tcp");
-            drop(_enter);
-
-            let mut guarded = inner.guarded.lock().await;
-            guarded.num_pending_out_attempts -= 1;
-            guarded.network.pending_outcome_err(start_connect.id, true);
-            inner.wake_up_main_background_task.notify(1);
-            return;
-        }
-    };
-    drop(_enter);
-
-    // Finishing ongoing connection process.
-    let socket = {
-        let now = Instant::now();
-        let mut timeout = Delay::new(if start_connect.timeout >= now {
-            start_connect.timeout - now
-        } else {
-            // `timeout - now` would panic
-            Duration::new(0, 0)
-        })
-        .fuse();
-        let socket = socket.fuse();
-        futures::pin_mut!(socket);
-        futures::select! {
-            _ = timeout => {
-                let mut guarded = inner.guarded.lock().await;
-                guarded.num_pending_out_attempts -= 1;
-                guarded.network.pending_outcome_err(start_connect.id, false);
-                inner.wake_up_main_background_task.notify(1);
-                return;
+        let new_expiration = Instant::now() + Duration::from_secs(20); // TODO: arbitrary constant
+        match self.slots_assign_backoff.entry((peer_id, chain_index)) {
+            hashbrown::hash_map::Entry::Occupied(e) if *e.get() < new_expiration => {
+                *e.into_mut() = new_expiration;
             }
-            result = socket => {
-                match result {
-                    Ok(s) => s,
-                    Err(_) => {
-                        let mut guarded = inner.guarded.lock().await;
-                        guarded.num_pending_out_attempts -= 1;
-                        guarded.network.pending_outcome_err(start_connect.id, true);
-                        inner.wake_up_main_background_task.notify(1);
-                        return;
-                    }
-                }
+            hashbrown::hash_map::Entry::Occupied(_) => {}
+            hashbrown::hash_map::Entry::Vacant(e) => {
+                e.insert(new_expiration);
             }
         }
-    };
-
-    // Inform the underlying network state machine that this dialing attempt
-    // has succeeded.
-    let mut guarded = inner.guarded.lock().await;
-    guarded.num_pending_out_attempts -= 1;
-    let (connection_id, connection_task) = guarded
-        .network
-        .pending_outcome_ok_single_stream(start_connect.id);
-    inner.wake_up_main_background_task.notify(1);
-
-    let (tx, rx) = mpsc::channel(16); // TODO: ?!
-    guarded.active_connections.insert(connection_id, tx);
-
-    // Now run the connection.
-    drop(guarded);
-    established_connection_task(
-        socket,
-        inner,
-        connection_id,
-        connection_task,
-        rx,
-        connection_to_coordinator,
-    )
-    .await;
-}
-
-/// Asynchronous task managing a specific connection.
-#[tracing::instrument(
-    level = "trace",
-    skip(
-        tcp_socket,
-        inner,
-        connection_task,
-        coordinator_to_connection,
-        connection_to_coordinator
-    )
-)]
-async fn established_connection_task(
-    tcp_socket: async_std::net::TcpStream,
-    inner: Arc<Inner>,
-    connection_id: service::ConnectionId,
-    mut connection_task: service::SingleStreamConnectionTask<Instant>,
-    coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<Instant>>,
-    mut connection_to_coordinator: mpsc::Sender<(
-        service::ConnectionId,
-        service::ConnectionToCoordinator,
-    )>,
-) {
-    // The Nagle algorithm, implemented in the kernel, consists in buffering the data to be
-    // sent out and waiting a bit before actually sending it out, in order to potentially merge
-    // multiple writes in a row into one packet. In the implementation below, it is guaranteed
-    // that the buffer in `WithBuffers` is filled with as much data as possible before the
-    // operating system gets involved. As such, we disable the Nagle algorithm, in order to
-    // avoid adding an artificial delay to all sends.
-    let _ = tcp_socket.set_nodelay(true);
-
-    // The socket is wrapped around a `WithBuffers` object containing a read buffer and a write
-    // buffer. These are the buffers whose pointer is passed to `read(2)` and `write(2)` when
-    // reading/writing the socket.
-    //
-    // Contains `None` if an I/O error has happened on the socket in the past.
-    let mut tcp_socket = Some(with_buffers::WithBuffers::new(tcp_socket));
-
-    // We need to use `peek()` on this future later down this function.
-    let mut coordinator_to_connection = coordinator_to_connection.peekable();
-
-    loop {
-        // Inject in the connection task the messages coming from the coordinator, if any.
-        loop {
-            let message = match coordinator_to_connection.next().now_or_never() {
-                Some(Some(msg)) => msg,
-                _ => break,
-            };
-            connection_task.inject_coordinator_message(message);
-        }
-
-        let wake_up_after = if let Some(socket) = tcp_socket.as_mut() {
-            let (read_buffer, write_buffer) = match socket.buffers() {
-                Ok(b) => b,
-                Err(error) => {
-                    tracing::debug!(%error, "connection-error");
-                    connection_task.reset();
-                    tcp_socket = None;
-                    continue;
-                }
-            };
-
-            let outgoing_buffer_was_closed = write_buffer.is_none();
-
-            let mut read_write = service::ReadWrite {
-                now: Instant::now(),
-                incoming_buffer: read_buffer.map(|b| b.0),
-                outgoing_buffer: write_buffer,
-                read_bytes: 0,
-                written_bytes: 0,
-                wake_up_after: None,
-            };
-
-            connection_task.read_write(&mut read_write);
-
-            if read_write.read_bytes != 0
-                || read_write.written_bytes != 0
-                || read_write.outgoing_buffer.is_none()
-            {
-                tracing::event!(
-                    tracing::Level::TRACE,
-                    read = read_write.read_bytes,
-                    written = read_write.written_bytes,
-                    "wake-up" = ?read_write.wake_up_after,  // TODO: ugly display
-                    "write-close" = read_write.outgoing_buffer.is_none(),
-                );
-            }
-
-            // We need to destroy `read_write` in order to un-borrow `socket`.
-            let read_bytes = read_write.read_bytes;
-            let written_bytes = read_write.written_bytes;
-            let wake_up_after = read_write.wake_up_after.take();
-            let outgoing_buffer_now_closed = read_write.outgoing_buffer.is_none();
-
-            if outgoing_buffer_now_closed && !outgoing_buffer_was_closed {
-                socket.close();
-            }
-
-            socket.advance(read_bytes, written_bytes);
-
-            if read_bytes != 0 || written_bytes != 0 {
-                continue;
-            }
-
-            wake_up_after
-        } else {
-            None
-        };
-
-        // Try pull message to send to the coordinator.
-
-        // Calling this method takes ownership of the task and returns that task if it has
-        // more work to do. If `None` is returned, then the entire task is gone and the
-        // connection must be abruptly closed, which is what happens when we return from
-        // this function.
-        let (mut task_update, message) = connection_task.pull_message_to_coordinator();
-
-        // If `task_update` is `None`, the connection task is going to die as soon as the
-        // message reaches the coordinator. Before returning, we need to do a bit of clean up
-        // by removing the task from the list of active connections.
-        // This is done before the message is sent to the coordinator, in order to be sure
-        // that the connection id is still attributed to the current task, and not to a new
-        // connection that the coordinator has assigned after receiving the message.
-        if task_update.is_none() {
-            let mut guarded = inner.guarded.lock().await;
-            let _was_in = guarded.active_connections.remove(&connection_id);
-            debug_assert!(_was_in.is_some());
-        }
-
-        if let Some(message) = message {
-            // Sending this message might take a long time (in case the coordinator is busy),
-            // but this is intentional and serves as a back-pressure mechanism.
-            // However, it is important to continue processing the messages coming from the
-            // coordinator, otherwise this could result in a deadlock.
-
-            // We do this by waiting for `connection_to_coordinator` to be ready to accept
-            // an element. Due to the way channels work, once a channel is ready it will
-            // always remain ready until we push an element. While waiting, we process
-            // incoming messages.
-            loop {
-                futures::select! {
-                    _ = future::poll_fn(|cx| connection_to_coordinator.poll_ready(cx)).fuse() => break,
-                    message = coordinator_to_connection.next() => {
-                        if let Some(message) = message {
-                            if let Some(task_update) = &mut task_update {
-                                task_update.inject_coordinator_message(message);
-                            }
-                        } else {
-                            return;
-                        }
-                    }
-                }
-            }
-            let result = connection_to_coordinator.try_send((connection_id, message));
-            inner.wake_up_main_background_task.notify(1);
-            if result.is_err() {
-                return;
-            }
-        }
-
-        if let Some(task_update) = task_update {
-            connection_task = task_update;
-        } else {
-            return;
-        }
-
-        // Starting from here, we block the current task until more processing needs to happen.
-
-        // Future ready when the timeout indicated by the connection state machine is reached.
-        let poll_after = if let Some(wake_up) = wake_up_after {
-            let now = Instant::now();
-            if wake_up > now {
-                let dur = wake_up - now;
-                future::Either::Left(futures_timer::Delay::new(dur))
-            } else {
-                // "Wake up" immediately.
-                continue;
-            }
-        } else {
-            future::Either::Right(future::pending())
-        }
-        .fuse();
-
-        // Future that is woken up when new data is ready on the socket.
-        let connection_ready = if let Some(tcp_socket) = tcp_socket.as_mut() {
-            future::Either::Left(Pin::new(tcp_socket).process())
-        } else {
-            future::Either::Right(future::pending())
-        };
-
-        // Future that is woken up when a new message is coming from the coordinator.
-        let message_from_coordinator = Pin::new(&mut coordinator_to_connection).peek();
-
-        // Wait until either some data is ready on the socket, or the connection state machine
-        // has requested to be polled again, or a message is coming from the coordinator.
-        futures::pin_mut!(connection_ready);
-        future::select(
-            future::select(connection_ready, message_from_coordinator),
-            poll_after,
-        )
-        .await;
     }
-}
-
-/// Builds a future that connects to the given multiaddress. Returns an error if the multiaddress
-/// protocols aren't supported.
-fn multiaddr_to_socket(
-    addr: &Multiaddr,
-) -> Result<impl Future<Output = Result<async_std::net::TcpStream, io::Error>>, ()> {
-    let mut iter = addr.iter();
-    let proto1 = iter.next().ok_or(())?;
-    let proto2 = iter.next().ok_or(())?;
-
-    if iter.next().is_some() {
-        return Err(());
-    }
-
-    // Ensure ahead of time that the multiaddress is supported.
-    let addr = match (&proto1, &proto2) {
-        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port)) => {
-            either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port))
-        }
-        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port)) => {
-            either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port))
-        }
-        // TODO: we don't care about the differences between Dns, Dns4, and Dns6
-        (ProtocolRef::Dns(addr), ProtocolRef::Tcp(port)) => {
-            either::Right((addr.to_string(), *port))
-        }
-        (ProtocolRef::Dns4(addr), ProtocolRef::Tcp(port)) => {
-            either::Right((addr.to_string(), *port))
-        }
-        (ProtocolRef::Dns6(addr), ProtocolRef::Tcp(port)) => {
-            either::Right((addr.to_string(), *port))
-        }
-        _ => return Err(()),
-    };
-
-    Ok(async move {
-        match addr {
-            either::Left(socket_addr) => async_std::net::TcpStream::connect(socket_addr).await,
-            either::Right((dns, port)) => {
-                async_std::net::TcpStream::connect((&dns[..], port)).await
-            }
-        }
-    })
 }
 
 /// Builds the response to a block request by reading from the given database.
@@ -1410,11 +1148,11 @@ async fn blocks_request_response(
                     let decoded = header::decode(&header, block_number_bytes).unwrap();
                     match config.direction {
                         protocol::BlocksRequestDirection::Ascending => {
-                            protocol::BlocksRequestConfigStart::Hash(*decoded.parent_hash)
-                        }
-                        protocol::BlocksRequestDirection::Descending => {
                             // TODO: right now, since we don't necessarily pick the best chain in `block_hash_by_number`, it is possible that the next block doesn't have the current block as parent
                             protocol::BlocksRequestConfigStart::Number(decoded.number + 1)
+                        }
+                        protocol::BlocksRequestDirection::Descending => {
+                            protocol::BlocksRequestConfigStart::Hash(*decoded.parent_hash)
                         }
                     }
                 };
