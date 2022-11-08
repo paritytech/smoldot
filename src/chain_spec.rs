@@ -37,7 +37,7 @@
 use crate::{
     chain::chain_information::{
         build, BabeEpochInformation, ChainInformation, ChainInformationConsensus,
-        ChainInformationFinality,
+        ChainInformationFinality, ValidChainInformation,
     },
     executor, libp2p, trie,
 };
@@ -86,7 +86,8 @@ impl ChainSpec {
     /// genesis block.
     pub fn as_chain_information(
         &self,
-    ) -> Result<(ChainInformation, executor::host::HostVmPrototype), FromGenesisStorageError> {
+    ) -> Result<(ValidChainInformation, executor::host::HostVmPrototype), FromGenesisStorageError>
+    {
         let genesis_storage = match self.genesis_storage() {
             GenesisStorage::Items(items) => items,
             GenesisStorage::TrieRootHash(_) => {
@@ -173,8 +174,7 @@ impl ChainSpec {
             }
         };
 
-        // TODO: ! we return a ChainInformation while we have a ValidChainInformation
-        Ok((chain_info.into(), vm_prototype))
+        Ok((chain_info, vm_prototype))
     }
 
     /// Returns the name of the chain. Meant to be displayed to the user.
