@@ -17,7 +17,7 @@ path = "src/main.rs"
 async-std = "1.12.0"
 atty = "0.2.14"
 blake2-rfc = { version = "0.2.18", default-features = false }
-clap = { version = "4.0.18", default-features = false, features = ["color", "derive", "help", "std", "suggestions", "usage"] }  # Note: enabling/disabling some features modifies the internal behavior of clap, be careful
+clap = { version = "4.0.22", default-features = false, features = ["color", "derive", "help", "std", "suggestions", "usage"] }  # Note: enabling/disabling some features modifies the internal behavior of clap, be careful
 ctrlc = "3.2.2"
 derive_more = "0.99.17"
 directories = "4.0.1"
@@ -31,6 +31,6 @@ hex = { version = "0.4.3", default-features = false }
 mick-jaeger = "0.1.8"
 rand = "0.8.5"
 smoldot = { version = "0.4.0", path = "../..", default-features = false, features = ["database-sqlite", "std"] }
-terminal_size = "0.2.1"
+terminal_size = "0.2.2"
 tracing = { version = "0.1.37", features = ["attributes"] }
 tracing-subscriber = { version = "0.2.25", default-features = false, features = ["ansi", "chrono", "env-filter", "json", "fmt", "parking_lot", "smallvec"] }
