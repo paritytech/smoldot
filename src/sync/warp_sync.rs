@@ -335,6 +335,23 @@ struct DownloadedRuntime {
     storage_heap_pages: Option<Vec<u8>>,
 }
 
+/// See [`InProgressWarpSync::status`].
+#[derive(Debug)]
+pub enum Status<'a, TSrc> {
+    /// Warp syncing algorithm is downloading Grandpa warp sync fragments containing a finality
+    /// proof.
+    Fragments {
+        /// Source from which the fragments are currently being downloaded, if any.
+        source: Option<(SourceId, &'a TSrc)>,
+    },
+    /// Warp syncing algorithm has reached the head of the finalized chain and is downloading and
+    /// building the chain information.
+    ChainInformation {
+        /// Source from which the chain information is being downloaded.
+        source: (SourceId, &'a TSrc),
+    },
+}
+
 impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     /// Returns the value that was initially passed in [`Config::block_number_bytes`].
     pub fn block_number_bytes(&self) -> usize {
@@ -349,6 +366,61 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         // entire warp syncing has succeeded. If if it still in progress, all we can return is
         // the starting point.
         (&self.start_chain_information).into()
+    }
+
+    /// Returns the current status of the warp syncing.
+    pub fn status(&self) -> Status<TSrc> {
+        match self.phase {
+            Phase::DownloadFragments {
+                ref previous_verifier_values,
+            } => {
+                let start_block_hash = match previous_verifier_values.as_ref() {
+                    Some((header, _)) => header.hash(self.block_number_bytes),
+                    None => self
+                        .start_chain_information
+                        .as_ref()
+                        .finalized_block_header
+                        .hash(self.block_number_bytes),
+                };
+
+                let source_id =
+                    self.in_progress_requests
+                        .iter()
+                        .find_map(|(_, (source_id, _, rq))| match rq {
+                            RequestDetail::WarpSyncRequest { block_hash }
+                                if *block_hash == start_block_hash =>
+                            {
+                                Some(*source_id)
+                            }
+                            _ => None,
+                        });
+
+                Status::Fragments {
+                    source: source_id.map(|id| (id, &self.sources[id.0].user_data)),
+                }
+            }
+            Phase::PendingVerify {
+                downloaded_source, ..
+            } => Status::Fragments {
+                source: Some((
+                    downloaded_source,
+                    &self.sources[downloaded_source.0].user_data,
+                )),
+            },
+            Phase::RuntimeDownload {
+                warp_sync_source_id,
+                ..
+            }
+            | Phase::ChainInformationDownload {
+                warp_sync_source_id,
+                ..
+            } => Status::ChainInformation {
+                source: (
+                    warp_sync_source_id,
+                    &self.sources[warp_sync_source_id.0].user_data,
+                ),
+            },
+        }
     }
 
     /// Returns a list of all known sources stored in the state machine.

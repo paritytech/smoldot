@@ -84,7 +84,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
         pending_storage_requests: stream::FuturesUnordered::new(),
         pending_call_proof_requests: stream::FuturesUnordered::new(),
         warp_sync_taking_long_time_warning: future::Either::Left(TPlat::sleep(
-            Duration::from_secs(15),
+            Duration::from_secs(10),
         ))
         .fuse(),
         all_notifications: Vec::<mpsc::Sender<Notification>>::new(),
@@ -316,13 +316,26 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
             },
 
             () = &mut task.warp_sync_taking_long_time_warning => {
-                log::warn!(
-                    target: &task.log_target,
-                    "GrandPa warp sync still in progress and taking a long time"
-                );
+                match task.sync.status() {
+                    all::Status::Sync => {},
+                    all::Status::WarpSyncFragments { source: None } => {
+                        log::warn!(target: &task.log_target, "GrandPa warp sync idle");
+                    }
+                    all::Status::WarpSyncFragments { source: Some((_, (peer_id, _))) } |
+                    all::Status::WarpSyncChainInformation { source: (_, (peer_id, _)) } => {
+                        let finalized_block = task.sync.finalized_block_header();
+                        log::warn!(
+                            target: &task.log_target,
+                            "GrandPa warp sync in progress. Block: #{} (0x{}). Peer attempt: {}.",
+                            finalized_block.number,
+                            HashDisplay(&finalized_block.hash(task.sync.block_number_bytes())),
+                            peer_id
+                        );
+                    },
+                };
 
                 task.warp_sync_taking_long_time_warning =
-                    future::Either::Left(TPlat::sleep(Duration::from_secs(15))).fuse();
+                    future::Either::Left(TPlat::sleep(Duration::from_secs(10))).fuse();
                 continue;
             },
 
