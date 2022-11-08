@@ -30,6 +30,7 @@
 //! TCP handshake), depending on the strategy used for the multistream-select protocol.
 
 // TODO: finish commenting on the number of round trips
+// TODO: some round-trips can be removed: the multistream-select ones, and maybe also a Noise one, but it's complicated
 
 use super::{
     super::peer_id::PeerId,
