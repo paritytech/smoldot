@@ -20,7 +20,7 @@
 //! The light client is capable of serializing the state of the finalized block, which is called
 //! a database. It is not really what is commonly called a database, but rather simply a small
 //! JSON document.
-//! It can later unserialize this database.
+//! It can later de-serialize this database.
 //!
 //! This database doesn't contain just the state of the finalized block, but also other
 //! information. See [`DatabaseContent`].
