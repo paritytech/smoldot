@@ -863,7 +863,7 @@ impl<TPlat: Platform> Background<TPlat> {
         follow_subscription: &str,
         hash: methods::HashHexString,
         key: methods::HexString,
-        child_key: Option<methods::HexString>,
+        child_trie: Option<methods::HexString>,
         network_config: Option<methods::NetworkConfig>,
     ) {
         let network_config = network_config.unwrap_or(methods::NetworkConfig {
@@ -872,7 +872,8 @@ impl<TPlat: Platform> Background<TPlat> {
             total_attempts: 3,
         });
 
-        if child_key.is_some() {
+        if child_trie.is_some() {
+            // TODO: implement this
             self.requests_subscriptions
                 .respond(
                     &state_machine_request_id,
@@ -880,7 +881,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         request_id,
                         json_rpc::parse::ErrorResponse::ServerError(
                             -32000,
-                            "Child key storage queries not supported yet",
+                            "Child trie storage queries not supported yet",
                         ),
                         None,
                     ),
@@ -888,7 +889,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await;
             log::warn!(
                 target: &self.log_target,
-                "chainHead_unstable_storage with a non-null childKey has been called. \
+                "chainHead_unstable_storage with a non-null childTrie has been called. \
                 This isn't supported by smoldot yet."
             );
             return;

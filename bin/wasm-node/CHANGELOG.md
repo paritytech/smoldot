@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The `childKey` parameter of the `chainHead_unstable_storage` JSON-RPC function has been renamed to `childTrie` in accordance to the latest specification changes.
+
 ## 0.7.6 - 2022-11-04
 
 ### Fixed

@@ -434,7 +434,7 @@ define_methods! {
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         key: HexString,
-        #[rename = "childKey"] child_key: Option<HexString>,
+        #[rename = "childTrie"] child_trie: Option<HexString>,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
     chainHead_unstable_unfollow(
