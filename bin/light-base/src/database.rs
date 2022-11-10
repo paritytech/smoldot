@@ -107,7 +107,7 @@ pub async fn encode_database<TPlat: platform::Platform>(
             // Can't shrink the database anymore. Return the string `"<too-large>"` which will
             // fail to decode but will indicate what is wrong.
             let dummy_message = "<too-large>";
-            return if dummy_message.len() >= max_size {
+            return if dummy_message.len() > max_size {
                 String::new()
             } else {
                 dummy_message.to_owned()
