@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- Add support for version 2 of the `TransactionPaymentApi` runtime API. This fixes the `payment_queryInfo` JSON-RPC call with newer runtime versions.
+
+### Changed
+
+- The version of the runtime API is now verified to match the excepted value when the `payment_queryInfo`, `state_getMetadata`, and `system_accountNextIndex` JSON-RPC functions are called. This means that without an update to the smoldot source code these JSON-RPC functions will stop working if the runtime API is out of range. However, this eliminates the likelihood that smoldot returns accidentally parses a value in a different way than intended and an incorrect result.
+
 ## 0.7.6 - 2022-11-04
 
 ### Fixed
