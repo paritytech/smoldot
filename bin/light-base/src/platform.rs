@@ -24,6 +24,7 @@ pub mod async_std;
 /// Access to a platform's capabilities.
 pub trait Platform: Send + 'static {
     type Delay: Future<Output = ()> + Unpin + Send + 'static;
+    type Yield: Future<Output = ()> + Unpin + Send + 'static;
     type Instant: Clone
         + ops::Add<Duration, Output = Self::Instant>
         + ops::Sub<Self::Instant, Output = Duration>
@@ -70,6 +71,11 @@ pub trait Platform: Send + 'static {
 
     /// Creates a future that becomes ready after the given instant has been reached.
     fn sleep_until(when: Self::Instant) -> Self::Delay;
+
+    /// Should be called after a CPU-intensive operation in order to yield back control.
+    ///
+    /// This function can be implemented as no-op on platforms where this is irrelevant.
+    fn yield_after_cpu_intensive() -> Self::Yield;
 
     /// Starts a connection attempt to the given multiaddress.
     ///

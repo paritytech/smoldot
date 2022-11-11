@@ -20,7 +20,7 @@ use crate::{bindings, timers::Delay};
 use smoldot::libp2p::multihash;
 use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
 
-use core::{cmp, mem, slice, str, time::Duration};
+use core::{cmp, mem, pin, slice, str, task, time::Duration};
 use futures::prelude::*;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -42,6 +42,7 @@ pub(crate) struct Platform;
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
 impl smoldot_light::platform::Platform for Platform {
     type Delay = Delay;
+    type Yield = Yield;
     type Instant = crate::Instant;
     type Connection = ConnectionWrapper; // Entry in the ̀`CONNECTIONS` map.
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
@@ -75,6 +76,20 @@ impl smoldot_light::platform::Platform for Platform {
 
     fn sleep_until(when: Self::Instant) -> Self::Delay {
         Delay::new_at(when)
+    }
+
+    fn yield_after_cpu_intensive() -> Self::Yield {
+        // We do not yield once, but twice.
+        // The reason is that, at the time of writing, `FuturesUnordered` yields to the outside
+        // after one of its futures has yielded twice.
+        // Yielding to the outside is important in the context of the browser node because it
+        // gives time to the browser to run its own events loop.
+        // See <https://github.com/rust-lang/futures-rs/blob/7a98cf0bbeb397dcfaf5f020b371ab9e836d33d4/futures-util/src/stream/futures_unordered/mod.rs#L531>
+        // See <https://github.com/rust-lang/futures-rs/issues/2053> for a discussion about a proper
+        // solution.
+        Yield {
+            num_pending_remain: 2,
+        }
     }
 
     fn connect(url: &str) -> Self::ConnectFuture {
@@ -349,6 +364,24 @@ impl smoldot_light::platform::Platform for Platform {
                 u32::try_from(data.as_ptr() as usize).unwrap(),
                 u32::try_from(data.len()).unwrap(),
             );
+        }
+    }
+}
+
+pub(crate) struct Yield {
+    num_pending_remain: u32,
+}
+
+impl Future for Yield {
+    type Output = ();
+
+    fn poll(mut self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        if self.num_pending_remain > 0 {
+            self.num_pending_remain -= 1;
+            cx.waker().wake_by_ref();
+            task::Poll::Pending
+        } else {
+            task::Poll::Ready(())
         }
     }
 }

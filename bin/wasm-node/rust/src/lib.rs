@@ -25,12 +25,15 @@ use core::{
     ops::{Add, Sub},
     pin::Pin,
     slice, str,
-    task::{Context, Poll},
+    sync::atomic,
     time::Duration,
 };
 use futures::prelude::*;
 use smoldot_light::HandleRpcError;
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    task,
+};
 
 pub mod bindings;
 
@@ -120,12 +123,26 @@ lazy_static::lazy_static! {
     static ref CLIENT: Mutex<Option<init::Client<platform::Platform, ()>>> = Mutex::new(None);
 }
 
-fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_limit: u32) {
-    let init_out = init::init(max_log_level, enable_current_task != 0, cpu_rate_limit);
+fn init(
+    max_log_level: u32,
+    enable_current_task: u32,
+    cpu_rate_limit: u32,
+    periodically_yield: u32,
+) {
+    let init_out = init::init(
+        max_log_level,
+        enable_current_task != 0,
+        cpu_rate_limit,
+        periodically_yield != 0,
+    );
 
     let mut client_lock = crate::CLIENT.lock().unwrap();
     assert!(client_lock.is_none());
     *client_lock = Some(init_out);
+}
+
+fn set_periodically_yield(periodically_yield: u32) {
+    CLIENT.lock().unwrap().as_mut().unwrap().periodically_yield = periodically_yield != 0;
 }
 
 fn start_shutdown() {
@@ -273,12 +290,13 @@ fn add_chain(
     // Poll the receiver once in order for `json_rpc_responses_non_empty` to be called the first
     // time a response is received.
     if let Some(json_rpc_responses) = json_rpc_responses.as_mut() {
-        let _polled_result = Pin::new(json_rpc_responses).poll_next(&mut Context::from_waker(
-            &Arc::new(JsonRpcResponsesNonEmptyWaker {
-                chain_id: outer_chain_id_u32,
-            })
-            .into(),
-        ));
+        let _polled_result =
+            Pin::new(json_rpc_responses).poll_next(&mut task::Context::from_waker(
+                &Arc::new(JsonRpcResponsesNonEmptyWaker {
+                    chain_id: outer_chain_id_u32,
+                })
+                .into(),
+            ));
         debug_assert!(_polled_result.is_pending());
     }
 
@@ -318,8 +336,9 @@ fn remove_chain(chain_id: u32) {
             // Therefore, we poll the receiver again with a dummy "no-op" waker for the sole
             // purpose of erasing the previously-registered waker.
             if let Some(mut json_rpc_responses_rx) = json_rpc_responses_rx {
-                let _ = Pin::new(&mut json_rpc_responses_rx)
-                    .poll_next(&mut Context::from_waker(futures::task::noop_waker_ref()));
+                let _ = Pin::new(&mut json_rpc_responses_rx).poll_next(
+                    &mut task::Context::from_waker(futures::task::noop_waker_ref()),
+                );
             }
 
             let () = client_lock
@@ -434,24 +453,24 @@ fn json_rpc_responses_peek(chain_id: u32) -> u32 {
                 if let Some(json_rpc_responses_rx) = json_rpc_responses_rx.as_mut() {
                     loop {
                         match Pin::new(&mut *json_rpc_responses_rx).poll_next(
-                            &mut Context::from_waker(
+                            &mut task::Context::from_waker(
                                 &Arc::new(JsonRpcResponsesNonEmptyWaker { chain_id }).into(),
                             ),
                         ) {
-                            Poll::Ready(Some(response)) if response.is_empty() => {
+                            task::Poll::Ready(Some(response)) if response.is_empty() => {
                                 // The API of `json_rpc_responses_peek` says that a length of 0
                                 // indicates that the queue is empty. For this reason, we skip
                                 // this response.
                                 // This is a pretty niche situation, but at least we handle it
                                 // properly.
                             }
-                            Poll::Ready(Some(response)) => {
+                            task::Poll::Ready(Some(response)) => {
                                 debug_assert!(!response.is_empty());
                                 *json_rpc_response = Some(response);
                                 break;
                             }
-                            Poll::Ready(None) => unreachable!(),
-                            Poll::Pending => break,
+                            task::Poll::Ready(None) => unreachable!(),
+                            task::Poll::Pending => break,
                         }
                     }
                 }
@@ -503,8 +522,53 @@ struct JsonRpcResponsesNonEmptyWaker {
     chain_id: u32,
 }
 
-impl std::task::Wake for JsonRpcResponsesNonEmptyWaker {
+impl task::Wake for JsonRpcResponsesNonEmptyWaker {
     fn wake(self: Arc<Self>) {
         unsafe { bindings::json_rpc_responses_non_empty(self.chain_id) }
+    }
+}
+
+fn advance_execution() {
+    let mut client_lock = CLIENT.lock().unwrap();
+    let client_lock = client_lock.as_mut().unwrap();
+
+    struct Waker {
+        woken_up: atomic::AtomicBool,
+    }
+
+    impl task::Wake for Waker {
+        fn wake(self: Arc<Self>) {
+            self.woken_up.store(true, atomic::Ordering::Release);
+        }
+    }
+
+    let waker = Arc::new(Waker {
+        woken_up: atomic::AtomicBool::new(false),
+    });
+
+    loop {
+        match client_lock
+            .main_task
+            .poll_unpin(&mut task::Context::from_waker(&waker.clone().into()))
+        {
+            task::Poll::Ready(infallible) => match infallible {}, // Unreachable
+            task::Poll::Pending => {}
+        }
+
+        // If the task didn't wake itself up, then there is nothing left to execute immediately
+        // and we break out of the loop.
+        if !waker.woken_up.swap(false, atomic::Ordering::AcqRel) {
+            break;
+        }
+
+        // If the task woke itself up (which means that it has more to execute), we continue
+        // looping provided that `periodically_yield` is `false`.
+        if !client_lock.periodically_yield {
+            continue;
+        }
+
+        // If the task woke itself up and `periodically_yield` is `true`, we use
+        // `setTimeout(..., 0)` to actually yield.
+        start_timer_wrap(Duration::new(0, 0), advance_execution);
     }
 }

@@ -17,28 +17,21 @@
 
 use crate::{alloc, bindings, cpu_rate_limiter, platform, timers::Delay};
 
-use core::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use core::{future::Future, pin::Pin, time::Duration};
 use futures::{channel::mpsc, prelude::*};
 use smoldot::informant::BytesDisplay;
-use std::{
-    panic,
-    sync::{
-        atomic::{self, Ordering},
-        Arc, Mutex,
-    },
-    task,
-};
+use std::{panic, sync::atomic::Ordering, task};
 
 pub(crate) struct Client<TPlat: smoldot_light::platform::Platform, TChain> {
     pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
 
     /// List of all chains that have been added by the user.
     pub(crate) chains: slab::Slab<Chain>,
+
+    pub(crate) periodically_yield: bool,
+
+    /// Infinite-running task that must be executed in order to drive the execution of the client.
+    pub(crate) main_task: future::BoxFuture<'static, core::convert::Infallible>, // TODO: use `!` once stable
 }
 
 pub(crate) enum Chain {
@@ -69,6 +62,7 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
     max_log_level: u32,
     enable_current_task: bool,
     cpu_rate_limit: u32,
+    periodically_yield: bool,
 ) -> Client<TPlat, TChain> {
     // Try initialize the logging and the panic hook.
     let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
@@ -106,7 +100,7 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
 
     // This is the main future that executes the entire client.
     // It receives new tasks from `new_task_rx` and runs them.
-    spawn_background_task(cpu_rate_limiter::CpuRateLimiter::new(
+    let main_task = cpu_rate_limiter::CpuRateLimiter::new(
         async move {
             let mut all_tasks = stream::FuturesUnordered::new();
 
@@ -155,7 +149,8 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
             }
         },
         cpu_rate_limit,
-    ));
+    )
+    .boxed();
 
     // Spawn a constantly-running task that periodically prints the total memory usage of
     // the node.
@@ -208,6 +203,8 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
     Client {
         smoldot: client,
         chains: slab::Slab::with_capacity(8),
+        periodically_yield,
+        main_task,
     }
 }
 
@@ -253,59 +250,4 @@ impl log::Log for Logger {
     }
 
     fn flush(&self) {}
-}
-
-/// Spawns a task that runs forever in the background.
-fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) {
-    // The way this works is:
-    //
-    // - We use `start_timer_wrap` with a duration of 0 to schedule a closure for execution as
-    //   soon as possible.
-    // - This closure calls `Future::poll`. During the call to `Future::poll`, or later, the waker
-    //   might be invoked, which again uses `start_timer_wrap` to schedule the same closure for
-    //   execution as soon as possible, which calls `Future::poll` again, etc.
-    // - The waker might be invoked multiple times. To prevent the closure from being scheduled
-    //   multiple time, the `allow_schedule` field stores whether we are allowed to schedule the
-    //   closure. It is set to `false` when the closure is scheduled for execution.
-
-    struct Waker {
-        allow_schedule: atomic::AtomicBool,
-        future: Mutex<(future::BoxFuture<'static, ()>, bool)>,
-    }
-
-    impl task::Wake for Waker {
-        fn wake(self: Arc<Self>) {
-            if !self.allow_schedule.swap(false, atomic::Ordering::AcqRel) {
-                return;
-            }
-
-            crate::start_timer_wrap(Duration::new(0, 0), move || {
-                // The single-threaded-ness aspect of Wasm guarantees that the `Mutex` can only
-                // ever be locked once at a time.
-                let mut future = self.future.try_lock().unwrap();
-                if future.1 {
-                    return;
-                }
-
-                self.allow_schedule.store(true, atomic::Ordering::Release);
-
-                match Future::poll(
-                    future.0.as_mut(),
-                    &mut Context::from_waker(&task::Waker::from(self.clone())),
-                ) {
-                    Poll::Ready(()) => {
-                        future.1 = true;
-                    }
-                    Poll::Pending => {}
-                }
-            })
-        }
-    }
-
-    let waker = Arc::new(Waker {
-        allow_schedule: atomic::AtomicBool::new(true),
-        future: Mutex::new((Box::pin(future), false)),
-    });
-
-    task::Wake::wake(waker);
 }

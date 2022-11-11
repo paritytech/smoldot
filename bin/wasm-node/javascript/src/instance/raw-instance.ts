@@ -70,6 +70,19 @@ export interface PlatformBindings {
     getRandomValues: (buffer: Uint8Array) => void,
 
     /**
+     * The "should periodically yield" setting indicates whether the execution should periodically
+     * yield back control by using `setTimeout(..., 0)`.
+     *
+     * On platforms such as browsers where `setTimeout(..., 0)` takes way more than 0 milliseconds,
+     * this setting should be set to `false`.
+     *
+     * This function registers a callback that is called when the setting should be updated with
+     * a new value. It returns the initial value of the setting and a function used to unregister
+     * the callback.
+     */
+    registerShouldPeriodicallyYield: (callback: (newValue: boolean) => void) => [boolean, () => void],
+
+    /**
      * Tries to open a new connection using the given configuration.
      *
      * @see Connection
