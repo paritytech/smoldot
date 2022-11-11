@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.7 - 2022-11-11
+
 ### Added
 
 - Add support for version 2 of the `TransactionPaymentApi` runtime API. This fixes the `payment_queryInfo` JSON-RPC call with newer runtime versions. ([#2995](https://github.com/paritytech/smoldot/pull/2995))
