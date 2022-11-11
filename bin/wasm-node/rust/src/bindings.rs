@@ -24,7 +24,7 @@
 //! need to be implemented on the host side and provided to the WebAssembly virtual machine. The
 //! other functions are functions that the Rust code *exports*, and can be called by the host.
 //!
-//! # Reentrency
+//! # Re-entrency
 //!
 //! As a rule, none of the implementations of the functions that the host provides is allowed
 //! to call a function exported by Rust.
@@ -308,7 +308,7 @@ pub extern "C" fn init(
 ///
 /// This setting is important when smoldot is used from within a web page. When the web page is in
 /// the foreground, it should be set to `true` so that the web browser can render the page often
-/// enough to not cause any inconfort. When the web page is in the background, it should be set
+/// enough to not cause any discomfort. When the web page is in the background, it should be set
 /// to `false` because `setTimeout` gets a minimum delay of 1 second making [`start_timer`]
 /// unreliable.
 /// See also <https://developer.mozilla.org/en-US/docs/Web/API/setTimeout#timeouts_in_inactive_tabs>.
