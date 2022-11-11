@@ -406,11 +406,11 @@ where
     ///
     /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
     /// to determine when the handshake timeout expires.
-    // TODO: add an is_initiator parameter? right now we're always implicitly the initiator
     pub fn insert_multi_stream<TSubId>(
         &mut self,
         now: TNow,
         handshake_kind: MultiStreamHandshakeKind,
+        is_initiator: bool,
         user_data: TConn,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
@@ -421,6 +421,7 @@ where
 
         let connection_task = MultiStreamConnectionTask::new(
             self.randomness_seeds.gen(),
+            is_initiator,
             now,
             handshake_kind,
             self.max_inbound_substreams,

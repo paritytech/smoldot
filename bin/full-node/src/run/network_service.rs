@@ -871,9 +871,9 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                 service::Event::InboundSlotAssigned { .. } => {
                     // TODO: log this
                 }
-                service::Event::BlocksRequestResult {
+                service::Event::RequestResult {
                     request_id,
-                    response,
+                    response: service::RequestResult::Blocks(response),
                 } => {
                     let _ = guarded
                         .blocks_requests
@@ -881,12 +881,8 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                         .unwrap()
                         .send(response);
                 }
-                service::Event::GrandpaWarpSyncRequestResult { .. }
-                | service::Event::StateRequestResult { .. }
-                | service::Event::StorageProofRequestResult { .. }
-                | service::Event::CallProofRequestResult { .. }
-                | service::Event::KademliaFindNodeRequestResult { .. } => {
-                    // We never start a request of this kind.
+                service::Event::RequestResult { .. } => {
+                    // We never start a request of any other kind.
                     unreachable!()
                 }
                 service::Event::RequestInCancel { .. } => {

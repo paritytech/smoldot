@@ -496,6 +496,30 @@ where
         )
     }
 
+    /// Adds a multi-stream incoming connection to the state machine.
+    ///
+    /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
+    /// yet.
+    ///
+    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
+    /// to determine when the handshake timeout expires.
+    ///
+    /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
+    /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
+    /// libp2p protocol, its own address, in which case we send it.
+    pub fn add_multi_stream_incoming_connection<TSubId>(
+        &mut self,
+        when_connected: TNow,
+        handshake_kind: MultiStreamHandshakeKind,
+        remote_addr: multiaddr::Multiaddr,
+    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
+    where
+        TSubId: Clone + PartialEq + Eq + Hash,
+    {
+        self.inner
+            .add_multi_stream_incoming_connection(when_connected, handshake_kind, remote_addr)
+    }
+
     pub fn pull_message_to_connection(
         &mut self,
     ) -> Option<(ConnectionId, CoordinatorToConnection<TNow>)> {
@@ -1579,9 +1603,9 @@ where
                             }
                         }
 
-                        break Some(Event::BlocksRequestResult {
+                        break Some(Event::RequestResult {
                             request_id,
-                            response,
+                            response: RequestResult::Blocks(response),
                         });
                     }
                     (OutRequestTy::GrandpaWarpSync, chain_index) => {
@@ -1604,9 +1628,9 @@ where
                                 }
                             });
 
-                        break Some(Event::GrandpaWarpSyncRequestResult {
+                        break Some(Event::RequestResult {
                             request_id,
-                            response,
+                            response: RequestResult::GrandpaWarpSync(response),
                         });
                     }
                     (OutRequestTy::State, _) => {
@@ -1621,9 +1645,9 @@ where
                                     }
                                 });
 
-                        break Some(Event::StateRequestResult {
+                        break Some(Event::RequestResult {
                             request_id,
-                            response,
+                            response: RequestResult::State(response),
                         });
                     }
                     (OutRequestTy::StorageProof, _) => {
@@ -1643,9 +1667,9 @@ where
                                 }
                             });
 
-                        break Some(Event::StorageProofRequestResult {
+                        break Some(Event::RequestResult {
                             request_id,
-                            response,
+                            response: RequestResult::StorageProof(response),
                         });
                     }
                     (OutRequestTy::CallProof, _) => {
@@ -1668,9 +1692,9 @@ where
                                     }
                                 });
 
-                        break Some(Event::CallProofRequestResult {
+                        break Some(Event::RequestResult {
                             request_id,
-                            response,
+                            response: RequestResult::CallProof(response),
                         });
                     }
                     (OutRequestTy::KademliaFindNode, _) => {
@@ -1681,9 +1705,9 @@ where
                                     .map_err(KademliaFindNodeError::DecodeError)
                             });
 
-                        break Some(Event::KademliaFindNodeRequestResult {
+                        break Some(Event::RequestResult {
                             request_id,
-                            response,
+                            response: RequestResult::KademliaFindNode(response),
                         });
                     }
                     (OutRequestTy::KademliaDiscoveryFindNode(operation_id), _) => {
@@ -2580,34 +2604,9 @@ pub enum Event {
         unassigned_slot_ty: SlotTy,
     },
 
-    BlocksRequestResult {
+    RequestResult {
         request_id: OutRequestId,
-        response: Result<Vec<protocol::BlockData>, BlocksRequestError>,
-    },
-
-    GrandpaWarpSyncRequestResult {
-        request_id: OutRequestId,
-        response: Result<EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
-    },
-
-    StateRequestResult {
-        request_id: OutRequestId,
-        response: Result<EncodedStateResponse, StateRequestError>,
-    },
-
-    StorageProofRequestResult {
-        request_id: OutRequestId,
-        response: Result<EncodedMerkleProof, StorageProofRequestError>,
-    },
-
-    CallProofRequestResult {
-        request_id: OutRequestId,
-        response: Result<EncodedMerkleProof, CallProofRequestError>,
-    },
-
-    KademliaFindNodeRequestResult {
-        request_id: OutRequestId,
-        response: Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, KademliaFindNodeError>,
+        response: RequestResult,
     },
 
     /// The given peer has opened a block announces substream with the local node, and an inbound
@@ -2694,6 +2693,21 @@ pub enum Event {
 pub enum SlotTy {
     Inbound,
     Outbound,
+}
+
+/// Response to an outgoing request.
+///
+/// See [`Event::RequestResult`̀].
+#[derive(Debug)]
+pub enum RequestResult {
+    Blocks(Result<Vec<protocol::BlockData>, BlocksRequestError>),
+    GrandpaWarpSync(Result<EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>),
+    State(Result<EncodedStateResponse, StateRequestError>),
+    StorageProof(Result<EncodedMerkleProof, StorageProofRequestError>),
+    CallProof(Result<EncodedMerkleProof, CallProofRequestError>),
+    KademliaFindNode(
+        Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, KademliaFindNodeError>,
+    ),
 }
 
 /// Error that can happen when trying to open an outbound notifications substream.
