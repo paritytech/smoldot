@@ -32,28 +32,55 @@ pub fn payment_info_parameters(
 pub const PAYMENT_FEES_FUNCTION_NAME: &str = "TransactionPaymentApi_query_info";
 
 /// Attempt to decode the output of the runtime call.
+///
+/// Must be passed the version of the `TransactionPaymentApi` API, according to the runtime
+/// specification.
 pub fn decode_payment_info(
     scale_encoded: &'_ [u8],
+    api_version: u32,
 ) -> Result<methods::RuntimeDispatchInfo, DecodeError> {
-    match nom::combinator::all_consuming(nom_decode_payment_info::<nom::error::Error<&'_ [u8]>>)(
-        scale_encoded,
-    ) {
+    let is_api_v2 = match api_version {
+        1 => false,
+        2 => true,
+        _ => return Err(DecodeError::UnknownRuntimeVersion),
+    };
+
+    match nom::combinator::all_consuming(nom_decode_payment_info::<nom::error::Error<&'_ [u8]>>(
+        is_api_v2,
+    ))(scale_encoded)
+    {
         Ok((_, info)) => Ok(info),
-        Err(_) => Err(DecodeError()),
+        Err(_) => Err(DecodeError::ParseError),
     }
 }
 
 /// Potential error when decoding payment information runtime output.
 #[derive(Debug, derive_more::Display)]
-#[display(fmt = "Payment info parsing error")]
-pub struct DecodeError();
+pub enum DecodeError {
+    /// Failed to parse the return value of `TransactionPaymentApi_query_info`.
+    ParseError,
+    /// The `TransactionPaymentApi` API uses a version that smoldot doesn't support.
+    UnknownRuntimeVersion,
+}
 
 fn nom_decode_payment_info<'a, E: nom::error::ParseError<&'a [u8]>>(
-    value: &'a [u8],
-) -> nom::IResult<&'a [u8], methods::RuntimeDispatchInfo, E> {
+    is_api_v2: bool,
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], methods::RuntimeDispatchInfo, E> {
     nom::combinator::map(
         nom::sequence::tuple((
-            nom::number::complete::le_u64,
+            move |bytes| {
+                if is_api_v2 {
+                    nom::number::complete::le_u64(bytes)
+                } else {
+                    nom::combinator::map(
+                        nom::sequence::tuple((
+                            crate::util::nom_scale_compact_u64,
+                            crate::util::nom_scale_compact_u64,
+                        )),
+                        |(ref_time, _proof_size)| ref_time,
+                    )(bytes)
+                }
+            },
             nom::combinator::map_opt(nom::number::complete::u8, |n| match n {
                 0 => Some(methods::DispatchClass::Normal),
                 1 => Some(methods::DispatchClass::Operational),
@@ -105,5 +132,5 @@ fn nom_decode_payment_info<'a, E: nom::error::ParseError<&'a [u8]>>(
             class,
             partial_fee,
         },
-    )(value)
+    )
 }

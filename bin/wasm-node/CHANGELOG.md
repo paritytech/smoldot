@@ -2,9 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- Add support for version 2 of the `TransactionPaymentApi` runtime API. This fixes the `payment_queryInfo` JSON-RPC call with newer runtime versions. ([#2995](https://github.com/paritytech/smoldot/pull/2995))
+
 ### Changed
 
 - The `enableExperimentalWebRTC` field has been removed from `ClientConfig`, and replaced with a `forbidWebRtc` option. WebRTC is now considered stable enough to be enabled by default. ([#2977](https://github.com/paritytech/smoldot/pull/2977))
+- The version of the runtime API is now verified to match the excepted value when the `payment_queryInfo`, `state_getMetadata`, and `system_accountNextIndex` JSON-RPC functions are called. This means that without an update to the smoldot source code these JSON-RPC functions will stop working if the runtime API is out of range. However, this eliminates the likelihood that smoldot returns accidentally parses a value in a different way than intended and an incorrect result. ([#2995](https://github.com/paritytech/smoldot/pull/2995))
 - Reduced the number of networking round-trips after a connection has been opened by assuming that the remote supports the desired networking protocols instead of waiting for its confirmation. ([#2984](https://github.com/paritytech/smoldot/pull/2984))
 
 ## 0.7.6 - 2022-11-04

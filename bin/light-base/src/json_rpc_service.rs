@@ -57,6 +57,7 @@ use alloc::{
 use core::{
     iter,
     num::{NonZeroU32, NonZeroUsize},
+    ops,
     sync::atomic,
     time::Duration,
 };
@@ -1512,8 +1513,38 @@ impl<TPlat: Platform> Background<TPlat> {
     }
 
     /// Performs a runtime call to a random block.
-    // TODO: maybe add a parameter to check for a runtime API?
     async fn runtime_call(
+        self: &Arc<Self>,
+        block_hash: &[u8; 32],
+        runtime_api: &str,
+        required_api_version_range: impl ops::RangeBounds<u32>,
+        function_to_call: &str,
+        call_parameters: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        max_parallel: NonZeroU32,
+    ) -> Result<RuntimeCallResult, RuntimeCallError> {
+        let (return_value, api_version) = self
+            .runtime_call_inner(
+                block_hash,
+                Some((runtime_api, required_api_version_range)),
+                function_to_call,
+                call_parameters,
+                total_attempts,
+                timeout_per_request,
+                max_parallel,
+            )
+            .await?;
+        Ok(RuntimeCallResult {
+            return_value,
+            api_version: api_version.unwrap(),
+        })
+    }
+
+    /// Performs a runtime call to a random block.
+    ///
+    /// Similar to [`Background::runtime_call`], except that the API version isn't checked.
+    async fn runtime_call_no_api_check(
         self: &Arc<Self>,
         block_hash: &[u8; 32],
         function_to_call: &str,
@@ -1522,6 +1553,32 @@ impl<TPlat: Platform> Background<TPlat> {
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
     ) -> Result<Vec<u8>, RuntimeCallError> {
+        let (return_value, _api_version) = self
+            .runtime_call_inner(
+                block_hash,
+                None::<(&str, ops::RangeFull)>,
+                function_to_call,
+                call_parameters,
+                total_attempts,
+                timeout_per_request,
+                max_parallel,
+            )
+            .await?;
+        debug_assert!(_api_version.is_none());
+        Ok(return_value)
+    }
+
+    /// Performs a runtime call to a random block.
+    async fn runtime_call_inner(
+        self: &Arc<Self>,
+        block_hash: &[u8; 32],
+        runtime_api_check: Option<(&str, impl ops::RangeBounds<u32>)>,
+        function_to_call: &str,
+        call_parameters: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        max_parallel: NonZeroU32,
+    ) -> Result<(Vec<u8>, Option<u32>), RuntimeCallError> {
         // This function contains two steps: obtaining the runtime of the block in question,
         // then performing the actual call. The first step is the longest and most difficult.
         let precall = self.runtime_lock(block_hash).await?;
@@ -1536,6 +1593,22 @@ impl<TPlat: Platform> Background<TPlat> {
             )
             .await
             .unwrap(); // TODO: don't unwrap
+
+        // Check that the runtime version is correct.
+        let runtime_api_version = if let Some((api_name, version_range)) = runtime_api_check {
+            let version = virtual_machine
+                .runtime_version()
+                .decode()
+                .apis
+                .find_version(api_name);
+            match version {
+                None => return Err(RuntimeCallError::ApiNotFound),
+                Some(v) if version_range.contains(&v) => Some(v),
+                Some(v) => return Err(RuntimeCallError::ApiVersionUnknown { actual_version: v }),
+            }
+        } else {
+            None
+        };
 
         // Now that we have obtained the virtual machine, we can perform the call.
         // This is a CPU-only operation that executes the virtual machine.
@@ -1559,7 +1632,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                     let output = success.virtual_machine.value().as_ref().to_vec();
                     runtime_call_lock.unlock(success.virtual_machine.into_prototype());
-                    break Ok(output);
+                    break Ok((output, runtime_api_version));
                 }
                 read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
                     runtime_call_lock.unlock(error.prototype);
@@ -1617,6 +1690,13 @@ enum RuntimeCallError {
     StartError(host::StartErr),
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
     NextKeyForbidden,
+    /// Required runtime API isn't supported by the runtime.
+    ApiNotFound,
+    /// Version requirement of runtime API isn't supported.
+    ApiVersionUnknown {
+        /// Version that the runtime supports.
+        actual_version: u32,
+    },
 }
 
 /// Error potentially returned by [`Background::state_trie_root_hash`].
@@ -1626,4 +1706,10 @@ enum StateTrieRootHashError {
     HeaderDecodeError(header::Error),
     /// Error while fetching block header from network.
     NetworkQueryError,
+}
+
+#[derive(Debug)]
+struct RuntimeCallResult {
+    return_value: Vec<u8>,
+    api_version: u32,
 }
