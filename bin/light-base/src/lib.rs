@@ -81,18 +81,17 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{cmp, num::NonZeroU32, pin::Pin};
+use core::{num::NonZeroU32, pin::Pin};
 use futures::{channel::oneshot, prelude::*};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
-    chain, chain_spec,
-    database::finalized_serialize,
-    header,
+    chain, chain_spec, header,
     informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id},
 };
 
+mod database;
 mod json_rpc_service;
 mod network_service;
 mod runtime_service;
@@ -363,44 +362,53 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                         s.as_chain_information(),
                     )
                 }),
-                decode_database(
+                database::decode_database(
                     config.database_content,
                     chain_spec.block_number_bytes().into(),
                 ),
             ) {
                 // Use the database if it contains a more recent block than the chain spec checkpoint.
-                (
-                    Ok(Ok(genesis_ci)),
-                    checkpoint,
-                    Ok((genesis_hash, database, checkpoint_nodes)),
-                ) if genesis_hash
-                    == genesis_ci
-                        .as_ref()
-                        .finalized_block_header
-                        .hash(chain_spec.block_number_bytes().into())
-                    && checkpoint
-                        .as_ref()
-                        .and_then(|r| r.as_ref().ok())
-                        .map_or(true, |cp| {
-                            cp.as_ref().finalized_block_header.number
-                                < database.as_ref().finalized_block_header.number
-                        }) =>
+                (Ok(Ok(genesis_ci)), checkpoint, Ok(database_content))
+                    if database_content.genesis_block_hash
+                        == genesis_ci
+                            .as_ref()
+                            .finalized_block_header
+                            .hash(chain_spec.block_number_bytes().into())
+                        && checkpoint.as_ref().and_then(|r| r.as_ref().ok()).map_or(
+                            true,
+                            |cp| {
+                                cp.as_ref().finalized_block_header.number
+                                    < database_content
+                                        .chain_information
+                                        .as_ref()
+                                        .finalized_block_header
+                                        .number
+                            },
+                        ) =>
                 {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
-                    (database, genesis_header.into(), checkpoint_nodes)
+                    (
+                        database_content.chain_information,
+                        genesis_header.into(),
+                        database_content.known_nodes,
+                    )
                 }
 
                 // Use the database if it contains a more recent block than the chain spec checkpoint.
                 (
                     Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
                     checkpoint,
-                    Ok((database_genesis_hash, database, checkpoint_nodes)),
+                    Ok(database_content),
                 ) if checkpoint
                     .as_ref()
                     .and_then(|r| r.as_ref().ok())
                     .map_or(true, |cp| {
                         cp.as_ref().finalized_block_header.number
-                            < database.as_ref().finalized_block_header.number
+                            < database_content
+                                .chain_information
+                                .as_ref()
+                                .finalized_block_header
+                                .number
                     }) =>
                 {
                     let genesis_header = header::Header {
@@ -411,13 +419,17 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                         digest: header::DigestRef::empty().into(),
                     };
 
-                    if database_genesis_hash
+                    if database_content.genesis_block_hash
                         == genesis_header.hash(chain_spec.block_number_bytes().into())
                     {
-                        (database, genesis_header, checkpoint_nodes)
+                        (
+                            database_content.chain_information,
+                            genesis_header,
+                            database_content.known_nodes,
+                        )
                     } else if let Some(Ok(checkpoint)) = checkpoint {
                         // Database is incorrect.
-                        (checkpoint, genesis_header, checkpoint_nodes)
+                        (checkpoint, genesis_header, database_content.known_nodes)
                     } else {
                         // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
                         return Err(
@@ -1131,129 +1143,4 @@ async fn start_services<TPlat: platform::Platform>(
         transactions_service,
         block_number_bytes: usize::from(chain_spec.block_number_bytes()),
     }
-}
-
-async fn encode_database<TPlat: platform::Platform>(
-    network_service: &network_service::NetworkService<TPlat>,
-    sync_service: &sync_service::SyncService<TPlat>,
-    genesis_block_hash: &[u8; 32],
-    block_number_bytes: usize,
-    max_size: usize,
-) -> String {
-    // Craft the structure containing all the data that we would like to include.
-    let mut database_draft = SerdeDatabase {
-        genesis_hash: hex::encode(genesis_block_hash),
-        chain: match sync_service.serialize_chain_information().await {
-            Some(ci) => {
-                let encoded = finalized_serialize::encode_chain(&ci, block_number_bytes);
-                serde_json::from_str(&encoded).unwrap()
-            }
-            None => {
-                // If the chain information can't be obtained, we just return a dummy value that
-                // will intentionally fail to decode if passed back.
-                let dummy_message = "<unknown>";
-                return if dummy_message.len() > max_size {
-                    String::new()
-                } else {
-                    dummy_message.to_owned()
-                };
-            }
-        },
-        nodes: network_service
-            .discovered_nodes(0) // TODO: hacky chain_index
-            .await
-            .map(|(peer_id, addrs)| {
-                (
-                    peer_id.to_base58(),
-                    addrs.map(|a| a.to_string()).collect::<Vec<_>>(),
-                )
-            })
-            .collect(),
-    };
-
-    // Cap the database length to the maximum size.
-    loop {
-        let serialized = serde_json::to_string(&database_draft).unwrap();
-        if serialized.len() <= max_size {
-            // Success!
-            return serialized;
-        }
-
-        if database_draft.nodes.is_empty() {
-            // Can't shrink the database anymore. Return the string `"<too-large>"` which will
-            // fail to decode but will indicate what is wrong.
-            let dummy_message = "<too-large>";
-            return if dummy_message.len() >= max_size {
-                String::new()
-            } else {
-                dummy_message.to_owned()
-            };
-        }
-
-        // Try to reduce the size of the database.
-
-        // Remove half of the nodes.
-        // Which nodes are removed doesn't really matter.
-        let mut nodes_to_remove = cmp::max(1, database_draft.nodes.len() / 2);
-        database_draft.nodes.retain(|_, _| {
-            if nodes_to_remove >= 1 {
-                nodes_to_remove -= 1;
-                false
-            } else {
-                true
-            }
-        });
-    }
-}
-
-fn decode_database(
-    encoded: &str,
-    block_number_bytes: usize,
-) -> Result<
-    (
-        [u8; 32],
-        chain::chain_information::ValidChainInformation,
-        Vec<(PeerId, Vec<multiaddr::Multiaddr>)>,
-    ),
-    (),
-> {
-    let decoded: SerdeDatabase = serde_json::from_str(encoded).map_err(|_| ())?;
-
-    let genesis_hash = if decoded.genesis_hash.len() == 64 {
-        <[u8; 32]>::try_from(hex::decode(&decoded.genesis_hash).map_err(|_| ())?).unwrap()
-    } else {
-        return Err(());
-    };
-
-    let (chain, _) = finalized_serialize::decode_chain(
-        &serde_json::to_string(&decoded.chain).unwrap(),
-        block_number_bytes,
-    )
-    .map_err(|_| ())?;
-
-    // Nodes that fail to decode are simply ignored. This is especially important for
-    // multiaddresses, as the definition of a valid or invalid multiaddress might change across
-    // versions.
-    let nodes = decoded
-        .nodes
-        .iter()
-        .filter_map(|(peer_id, addrs)| {
-            let addrs = addrs
-                .iter()
-                .filter_map(|a| Some(a.parse::<multiaddr::Multiaddr>().ok()?))
-                .collect();
-            Some((peer_id.parse::<PeerId>().ok()?, addrs))
-        })
-        .collect::<Vec<_>>();
-
-    Ok((genesis_hash, chain, nodes))
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SerdeDatabase {
-    /// Hexadecimal-encoded hash of the genesis block header. Has no `0x` prefix.
-    #[serde(rename = "genesisHash")]
-    genesis_hash: String,
-    chain: Box<serde_json::value::RawValue>,
-    nodes: hashbrown::HashMap<String, Vec<String>, fnv::FnvBuildHasher>,
 }

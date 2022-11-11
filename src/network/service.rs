@@ -1603,9 +1603,9 @@ where
                             }
                         }
 
-                        break Some(Event::BlocksRequestResult {
+                        break Some(Event::RequestResult {
                             request_id,
-                            response,
+                            response: RequestResult::Blocks(response),
                         });
                     }
                     (OutRequestTy::GrandpaWarpSync, chain_index) => {
@@ -1628,9 +1628,9 @@ where
                                 }
                             });
 
-                        break Some(Event::GrandpaWarpSyncRequestResult {
+                        break Some(Event::RequestResult {
                             request_id,
-                            response,
+                            response: RequestResult::GrandpaWarpSync(response),
                         });
                     }
                     (OutRequestTy::State, _) => {
@@ -1645,9 +1645,9 @@ where
                                     }
                                 });
 
-                        break Some(Event::StateRequestResult {
+                        break Some(Event::RequestResult {
                             request_id,
-                            response,
+                            response: RequestResult::State(response),
                         });
                     }
                     (OutRequestTy::StorageProof, _) => {
@@ -1667,9 +1667,9 @@ where
                                 }
                             });
 
-                        break Some(Event::StorageProofRequestResult {
+                        break Some(Event::RequestResult {
                             request_id,
-                            response,
+                            response: RequestResult::StorageProof(response),
                         });
                     }
                     (OutRequestTy::CallProof, _) => {
@@ -1692,9 +1692,9 @@ where
                                     }
                                 });
 
-                        break Some(Event::CallProofRequestResult {
+                        break Some(Event::RequestResult {
                             request_id,
-                            response,
+                            response: RequestResult::CallProof(response),
                         });
                     }
                     (OutRequestTy::KademliaFindNode, _) => {
@@ -1705,9 +1705,9 @@ where
                                     .map_err(KademliaFindNodeError::DecodeError)
                             });
 
-                        break Some(Event::KademliaFindNodeRequestResult {
+                        break Some(Event::RequestResult {
                             request_id,
-                            response,
+                            response: RequestResult::KademliaFindNode(response),
                         });
                     }
                     (OutRequestTy::KademliaDiscoveryFindNode(operation_id), _) => {
@@ -2604,34 +2604,9 @@ pub enum Event {
         unassigned_slot_ty: SlotTy,
     },
 
-    BlocksRequestResult {
+    RequestResult {
         request_id: OutRequestId,
-        response: Result<Vec<protocol::BlockData>, BlocksRequestError>,
-    },
-
-    GrandpaWarpSyncRequestResult {
-        request_id: OutRequestId,
-        response: Result<EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
-    },
-
-    StateRequestResult {
-        request_id: OutRequestId,
-        response: Result<EncodedStateResponse, StateRequestError>,
-    },
-
-    StorageProofRequestResult {
-        request_id: OutRequestId,
-        response: Result<EncodedMerkleProof, StorageProofRequestError>,
-    },
-
-    CallProofRequestResult {
-        request_id: OutRequestId,
-        response: Result<EncodedMerkleProof, CallProofRequestError>,
-    },
-
-    KademliaFindNodeRequestResult {
-        request_id: OutRequestId,
-        response: Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, KademliaFindNodeError>,
+        response: RequestResult,
     },
 
     /// The given peer has opened a block announces substream with the local node, and an inbound
@@ -2718,6 +2693,21 @@ pub enum Event {
 pub enum SlotTy {
     Inbound,
     Outbound,
+}
+
+/// Response to an outgoing request.
+///
+/// See [`Event::RequestResult`̀].
+#[derive(Debug)]
+pub enum RequestResult {
+    Blocks(Result<Vec<protocol::BlockData>, BlocksRequestError>),
+    GrandpaWarpSync(Result<EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>),
+    State(Result<EncodedStateResponse, StateRequestError>),
+    StorageProof(Result<EncodedMerkleProof, StorageProofRequestError>),
+    CallProof(Result<EncodedMerkleProof, CallProofRequestError>),
+    KademliaFindNode(
+        Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, KademliaFindNodeError>,
+    ),
 }
 
 /// Error that can happen when trying to open an outbound notifications substream.
