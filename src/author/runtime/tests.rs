@@ -29,7 +29,7 @@ fn block_building_works() {
     let genesis_storage = chain_specs.genesis_storage().into_genesis_items().unwrap();
 
     let (chain_info, genesis_runtime) = chain_specs.as_chain_information().unwrap();
-    let genesis_hash = chain_info.finalized_block_header.hash(4);
+    let genesis_hash = chain_info.as_ref().finalized_block_header.hash(4);
 
     let mut builder = super::build_block(super::Config {
         block_number_bytes: 4,
