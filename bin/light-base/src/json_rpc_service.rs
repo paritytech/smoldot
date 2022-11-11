@@ -1105,7 +1105,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 follow_subscription,
                 hash,
                 key,
-                child_key,
+                child_trie,
                 network_config,
             } => {
                 self.chain_head_storage(
@@ -1114,7 +1114,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     &*follow_subscription,
                     hash,
                     key,
-                    child_key,
+                    child_trie,
                     network_config,
                 )
                 .await;
