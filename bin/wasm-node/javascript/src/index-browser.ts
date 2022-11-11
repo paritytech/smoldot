@@ -65,7 +65,7 @@ export function start(options?: ClientOptions): Client {
         options?.forbidWs || false,
         options?.forbidNonLocalWs || false,
         options?.forbidWss || false,
-        !(options?.enableExperimentalWebRTC || false)
+        options?.forbidWebRtc || false
       )
     }
   })
