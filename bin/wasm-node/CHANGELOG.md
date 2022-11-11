@@ -4,6 +4,7 @@
 
 ### Changed
 
+- The `enableExperimentalWebRTC` field has been removed from `ClientConfig`, and replaced with a `forbidWebRtc` option. WebRTC is now considered stable enough to be enabled by default. ([#2977](https://github.com/paritytech/smoldot/pull/2977))
 - Reduced the number of networking round-trips after a connection has been opened by assuming that the remote supports the desired networking protocols instead of waiting for its confirmation. ([#2984](https://github.com/paritytech/smoldot/pull/2984))
 
 ## 0.7.6 - 2022-11-04
