@@ -190,6 +190,20 @@ where
         }
     }
 
+    /// If this function returns true, then the multistream-select handshake has finished writing
+    /// all its data, and the API user can now start writing the protocol-specific data if it
+    /// desires, even though the multistream-handshake isn't finished.
+    ///
+    /// If the remote supports the requested protocol, then doing so will save one networking
+    /// round-trip. If however the remote doesn't support the requested protocol, then doing so
+    /// will lead to confusing errors on the remote, as it will interpret the protocol-specific
+    /// data as being from the multistream-select protocol, and the substream will be rendered
+    /// unusable. Overall, saving a round-trip is usually seen as preferable over confusing
+    /// errors.
+    pub fn can_write_protocol_data(&self) -> bool {
+        matches!(self.state, InProgressState::ProtocolRequestAnswerExpected)
+    }
+
     /// Feeds data coming from a socket, updates the internal state machine, and writes data
     /// destined to the socket.
     ///
