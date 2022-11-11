@@ -977,6 +977,34 @@ where
         (connection_id, connection_task)
     }
 
+    /// Inserts a multi-stream incoming connection in the state machine.
+    ///
+    /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
+    /// yet.
+    ///
+    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
+    /// to determine when the handshake timeout expires.
+    pub fn add_multi_stream_incoming_connection<TSubId>(
+        &mut self,
+        when_connected: TNow,
+        handshake_kind: MultiStreamHandshakeKind,
+        user_data: TConn,
+    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
+    where
+        TSubId: Clone + PartialEq + Eq + Hash,
+    {
+        self.inner.insert_multi_stream(
+            when_connected,
+            handshake_kind,
+            false,
+            Connection {
+                peer_index: None,
+                user_data,
+                outbound: false,
+            },
+        )
+    }
+
     /// Inserts a multi-stream outgoing connection in the state machine.
     ///
     /// This connection hasn't finished handshaking, and the [`PeerId`] of the remote isn't known
@@ -1003,6 +1031,7 @@ where
         let (connection_id, connection_task) = self.inner.insert_multi_stream(
             when_connected,
             handshake_kind,
+            true,
             Connection {
                 peer_index: Some(peer_index),
                 user_data,

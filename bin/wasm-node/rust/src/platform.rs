@@ -236,18 +236,20 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn open_out_substream(ConnectionWrapper(connection_id): &mut Self::Connection) {
-        debug_assert!(matches!(
-            STATE
-                .try_lock()
-                .unwrap()
-                .connections
-                .get(connection_id)
-                .unwrap()
-                .inner,
-            ConnectionInner::MultiStreamWebRtc { .. }
-        ));
-
-        unsafe { bindings::connection_stream_open(*connection_id) }
+        match STATE
+            .try_lock()
+            .unwrap()
+            .connections
+            .get(connection_id)
+            .unwrap()
+            .inner
+        {
+            ConnectionInner::MultiStreamWebRtc { .. } => unsafe {
+                bindings::connection_stream_open(*connection_id)
+            },
+            ConnectionInner::Reset { .. } => {}
+            ConnectionInner::NotOpen | ConnectionInner::SingleStreamMsNoiseYamux => unreachable!(),
+        }
     }
 
     fn wait_more_data(

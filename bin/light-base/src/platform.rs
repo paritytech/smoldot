@@ -81,6 +81,9 @@ pub trait Platform: Send + 'static {
     ///
     /// The substream, once opened, must be yielded by [`Platform::next_substream`].
     ///
+    /// Calls to this function should be ignored if the connection has already been killed by the
+    /// remote.
+    ///
     /// > **Note**: No mechanism exists in this API to handle the situation where a substream fails
     /// >           to open, as this is not supposed to happen. If you need to handle such a
     /// >           situation, either try again opening a substream again or reset the entire
