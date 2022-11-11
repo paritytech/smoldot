@@ -354,9 +354,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
         // TODO: clean up that block
         let (chain_information, genesis_block_header, checkpoint_nodes) = {
             match (
-                chain_spec
-                    .as_chain_information()
-                    .map(|(ci, _)| chain::chain_information::ValidChainInformation::try_from(ci)), // TODO: don't just throw away the runtime
+                chain_spec.as_chain_information().map(|(ci, _)| ci), // TODO: don't just throw away the runtime
                 chain_spec.light_sync_state().map(|s| {
                     chain::chain_information::ValidChainInformation::try_from(
                         s.as_chain_information(),
@@ -368,7 +366,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 ),
             ) {
                 // Use the database if it contains a more recent block than the chain spec checkpoint.
-                (Ok(Ok(genesis_ci)), checkpoint, Ok(database_content))
+                (Ok(genesis_ci), checkpoint, Ok(database_content))
                     if database_content.genesis_block_hash
                         == genesis_ci
                             .as_ref()
@@ -469,10 +467,6 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                     ));
                 }
 
-                (Ok(Err(err)), _, _) => {
-                    return Err(format!("Invalid genesis chain information: {}", err));
-                }
-
                 (_, Some(Err(err)), _) => {
                     return Err(format!(
                         "Invalid checkpoint in chain specification: {}",
@@ -480,12 +474,12 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                     ));
                 }
 
-                (Ok(Ok(genesis_ci)), Some(Ok(checkpoint)), _) => {
+                (Ok(genesis_ci), Some(Ok(checkpoint)), _) => {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
                     (checkpoint, genesis_header.into(), Default::default())
                 }
 
-                (Ok(Ok(genesis_ci)), None, _) => {
+                (Ok(genesis_ci), None, _) => {
                     let genesis_header =
                         header::Header::from(genesis_ci.as_ref().finalized_block_header.clone());
                     (genesis_ci, genesis_header, Default::default())
