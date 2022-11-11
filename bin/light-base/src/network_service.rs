@@ -1114,9 +1114,9 @@ async fn update_round<TPlat: Platform>(
                         chain_index,
                     };
                 }
-                service::Event::BlocksRequestResult {
+                service::Event::RequestResult {
                     request_id,
-                    response,
+                    response: service::RequestResult::Blocks(response),
                 } => {
                     let _ = guarded
                         .blocks_requests
@@ -1124,9 +1124,9 @@ async fn update_round<TPlat: Platform>(
                         .unwrap()
                         .send(response);
                 }
-                service::Event::GrandpaWarpSyncRequestResult {
+                service::Event::RequestResult {
                     request_id,
-                    response,
+                    response: service::RequestResult::GrandpaWarpSync(response),
                 } => {
                     let _ = guarded
                         .grandpa_warp_sync_requests
@@ -1134,9 +1134,9 @@ async fn update_round<TPlat: Platform>(
                         .unwrap()
                         .send(response);
                 }
-                service::Event::StorageProofRequestResult {
+                service::Event::RequestResult {
                     request_id,
-                    response,
+                    response: service::RequestResult::StorageProof(response),
                 } => {
                     let _ = guarded
                         .storage_proof_requests
@@ -1144,9 +1144,9 @@ async fn update_round<TPlat: Platform>(
                         .unwrap()
                         .send(response);
                 }
-                service::Event::CallProofRequestResult {
+                service::Event::RequestResult {
                     request_id,
-                    response,
+                    response: service::RequestResult::CallProof(response),
                 } => {
                     let _ = guarded
                         .call_proof_requests
@@ -1154,9 +1154,8 @@ async fn update_round<TPlat: Platform>(
                         .unwrap()
                         .send(response);
                 }
-                service::Event::StateRequestResult { .. }
-                | service::Event::KademliaFindNodeRequestResult { .. } => {
-                    // We never start this kind of requests.
+                service::Event::RequestResult { .. } => {
+                    // We never start any other kind of requests.
                     unreachable!()
                 }
                 service::Event::KademliaDiscoveryResult {
