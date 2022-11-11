@@ -140,6 +140,7 @@ where
     // a function only called from the parent module.
     pub(super) fn new(
         randomness_seed: [u8; 32],
+        is_initiator: bool,
         now: TNow,
         handshake_kind: MultiStreamHandshakeKind,
         max_inbound_substreams: usize,
@@ -151,7 +152,6 @@ where
         // In the WebRTC handshake, the Noise prologue must be set to `"libp2p-webrtc-noise:"`
         // followed with the multihash-encoded fingerprints of the initiator's certificate
         // and the receiver's certificate.
-        // TODO: we currently assume that the local node is always the initiator
         // See <https://github.com/libp2p/specs/pull/412>.
         let noise_prologue = {
             let MultiStreamHandshakeKind::WebRtc {
@@ -165,10 +165,13 @@ where
                     + remote_tls_certificate_multihash.len(),
             );
             out.extend_from_slice(PREFIX);
-            // Since smoldot always acts as a client (at least right now), we don't need to change
-            // the order of fingerprints.
-            out.extend_from_slice(&local_tls_certificate_multihash);
-            out.extend_from_slice(&remote_tls_certificate_multihash);
+            if is_initiator {
+                out.extend_from_slice(&local_tls_certificate_multihash);
+                out.extend_from_slice(&remote_tls_certificate_multihash);
+            } else {
+                out.extend_from_slice(&remote_tls_certificate_multihash);
+                out.extend_from_slice(&local_tls_certificate_multihash);
+            }
             out
         };
 
@@ -176,7 +179,8 @@ where
             connection: MultiStreamConnectionTaskInner::Handshake {
                 handshake: Some(noise::HandshakeInProgress::new(noise::Config {
                     key: &noise_key,
-                    is_initiator: false, // TODO: is_initiator?
+                    // It's the "server" that initiates the Noise handshake.
+                    is_initiator: !is_initiator,
                     prologue: &noise_prologue,
                 })),
                 opened_substream: None,
