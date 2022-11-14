@@ -62,6 +62,8 @@ impl<TPlat: Platform> Background<TPlat> {
         let result = self
             .runtime_call(
                 &block_hash,
+                "AccountNonceApi",
+                1..=1,
                 "AccountNonceApi_account_nonce",
                 iter::once(&account.0),
                 4,
@@ -71,10 +73,11 @@ impl<TPlat: Platform> Background<TPlat> {
             .await;
 
         let response = match result {
-            Ok(nonce) => {
+            Ok(result) => {
                 // TODO: we get a u32 when expecting a u64; figure out problem
                 // TODO: don't unwrap
-                let index = u32::from_le_bytes(<[u8; 4]>::try_from(&nonce[..]).unwrap());
+                let index =
+                    u32::from_le_bytes(<[u8; 4]>::try_from(&result.return_value[..]).unwrap());
                 methods::Response::system_accountNextIndex(u64::from(index))
                     .to_json_response(request_id)
             }
@@ -857,6 +860,8 @@ impl<TPlat: Platform> Background<TPlat> {
         let result = self
             .runtime_call(
                 &block_hash,
+                "TransactionPaymentApi",
+                1..=2,
                 json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME,
                 json_rpc::payment_info::payment_info_parameters(extrinsic),
                 4,
@@ -866,7 +871,10 @@ impl<TPlat: Platform> Background<TPlat> {
             .await;
 
         let response = match result {
-            Ok(encoded) => match json_rpc::payment_info::decode_payment_info(&encoded) {
+            Ok(result) => match json_rpc::payment_info::decode_payment_info(
+                &result.return_value,
+                result.api_version,
+            ) {
                 Ok(info) => methods::Response::payment_queryInfo(info).to_json_response(request_id),
                 Err(error) => json_rpc::parse::build_error_response(
                     request_id,
@@ -915,7 +923,7 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         let result = self
-            .runtime_call(
+            .runtime_call_no_api_check(
                 &block_hash,
                 function_to_call,
                 iter::once(call_parameters.0),
@@ -1104,6 +1112,8 @@ impl<TPlat: Platform> Background<TPlat> {
         let result = self
             .runtime_call(
                 &block_hash,
+                "Metadata",
+                1..=1,
                 "Metadata_metadata",
                 iter::empty::<Vec<u8>>(),
                 3,
@@ -1113,7 +1123,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .await;
         let result = result
             .as_ref()
-            .map(|output| remove_metadata_length_prefix(&output));
+            .map(|output| remove_metadata_length_prefix(&output.return_value));
 
         let response = match result {
             Ok(Ok(metadata)) => {

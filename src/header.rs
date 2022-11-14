@@ -71,8 +71,7 @@
 //! assert_eq!(reencoded, scale_encoded_header);
 //! ```
 
-// TODO: consider rewriting the encoding/decoding into a more legible style
-// TODO: consider nom for decoding
+// TODO: consider rewriting the encoding into a more legible style
 
 use crate::{trie, util};
 
@@ -137,7 +136,6 @@ pub fn decode(scale_encoded: &[u8], block_number_bytes: usize) -> Result<HeaderR
 ///
 /// Contrary to [`decode`], doesn't return an error if the slice is too long but returns the
 /// remainder.
-// TODO: use block_number_bytes
 pub fn decode_partial(
     mut scale_encoded: &[u8],
     block_number_bytes: usize,
@@ -265,9 +263,15 @@ impl<'a> HeaderRef<'a> {
 
     /// Equivalent to [`HeaderRef::scale_encoding`] but returns the data in a `Vec`.
     pub fn scale_encoding_vec(&self, block_number_bytes: usize) -> Vec<u8> {
-        // TODO: Vec::with_capacity?
+        // We assume that an average header should be less than this size.
+        // At the time of writing of this comment, the average Westend/Polkadot/Kusama block
+        // header is 288 bytes, and the average parachain block is 186 bytes. Some blocks
+        // (the epoch transition blocks in particular) have a much larger header, but considering
+        // that they are the vast minority we don't care so much about that.
+        const CAP: usize = 1024;
+
         self.scale_encoding(block_number_bytes)
-            .fold(Vec::new(), |mut a, b| {
+            .fold(Vec::with_capacity(CAP), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
             })

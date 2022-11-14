@@ -252,14 +252,13 @@ export interface ClientOptions {
   forbidWss?: boolean;
 
   /**
-   * Enable experimental support for WebRTC connections.
+   * If `true`, then the client will never open any WebRTC connection.
+   * Defaults to `false`.
    *
-   * Support for WebRTC connections is currently in progress and might have significant issues.
-   *
-   * This flag currently defaults to `false`. In a later version, it will be removed and WebRTC
-   * connections will be enabled by default.
+   * This option has no effect in environments where non-secure WebSocket connections aren't
+   * supported anyway.
    */
-  enableExperimentalWebRTC?: boolean;
+  forbidWebRtc?: boolean;
 }
 
 /**

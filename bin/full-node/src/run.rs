@@ -174,7 +174,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
         let (db, existed) = open_database(
             &chain_spec,
-            &genesis_chain_information,
+            genesis_chain_information.as_ref(),
             db_path,
             matches!(cli_output, cli::Output::Informant),
         )
@@ -191,7 +191,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         Some(Arc::new(database_thread::DatabaseThread::from(
             open_database(
                 relay_chain_spec,
-                relay_genesis_chain_information.as_ref().unwrap(),
+                relay_genesis_chain_information.as_ref().unwrap().as_ref(),
                 relay_db_path,
                 matches!(cli_output, cli::Output::Informant),
             )
@@ -267,6 +267,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key()).into_peer_id();
 
     let genesis_block_hash = genesis_chain_information
+        .as_ref()
         .finalized_block_header
         .hash(chain_spec.block_number_bytes().into());
 
@@ -287,8 +288,8 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 database: database.clone(),
                 has_grandpa_protocol: matches!(
-                    genesis_chain_information.finality,
-                    chain::chain_information::ChainInformationFinality::Grandpa { .. }
+                    genesis_chain_information.as_ref().finality,
+                    chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
                 ),
                 genesis_block_hash,
                 best_block: {
@@ -340,13 +341,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                         block_number_bytes: usize::from(relay_chains_specs.block_number_bytes()),
                         database: relay_chain_database.clone().unwrap(),
                         has_grandpa_protocol: matches!(
-                            relay_genesis_chain_information.as_ref().unwrap().finality,
-                            chain::chain_information::ChainInformationFinality::Grandpa { .. }
+                            relay_genesis_chain_information.as_ref().unwrap().as_ref().finality,
+                            chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
                         ),
                         genesis_block_hash: relay_genesis_chain_information
                             .as_ref()
                             .unwrap()
-                            .finalized_block_header
+                            .as_ref().finalized_block_header
                             .hash(chain_spec.block_number_bytes().into(),),
                         best_block: relay_chain_database
                             .as_ref()
@@ -437,6 +438,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 genesis_block_hash: relay_genesis_chain_information
                     .as_ref()
                     .unwrap()
+                    .as_ref()
                     .finalized_block_header
                     .hash(usize::from(
                         relay_chain_spec.as_ref().unwrap().block_number_bytes(),
@@ -672,7 +674,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 #[tracing::instrument(level = "trace", skip(chain_spec, show_progress))]
 async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
-    genesis_chain_information: &chain::chain_information::ChainInformation,
+    genesis_chain_information: chain::chain_information::ChainInformationRef<'_>,
     db_path: Option<PathBuf>,
     show_progress: bool,
 ) -> (full_sqlite::SqliteFullDatabase, bool) {
