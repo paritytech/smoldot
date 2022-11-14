@@ -58,6 +58,9 @@ export function start(options?: ClientOptions): Client {
     trustedBase64DecodeAndZlibInflate: (input) => {
         return Promise.resolve(inflate(Buffer.from(input, 'base64')))
     },
+    registerShouldPeriodicallyYield: (_callback) => {
+      return [true, () => {}]
+    },
     performanceNow: () => {
         return performance.now()
     },

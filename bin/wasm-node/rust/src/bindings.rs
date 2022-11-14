@@ -24,6 +24,16 @@
 //! need to be implemented on the host side and provided to the WebAssembly virtual machine. The
 //! other functions are functions that the Rust code *exports*, and can be called by the host.
 //!
+//! # Re-entrency
+//!
+//! As a rule, none of the implementations of the functions that the host provides is allowed
+//! to call a function exported by Rust.
+//!
+//! For example, the implementation of [`start_timer`] isn't allowed to call [`timer_finished`].
+//! Instead, it must return, and later [`timer_finished`] be called independently.
+//!
+//! This avoids potential stack overflows and tricky borrowing-related situations.
+//!
 //! # About wasi
 //!
 //! The Rust code is expected to be compiled for the `wasm32-wasi` target, and not just
@@ -272,9 +282,40 @@ extern "C" {
 /// `cpu_rate_limit` can be used to limit the amount of CPU that smoldot will use on average.
 /// `u32::max_value()` represents "one CPU". For example passing `rate_limit / 2` represents
 /// "`50%` of one CPU".
+///
+/// `periodically_yield` represents the initial value of the setting described in the
+/// documentation of [`set_periodically_yield`].
 #[no_mangle]
-pub extern "C" fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_limit: u32) {
-    crate::init(max_log_level, enable_current_task, cpu_rate_limit)
+pub extern "C" fn init(
+    max_log_level: u32,
+    enable_current_task: u32,
+    cpu_rate_limit: u32,
+    periodically_yield: u32,
+) {
+    crate::init(
+        max_log_level,
+        enable_current_task,
+        cpu_rate_limit,
+        periodically_yield,
+    );
+    super::advance_execution();
+}
+
+/// Sets whether the smoldot client must periodically yield back control by setting up a timer
+/// using [`start_timer`] with a delay of 0.
+///
+/// A value of 0 means "no", and any other value means "yes".
+///
+/// This setting is important when smoldot is used from within a web page. When the web page is in
+/// the foreground, it should be set to `true` so that the web browser can render the page often
+/// enough to not cause any discomfort. When the web page is in the background, it should be set
+/// to `false` because `setTimeout` gets a minimum delay of 1 second making [`start_timer`]
+/// unreliable.
+/// See also <https://developer.mozilla.org/en-US/docs/Web/API/setTimeout#timeouts_in_inactive_tabs>.
+#[no_mangle]
+pub extern "C" fn set_periodically_yield(periodically_yield: u32) {
+    crate::set_periodically_yield(periodically_yield);
+    super::advance_execution();
 }
 
 /// Instructs the client to start shutting down.
@@ -286,7 +327,8 @@ pub extern "C" fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_li
 // TODO: can this be called multiple times?
 #[no_mangle]
 pub extern "C" fn start_shutdown() {
-    crate::start_shutdown()
+    crate::start_shutdown();
+    super::advance_execution();
 }
 
 /// Allocates a buffer of the given length, with an alignment of 1.
@@ -342,7 +384,7 @@ pub extern "C" fn add_chain(
     potential_relay_chains_ptr: u32,
     potential_relay_chains_len: u32,
 ) -> u32 {
-    super::add_chain(
+    let success_code = super::add_chain(
         chain_spec_pointer,
         chain_spec_len,
         database_content_pointer,
@@ -350,7 +392,9 @@ pub extern "C" fn add_chain(
         json_rpc_running,
         potential_relay_chains_ptr,
         potential_relay_chains_len,
-    )
+    );
+    super::advance_execution();
+    success_code
 }
 
 /// Removes a chain previously added using [`add_chain`]. Instantly unsubscribes all the JSON-RPC
@@ -360,7 +404,8 @@ pub extern "C" fn add_chain(
 /// returned by [`chain_error_ptr`].
 #[no_mangle]
 pub extern "C" fn remove_chain(chain_id: u32) {
-    super::remove_chain(chain_id)
+    super::remove_chain(chain_id);
+    super::advance_execution();
 }
 
 /// Returns `1` if creating this chain was successful. Otherwise, returns `0`.
@@ -416,7 +461,9 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 ///
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) -> u32 {
-    super::json_rpc_send(text_ptr, text_len, chain_id)
+    let success_code = super::json_rpc_send(text_ptr, text_len, chain_id);
+    super::advance_execution();
+    success_code
 }
 
 /// Obtains information about the first response in the queue of JSON-RPC responses.
@@ -457,13 +504,15 @@ pub struct JsonRpcResponseInfo {
 /// `json_rpc_running` equal to 0.
 #[no_mangle]
 pub extern "C" fn json_rpc_responses_pop(chain_id: u32) {
-    super::json_rpc_responses_pop(chain_id)
+    super::json_rpc_responses_pop(chain_id);
+    super::advance_execution();
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.
 #[no_mangle]
 pub extern "C" fn timer_finished(timer_id: u32) {
     crate::timers::timer_finished(timer_id);
+    super::advance_execution();
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection
@@ -482,6 +531,7 @@ pub extern "C" fn timer_finished(timer_id: u32) {
 #[no_mangle]
 pub extern "C" fn connection_open_single_stream(connection_id: u32, handshake_ty: u32) {
     crate::platform::connection_open_single_stream(connection_id, handshake_ty);
+    super::advance_execution();
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection
@@ -506,7 +556,12 @@ pub extern "C" fn connection_open_multi_stream(
     handshake_ty_ptr: u32,
     handshake_ty_len: u32,
 ) {
-    crate::platform::connection_open_multi_stream(connection_id, handshake_ty_ptr, handshake_ty_len)
+    crate::platform::connection_open_multi_stream(
+        connection_id,
+        handshake_ty_ptr,
+        handshake_ty_len,
+    );
+    super::advance_execution();
 }
 
 /// Notify of a message being received on the stream. The connection associated with that stream
@@ -522,7 +577,8 @@ pub extern "C" fn connection_open_multi_stream(
 /// called.
 #[no_mangle]
 pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: u32) {
-    crate::platform::stream_message(connection_id, stream_id, ptr, len)
+    crate::platform::stream_message(connection_id, stream_id, ptr, len);
+    super::advance_execution();
 }
 
 /// Called by the JavaScript code when the given multi-stream connection has a new substream.
@@ -537,7 +593,8 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, l
 /// [`connection_stream_open`].
 #[no_mangle]
 pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
-    crate::platform::connection_stream_opened(connection_id, stream_id, outbound)
+    crate::platform::connection_stream_opened(connection_id, stream_id, outbound);
+    super::advance_execution();
 }
 
 /// Can be called at any point by the JavaScript code if the connection switches to the `Reset`
@@ -551,7 +608,8 @@ pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, o
 /// See also [`connection_new`].
 #[no_mangle]
 pub extern "C" fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
-    crate::platform::connection_reset(connection_id, ptr, len)
+    crate::platform::connection_reset(connection_id, ptr, len);
+    super::advance_execution();
 }
 
 /// Can be called at any point by the JavaScript code if the stream switches to the `Reset`
@@ -566,5 +624,6 @@ pub extern "C" fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
 /// See also [`connection_open_multi_stream`].
 #[no_mangle]
 pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32) {
-    crate::platform::stream_reset(connection_id, stream_id)
+    crate::platform::stream_reset(connection_id, stream_id);
+    super::advance_execution();
 }

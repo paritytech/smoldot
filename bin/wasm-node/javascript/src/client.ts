@@ -428,9 +428,7 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
             return Promise.reject(new AlreadyDestroyedError());
           if (options.disableJsonRpc)
             return Promise.reject(new JsonRpcDisabledError());
-          return new Promise((resolve, reject) => {
-            instance.nextJsonRpcResponse(chainId, resolve, reject)
-          });
+          return instance.nextJsonRpcResponse(chainId);
         },
         remove: () => {
           if (alreadyDestroyedError)

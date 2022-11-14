@@ -39,6 +39,7 @@ pub struct AsyncStdTcpWebSocket;
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
 impl Platform for AsyncStdTcpWebSocket {
     type Delay = future::BoxFuture<'static, ()>;
+    type Yield = future::Ready<()>;
     type Instant = std::time::Instant;
     type Connection = std::convert::Infallible;
     type Stream = Stream;
@@ -66,6 +67,11 @@ impl Platform for AsyncStdTcpWebSocket {
     fn sleep_until(when: Self::Instant) -> Self::Delay {
         let duration = when.saturating_duration_since(std::time::Instant::now());
         Self::sleep(duration)
+    }
+
+    fn yield_after_cpu_intensive() -> Self::Yield {
+        // No-op.
+        future::ready(())
     }
 
     fn connect(multiaddr: &str) -> Self::ConnectFuture {

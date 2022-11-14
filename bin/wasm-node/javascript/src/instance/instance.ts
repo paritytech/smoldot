@@ -63,7 +63,7 @@ export interface Config {
 
 export interface Instance {
   request: (request: string, chainId: number) => void
-  nextJsonRpcResponse: (chainId: number, resolve: (response: string) => void, reject: (error: Error) => void) => void
+  nextJsonRpcResponse: (chainId: number) => Promise<string>
   addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
   removeChain: (chainId: number) => void
   startShutdown: () => void
@@ -76,7 +76,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
   // - At initialization, it is a Promise containing the Wasm VM is still initializing.
   // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
   //
-  let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { initialized: true, instance: SmoldotWasmInstance };
+  let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { initialized: true, instance: SmoldotWasmInstance, unregisterCallback: () => void };
 
   const crashError: { error?: CrashError } = {};
 
@@ -114,44 +114,10 @@ export function start(configMessage: Config, platformBindings: instance.Platform
       configMessage.logCallback(level, target, message)
     },
     jsonRpcResponsesNonEmptyCallback: (chainId) => {
-      // We shouldn't call back into the Wasm virtual machine from a callback called by the virtual
-      // machine itself. For this reason, we setup a closure to be called immediately after.
-      const update = () => {
-        try {
-          if (!state.initialized)
-            throw new Error("Internal error");
-
-          const promises = chains.get(chainId)?.jsonRpcResponsesPromises;
-          if (!promises)
-            return;
-          const mem = new Uint8Array(state.instance.exports.memory.buffer);
-
-          // Immediately read all the elements of the queue and remove them.
-          // `json_rpc_responses_non_empty` is only guaranteed to be called if the queue is
-          // empty.
-          while (promises.length !== 0) {
-              const responseInfo = state.instance.exports.json_rpc_responses_peek(chainId) >>> 0;
-              const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
-              const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
-              // `len === 0` means "queue is empty" according to the API.
-              if (len === 0)
-                  break;
-
-              const message = buffer.utf8BytesToString(mem, ptr, len);
-              state.instance.exports.json_rpc_responses_pop(chainId);
-              promises.shift()!.resolve(message);
-          }
-
-        } catch(_error) {}
-      };
-
-      // In browsers, `setTimeout` works as expected when `ms` equals 0. However, NodeJS requires
-      // a minimum of 1 millisecond (if `0` is passed, it is automatically replaced with `1`) and
-      // wants you to use `setImmediate` instead.
-      if (typeof setImmediate === "function") {
-        setImmediate(update)
-      } else {
-        setTimeout(update, 0)
+      // Notify every single promise found in `jsonRpcResponsesPromises`.
+      const promises = chains.get(chainId)!.jsonRpcResponsesPromises;
+      while (promises.length !== 0) {
+        promises.shift()!.resolve();
       }
     },
     currentTaskCallback: (taskName) => {
@@ -173,9 +139,16 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
       // Smoldot requires an initial call to the `init` function in order to do its internal
       // configuration.
-      instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0, cpuRateLimit);
+      const [periodicallyYield, unregisterCallback] = platformBindings.registerShouldPeriodicallyYield((newValue) => {
+        if (state.initialized && !crashError.error) {
+          try {
+            state.instance.exports.set_periodically_yield(newValue ? 1 : 0)
+          } catch(_error) {}
+        }
+      });
+      instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0, cpuRateLimit, periodicallyYield ? 1 : 0);
 
-      state = { initialized: true, instance };
+      state = { initialized: true, instance, unregisterCallback };
       return instance;
     })
   };
@@ -223,35 +196,40 @@ export function start(configMessage: Config, platformBindings: instance.Platform
       }
     },
 
-    nextJsonRpcResponse: (chainId: number, resolve: (response: string) => void, reject: (error: Error) => void) => {
+    nextJsonRpcResponse: async (chainId: number): Promise<string> => {
       // Because `nextJsonRpcResponse` is passed as parameter an identifier returned by `addChain`,
       // it is always the case that the Wasm instance is already initialized. The only possibility
       // for it to not be the case is if the user completely invented the `chainId`.
       if (!state.initialized)
         throw new Error("Internal error");
-      if (crashError.error)
-        throw crashError.error;
 
-      try {
-        const mem = new Uint8Array(state.instance.exports.memory.buffer);
-        const responseInfo = state.instance.exports.json_rpc_responses_peek(chainId) >>> 0;
-        const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
-        const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
+      while (true) {
+        if (crashError.error)
+          throw crashError.error;
 
-        // `len === 0` means "queue is empty" according to the API.
-        // In that situation, queue the resolve/reject.
-        if (len === 0) {
-          chains.get(chainId)!.jsonRpcResponsesPromises.push({ resolve, reject })
-          return;
+        // Try to pop a message from the queue.
+        try {
+          const mem = new Uint8Array(state.instance.exports.memory.buffer);
+          const responseInfo = state.instance.exports.json_rpc_responses_peek(chainId) >>> 0;
+          const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
+          const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
+
+          // `len === 0` means "queue is empty" according to the API.
+          // In that situation, queue the resolve/reject.
+          if (len !== 0) {
+            const message = buffer.utf8BytesToString(mem, ptr, len);
+            state.instance.exports.json_rpc_responses_pop(chainId);
+            return message;
+          }
+        } catch (_error) {
+          console.assert(crashError.error);
+          throw crashError.error
         }
 
-        const message = buffer.utf8BytesToString(mem, ptr, len);
-        resolve(message);
-
-        state.instance.exports.json_rpc_responses_pop(chainId);
-      } catch (_error) {
-        console.assert(crashError.error);
-        throw crashError.error
+        // If no message is available, wait for one to be.
+        await new Promise((resolve, reject) => {
+          chains.get(chainId)!.jsonRpcResponsesPromises.push({ resolve: () => resolve(undefined), reject })
+        });
       }
     },
 
@@ -345,6 +323,8 @@ export function start(configMessage: Config, platformBindings: instance.Platform
         // exception when the user wants the shutdown to happen.
         if (crashError.error)
           return;
+        if (state.initialized)
+          state.unregisterCallback();
         try {
           printError.printError = false
           instance.exports.start_shutdown()
@@ -357,6 +337,6 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 }
 
 interface JsonRpcResponsesPromise {
-  resolve: (data: string) => void,
+  resolve: () => void,
   reject: (error: Error) => void,
 }

@@ -131,11 +131,9 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
             if has_done_verif {
                 queue_empty = false;
 
-                // Since JavaScript/Wasm is single-threaded, executing many CPU-heavy operations
-                // in a row would prevent all the other tasks in the background from running.
-                // In order to provide a better granularity, we force a yield after each
-                // verification.
-                crate::util::yield_twice().await;
+                // As explained in the documentation of `yield_after_cpu_intensive`, we should
+                // yield after a CPU-intensive operation. This helps provide a better granularity.
+                TPlat::yield_after_cpu_intensive().await;
             }
 
             queue_empty
