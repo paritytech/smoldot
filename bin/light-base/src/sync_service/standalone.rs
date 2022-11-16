@@ -33,7 +33,7 @@ use smoldot::{
     libp2p,
     network::{self, protocol},
     sync::all,
-    trie::proof_verify,
+    trie::proof_decode,
 };
 
 /// Starts a sync service background task to synchronize a standalone chain (relay chain or not).
@@ -579,17 +579,23 @@ impl<TPlat: Platform> Task<TPlat> {
                         // TODO: lots of copying around
                         // TODO: log what happens
                         let decoded = outcome.decode();
-                        keys.iter()
-                            .map(|key| {
-                                proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                    proof: decoded.iter().map(|nv| &nv[..]),
-                                    requested_key: key.as_ref(),
-                                    trie_root_hash: &state_trie_root,
-                                })
-                                .map_err(|_| ())
-                                .map(|v| v.map(|v| v.to_vec()))
+                        if let Ok(decoded) =
+                            proof_decode::decode_and_verify_proof(proof_decode::VerifyProofConfig {
+                                proof: decoded.iter().copied(),
+                                trie_root_hash: &state_trie_root,
                             })
-                            .collect::<Result<Vec<_>, ()>>()
+                        {
+                            keys.iter()
+                                .map(|key| {
+                                    decoded
+                                        .storage_value(key)
+                                        .ok_or(())
+                                        .map(|v| v.map(|v| v.to_vec()))
+                                })
+                                .collect::<Result<Vec<_>, ()>>()
+                        } else {
+                            Err(())
+                        }
                     } else {
                         Err(())
                     }

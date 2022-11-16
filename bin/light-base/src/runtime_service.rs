@@ -54,9 +54,10 @@
 //! large, the subscription is force-killed by the [`RuntimeService`].
 //!
 
-use crate::{network_service, platform::Platform, sync_service};
+use crate::{platform::Platform, sync_service};
 
 use alloc::{
+    borrow::ToOwned as _,
     boxed::Box,
     collections::BTreeMap,
     format,
@@ -82,7 +83,7 @@ use smoldot::{
     executor, header,
     informant::{BytesDisplay, HashDisplay},
     network::protocol,
-    trie::{self, proof_verify},
+    trie::{self, proof_decode},
 };
 
 /// Configuration for a runtime service.
@@ -803,6 +804,14 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
             .await
             .map_err(RuntimeCallError::CallProof);
 
+        let call_proof = call_proof.and_then(|call_proof| {
+            proof_decode::decode_and_verify_proof(proof_decode::VerifyProofConfig {
+                proof: call_proof.decode().into_iter().map(|v| v.to_owned()), // TODO: to_owned() inefficiency, need some help from the networking to obtain the owned data
+                trie_root_hash: &self.block_state_root_hash,
+            })
+            .map_err(RuntimeCallError::StorageRetrieval)
+        });
+
         let (guarded, virtual_machine) = match self.runtime.runtime.as_ref() {
             Ok(r) => {
                 let mut lock = r.virtual_machine.lock().await;
@@ -829,7 +838,7 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
 pub struct RuntimeCallLock<'a> {
     guarded: MutexGuard<'a, Option<executor::host::HostVmPrototype>>,
     block_state_root_hash: [u8; 32],
-    call_proof: Result<network_service::EncodedMerkleProof, RuntimeCallError>,
+    call_proof: Result<trie::proof_decode::DecodedTrieProof<Vec<u8>>, RuntimeCallError>,
 }
 
 impl<'a> RuntimeCallLock<'a> {
@@ -845,17 +854,13 @@ impl<'a> RuntimeCallLock<'a> {
     // TODO: if proof is invalid, we should give the option to fetch another call proof
     pub fn storage_entry(&self, requested_key: &[u8]) -> Result<Option<&[u8]>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
-            Ok(p) => p.decode(),
+            Ok(p) => p,
             Err(err) => return Err(err.clone()),
         };
 
-        match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-            requested_key,
-            trie_root_hash: self.block_storage_root(),
-            proof: call_proof.iter().map(|v| &v[..]),
-        }) {
-            Ok(v) => Ok(v),
-            Err(err) => Err(RuntimeCallError::StorageRetrieval(err)),
+        match call_proof.storage_value(requested_key) {
+            Some(v) => Ok(v),
+            None => Err(RuntimeCallError::MissingProofEntry),
         }
     }
 
@@ -870,27 +875,24 @@ impl<'a> RuntimeCallLock<'a> {
         &'_ self,
         prefix: &[u8],
     ) -> Result<impl Iterator<Item = impl AsRef<[u8]> + '_>, RuntimeCallError> {
-        // TODO: this is sub-optimal as we iterate over the proof multiple times and do a lot of Vec allocations
+        // TODO: this could be a function in the proof_decode module
         let mut to_find = vec![trie::bytes_to_nibbles(prefix.iter().copied()).collect::<Vec<_>>()];
         let mut output = Vec::new();
 
         let call_proof = match &self.call_proof {
-            Ok(p) => p.decode(),
+            Ok(p) => p,
             Err(err) => return Err(err.clone()),
         };
 
         for key in mem::take(&mut to_find) {
-            let node_info = proof_verify::trie_node_info(proof_verify::TrieNodeInfoConfig {
-                requested_key: key.iter().cloned(),
-                trie_root_hash: self.block_storage_root(),
-                proof: call_proof.iter().map(|v| &v[..]),
-            })
-            .map_err(RuntimeCallError::StorageRetrieval)?;
+            let node_info = call_proof
+                .trie_node_info(&key)
+                .ok_or(RuntimeCallError::MissingProofEntry)?;
 
             if matches!(
                 node_info.storage_value,
-                proof_verify::StorageValue::Known(_)
-                    | proof_verify::StorageValue::HashKnownValueMissing(_)
+                proof_decode::StorageValue::Known(_)
+                    | proof_decode::StorageValue::HashKnownValueMissing(_)
             ) {
                 assert_eq!(key.len() % 2, 0);
                 output.push(
@@ -898,24 +900,14 @@ impl<'a> RuntimeCallLock<'a> {
                 );
             }
 
-            match node_info.children {
-                proof_verify::Children::None => {}
-                proof_verify::Children::One(nibble) => {
-                    let mut child = key.clone();
-                    child.push(nibble);
-                    to_find.push(child);
+            for nibble in trie::all_nibbles() {
+                if !node_info.children.has_child(nibble) {
+                    continue;
                 }
-                proof_verify::Children::Multiple { children_bitmap } => {
-                    for nibble in trie::all_nibbles() {
-                        if (children_bitmap & (1 << u8::from(nibble))) == 0 {
-                            continue;
-                        }
 
-                        let mut child = key.clone();
-                        child.push(nibble);
-                        to_find.push(child);
-                    }
-                }
+                let mut child = key.clone();
+                child.push(nibble);
+                to_find.push(child);
             }
         }
 
@@ -952,7 +944,9 @@ pub enum RuntimeCallError {
     /// Error while retrieving the storage item from other nodes.
     // TODO: change error type?
     #[display(fmt = "Error in call proof: {}", _0)]
-    StorageRetrieval(proof_verify::Error),
+    StorageRetrieval(proof_decode::Error),
+    /// One or more entries are missing from the call proof.
+    MissingProofEntry,
     /// Error while retrieving the call proof from the network.
     #[display(fmt = "Error when retrieving the call proof: {}", _0)]
     CallProof(sync_service::CallProofQueryError),
@@ -968,8 +962,9 @@ impl RuntimeCallError {
         match self {
             RuntimeCallError::InvalidRuntime(_) => false,
             // TODO: as a temporary hack, we consider `TrieRootNotFound` as the remote not knowing about the requested block; see https://github.com/paritytech/substrate/pull/8046
-            RuntimeCallError::StorageRetrieval(proof_verify::Error::TrieRootNotFound) => true,
+            RuntimeCallError::StorageRetrieval(proof_decode::Error::TrieRootNotFound) => true,
             RuntimeCallError::StorageRetrieval(_) => false,
+            RuntimeCallError::MissingProofEntry => false,
             RuntimeCallError::CallProof(err) => err.is_network_problem(),
             RuntimeCallError::StorageQuery(err) => err.is_network_problem(),
         }

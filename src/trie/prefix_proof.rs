@@ -27,7 +27,7 @@
 
 // TODO: usage example
 
-use super::{nibble, proof_verify};
+use super::{nibble, proof_decode};
 
 use alloc::{vec, vec::Vec};
 use core::{fmt, iter, mem};
@@ -75,7 +75,16 @@ impl PrefixScan {
     pub fn resume<'a>(
         mut self,
         proof: impl Iterator<Item = &'a [u8]> + Clone + 'a,
-    ) -> Result<ResumeOutcome, (Self, proof_verify::Error)> {
+    ) -> Result<ResumeOutcome, (Self, Error)> {
+        let decoded_proof =
+            match proof_decode::decode_and_verify_proof(proof_decode::VerifyProofConfig {
+                proof,
+                trie_root_hash: &self.trie_root_hash,
+            }) {
+                Ok(d) => d,
+                Err(err) => return Err((self, Error::InvalidProof(err))),
+            };
+
         let mut non_terminal_queries = mem::take(&mut self.next_queries);
 
         // The entire body is executed as long as verifying at least one proof succeeds.
@@ -86,39 +95,34 @@ impl PrefixScan {
             let mut next = Vec::with_capacity(non_terminal_queries.len() * 2);
 
             debug_assert!(!non_terminal_queries.is_empty());
-            // TODO: iterating like that is very inefficient, as we verify the proof dozens of times
             loop {
                 let query = match non_terminal_queries.pop() {
                     Some(q) => q,
                     None => break,
                 };
 
-                let info = match proof_verify::trie_node_info(proof_verify::TrieNodeInfoConfig {
-                    requested_key: query.iter().copied(),
-                    trie_root_hash: &self.trie_root_hash,
-                    proof: proof.clone(),
-                }) {
-                    Ok(info) => info,
-                    Err(proof_verify::Error::MissingProofEntry { .. }) if !is_first_iteration => {
+                let info = match decoded_proof.trie_node_info(&query) {
+                    Some(info) => info,
+                    None if !is_first_iteration => {
                         // Node not in the proof. There's no point in adding this node to `next`
                         // as we will fail again if we try to verify the proof again.
                         // If `is_first_iteration`, it means that the proof is incorrect.
                         self.next_queries.push(query);
                         continue;
                     }
-                    Err(err) => {
+                    None => {
                         // Push all the non-processed queries back to `next_queries` before
                         // returning the error, so that we can try again.
                         self.next_queries.push(query);
                         self.next_queries.extend(non_terminal_queries);
-                        return Err((self, err));
+                        return Err((self, Error::MissingProofEntry));
                     }
                 };
 
                 if matches!(
                     info.storage_value,
-                    proof_verify::StorageValue::Known(_)
-                        | proof_verify::StorageValue::HashKnownValueMissing(_)
+                    proof_decode::StorageValue::Known(_)
+                        | proof_decode::StorageValue::HashKnownValueMissing(_)
                 ) {
                     // Trie nodes with a value are always aligned to "bytes-keys". In other words,
                     // the number of nibbles is always even.
@@ -177,6 +181,16 @@ pub enum ResumeOutcome {
         /// List of keys with the requested prefix.
         keys: Vec<Vec<u8>>,
     },
+}
+
+/// Possible error returned by [`PrefixScan::resume`].
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum Error {
+    /// The proof has an invalid format.
+    #[display(fmt = "{}", _0)]
+    InvalidProof(proof_decode::Error),
+    /// One or more entries in the proof are missing.
+    MissingProofEntry,
 }
 
 // TODO: needs tests
