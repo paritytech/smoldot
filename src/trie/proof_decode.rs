@@ -44,8 +44,7 @@ use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::{mem, ops};
 
 /// Configuration to pass to [`decode_and_verify_proof`].
-// TODO: rename?
-pub struct VerifyProofConfig<'a, I> {
+pub struct Config<'a, I> {
     /// Merkle value (or node value) of the root node of the trie.
     ///
     /// > **Note**: The Merkle value and node value are always the same for the root node.
@@ -67,7 +66,7 @@ pub struct VerifyProofConfig<'a, I> {
 /// disconnected from the root node of the trie.
 // TODO: maybe rethink the whole API of the proof thing and consider accepting as parameter a single Vec<u8> or &[u8] containing the SCALE-encoded proof
 pub fn decode_and_verify_proof<'a, T>(
-    config: VerifyProofConfig<'a, impl Iterator<Item = T> + Clone>,
+    config: Config<'a, impl Iterator<Item = T> + Clone>,
 ) -> Result<DecodedTrieProof<T>, Error>
 where
     T: AsRef<[u8]>,
@@ -517,7 +516,7 @@ mod tests {
             <[u8; 32]>::try_from(&bytes[..]).unwrap()
         };
 
-        let decoded = super::decode_and_verify_proof(super::VerifyProofConfig {
+        let decoded = super::decode_and_verify_proof(super::Config {
             trie_root_hash: &trie_root,
             proof: proof.iter().map(|p| &p[..]),
         })
@@ -577,7 +576,7 @@ mod tests {
             215, 134, 15, 252, 135, 67, 129, 21, 16, 20, 211, 97, 217,
         ];
 
-        let decoded = super::decode_and_verify_proof(super::VerifyProofConfig {
+        let decoded = super::decode_and_verify_proof(super::Config {
             trie_root_hash: &trie_root,
             proof: proof.iter().map(|p| &p[..]),
         })

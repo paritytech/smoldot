@@ -1309,26 +1309,25 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
 
                 for (call, proof) in calls {
                     let proof = proof.take().unwrap();
-                    let decoded_proof = match proof_decode::decode_and_verify_proof(
-                        proof_decode::VerifyProofConfig {
+                    let decoded_proof =
+                        match proof_decode::decode_and_verify_proof(proof_decode::Config {
                             trie_root_hash: &header.state_root,
                             proof: proof.into_iter(),
-                        },
-                    ) {
-                        Ok(d) => d,
-                        Err(err) => {
-                            self.inner.phase = Phase::DownloadFragments {
-                                previous_verifier_values: Some((
-                                    header.clone(),
-                                    chain_information_finality.clone(),
-                                )),
-                            };
-                            return (
-                                WarpSync::InProgress(self.inner),
-                                Some(Error::InvalidCallProof(err)),
-                            );
-                        }
-                    };
+                        }) {
+                            Ok(d) => d,
+                            Err(err) => {
+                                self.inner.phase = Phase::DownloadFragments {
+                                    previous_verifier_values: Some((
+                                        header.clone(),
+                                        chain_information_finality.clone(),
+                                    )),
+                                };
+                                return (
+                                    WarpSync::InProgress(self.inner),
+                                    Some(Error::InvalidCallProof(err)),
+                                );
+                            }
+                        };
                     decoded_proofs.insert(call.clone(), decoded_proof);
                 }
 

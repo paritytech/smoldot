@@ -76,14 +76,13 @@ impl PrefixScan {
         mut self,
         proof: impl Iterator<Item = &'a [u8]> + Clone + 'a,
     ) -> Result<ResumeOutcome, (Self, Error)> {
-        let decoded_proof =
-            match proof_decode::decode_and_verify_proof(proof_decode::VerifyProofConfig {
-                proof,
-                trie_root_hash: &self.trie_root_hash,
-            }) {
-                Ok(d) => d,
-                Err(err) => return Err((self, Error::InvalidProof(err))),
-            };
+        let decoded_proof = match proof_decode::decode_and_verify_proof(proof_decode::Config {
+            proof,
+            trie_root_hash: &self.trie_root_hash,
+        }) {
+            Ok(d) => d,
+            Err(err) => return Err((self, Error::InvalidProof(err))),
+        };
 
         let mut non_terminal_queries = mem::take(&mut self.next_queries);
 

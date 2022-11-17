@@ -580,7 +580,7 @@ impl<TPlat: Platform> Task<TPlat> {
                         // TODO: log what happens
                         let decoded = outcome.decode();
                         if let Ok(decoded) =
-                            proof_decode::decode_and_verify_proof(proof_decode::VerifyProofConfig {
+                            proof_decode::decode_and_verify_proof(proof_decode::Config {
                                 proof: decoded.iter().copied(),
                                 trie_root_hash: &state_trie_root,
                             })
