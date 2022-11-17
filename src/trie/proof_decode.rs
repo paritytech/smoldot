@@ -285,6 +285,7 @@ pub struct DecodedTrieProof<T> {
     proof: Vec<T>,
 
     /// For each storage key, contains the entry found in the proof and the children bitmap.
+    // TODO: a BTreeMap is actually kind of stupid since `proof` is itself in a tree format
     entries: BTreeMap<Vec<nibble::Nibble>, (StorageValueInner, u16)>,
 }
 
