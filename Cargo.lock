@@ -930,7 +930,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c24f403d068ad0b359e577a77f92392118be3f3c927538f2bb544a5ecd828c6"
 dependencies = [
  "curve25519-dalek 3.2.0",
- "hashbrown",
+ "hashbrown 0.12.3",
  "hex",
  "rand_core 0.6.3",
  "sha2 0.9.8",
@@ -1192,6 +1192,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
 dependencies = [
  "ahash",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33ff8ae62cd3a9102e5637afc8452c55acf3844001bd5374e0b0bd7b6616c038"
+dependencies = [
  "serde",
 ]
 
@@ -1276,7 +1284,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10a35a97730320ffe8e2d410b5d3b69279b98d2c14bdb8b70ea89ecf7888d41e"
 dependencies = [
  "autocfg",
- "hashbrown",
+ "hashbrown 0.12.3",
  "serde",
 ]
 
@@ -1608,7 +1616,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "21158b2c33aa6d4561f1c0a6ea283ca92bc54802a93b263e910746d679a7eb53"
 dependencies = [
  "crc32fast",
- "hashbrown",
+ "hashbrown 0.12.3",
  "indexmap",
  "memchr",
 ]
@@ -2253,7 +2261,7 @@ dependencies = [
  "event-listener",
  "fnv",
  "futures",
- "hashbrown",
+ "hashbrown 0.13.1",
  "hex",
  "hmac 0.12.1",
  "itertools",
@@ -2304,7 +2312,7 @@ dependencies = [
  "fnv",
  "futures",
  "futures-timer",
- "hashbrown",
+ "hashbrown 0.13.1",
  "hex",
  "mick-jaeger",
  "rand",
@@ -2326,7 +2334,7 @@ dependencies = [
  "event-listener",
  "fnv",
  "futures",
- "hashbrown",
+ "hashbrown 0.13.1",
  "hex",
  "itertools",
  "log",
@@ -2346,7 +2354,7 @@ dependencies = [
  "event-listener",
  "fnv",
  "futures",
- "hashbrown",
+ "hashbrown 0.13.1",
  "lazy_static",
  "log",
  "nom",

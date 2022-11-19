@@ -1079,7 +1079,7 @@ where
                 .map(|(peer_id, _)| peer_id)
                 .filter(|peer_id| {
                     // Don't assign slots to peers that already have a slot.
-                    !chain.out_peers.contains(peer_id) && !chain.in_peers.contains(peer_id)
+                    !chain.out_peers.contains(*peer_id) && !chain.in_peers.contains(*peer_id)
                 }),
         )
     }
