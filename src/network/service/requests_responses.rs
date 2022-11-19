@@ -699,7 +699,7 @@ where
                 // TODO: additionally, this only takes outgoing connections into account
                 .find(|(peer_id, _)| {
                     self.kbuckets_peers
-                        .get(peer_id)
+                        .get(*peer_id)
                         .unwrap()
                         .addresses
                         .iter_connected()
