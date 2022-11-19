@@ -44,8 +44,20 @@
 //! >           access to the storage of a block sends to a machine that doesn't all the proofs
 //! >           corresponding to the storage entries necessary for a certain runtime call.
 //!
+//! # Compact vs non-compact
+//!
+//! There exists two kind of trie proofs: compact and non-compact.
+//!
+//! Non-compact proofs are the oldest format. Nodes of the trie can be found in any order in the
+//! proof, and a node in the trie references its children either by hash or by inline the child
+//! node value. A non-compact proof is simply a list of node values.
+//!
+//! Compact proofs are more recent and occupy less space than non-compact proofs. Node values can
+//! contain child node values of length 0, in which case the child must immediately follow its
+//! parent in the proof. The hash of the first node in the proof must always match the trie root.
+//!
 
-use super::{nibble, proof_node_codec};
+use super::{nibble, node_value::HashOrInline, proof_node_codec};
 
 use alloc::vec::Vec;
 
@@ -90,20 +102,15 @@ pub fn verify_proof<'a, 'b>(
         StorageValue::None => Ok(None),
         StorageValue::Known(v) => Ok(Some(v)),
         StorageValue::HashKnownValueMissing(_) => {
-            // Considering that this function is specifically about obtaining the storage value
-            // of an item, if this storage item is missing we indicate that the proof is
-            // incomplete.
-            Err(Error::MissingProofEntry {
-                closest_ancestor_nibbles: {
-                    // Length of the requested key, in nibbles.
-                    config.requested_key.len() * 2
-                },
-            })
+            // Considering that this function is about obtaining the storage value of a specific
+            // item, if this storage item is missing we indicate that the proof is incomplete.
+            Err(Error::MissingProofEntry)
         }
     }
 }
 
 /// Configuration to pass to [`trie_node_info`].
+#[derive(Debug, Clone)]
 pub struct TrieNodeInfoConfig<'a, K, I> {
     /// Key whose storage value needs to be found.
     pub requested_key: K,
@@ -131,6 +138,23 @@ pub struct TrieNodeInfoConfig<'a, K, I> {
 /// >           Only the minimum amount of information required is fetched from `proof`, and an
 /// >           error is returned if a problem happens during this process.
 pub fn trie_node_info<'a, 'b>(
+    config: TrieNodeInfoConfig<
+        'a,
+        impl Iterator<Item = nibble::Nibble> + Clone,
+        impl Iterator<Item = &'b [u8]> + Clone,
+    >,
+) -> Result<TrieNodeInfo<'b>, Error> {
+    match trie_node_info_non_compact(config.clone()) {
+        Ok(info) => Ok(info),
+        Err(err) => match trie_node_info_compact(config) {
+            Ok(info) => Ok(info),
+            Err(_) => Err(err), // TODO: merge errors or something?
+        },
+    }
+}
+
+/// Similar to [`trie_node_info`], but only accepts non-compact trie proofs.
+pub fn trie_node_info_non_compact<'a, 'b>(
     mut config: TrieNodeInfoConfig<
         'a,
         impl Iterator<Item = nibble::Nibble>,
@@ -167,10 +191,6 @@ pub fn trie_node_info<'a, 'b>(
         config.proof.clone().nth(proof_iter).unwrap()
     };
 
-    // Number of nibbles that have been found during the iteration below.
-    // Used only for debugging purposes.
-    let mut iter_nibbles = 0usize; // TODO: remove?
-
     // The verification consists in iterating using `expected_nibbles_iter` and `node_value`.
     let mut expected_nibbles_iter = config.requested_key;
     loop {
@@ -195,7 +215,6 @@ pub fn trie_node_info<'a, 'b>(
                 }
                 Some(_) => {
                     // Normal path.
-                    iter_nibbles += 1;
                 }
             }
         }
@@ -221,17 +240,218 @@ pub fn trie_node_info<'a, 'b>(
                 node_value = child;
             } else {
                 // Find the entry in `proof` matching this Merkle value and update
-                // `node_value`.
-                let proof_iter = merkle_values.iter().position(|v| v[..] == *child).ok_or(
-                    Error::MissingProofEntry {
-                        closest_ancestor_nibbles: iter_nibbles,
-                    },
-                )?;
+                // `proof_iter`.
+                let proof_iter = merkle_values
+                    .iter()
+                    .position(|v| v[..] == *child)
+                    .ok_or(Error::MissingProofEntry)?;
                 node_value = config.proof.clone().nth(proof_iter).unwrap();
             }
+        } else {
+            // The current node (i.e. `node_value`) exactly matches the requested key.
+            return Ok(TrieNodeInfo {
+                storage_value: match decoded_node_value.storage_value {
+                    proof_node_codec::StorageValue::Hashed(hash) => {
+                        // If the node contains a hash, the un-hashed value should also be found
+                        // in the proof as a standalone item.
+                        match merkle_values.iter().position(|v| v[..] == *hash) {
+                            None => StorageValue::HashKnownValueMissing(hash),
+                            Some(idx) => {
+                                let value = config.proof.nth(idx).unwrap();
+                                StorageValue::Known(value)
+                            }
+                        }
+                    }
+                    proof_node_codec::StorageValue::Unhashed(v) => StorageValue::Known(v),
+                    proof_node_codec::StorageValue::None => StorageValue::None,
+                },
+                children: Children::Multiple {
+                    children_bitmap: decoded_node_value.children_bitmap(),
+                },
+            });
+        }
+    }
+}
 
-            // Jump to the next node.
-            iter_nibbles += 1;
+/// Similar to [`trie_node_info`], but only accepts compact trie proofs.
+///
+/// In the compact trie proof format, the order of the elements of the proof is important, with
+/// the root first. Each node can be prefixed with a `1` byte, in which case its header must
+/// specify a storage value of length 0 that is actually found right after the node in the proof.
+/// In each node, a child value can be replaced with an empty value, which indicates that the
+/// child is found immediately after the node (and after the storage value, in case of a `1` byte
+/// prefix).
+pub fn trie_node_info_compact<'a, 'b>(
+    mut config: TrieNodeInfoConfig<
+        'a,
+        impl Iterator<Item = nibble::Nibble>,
+        impl Iterator<Item = &'b [u8]>,
+    >,
+) -> Result<TrieNodeInfo<'b>, Error> {
+    // The first node in the proof must always match the trie root. But because nodes in a compact
+    // proof don't necessarily contain their children, we can't just hash the item.
+    // In order to check whether the proof is correct, we must thus recombine the node items
+    // properly.
+    {
+        // To do so, we iterating over the proof starting from the end and maintain a stack of the
+        // calculated hashes. The maximum size of the stack will be the maximum depth of the proof.
+        let mut stack: Vec<arrayvec::ArrayVec<u8, 32>> = Vec::with_capacity(16);
+        // TODO: meh for collecting into a Vec
+        for node in config.proof.collect::<Vec<_>>().into_iter().rev() {
+            // TODO: handle prefix
+            let mut decoded_node =
+                proof_node_codec::decode(node).map_err(Error::InvalidNodeValue)?;
+
+            // Modify `decoded_node` and replace each missing child with the value of that child
+            // found in `stack`.
+            let mut num_extracted_children = 0;
+            for child in decoded_node.children.iter_mut().rev() {
+                if child.map_or(true, |c| !c.is_empty()) {
+                    // No child or child is already in the node.
+                    continue;
+                }
+
+                if stack
+                    .len()
+                    .checked_sub(num_extracted_children)
+                    .map_or(true, |l| l == 0)
+                {
+                    return Err(Error::MissingProofEntry);
+                }
+
+                *child = Some(&stack[stack.len() - 1 - num_extracted_children]);
+                num_extracted_children += 1;
+            }
+
+            // Now that `decoded_node` is updated to include the children again, we calculate
+            // the node value (i.e. either the hash of the node or its inline value).
+            let recomposed_node_value = proof_node_codec::encode(decoded_node)
+                .fold(
+                    HashOrInline::Inline(arrayvec::ArrayVec::new()),
+                    |mut h, s| {
+                        h.update(s.as_ref());
+                        h
+                    },
+                )
+                .finalize();
+
+            // Update the stack for the next iteration.
+            debug_assert!(recomposed_node_value.as_ref().len() <= 32);
+            // TODO: must also skip node storage value if any
+            for _ in 0..num_extracted_children {
+                stack.pop();
+            }
+            stack.push(arrayvec::ArrayVec::try_from(recomposed_node_value.as_ref()).unwrap());
+        }
+
+        // The stack should now contain exactly one value. It can contain zero or more than one
+        // if the proof is invalid.
+        if stack.is_empty() {
+            return Err(Error::TrieRootNotFound);
+        } else if stack.len() != 1 {
+            return Err(Error::TooManyEntries);
+        }
+
+        // Now check that the root matches the trie root.
+        if blake2_rfc::blake2b::blake2b(32, &[], &stack[0]).as_bytes() != config.trie_root_hash {
+            return Err(Error::TrieRootNotFound);
+        }
+    }
+
+    // Start iterating at the first node in the proof.
+    // `node_value` is updated as the decoding progresses.
+    let mut node_value = config.proof.next().ok_or(Error::TrieRootNotFound)?;
+
+    // The verification consists in iterating using `expected_nibbles_iter` and `node_value`.
+    let mut expected_nibbles_iter = config.requested_key;
+    loop {
+        // Decodes `node_value` into its components.
+        // Each node can be prefixed with a `1` special prefix that indicates that the storage
+        // value is included separately in the proof.
+        let (has_compact_prefix, decoded_node_value) = if node_value.first() == Some(&1) {
+            debug_assert!(proof_node_codec::decode(node_value).is_err());
+            node_value = &node_value[1..];
+            let decoded = proof_node_codec::decode(node_value).map_err(Error::InvalidNodeValue)?;
+            if !matches!(
+                decoded.storage_value,
+                proof_node_codec::StorageValue::Unhashed(&[])
+            ) {
+                return Err(Error::CompactPrefixInvalidCombination);
+            }
+            (true, decoded)
+        } else {
+            (
+                false,
+                proof_node_codec::decode(node_value).map_err(Error::InvalidNodeValue)?,
+            )
+        };
+
+        // Iterating over this partial key, checking if it matches `expected_nibbles_iter`.
+        for nibble in decoded_node_value.partial_key.clone() {
+            match expected_nibbles_iter.next() {
+                None => {
+                    return Ok(TrieNodeInfo {
+                        storage_value: StorageValue::None,
+                        children: Children::One(nibble),
+                    });
+                }
+                Some(n) if n != nibble => {
+                    return Ok(TrieNodeInfo {
+                        storage_value: StorageValue::None,
+                        children: Children::None,
+                    });
+                }
+                Some(_) => {
+                    // Normal path.
+                }
+            }
+        }
+
+        if let Some(expected_nibble) = expected_nibbles_iter.next() {
+            // Update `config.proof` to skip over any child that doesn't interest us.
+            let mut num_nodes_to_skip = decoded_node_value
+                .children
+                .iter()
+                .take(usize::from(u8::from(expected_nibble)))
+                .filter(|c| c.map_or(false, |c| c.is_empty()))
+                .count();
+            if has_compact_prefix {
+                num_nodes_to_skip += 1;
+            }
+            while num_nodes_to_skip > 0 {
+                num_nodes_to_skip -= 1;
+
+                let uninteresting_node = config.proof.next().ok_or(Error::MissingProofEntry)?;
+                let decoded_uninteresting = proof_node_codec::decode(uninteresting_node)
+                    .map_err(Error::InvalidNodeValue)?;
+                num_nodes_to_skip += decoded_uninteresting
+                    .children
+                    .iter()
+                    .take(usize::from(u8::from(expected_nibble)))
+                    .filter(|c| c.map_or(false, |c| c.is_empty()))
+                    .count();
+            }
+
+            // Iteration continues with another node.
+            // Update `node_value` to point to the child whose index matches next nibble that was
+            // just pulled from `expected_nibbles_iter`.
+            let child = match decoded_node_value.children[usize::from(u8::from(expected_nibble))] {
+                Some(child) => child,
+                None => {
+                    // No child with the requested index exists.
+                    return Ok(TrieNodeInfo {
+                        storage_value: StorageValue::None,
+                        children: Children::None,
+                    });
+                }
+            };
+
+            if child.is_empty() {
+                node_value = config.proof.next().ok_or(Error::MissingProofEntry)?;
+            } else {
+                // TODO: is this correct? aren't all children 0 size?
+                node_value = child;
+            }
         } else {
             // The current node (i.e. `node_value`) exactly matches the requested key.
             return Ok(TrieNodeInfo {
@@ -342,14 +562,11 @@ pub enum Error {
     #[display(fmt = "A node of the proof has an invalid format: {}", _0)]
     InvalidNodeValue(proof_node_codec::Error),
     /// Missing an entry in the proof.
-    #[display(
-        fmt = "An entry is missing from the proof (closest ancestor nibbles: {})",
-        closest_ancestor_nibbles
-    )]
-    MissingProofEntry {
-        /// Number of nibbles in the key of the closest ancestor that was found in the proof.
-        closest_ancestor_nibbles: usize,
-    },
+    MissingProofEntry,
+    /// Some entries aren't used in the proof.
+    TooManyEntries,
+    /// Compact prefix found in front of a node without an unhashed empty storage value.
+    CompactPrefixInvalidCombination,
 }
 
 #[cfg(test)]

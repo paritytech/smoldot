@@ -342,7 +342,8 @@ impl fmt::Debug for Output {
 /// This struct serves as a helper to handle these situations. Rather than putting intermediary
 /// values in buffers then hashing the node value as a whole, we push the elements of the node
 /// value to this struct which automatically switches to hashing if the value exceeds 32 bytes.
-enum HashOrInline {
+// TODO: improve the API of this: hide the implementation detail and add constructors
+pub enum HashOrInline {
     Inline(ArrayVec<u8, 31>),
     Hasher(blake2_rfc::blake2b::Blake2b),
 }
@@ -350,7 +351,7 @@ enum HashOrInline {
 impl HashOrInline {
     /// Adds data to the node value. If this is a [`HashOrInline::Inline`] and the total size would
     /// go above 32 bytes, then we switch to a hasher.
-    fn update(&mut self, data: &[u8]) {
+    pub fn update(&mut self, data: &[u8]) {
         match self {
             HashOrInline::Inline(curr) => {
                 if curr.try_extend_from_slice(data).is_err() {
@@ -366,7 +367,7 @@ impl HashOrInline {
         }
     }
 
-    fn finalize(self) -> Output {
+    pub fn finalize(self) -> Output {
         Output {
             inner: match self {
                 HashOrInline::Inline(b) => OutputInner::Inline(b),
