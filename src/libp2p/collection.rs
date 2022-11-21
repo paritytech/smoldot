@@ -65,7 +65,8 @@ use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 pub use super::peer_id::PeerId;
 pub use super::read_write::ReadWrite;
 pub use established::{
-    ConfigRequestResponse, ConfigRequestResponseIn, InboundError, SubstreamFate,
+    ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn, InboundError,
+    SubstreamFate,
 };
 pub use single_stream_handshake::HandshakeError;
 

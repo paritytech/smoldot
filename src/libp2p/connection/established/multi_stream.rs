@@ -598,7 +598,7 @@ where
                     self.ping_substream = None;
                 }
                 self.out_in_substreams_map.remove(&substream.id);
-                self.in_substreams.remove(&substream_id);
+                self.in_substreams.remove(substream_id);
                 break SubstreamFate::Reset;
             } else if !continue_looping {
                 break SubstreamFate::Continue;
