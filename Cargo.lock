@@ -2408,9 +2408,9 @@ dependencies = [
 
 [[package]]
 name = "sqlite"
-version = "0.27.3"
+version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e66cb949f931ece6201d72bffad3f3601b94998a345793713dd13af70a77c185"
+checksum = "eaae786470902daa541da257e5d1d519b1d16f4eef3f5426bee4fd6e7d78f5f7"
 dependencies = [
  "libc",
  "sqlite3-sys",
