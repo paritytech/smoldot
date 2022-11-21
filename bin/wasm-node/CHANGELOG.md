@@ -7,6 +7,10 @@
 - In earlier versions of smoldot, `setTimeout(callback, 0)` was frequently used in order split execution of CPU-intensive tasks in multiple smaller ones while still giving back control to the execution environment (such as NodeJS or the browser). Unfortunately, when a web page is in the background, browsers set a minimum delay of one second for `setTimeout`. For this reason, the usage of ̀`setTimeout` has now been reduced to the strict minimum, except when the environment is browser and `document.visibilityState` is equal to `visible`. ([#2999](https://github.com/paritytech/smoldot/pull/2999))
 - Optimize the Merkle proof verification. The complexity has been reduced from `O(n^2)` to `O(n * log n)`. ([#3013](https://github.com/paritytech/smoldot/pull/3013))
 
+### Fixed
+
+- Fix `ProtobufDecode` errors appearing while the Grandpa warp syncing is still in progress.
+
 ## 0.7.7 - 2022-11-11
 
 ### Added

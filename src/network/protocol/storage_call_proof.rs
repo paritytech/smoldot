@@ -94,28 +94,33 @@ pub fn build_call_proof_request<'a>(
 
 /// Decodes a response to a storage proof request or a call proof request.
 ///
-/// On success, contains a list of Merkle proof entries.
+/// On success, contains a list of Merkle proof entries, or `None` if the remote couldn't answer
+/// the request.
 pub fn decode_storage_or_call_proof_response(
     ty: StorageOrCallProof,
     response_bytes: &[u8],
-) -> Result<Vec<&[u8]>, DecodeStorageCallProofResponseError> {
+) -> Result<Option<Vec<&[u8]>>, DecodeStorageCallProofResponseError> {
     let field_num = match ty {
         StorageOrCallProof::CallProof => 1,
         StorageOrCallProof::StorageProof => 2,
     };
 
+    // TODO: while the `proof` field is correctly optional, the `response` field isn't supposed to be optional; make it `#[required]` again once https://github.com/paritytech/substrate/pull/12732 has been merged and released
+
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
-            #[required] response = field_num => protobuf::message_tag_decode(protobuf::message_decode!{
-                #[required] proof = 2 => protobuf::bytes_tag_decode
+            #[optional] response = field_num => protobuf::message_tag_decode(protobuf::message_decode!{
+                #[optional] proof = 2 => protobuf::bytes_tag_decode
             }),
         }),
     );
 
-    let proof: &[u8] = match nom::Finish::finish(parser(response_bytes)) {
-        Ok((_, out)) => out.response.proof,
+    let proof = match nom::Finish::finish(parser(response_bytes)) {
+        Ok((_, out)) => out.response.and_then(|r| r.proof),
         Err(_) => return Err(DecodeStorageCallProofResponseError::ProtobufDecode),
     };
+
+    let Some(proof) = proof else { return Ok(None) };
 
     // The proof itself is a SCALE-encoded `Vec<Vec<u8>>`.
     let (_, decoded) = nom::combinator::all_consuming(nom::combinator::flat_map(
@@ -126,7 +131,7 @@ pub fn decode_storage_or_call_proof_response(
         DecodeStorageCallProofResponseError::ProofDecodeError
     })?;
 
-    Ok(decoded)
+    Ok(Some(decoded))
 }
 
 /// Error potentially returned by [`decode_storage_or_call_proof_response`].
