@@ -239,6 +239,9 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
         // Find the Merkle value of that child in `node_value`.
         let (node_value_update, len) = crate::util::nom_scale_compact_usize(node_value)
             .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::ChildLenDecode)?;
+        if len > 32 {
+            return Err(Error::ChildTooLarge);
+        }
         node_value = node_value_update;
         if node_value.len() < len {
             return Err(Error::ChildrenTooShort);
@@ -375,6 +378,8 @@ pub enum Error {
     ChildLenDecode,
     /// Node value ends within a child value.
     ChildrenTooShort,
+    /// Child value is superior to 32 bytes.
+    ChildTooLarge,
     /// Error while decoding length of storage value.
     StorageValueLenDecode,
     /// Node value ends within the storage value.

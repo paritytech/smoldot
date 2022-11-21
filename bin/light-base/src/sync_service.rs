@@ -40,7 +40,7 @@ use smoldot::{
     executor::host,
     libp2p::PeerId,
     network::{protocol, service},
-    trie::{self, prefix_proof, proof_verify},
+    trie::{self, prefix_proof, proof_decode},
 };
 
 mod parachain;
@@ -429,16 +429,19 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 .map_err(StorageQueryErrorDetail::Network)
                 .and_then(|outcome| {
                     let decoded = outcome.decode();
+                    let decoded = proof_decode::decode_and_verify_proof(proof_decode::Config {
+                        proof: decoded.iter().copied(),
+                        trie_root_hash: &storage_trie_root,
+                    })
+                    .map_err(StorageQueryErrorDetail::ProofVerification)?;
+
                     let mut result = Vec::with_capacity(requested_keys.clone().count());
                     for key in requested_keys.clone() {
                         result.push(
-                            proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                proof: decoded.iter().map(|nv| &nv[..]),
-                                requested_key: key.as_ref(),
-                                trie_root_hash: &storage_trie_root,
-                            })
-                            .map_err(StorageQueryErrorDetail::ProofVerification)?
-                            .map(|v| v.to_owned()),
+                            decoded
+                                .storage_value(key.as_ref())
+                                .ok_or(StorageQueryErrorDetail::MissingProofEntry)?
+                                .map(|v| v.to_owned()),
                         );
                     }
                     debug_assert_eq!(result.len(), result.capacity());
@@ -516,8 +519,14 @@ impl<TPlat: Platform> SyncService<TPlat> {
                             }
                             Err((scan, err)) => {
                                 prefix_scan = scan;
-                                outcome_errors
-                                    .push(StorageQueryErrorDetail::ProofVerification(err));
+                                outcome_errors.push(match err {
+                                    prefix_proof::Error::InvalidProof(err) => {
+                                        StorageQueryErrorDetail::ProofVerification(err)
+                                    }
+                                    prefix_proof::Error::MissingProofEntry => {
+                                        StorageQueryErrorDetail::MissingProofEntry
+                                    }
+                                });
                             }
                         }
                     }
@@ -616,10 +625,11 @@ impl StorageQueryError {
                 ),
             ) => false,
             // TODO: as a temporary hack, we consider `TrieRootNotFound` as the remote not knowing about the requested block; see https://github.com/paritytech/substrate/pull/8046
-            StorageQueryErrorDetail::ProofVerification(proof_verify::Error::TrieRootNotFound) => {
+            StorageQueryErrorDetail::ProofVerification(proof_decode::Error::TrieRootNotFound) => {
                 true
             }
-            StorageQueryErrorDetail::ProofVerification(_) => false,
+            StorageQueryErrorDetail::ProofVerification(_)
+            | StorageQueryErrorDetail::MissingProofEntry => false,
         })
     }
 }
@@ -646,7 +656,9 @@ pub enum StorageQueryErrorDetail {
     Network(network_service::StorageProofRequestError),
     /// Error verifying the proof.
     #[display(fmt = "{}", _0)]
-    ProofVerification(proof_verify::Error),
+    ProofVerification(proof_decode::Error),
+    /// Proof is missing one or more desired storage items.
+    MissingProofEntry,
 }
 
 /// Error that can happen when calling [`SyncService::call_proof_query`].

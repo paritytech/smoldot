@@ -103,7 +103,7 @@ use crate::{
     },
     finality::grandpa::warp_sync,
     header::{self, Header},
-    trie::proof_verify,
+    trie::proof_decode,
 };
 
 use alloc::{borrow::Cow, vec::Vec};
@@ -128,7 +128,10 @@ pub enum Error {
     ChainInformationBuild(chain_information::build::Error),
     /// Failed to verify call proof.
     // TODO: this is a non-fatal error contrary to all the other errors in this enum
-    InvalidCallProof(proof_verify::Error),
+    InvalidCallProof(proof_decode::Error),
+    /// Call proof is missing the necessary entries.
+    // TODO: this is a non-fatal error contrary to all the other errors in this enum
+    CallProofEntriesMissing,
     /// Warp sync requires fetching the key that follows another one. This isn't implemented in
     /// smoldot.
     NextKeyUnimplemented,
@@ -1297,37 +1300,61 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
         {
             debug_assert!(calls.values().all(Option::is_some));
 
+            // Decode all the Merkle proofs that have been received.
+            let calls = {
+                let mut decoded_proofs = hashbrown::HashMap::with_capacity_and_hasher(
+                    calls.len(),
+                    fnv::FnvBuildHasher::default(),
+                );
+
+                for (call, proof) in calls {
+                    let proof = proof.take().unwrap();
+                    let decoded_proof =
+                        match proof_decode::decode_and_verify_proof(proof_decode::Config {
+                            trie_root_hash: &header.state_root,
+                            proof: proof.into_iter(),
+                        }) {
+                            Ok(d) => d,
+                            Err(err) => {
+                                self.inner.phase = Phase::DownloadFragments {
+                                    previous_verifier_values: Some((
+                                        header.clone(),
+                                        chain_information_finality.clone(),
+                                    )),
+                                };
+                                return (
+                                    WarpSync::InProgress(self.inner),
+                                    Some(Error::InvalidCallProof(err)),
+                                );
+                            }
+                        };
+                    decoded_proofs.insert(call.clone(), decoded_proof);
+                }
+
+                decoded_proofs
+            };
+
             let mut chain_info_builder = chain_info_builder.take().unwrap();
 
             loop {
                 match chain_info_builder {
                     chain_information::build::InProgress::StorageGet(get) => {
-                        let proof = calls
-                            .get(&get.call_in_progress())
-                            .unwrap()
-                            .as_ref()
-                            .unwrap();
-
-                        let value =
-                            match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                requested_key: get.key().as_ref(),
-                                trie_root_hash: &header.state_root,
-                                proof: proof.iter().map(|v| &v[..]),
-                            }) {
-                                Ok(v) => v,
-                                Err(err) => {
-                                    self.inner.phase = Phase::DownloadFragments {
-                                        previous_verifier_values: Some((
-                                            header.clone(),
-                                            chain_information_finality.clone(),
-                                        )),
-                                    };
-                                    return (
-                                        WarpSync::InProgress(self.inner),
-                                        Some(Error::InvalidCallProof(err)),
-                                    );
-                                }
-                            };
+                        let proof = calls.get(&get.call_in_progress()).unwrap();
+                        let value = match proof.storage_value(get.key().as_ref()) {
+                            Some(v) => v,
+                            None => {
+                                self.inner.phase = Phase::DownloadFragments {
+                                    previous_verifier_values: Some((
+                                        header.clone(),
+                                        chain_information_finality.clone(),
+                                    )),
+                                };
+                                return (
+                                    WarpSync::InProgress(self.inner),
+                                    Some(Error::CallProofEntriesMissing),
+                                );
+                            }
+                        };
 
                         match get.inject_value(value.map(iter::once)) {
                             chain_information::build::ChainInformationBuild::Finished {

@@ -300,6 +300,15 @@ impl<TPlat: Platform> Background<TPlat> {
                         }
                         .to_json_call_object_parameters(None)
                     }
+                    Some(Err(runtime_service::RuntimeCallError::MissingProofEntry)) => {
+                        methods::ServerToClient::chainHead_unstable_callEvent {
+                            subscription: (&subscription_id).into(),
+                            result: methods::ChainHeadCallEvent::Error {
+                                error: "incomplete call proof".into(),
+                            },
+                        }
+                        .to_json_call_object_parameters(None)
+                    }
                     Some(Err(runtime_service::RuntimeCallError::CallProof(error))) => {
                         methods::ServerToClient::chainHead_unstable_callEvent {
                             subscription: (&subscription_id).into(),
