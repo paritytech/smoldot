@@ -172,8 +172,9 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
                     // Due to the way the calculation below is performed, sending or receiving
                     // more than `type_of(TOTAL_BYTES_RECEIVED or TOTAL_BYTES_SENT)::max_value`
                     // bytes within an interval will lead to an erroneous value being shown to the
-                    // user. We just assume that this can't happen. If it does happen, consider
-                    // increasing the size of `TOTAL_BYTES_RECEIVED` or `TOTAL_BYTES_SENT`.
+                    // user. We just assume that this can't happen. If it does happen, the fix
+                    // consists in increasing the size of `TOTAL_BYTES_RECEIVED` or
+                    // `TOTAL_BYTES_SENT`.
 
                     let bytes_rx = platform::TOTAL_BYTES_RECEIVED.load(Ordering::Relaxed);
                     let avg_dl = u64::try_from(bytes_rx.wrapping_sub(previous_read_bytes)).unwrap() / interval;
