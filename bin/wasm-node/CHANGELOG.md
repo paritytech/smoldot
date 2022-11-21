@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Fix `ProtobufDecode` errors appearing while the Grandpa warp syncing is still in progress.
+- Fix `ProtobufDecode` errors appearing while the Grandpa warp syncing is still in progress. ([#3018](https://github.com/paritytech/smoldot/pull/3018))
 
 ## 0.7.7 - 2022-11-11
 
