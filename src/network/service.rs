@@ -560,8 +560,8 @@ where
     /// [`ChainNetwork::pending_outcome_ok_multi_stream`].
     ///
     /// `is_bad_address` should be `true` if the address is invalid or definitely unreachable and
-    /// should thus never be attempted again unless it is re-discovered. If `false` is passed, the
-    /// address might be attempted again in the future.
+    /// should thus not be attempted again. If `false` is passed, the address might be attempted
+    /// again.
     ///
     /// # Panic
     ///
