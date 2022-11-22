@@ -59,7 +59,7 @@ pub struct Config<'a, I> {
 ///
 /// The proof is then stored within the [`DecodedTrieProof`].
 ///
-/// Due to the genesis nature of this function, the proof can be either a `Vec<u8>` or a `&[u8]`.
+/// Due to the generic nature of this function, the proof can be either a `Vec<u8>` or a `&[u8]`.
 ///
 /// Returns an error if the proof is invalid, or if the proof contains entries that are
 /// disconnected from the root node of the trie.
