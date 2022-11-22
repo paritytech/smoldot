@@ -25,17 +25,17 @@ use futures::prelude::*;
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
         Mutex,
     },
 };
 
 /// Total number of bytes that all the connections created through [`Platform`] combined have
 /// received.
-pub static TOTAL_BYTES_RECEIVED: AtomicUsize = AtomicUsize::new(0);
+pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 /// Total number of bytes that all the connections created through [`Platform`] combined have
 /// sent.
-pub static TOTAL_BYTES_SENT: AtomicUsize = AtomicUsize::new(0);
+pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct Platform;
 
@@ -355,7 +355,8 @@ impl smoldot_light::platform::Platform for Platform {
             return;
         }
 
-        TOTAL_BYTES_SENT.fetch_add(data.len(), Ordering::Relaxed);
+        // `unwrap()` is ok as there's no way that `data.len()` doesn't fit in a `u64`.
+        TOTAL_BYTES_SENT.fetch_add(u64::try_from(data.len()).unwrap(), Ordering::Relaxed);
 
         unsafe {
             bindings::stream_send(
@@ -647,12 +648,12 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: 
     debug_assert!(!stream.reset);
 
     let ptr = usize::try_from(ptr).unwrap();
-    let len = usize::try_from(len).unwrap();
+    let len_usize = usize::try_from(len).unwrap();
 
-    TOTAL_BYTES_RECEIVED.fetch_add(len, Ordering::Relaxed);
+    TOTAL_BYTES_RECEIVED.fetch_add(u64::from(len), Ordering::Relaxed);
 
     let message: Box<[u8]> =
-        unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
+        unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len_usize)) };
 
     // Ignore empty message to avoid all sorts of problems.
     if message.is_empty() {

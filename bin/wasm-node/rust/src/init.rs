@@ -169,12 +169,19 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
                     // not fit in a `u64`, which as of 2021 is basically impossible.
                     let mem = u64::try_from(alloc::total_alloc_bytes()).unwrap();
 
+                    // Due to the way the calculation below is performed, sending or receiving
+                    // more than `type_of(TOTAL_BYTES_RECEIVED or TOTAL_BYTES_SENT)::max_value`
+                    // bytes within an interval will lead to an erroneous value being shown to the
+                    // user. At the time of writing of this comment, they are 64bits, so we just
+                    // assume that this can't happen. If it does happen, the fix would consist in
+                    // increasing the size of `TOTAL_BYTES_RECEIVED` or `TOTAL_BYTES_SENT`.
+
                     let bytes_rx = platform::TOTAL_BYTES_RECEIVED.load(Ordering::Relaxed);
-                    let avg_dl = u64::try_from(bytes_rx - previous_read_bytes).unwrap() / interval;
+                    let avg_dl = u64::try_from(bytes_rx.wrapping_sub(previous_read_bytes)).unwrap() / interval;
                     previous_read_bytes = bytes_rx;
 
                     let bytes_tx = platform::TOTAL_BYTES_SENT.load(Ordering::Relaxed);
-                    let avg_up = u64::try_from(bytes_tx - previous_sent_bytes).unwrap() / interval;
+                    let avg_up = u64::try_from(bytes_tx.wrapping_sub(previous_sent_bytes)).unwrap() / interval;
                     previous_sent_bytes = bytes_tx;
 
                     // Note that we also print the version at every interval, in order to increase
