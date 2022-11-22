@@ -1610,7 +1610,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn call_proof_response(
         &mut self,
         request_id: RequestId,
-        response: Result<impl Iterator<Item = impl AsRef<[u8]>>, ()>,
+        response: Result<Vec<u8>, ()>,
     ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
