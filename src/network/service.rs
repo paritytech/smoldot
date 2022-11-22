@@ -559,16 +559,15 @@ where
     /// See also [`ChainNetwork::pending_outcome_ok_single_stream`] and
     /// [`ChainNetwork::pending_outcome_ok_multi_stream`].
     ///
-    /// `is_unreachable` should be `true` if the address is invalid or unreachable and should
-    /// thus never be attempted again unless it is re-discovered. It should be `false` if the
-    /// address might only be temporarily unreachable, such as because of a timeout. If `false`
-    /// is passed, the address might be attempted again in the future.
+    /// `is_bad_address` should be `true` if the address is invalid or definitely unreachable and
+    /// should thus never be attempted again unless it is re-discovered. If `false` is passed, the
+    /// address might be attempted again in the future.
     ///
     /// # Panic
     ///
     /// Panics if the [`PendingId`] is invalid.
     ///
-    pub fn pending_outcome_err(&mut self, id: PendingId, is_unreachable: bool) {
+    pub fn pending_outcome_err(&mut self, id: PendingId, is_bad_address: bool) {
         let (expected_peer_id, multiaddr, _) = self.pending_ids.get(id.0).unwrap();
         let multiaddr = multiaddr.clone(); // Solves borrowck issues.
 
@@ -604,7 +603,7 @@ where
         // Updates the addresses book.
         if let Some(KBucketsPeer { addresses, .. }) = self.kbuckets_peers.get_mut(&expected_peer_id)
         {
-            if is_unreachable {
+            if is_bad_address {
                 // Do not remove last remaining address, in order to prevent the addresses
                 // list from ever becoming empty.
                 debug_assert!(!addresses.is_empty());
