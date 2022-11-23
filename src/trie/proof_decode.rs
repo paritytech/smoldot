@@ -348,7 +348,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     ///
     /// As a conclusion, if this proof is made against a trie that has only ever been used in the
     /// context of a runtime, then this function cannot panic. Malicious proofs also cannot trigger
-    /// a panic here.
+    /// a panic.
     ///
     /// # Panic
     ///
