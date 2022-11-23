@@ -360,6 +360,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         &'_ self,
     ) -> impl Iterator<Item = (Vec<u8>, StorageValue<'_>)> + '_ {
         self.iter_ordered().filter_map(|(key, value)| {
+            let value = value.storage_value;
+
             if key.len() % 2 != 0 {
                 assert!(matches!(value, StorageValue::None));
                 return None;
@@ -375,22 +377,32 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// The iterator includes branch nodes.
     pub fn iter_ordered(
         &'_ self,
-    ) -> impl Iterator<Item = (&'_ [nibble::Nibble], StorageValue<'_>)> + '_ {
-        self.entries.iter().map(|(key, (storage_value, _))| {
-            let storage_value = match storage_value {
-                StorageValueInner::Known { offset, len } => {
-                    StorageValue::Known(&self.proof.as_ref()[*offset..][..*len])
-                }
-                StorageValueInner::None => StorageValue::None,
-                StorageValueInner::HashKnownValueMissing { offset } => {
-                    StorageValue::HashKnownValueMissing(
-                        <&[u8; 32]>::try_from(&self.proof.as_ref()[*offset..][..32]).unwrap(),
-                    )
-                }
-            };
+    ) -> impl Iterator<Item = (&'_ [nibble::Nibble], TrieNodeInfo<'_>)> + '_ {
+        self.entries
+            .iter()
+            .map(|(key, (storage_value, children_bitmap))| {
+                let storage_value = match storage_value {
+                    StorageValueInner::Known { offset, len } => {
+                        StorageValue::Known(&self.proof.as_ref()[*offset..][..*len])
+                    }
+                    StorageValueInner::None => StorageValue::None,
+                    StorageValueInner::HashKnownValueMissing { offset } => {
+                        StorageValue::HashKnownValueMissing(
+                            <&[u8; 32]>::try_from(&self.proof.as_ref()[*offset..][..32]).unwrap(),
+                        )
+                    }
+                };
 
-            (&key[..], storage_value)
-        })
+                (
+                    &key[..],
+                    TrieNodeInfo {
+                        children: Children {
+                            children_bitmap: *children_bitmap,
+                        },
+                        storage_value,
+                    },
+                )
+            })
     }
 
     /// Returns information about a trie node.
