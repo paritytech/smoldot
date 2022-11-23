@@ -307,7 +307,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// Returns a list of all elements of the proof, ordered by key in lexicographic order.
     ///
     /// This function is a convenient wrapper around [`DecodedTrieProof::iter_ordered`] that
-    /// converts the keys into an array of bytes. If a key isn't representable as an array of
+    /// converts the keys into arrays of bytes. If a key can't be represented as an array of
     /// bytes, then this function panics. Assuming that the trie has only ever been used in the
     /// context of the runtime, then panics cannot happen. See the section below for an
     /// explanation.
@@ -326,8 +326,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// to know where to write this value, this array of bytes is converted into an array of
     /// nibbles by turning each byte into two nibbles.
     ///
-    /// Due to the fact that the host <-> runtime interface only ever uses arrays of bytes, it is
-    /// not possible for the runtime to store a value or read a value in the trie at a key that
+    /// Due to the fact that the host-runtime interface only ever uses arrays of bytes, it is not
+    /// possible for the runtime to store a value or read a value in the trie at a key that
     /// consists in an uneven number of nibbles, as an uneven number of nibbles cannot be
     /// converted to an array of bytes.
     ///
