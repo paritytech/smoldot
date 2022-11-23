@@ -94,12 +94,12 @@ pub fn build_call_proof_request<'a>(
 
 /// Decodes a response to a storage proof request or a call proof request.
 ///
-/// On success, contains a list of Merkle proof entries, or `None` if the remote couldn't answer
+/// On success, returns a SCALE-encoded Merkle proof, or `None` if the remote couldn't answer
 /// the request.
 pub fn decode_storage_or_call_proof_response(
     ty: StorageOrCallProof,
     response_bytes: &[u8],
-) -> Result<Option<Vec<&[u8]>>, DecodeStorageCallProofResponseError> {
+) -> Result<Option<&[u8]>, DecodeStorageCallProofResponseError> {
     let field_num = match ty {
         StorageOrCallProof::CallProof => 1,
         StorageOrCallProof::StorageProof => 2,
@@ -120,18 +120,7 @@ pub fn decode_storage_or_call_proof_response(
         Err(_) => return Err(DecodeStorageCallProofResponseError::ProtobufDecode),
     };
 
-    let Some(proof) = proof else { return Ok(None) };
-
-    // The proof itself is a SCALE-encoded `Vec<Vec<u8>>`.
-    let (_, decoded) = nom::combinator::all_consuming(nom::combinator::flat_map(
-        crate::util::nom_scale_compact_usize,
-        |num_elems| nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode),
-    ))(proof)
-    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
-        DecodeStorageCallProofResponseError::ProofDecodeError
-    })?;
-
-    Ok(Some(decoded))
+    Ok(proof)
 }
 
 /// Error potentially returned by [`decode_storage_or_call_proof_response`].

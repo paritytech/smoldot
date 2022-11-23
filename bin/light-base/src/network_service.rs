@@ -628,11 +628,10 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 let decoded = items.decode();
                 log::debug!(
                     target: "network",
-                    "Connection({}) => StorageProofRequest(chain={}, num_elems={}, total_size={})",
+                    "Connection({}) => StorageProofRequest(chain={}, total_size={})",
                     target,
                     self.shared.log_chain_names[chain_index],
-                    decoded.len(),
-                    BytesDisplay(decoded.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
+                    BytesDisplay(u64::try_from(decoded.len()).unwrap()),
                 );
             }
             Err(err) => {
@@ -699,11 +698,10 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 let decoded = items.decode();
                 log::debug!(
                     target: "network",
-                    "Connection({}) => CallProofRequest({}, num_elems: {}, total_size: {})",
+                    "Connection({}) => CallProofRequest({}, total_size: {})",
                     target,
                     self.shared.log_chain_names[chain_index],
-                    decoded.len(),
-                    BytesDisplay(decoded.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
+                    BytesDisplay(u64::try_from(decoded.len()).unwrap())
                 );
             }
             Err(err) => {

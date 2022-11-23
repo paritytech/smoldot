@@ -72,10 +72,7 @@ impl PrefixScan {
     /// Injects the proof presumably containing the keys returned by [`PrefixScan::requested_keys`].
     ///
     /// Returns an error if the proof is invalid. In that case, `self` isn't modified.
-    pub fn resume<'a>(
-        mut self,
-        proof: impl Iterator<Item = &'a [u8]> + Clone + 'a,
-    ) -> Result<ResumeOutcome, (Self, Error)> {
+    pub fn resume(mut self, proof: &[u8]) -> Result<ResumeOutcome, (Self, Error)> {
         let decoded_proof = match proof_decode::decode_and_verify_proof(proof_decode::Config {
             proof,
             trie_root_hash: &self.trie_root_hash,
