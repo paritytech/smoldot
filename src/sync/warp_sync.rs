@@ -325,7 +325,7 @@ enum Phase {
         /// downloaded yet.
         calls: hashbrown::HashMap<
             chain_information::build::RuntimeCall,
-            Option<Vec<Vec<u8>>>,
+            Option<Vec<u8>>,
             fnv::FnvBuildHasher,
         >,
     },
@@ -790,7 +790,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     pub fn runtime_call_merkle_proof_success(
         &mut self,
         request_id: RequestId,
-        response: impl Iterator<Item = impl AsRef<[u8]>>,
+        response: Vec<u8>,
     ) -> TRq {
         match (
             self.in_progress_requests.remove(request_id.0),
@@ -816,7 +816,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     if function_name == call.function_name()
                         && parameters_equal(&parameter_vectored, call.parameter_vectored())
                     {
-                        *value = Some(response.map(|e| e.as_ref().to_vec()).collect());
+                        *value = Some(response);
                         break;
                     }
                 }

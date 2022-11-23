@@ -907,8 +907,8 @@ impl fmt::Debug for EncodedBlockAnnounce {
 pub struct EncodedMerkleProof(Vec<u8>, protocol::StorageOrCallProof);
 
 impl EncodedMerkleProof {
-    /// Returns the decoded version of the proof.
-    pub fn decode(&self) -> Vec<&[u8]> {
+    /// Returns the SCALE-encoded Merkle proof.
+    pub fn decode(&self) -> &[u8] {
         protocol::decode_storage_or_call_proof_response(self.1, &self.0)
             .unwrap()
             .unwrap()

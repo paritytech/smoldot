@@ -430,7 +430,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 .and_then(|outcome| {
                     let decoded = outcome.decode();
                     let decoded = proof_decode::decode_and_verify_proof(proof_decode::Config {
-                        proof: decoded.iter().copied(),
+                        proof: decoded,
                         trie_root_hash: &storage_trie_root,
                     })
                     .map_err(StorageQueryErrorDetail::ProofVerification)?;
@@ -507,8 +507,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
 
                 match result {
                     Ok(proof) => {
-                        let decoded_proof = proof.decode();
-                        match prefix_scan.resume(decoded_proof.iter().map(|v| &v[..])) {
+                        match prefix_scan.resume(proof.decode()) {
                             Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
                                 // Continue next step of the proof.
                                 prefix_scan = scan;

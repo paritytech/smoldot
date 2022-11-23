@@ -301,7 +301,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                     task.sync.call_proof_response(
                         request_id,
                         match result {
-                            Ok(ref r) => Ok(r.decode().into_iter()),
+                            Ok(ref r) => Ok(r.decode().to_owned()), // TODO: need help from networking service to avoid this to_owned
                             Err(err) => Err(err),
                         }
                     ).1
@@ -578,10 +578,9 @@ impl<TPlat: Platform> Task<TPlat> {
                     if let Ok(outcome) = storage_request.await {
                         // TODO: lots of copying around
                         // TODO: log what happens
-                        let decoded = outcome.decode();
                         if let Ok(decoded) =
                             proof_decode::decode_and_verify_proof(proof_decode::Config {
-                                proof: decoded.iter().copied(),
+                                proof: outcome.decode(),
                                 trie_root_hash: &state_trie_root,
                             })
                         {
