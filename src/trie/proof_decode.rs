@@ -313,9 +313,9 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// explanation.
     ///
     /// The iterator might include branch nodes. It is not possible for this function to
-    /// differentiate between that valueless nodes that are present in the proof only because they
-    /// are branch nodes, and valueless nodes that are present in the proof because the fact that
-    /// they have no value is important.
+    /// differentiate between value-less nodes that are present in the proof only because they are
+    /// branch nodes, and value-less nodes that are present in the proof because the fact that they
+    /// have no value is important for the proof.
     ///
     /// # Detailed explanation
     ///
