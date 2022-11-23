@@ -306,13 +306,16 @@ pub struct DecodedTrieProof<T> {
 impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// Returns a list of all elements of the proof, ordered by key in lexicographic order.
     ///
-    /// The iterator includes branch nodes.
-    ///
     /// This function is a convenient wrapper around [`DecodedTrieProof::iter_ordered`] that
     /// converts the keys into an array of bytes. If a key isn't representable as an array of
     /// bytes, then this function panics. Assuming that the trie has only ever been used in the
     /// context of the runtime, then panics cannot happen. See the section below for an
     /// explanation.
+    ///
+    /// The iterator might include branch nodes. It is not possible for this function to
+    /// differentiate between that valueless nodes that are present in the proof only because they
+    /// are branch nodes, and valueless nodes that are present in the proof because the fact that
+    /// they have no value is important.
     ///
     /// # Detailed explanation
     ///
