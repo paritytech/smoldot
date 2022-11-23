@@ -304,6 +304,92 @@ pub struct DecodedTrieProof<T> {
 }
 
 impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
+    /// Returns a list of all elements of the proof, ordered by key in lexicographic order.
+    ///
+    /// The iterator includes branch nodes.
+    ///
+    /// This function is a convenient wrapper around [`DecodedTrieProof::iter_ordered`] that
+    /// converts the keys into an array of bytes. If a key isn't representable as an array of
+    /// bytes, then this function panics. Assuming that the trie has only ever been used in the
+    /// context of the runtime, then panics cannot happen. See the section below for an
+    /// explanation.
+    ///
+    /// # Detailed explanation
+    ///
+    /// The trie consists of nodes, each with a key and a value. The keys consist of an array of
+    /// "nibbles", which are 4 bits each.
+    ///
+    /// When the runtime writes a value in the trie, it passes a key as an array a bytes. In order
+    /// to know where to write this value, this array of bytes is converted into an array of
+    /// nibbles by turning each byte into two nibbles.
+    ///
+    /// Due to the fact that the host <-> runtime interface only ever uses arrays of bytes, it is
+    /// not possible for the runtime to store a value or read a value in the trie at a key that
+    /// consists in an uneven number of nibbles, as an uneven number of nibbles cannot be
+    /// converted to an array of bytes.
+    ///
+    /// In other words, if a trie has only ever been used in the context of a runtime, then it is
+    /// guaranteed to not contain any storage value at key that consists in an uneven number of
+    /// nibbles.
+    ///
+    /// The trie format itself, however, technically doesn't forbid storing reading and writing
+    /// values at keys that consist in an uneven number of nibbles. For this reason, a proof
+    /// containing a value at a key that consists in an uneven number of nibbles is considered as
+    /// valid according to [`decode_and_verify_proof`].
+    ///
+    /// However, given that [`decode_and_verify_proof`] verifies the trie proof against the state
+    /// trie root hash, we are also guaranteed that this proof reflects the actual trie. If the
+    /// actual trie can't contain any storage value at a key that consists in an uneven number of
+    /// nibbles, then the proof is also guaranteed to not contain any storage value at a key that
+    /// consists in an uneven number of nibbles.
+    ///
+    /// As a conclusion, if this proof is made against a trie that has only ever been used in the
+    /// context of a runtime, then this function cannot panic. Malicious proofs also cannot trigger
+    /// a panic here.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the proof contains any storage value at a key with an uneven number of nibbles.
+    /// This cannot happen if the proof is a proof of a trie that has only ever been used in the
+    /// context of the runtime. See the section above for detailed explanations.
+    ///
+    pub fn iter_runtime_context_ordered(
+        &'_ self,
+    ) -> impl Iterator<Item = (Vec<u8>, StorageValue<'_>)> + '_ {
+        self.iter_ordered().filter_map(|(key, value)| {
+            if key.len() % 2 != 0 {
+                assert!(matches!(value, StorageValue::None));
+                return None;
+            }
+
+            let key = nibble::nibbles_to_bytes_suffix_extend(key.iter().copied()).collect();
+            Some((key, value))
+        })
+    }
+
+    /// Returns a list of all elements of the proof, ordered by key in lexicographic order.
+    ///
+    /// The iterator includes branch nodes.
+    pub fn iter_ordered(
+        &'_ self,
+    ) -> impl Iterator<Item = (&'_ [nibble::Nibble], StorageValue<'_>)> + '_ {
+        self.entries.iter().map(|(key, (storage_value, _))| {
+            let storage_value = match storage_value {
+                StorageValueInner::Known { offset, len } => {
+                    StorageValue::Known(&self.proof.as_ref()[*offset..][..*len])
+                }
+                StorageValueInner::None => StorageValue::None,
+                StorageValueInner::HashKnownValueMissing { offset } => {
+                    StorageValue::HashKnownValueMissing(
+                        <&[u8; 32]>::try_from(&self.proof.as_ref()[*offset..][..32]).unwrap(),
+                    )
+                }
+            };
+
+            (&key[..], storage_value)
+        })
+    }
+
     /// Returns information about a trie node.
     ///
     /// Returns `None` if the proof doesn't contain enough information about this trie node.
