@@ -221,7 +221,7 @@ impl ProofBuilder {
     ///
     /// # Panic
     ///
-    /// Panics if the iterator returned by [`ProofBuilder::missing_merkle_values`] is not empty.
+    /// Panics if the iterator returned by [`ProofBuilder::missing_node_values`] is not empty.
     ///
     pub fn build(mut self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
         // As documented, panic if any node value is missing.
