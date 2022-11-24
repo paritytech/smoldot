@@ -202,8 +202,8 @@ impl ProofBuilder {
         }
     }
 
-    /// Returns a list of keys for which the node value must be known in order for the proof to be
-    /// buildable.
+    /// Returns a list of keys for which the node value must be known in order to be able to build
+    /// the proof.
     ///
     /// For each entry returned by this iterator, [`ProofBuilder::set_node_value`] must be called.
     ///
