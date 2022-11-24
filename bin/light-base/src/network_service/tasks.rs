@@ -101,7 +101,7 @@ pub(super) async fn connection_task<TPlat: Platform>(
                 guarded.network.pending_outcome_err(
                     start_connect.id,
                     err.map_or(false, |err| err.is_bad_addr),
-                ); // TODO: should pass a proper value for `is_unreachable`, but an error is sometimes returned despite a timeout https://github.com/paritytech/smoldot/issues/1531
+                );
 
                 for chain_index in 0..guarded.network.num_chains() {
                     guarded
