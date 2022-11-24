@@ -16,6 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{proof_node_codec, trie_structure};
+
+use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::iter;
 
 pub use super::nibble::Nibble;
