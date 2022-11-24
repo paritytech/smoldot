@@ -35,6 +35,7 @@ mod tests;
 ///
 /// This struct doesn't represent a complete trie. It only manages the structure of the trie, and
 /// the storage values have to be maintained in parallel of this.
+#[derive(Clone)]
 pub struct TrieStructure<TUd> {
     /// List of nodes. Using a [`Slab`] guarantees that the node indices never change.
     nodes: Slab<Node<TUd>>,
@@ -43,7 +44,7 @@ pub struct TrieStructure<TUd> {
 }
 
 /// Entry in the structure.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Node<TUd> {
     /// Index of the parent within [`TrieStructure::nodes`]. `None` if this is the root.
     parent: Option<(usize, Nibble)>,
@@ -158,6 +159,11 @@ impl<TUd> TrieStructure<TUd> {
     /// See [`Vec::shrink_to_fit`].
     pub fn shrink_to_fit(&mut self) {
         self.nodes.shrink_to_fit();
+    }
+
+    /// Returns a list of all nodes in the structure, without any specific order.
+    pub fn iter_unordered(&'_ self) -> impl Iterator<Item = NodeIndex> + '_ {
+        self.nodes.iter().map(|(k, _)| NodeIndex(k))
     }
 
     /// Returns the root node of the trie, or `None` if the trie is empty.
