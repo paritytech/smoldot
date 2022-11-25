@@ -131,6 +131,14 @@ where
         merkle_values
     };
 
+    // Dummy empty proofs are always valid.
+    if merkle_values.is_empty() {
+        return Ok(DecodedTrieProof {
+            proof: config.proof,
+            entries: BTreeMap::new(),
+        });
+    }
+
     // The implementation below iterates down the tree of nodes represented by this proof, keeping
     // note of the traversed elements.
 
@@ -608,6 +616,15 @@ impl Children {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_is_valid() {
+        let _ = super::decode_and_verify_proof(super::Config {
+            trie_root_hash: &[0; 32], // Trie root hash doesn't matter.
+            proof: &[0],
+        })
+        .unwrap();
+    }
+
     #[test]
     fn basic_works() {
         // Key/value taken from the Polkadot genesis block.
