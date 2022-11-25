@@ -77,10 +77,17 @@ impl ProofBuilder {
     /// Overwrites any previously-set value for this key.
     ///
     /// The `node_value` is decoded in order for the proof builder to determine the hierarchy of
-    /// the trie and know which node values are missing.
+    /// the trie and know which node values are missing. If the `node_value` is invalid, this
+    /// function panics.
     ///
     /// If the `node_value` contains a storage value as a hash, then a `unhashed_storage_value`
     /// can optionally be provided in order to provide the unhashed version of this value.
+    ///
+    /// The validity of the `node_value` in the context of the other node values that have been
+    /// stored in this proof builder isn't verified. For example, a node value can indicate no
+    /// children while the node value of a child has been added, or a node value can indicate a
+    /// child with a specific hash, while the child in question has a different hash. This will
+    /// lead to an invalid proof being generated.
     ///
     /// # Panic
     ///
