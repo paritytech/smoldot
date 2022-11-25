@@ -219,14 +219,9 @@ impl ProofBuilder {
     ///
     /// This function will succeed if no entry at all has been inserted in the [`ProofBuilder`].
     ///
-    /// # Panic
-    ///
-    /// Panics if the iterator returned by [`ProofBuilder::missing_node_values`] is not empty.
-    ///
+    /// This function will succeed even if [`ProofBuilder::missing_node_values`] returns a
+    /// non-zero number of elements. However, the proof produced will then be invalid.
     pub fn build(mut self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
-        // As documented, panic if any node value is missing.
-        assert!(self.missing_node_values.is_empty());
-
         // The first bytes of the proof contain the number of entries in the proof.
         let num_entries_encoded = crate::util::encode_scale_compact_usize(self.num_proof_entries);
 
@@ -237,14 +232,13 @@ impl ProofBuilder {
             .iter_unordered()
             .collect::<Vec<_>>()
             .into_iter()
-            .flat_map(move |node_index| {
+            .filter_map(move |node_index| {
                 let trie_structure_value = self
                     .trie_structure
                     .node_by_index(node_index)
                     .unwrap()
                     .user_data()
-                    .take()
-                    .expect("missing node value");
+                    .take()?;
 
                 // For each node, there are either two things or four things to output: the
                 // length of the node value and the node value, and optionally the length of the
@@ -258,15 +252,14 @@ impl ProofBuilder {
                     .as_ref()
                     .map(|v| crate::util::encode_scale_compact_usize(v.len()));
 
-                [
+                Some([
                     node_value_length.map(either::Left),
                     node_value.map(either::Right),
                     storage_value_length.map(either::Left),
                     storage_value.map(either::Right),
-                ]
-                .into_iter()
-                .flat_map(|v| v.into_iter())
-            });
+                ])
+            })
+            .flat_map(|v| v.into_iter().flat_map(|v| v.into_iter()));
 
         iter::once(either::Left(num_entries_encoded)).chain(entries.map(either::Right))
     }
@@ -342,8 +335,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn build_panics_if_missing_node() {
+    fn build_doesnt_panic_if_missing_node() {
         let mut proof_builder = super::ProofBuilder::new();
         proof_builder.set_node_value(
             &nibble::bytes_to_nibbles([1, 2, 3, 4].into_iter()).collect::<Vec<_>>(),
