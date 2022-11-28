@@ -186,14 +186,14 @@ impl ProofBuilder {
         let partial_key_len = decoded_node_value.partial_key.len();
         assert!(
             key.len() >= partial_key_len,
-            "mismatch between node value and key"
+            "mismatch between node value partial key and provided key"
         );
         assert!(
             itertools::equal(
-                key[..(key.len() - partial_key_len)].iter().copied(),
-                decoded_node_value.partial_key
+                key[(key.len() - partial_key_len)..].iter().copied(),
+                decoded_node_value.partial_key.clone()
             ),
-            "mismatch between node value and key"
+            "mismatch between node value partial key and provided key"
         );
         if key.len() != partial_key_len {
             let parent_key = &key[..(key.len() - partial_key_len - 1)];
