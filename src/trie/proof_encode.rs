@@ -245,6 +245,13 @@ impl ProofBuilder {
     ///
     /// This function only updates the hashes of storage values and children. Storage values
     /// themselves are always left untouched.
+    /// This function also updates the presence of children. If a node has been added using
+    /// [`ProofBuilder::set_node_value`] but its parent indicates a lack of child, then calling
+    /// this function will modify the parent in order to indicate the presence of a child.
+    /// However, this function never removes children. If a node indicates that it has a child, but
+    /// the child has not been added using [`ProofBuilder::set_node_value`], it simply indicates
+    /// that the child in question is (intentionally) not part of the proof, and the proof is still
+    /// valid.
     ///
     /// This function works even if [`ProofBuilder::missing_node_values`] returns a non-empty
     /// iterator, but will not be able to update everything. You are encouraged to call this
