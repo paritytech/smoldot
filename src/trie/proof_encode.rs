@@ -78,7 +78,9 @@ impl ProofBuilder {
     ///
     /// The `node_value` is decoded in order for the proof builder to determine the hierarchy of
     /// the trie and know which node values are missing. If the `node_value` is invalid, this
-    /// function panics.
+    /// function panics. In order to avoid difficult-to-debug corner cases, this function also
+    /// panics if it is no possible for `node_value` to be found at the given `key` due to a
+    /// mismatch.
     ///
     /// If the `node_value` contains a storage value as a hash, then a `unhashed_storage_value`
     /// can optionally be provided in order to provide the unhashed version of this value.
@@ -92,6 +94,7 @@ impl ProofBuilder {
     /// # Panic
     ///
     /// Panics if `node_value` is not a valid node value.
+    /// Panics if the partial key found in `node_value` doesn't match the last elements of `key`.
     /// Panics in case `node_value` indicates no storage value, but `unhashed_storage_value`
     /// is `Some`.
     ///
@@ -180,7 +183,18 @@ impl ProofBuilder {
         // We must also make sure that the parent of the node is in the proof. Insert the parent
         // in the trie structure as well.
         // This shouldn't be done if the node is the root node of the trie.
-        let partial_key_len = decoded_node_value.partial_key.count();
+        let partial_key_len = decoded_node_value.partial_key.len();
+        assert!(
+            key.len() >= partial_key_len,
+            "mismatch between node value and key"
+        );
+        assert!(
+            itertools::equal(
+                key[..(key.len() - partial_key_len)].iter().copied(),
+                decoded_node_value.partial_key
+            ),
+            "mismatch between node value and key"
+        );
         if key.len() != partial_key_len {
             let parent_key = &key[..(key.len() - partial_key_len - 1)];
             match self.trie_structure.node(parent_key.iter().copied()) {
