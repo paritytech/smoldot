@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.7.9 - 2022-11-28
+
+### Fixed
+
+- Fix wrong block being reported in the logs when printing the status of the Grandpa warp syncing, giving the impression that the warp syncing wasn't advancing. ([#3044](https://github.com/paritytech/smoldot/pull/3044))
+- Fix panic introduced in v0.7.8 when verifying a Merkle proof of a trie related to a chain whose `state_version` is equal to `1`. ([#3043](https://github.com/paritytech/smoldot/pull/3043))
+
 ## 0.7.8 - 2022-11-23
 
 ### Changed

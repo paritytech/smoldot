@@ -245,8 +245,9 @@ where
                         {
                             let _ = unvisited_proof_entries.remove(value_position);
                             StorageValueInner::Known {
+                                is_inline: false,
                                 offset: value_entry_range.start,
-                                len: value_entry_range.end,
+                                len: value_entry_range.end - value_entry_range.start,
                             }
                         } else {
                             let offset =
@@ -265,13 +266,18 @@ where
                         debug_assert!(offset >= proof_entry_range.start);
                         debug_assert!(offset <= (proof_entry_range.start + proof_entry.len()));
                         StorageValueInner::Known {
+                            is_inline: true,
                             offset,
                             len: v.len(),
                         }
                     }
                 };
 
-                (storage_value, decoded_node_value_children_bitmap)
+                (
+                    storage_value,
+                    proof_entry_range.clone(),
+                    decoded_node_value_children_bitmap,
+                )
             });
             debug_assert!(_prev_value.is_none());
         }
@@ -293,7 +299,11 @@ where
 #[derive(Debug, Copy, Clone)]
 enum StorageValueInner {
     /// Equivalent to [`StorageValue::Known`].
-    Known { offset: usize, len: usize },
+    Known {
+        is_inline: bool,
+        offset: usize,
+        len: usize,
+    },
     /// Equivalent to [`StorageValue::HashKnownValueMissing`].
     HashKnownValueMissing { offset: usize },
     /// Equivalent to [`StorageValue::None`].
@@ -306,9 +316,10 @@ pub struct DecodedTrieProof<T> {
     /// The proof itself.
     proof: T,
 
-    /// For each storage key, contains the entry found in the proof and the children bitmap.
+    /// For each storage key, contains the entry found in the proof, the range at which to find
+    /// its node value, and the children bitmap.
     // TODO: a BTreeMap is actually kind of stupid since `proof` is itself in a tree format
-    entries: BTreeMap<Vec<nibble::Nibble>, (StorageValueInner, u16)>,
+    entries: BTreeMap<Vec<nibble::Nibble>, (StorageValueInner, ops::Range<usize>, u16)>,
 }
 
 impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
@@ -367,8 +378,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     pub fn iter_runtime_context_ordered(
         &'_ self,
     ) -> impl Iterator<Item = (Vec<u8>, StorageValue<'_>)> + '_ {
-        self.iter_ordered().filter_map(|(key, value)| {
-            let value = value.storage_value;
+        self.iter_ordered().filter_map(|(key, entry)| {
+            let value = entry.trie_node_info.storage_value;
 
             if key.len() % 2 != 0 {
                 assert!(matches!(value, StorageValue::None));
@@ -385,12 +396,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// The iterator includes branch nodes.
     pub fn iter_ordered(
         &'_ self,
-    ) -> impl Iterator<Item = (&'_ [nibble::Nibble], TrieNodeInfo<'_>)> + '_ {
-        self.entries
-            .iter()
-            .map(|(key, (storage_value, children_bitmap))| {
-                let storage_value = match storage_value {
-                    StorageValueInner::Known { offset, len } => {
+    ) -> impl Iterator<Item = (&'_ [nibble::Nibble], ProofEntry<'_>)> + '_ {
+        self.entries.iter().map(
+            |(key, (storage_value_inner, node_value_range, children_bitmap))| {
+                let storage_value = match storage_value_inner {
+                    StorageValueInner::Known { offset, len, .. } => {
                         StorageValue::Known(&self.proof.as_ref()[*offset..][..*len])
                     }
                     StorageValueInner::None => StorageValue::None,
@@ -403,20 +413,42 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
 
                 (
                     &key[..],
-                    TrieNodeInfo {
-                        children: Children {
-                            children_bitmap: *children_bitmap,
+                    ProofEntry {
+                        node_value: &self.proof.as_ref()[node_value_range.clone()],
+                        unhashed_storage_value: match storage_value_inner {
+                            StorageValueInner::Known {
+                                is_inline: false,
+                                offset,
+                                len,
+                            } => Some(&self.proof.as_ref()[*offset..][..*len]),
+                            _ => None,
                         },
-                        storage_value,
+                        trie_node_info: TrieNodeInfo {
+                            children: Children {
+                                children_bitmap: *children_bitmap,
+                            },
+                            storage_value,
+                        },
                     },
                 )
-            })
+            },
+        )
     }
 
     /// Returns information about a trie node.
     ///
     /// Returns `None` if the proof doesn't contain enough information about this trie node.
+    ///
+    /// This function might return `Some` even if there is no node in the trie for `key`, in which
+    /// case the returned [`TrieNodeInfo`] will indicate no storage value and no children.
     pub fn trie_node_info(&'_ self, key: &[nibble::Nibble]) -> Option<TrieNodeInfo<'_>> {
+        // If the proof is empty, then we have no information about the node whatsoever.
+        // This check is necessary because we assume below that a lack of ancestor means that the
+        // key is outside of the trie.
+        if self.entries.is_empty() {
+            return None;
+        }
+
         // The requested key can be found directly in the proof, but it can also be a child of an
         // item of the proof.
         // Search for the key in the proof that is an ancestor or equal to the requested key.
@@ -435,6 +467,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 .next_back()
             {
                 None => {
+                    debug_assert!(!self.entries.is_empty());
                     // The requested key doesn't have any ancestor in the trie. This means that
                     // it doesn't share any prefix with any other entry in the trie. This means
                     // that it doesn't exist.
@@ -443,11 +476,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         children: Children { children_bitmap: 0 },
                     });
                 }
-                Some((found_key, (storage_value, children_bitmap))) if *found_key == key => {
+                Some((found_key, (storage_value, _, children_bitmap))) if *found_key == key => {
                     // Found exact match. Returning.
                     return Some(TrieNodeInfo {
                         storage_value: match storage_value {
-                            StorageValueInner::Known { offset, len } => {
+                            StorageValueInner::Known { offset, len, .. } => {
                                 StorageValue::Known(&self.proof.as_ref()[*offset..][..*len])
                             }
                             StorageValueInner::None => StorageValue::None,
@@ -463,7 +496,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         },
                     });
                 }
-                Some((found_key, (_, children_bitmap))) if key.starts_with(found_key) => {
+                Some((found_key, (_, _, children_bitmap))) if key.starts_with(found_key) => {
                     // Requested key is a descendant of an entry found in the proof.
                     // Check whether the entry can have a descendant in the direction towards the
                     // requested key.
@@ -569,7 +602,33 @@ pub enum Error {
     DuplicateProofEntry,
 }
 
+/// Information about an entry in the proof.
+#[derive(Debug, Copy, Clone)]
+pub struct ProofEntry<'a> {
+    /// Information about the node of the trie associated to this entry.
+    pub trie_node_info: TrieNodeInfo<'a>,
+
+    /// Node value of that proof entry.
+    ///
+    /// > **Note**: This is a low-level information. If you're not familiar with how the trie
+    /// >           works, you most likely don't need this.
+    pub node_value: &'a [u8],
+
+    /// If [`ProofEntry::node_value`] indicates that the storage value is hashed, then this field
+    /// contains the unhashed storage value that is found in the proof, if any.
+    ///
+    /// If this field contains `Some`, then [`TrieNodeInfo::storage_value`] is guaranteed to
+    /// contain [`StorageValue::Known`]. However the opposite is not necessarily true.
+    ///
+    /// > **Note**: This is a low-level information. If you're not familiar with how the trie
+    /// >           works, you most likely don't need this.
+    pub unhashed_storage_value: Option<&'a [u8]>,
+}
+
 /// Information about a node of the trie.
+///
+/// > **Note**: This structure might represent a node that doesn't actually exist in the trie.
+#[derive(Debug, Copy, Clone)]
 pub struct TrieNodeInfo<'a> {
     /// Storage value of the node, if any.
     pub storage_value: StorageValue<'a>,

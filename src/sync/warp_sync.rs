@@ -346,12 +346,28 @@ pub enum Status<'a, TSrc> {
     Fragments {
         /// Source from which the fragments are currently being downloaded, if any.
         source: Option<(SourceId, &'a TSrc)>,
+        /// Hash of the highest block that is proven to be finalized.
+        ///
+        /// This isn't necessarily the same block as returned by
+        /// [`InProgressWarpSync::as_chain_information`], as this function first has to download
+        /// extra information compared to just the finalized block.
+        finalized_block_hash: [u8; 32],
+        /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
+        finalized_block_number: u64,
     },
     /// Warp syncing algorithm has reached the head of the finalized chain and is downloading and
     /// building the chain information.
     ChainInformation {
         /// Source from which the chain information is being downloaded.
         source: (SourceId, &'a TSrc),
+        /// Hash of the highest block that is proven to be finalized.
+        ///
+        /// This isn't necessarily the same block as returned by
+        /// [`InProgressWarpSync::as_chain_information`], as this function first has to download
+        /// extra information compared to just the finalized block.
+        finalized_block_hash: [u8; 32],
+        /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
+        finalized_block_number: u64,
     },
 }
 
@@ -377,13 +393,14 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             Phase::DownloadFragments {
                 ref previous_verifier_values,
             } => {
-                let start_block_hash = match previous_verifier_values.as_ref() {
-                    Some((header, _)) => header.hash(self.block_number_bytes),
-                    None => self
-                        .start_chain_information
-                        .as_ref()
-                        .finalized_block_header
-                        .hash(self.block_number_bytes),
+                let (finalized_block_hash, finalized_block_number) = match previous_verifier_values
+                    .as_ref()
+                {
+                    Some((header, _)) => (header.hash(self.block_number_bytes), header.number),
+                    None => {
+                        let header = self.start_chain_information.as_ref().finalized_block_header;
+                        (header.hash(self.block_number_bytes), header.number)
+                    }
                 };
 
                 let source_id =
@@ -391,7 +408,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                         .iter()
                         .find_map(|(_, (source_id, _, rq))| match rq {
                             RequestDetail::WarpSyncRequest { block_hash }
-                                if *block_hash == start_block_hash =>
+                                if *block_hash == finalized_block_hash =>
                             {
                                 Some(*source_id)
                             }
@@ -400,28 +417,50 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
 
                 Status::Fragments {
                     source: source_id.map(|id| (id, &self.sources[id.0].user_data)),
+                    finalized_block_hash,
+                    finalized_block_number,
                 }
             }
             Phase::PendingVerify {
-                downloaded_source, ..
-            } => Status::Fragments {
-                source: Some((
-                    downloaded_source,
-                    &self.sources[downloaded_source.0].user_data,
-                )),
-            },
+                downloaded_source,
+                ref previous_verifier_values,
+                ..
+            } => {
+                let (finalized_block_hash, finalized_block_number) = match previous_verifier_values
+                    .as_ref()
+                {
+                    Some((header, _)) => (header.hash(self.block_number_bytes), header.number),
+                    None => {
+                        let header = self.start_chain_information.as_ref().finalized_block_header;
+                        (header.hash(self.block_number_bytes), header.number)
+                    }
+                };
+
+                Status::Fragments {
+                    source: Some((
+                        downloaded_source,
+                        &self.sources[downloaded_source.0].user_data,
+                    )),
+                    finalized_block_hash,
+                    finalized_block_number,
+                }
+            }
             Phase::RuntimeDownload {
                 warp_sync_source_id,
+                ref header,
                 ..
             }
             | Phase::ChainInformationDownload {
                 warp_sync_source_id,
+                ref header,
                 ..
             } => Status::ChainInformation {
                 source: (
                     warp_sync_source_id,
                     &self.sources[warp_sync_source_id.0].user_data,
                 ),
+                finalized_block_hash: header.hash(self.block_number_bytes),
+                finalized_block_number: header.number,
             },
         }
     }
