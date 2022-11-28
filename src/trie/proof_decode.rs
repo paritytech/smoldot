@@ -868,4 +868,21 @@ mod tests {
 
         assert_eq!(obtained, Some(&[80, 82, 127, 41, 119, 1, 0, 0][..]));
     }
+
+    #[test]
+    fn very_small_root_node_decodes() {
+        // Checks that a proof with one root node whose length is < 32 bytes properly verifies.
+        let proof = vec![
+            4, 64, 66, 3, 52, 120, 31, 215, 222, 245, 16, 76, 51, 181, 0, 245, 192, 194,
+        ];
+
+        super::decode_and_verify_proof(super::Config {
+            proof,
+            trie_root_hash: &[
+                83, 2, 191, 235, 8, 252, 233, 114, 129, 199, 229, 115, 221, 238, 15, 205, 193, 110,
+                145, 107, 12, 3, 10, 145, 117, 211, 203, 151, 182, 147, 221, 178,
+            ],
+        })
+        .unwrap();
+    }
 }
