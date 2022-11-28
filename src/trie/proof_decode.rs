@@ -246,7 +246,7 @@ where
                             let _ = unvisited_proof_entries.remove(value_position);
                             StorageValueInner::Known {
                                 offset: value_entry_range.start,
-                                len: value_entry_range.end,
+                                len: value_entry_range.end - value_entry_range.start,
                             }
                         } else {
                             let offset =
