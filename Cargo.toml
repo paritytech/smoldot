@@ -28,6 +28,7 @@ database-sqlite = [
     "std"   # A database stored on the filesystem can't reasonably work without a filesystem.
 ]
 std = [
+    "anyhow",
     "async-std",
     "futures/thread-pool",
     "pin-project",
@@ -99,7 +100,8 @@ parity-scale-codec = { version = "3.2.1", features = ["derive"], default-feature
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
-wasmtime = { version = "2.0.2", default-features = false, features = ["async", "cranelift"], optional = true }
+anyhow = { version = "1.0.66", default-features = false, features = ["std"], optional = true }  # Used only in order to interact with wasmtime
+wasmtime = { version = "3.0.0", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
 async-std = "1.12.0"
