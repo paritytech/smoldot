@@ -245,6 +245,7 @@ where
                         {
                             let _ = unvisited_proof_entries.remove(value_position);
                             StorageValueInner::Known {
+                                is_inline: false,
                                 offset: value_entry_range.start,
                                 len: value_entry_range.end,
                             }
@@ -265,6 +266,7 @@ where
                         debug_assert!(offset >= proof_entry_range.start);
                         debug_assert!(offset <= (proof_entry_range.start + proof_entry.len()));
                         StorageValueInner::Known {
+                            is_inline: true,
                             offset,
                             len: v.len(),
                         }
@@ -297,7 +299,11 @@ where
 #[derive(Debug, Copy, Clone)]
 enum StorageValueInner {
     /// Equivalent to [`StorageValue::Known`].
-    Known { offset: usize, len: usize },
+    Known {
+        is_inline: bool,
+        offset: usize,
+        len: usize,
+    },
     /// Equivalent to [`StorageValue::HashKnownValueMissing`].
     HashKnownValueMissing { offset: usize },
     /// Equivalent to [`StorageValue::None`].
@@ -392,9 +398,9 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         &'_ self,
     ) -> impl Iterator<Item = (&'_ [nibble::Nibble], ProofEntry<'_>)> + '_ {
         self.entries.iter().map(
-            |(key, (storage_value, node_value_range, children_bitmap))| {
-                let storage_value = match storage_value {
-                    StorageValueInner::Known { offset, len } => {
+            |(key, (storage_value_inner, node_value_range, children_bitmap))| {
+                let storage_value = match storage_value_inner {
+                    StorageValueInner::Known { offset, len, .. } => {
                         StorageValue::Known(&self.proof.as_ref()[*offset..][..*len])
                     }
                     StorageValueInner::None => StorageValue::None,
@@ -409,6 +415,14 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     &key[..],
                     ProofEntry {
                         node_value: &self.proof.as_ref()[node_value_range.clone()],
+                        unhashed_storage_value: match storage_value_inner {
+                            StorageValueInner::Known {
+                                is_inline: false,
+                                offset,
+                                len,
+                            } => Some(&self.proof.as_ref()[*offset..][..*len]),
+                            _ => None,
+                        },
                         trie_node_info: TrieNodeInfo {
                             children: Children {
                                 children_bitmap: *children_bitmap,
@@ -458,7 +472,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     // Found exact match. Returning.
                     return Some(TrieNodeInfo {
                         storage_value: match storage_value {
-                            StorageValueInner::Known { offset, len } => {
+                            StorageValueInner::Known { offset, len, .. } => {
                                 StorageValue::Known(&self.proof.as_ref()[*offset..][..*len])
                             }
                             StorageValueInner::None => StorageValue::None,
@@ -591,6 +605,16 @@ pub struct ProofEntry<'a> {
     /// > **Note**: This is a low-level information. If you're not familiar with how the trie
     /// >           works, you most likely don't need this.
     pub node_value: &'a [u8],
+
+    /// If [`ProofEntry::node_value`] indicates that the storage value is hashed, then this field
+    /// contains the unhashed storage value that is found in the proof, if any.
+    ///
+    /// If this field contains `Some`, then [`TrieNodeInfo::storage_value`] is guaranteed to
+    /// contain [`StorageValue::Known`]. However the opposite is not necessarily true.
+    ///
+    /// > **Note**: This is a low-level information. If you're not familiar with how the trie
+    /// >           works, you most likely don't need this.
+    pub unhashed_storage_value: Option<&'a [u8]>,
 }
 
 /// Information about a node of the trie.
