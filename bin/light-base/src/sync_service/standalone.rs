@@ -316,17 +316,21 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
             () = &mut task.warp_sync_taking_long_time_warning => {
                 match task.sync.status() {
                     all::Status::Sync => {},
-                    all::Status::WarpSyncFragments { source: None } => {
-                        log::warn!(target: &task.log_target, "GrandPa warp sync idle");
+                    all::Status::WarpSyncFragments { source: None, finalized_block_hash, finalized_block_number } => {
+                        log::warn!(
+                            target: &task.log_target,
+                            "GrandPa warp sync idle at block #{} (0x{})",
+                            finalized_block_number,
+                            HashDisplay(&finalized_block_hash),
+                        );
                     }
-                    all::Status::WarpSyncFragments { source: Some((_, (peer_id, _))) } |
-                    all::Status::WarpSyncChainInformation { source: (_, (peer_id, _)) } => {
-                        let finalized_block = task.sync.finalized_block_header();
+                    all::Status::WarpSyncFragments { source: Some((_, (peer_id, _))), finalized_block_hash, finalized_block_number } |
+                    all::Status::WarpSyncChainInformation { source: (_, (peer_id, _)), finalized_block_hash, finalized_block_number } => {
                         log::warn!(
                             target: &task.log_target,
                             "GrandPa warp sync in progress. Block: #{} (0x{}). Peer attempt: {}.",
-                            finalized_block.number,
-                            HashDisplay(&finalized_block.hash(task.sync.block_number_bytes())),
+                            finalized_block_number,
+                            HashDisplay(&finalized_block_hash),
                             peer_id
                         );
                     },

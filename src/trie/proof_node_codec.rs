@@ -118,6 +118,31 @@ pub fn encode(
         .chain(children_nodes.map(either::Right))
 }
 
+/// Encodes the components of a node value into the node value itself.
+///
+/// This is a convenient wrapper around [`encode`]. See the documentation of [`encode`] for more
+/// details.
+pub fn encode_to_vec(decoded: Decoded<'_>) -> Vec<u8> {
+    let capacity = decoded.partial_key.len() / 2
+        + match decoded.storage_value {
+            StorageValue::Hashed(_) => 32,
+            StorageValue::None => 0,
+            StorageValue::Unhashed(v) => v.len(),
+        }
+        + 16 * 32
+        + 32; // The last `+ 32` is an arbitrary margin, for length prefixes and the header.
+
+    let result = encode(decoded).fold(Vec::with_capacity(capacity), |mut a, b| {
+        a.extend_from_slice(b.as_ref());
+        a
+    });
+
+    // Check that `capacity` was calculated correctly and that no re-allocation has happened.
+    debug_assert_eq!(result.capacity(), capacity);
+
+    result
+}
+
 /// Decodes a node value found in a proof into its components.
 ///
 /// This can decode nodes no matter their version.
@@ -442,7 +467,7 @@ mod tests {
             encoded_bytes
         );
         assert_eq!(
-            decoded.partial_key.collect::<Vec<_>>(),
+            decoded.partial_key.clone().collect::<Vec<_>>(),
             vec![
                 nibble::Nibble::try_from(0x6).unwrap(),
                 nibble::Nibble::try_from(0x3).unwrap()
@@ -472,5 +497,7 @@ mod tests {
                 ][..]
             )
         );
+
+        assert_eq!(super::encode_to_vec(decoded), encoded_bytes);
     }
 }
