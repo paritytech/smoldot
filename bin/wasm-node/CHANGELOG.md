@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix panic introduced in v0.7.8 when providing a Merkle proof of a trie whose `state_version` is equal to `1`.
+
 ## 0.7.8 - 2022-11-23
 
 ### Changed
