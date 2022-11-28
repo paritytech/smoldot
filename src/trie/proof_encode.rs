@@ -219,6 +219,23 @@ impl ProofBuilder {
         self.missing_node_values.iter().map(|v| &v[..])
     }
 
+    /// Returns the hash of the trie root node.
+    ///
+    /// This function returns `None` if the proof is empty or if the trie root node is missing
+    /// from the proof, in which case [`ProofBuilder::missing_node_values`] will return it.
+    ///
+    /// In other words, if the proof is not empty and if [`ProofBuilder::missing_node_values`]
+    /// returns an empty iterator, then you are guaranteed that this function returns `Some`.
+    ///
+    /// This function has a complexity of `O(1)`.
+    pub fn trie_root_hash(&self) -> Option<[u8; 32]> {
+        let node_value = &self.trie_structure.root_user_data()?.as_ref()?.node_value;
+        Some(
+            *&<[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], node_value).as_bytes())
+                .unwrap(),
+        )
+    }
+
     /// Builds the Merkle proof.
     ///
     /// This function returns an iterator of buffers. The actual Merkle proof consists in the
