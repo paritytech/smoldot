@@ -135,8 +135,8 @@ pub enum Status<'a, TSrc> {
         /// Hash of the highest block that is proven to be finalized.
         ///
         /// This isn't necessarily the same block as returned by
-        /// [`InProgressWarpSync::as_chain_information`], as this function first has to download
-        /// extra information compared to just the finalized block.
+        /// [`AllSync::as_chain_information`], as this function first has to download extra
+        /// information compared to just the finalized block.
         finalized_block_hash: [u8; 32],
         /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
         finalized_block_number: u64,
@@ -149,8 +149,8 @@ pub enum Status<'a, TSrc> {
         /// Hash of the highest block that is proven to be finalized.
         ///
         /// This isn't necessarily the same block as returned by
-        /// [`InProgressWarpSync::as_chain_information`], as this function first has to download
-        /// extra information compared to just the finalized block.
+        /// [`AllSync::as_chain_information`], as this function first has to download extra
+        /// information compared to just the finalized block.
         finalized_block_hash: [u8; 32],
         /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
         finalized_block_number: u64,
