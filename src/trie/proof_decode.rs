@@ -417,6 +417,13 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     ///
     /// Returns `None` if the proof doesn't contain enough information about this trie node.
     pub fn trie_node_info(&'_ self, key: &[nibble::Nibble]) -> Option<TrieNodeInfo<'_>> {
+        // If the proof is empty, then we have no information about the node whatsoever.
+        // This check is necessary because we assume below that a lack of ancestor means that the
+        // key is outside of the trie.
+        if self.entries.is_empty() {
+            return None;
+        }
+
         // The requested key can be found directly in the proof, but it can also be a child of an
         // item of the proof.
         // Search for the key in the proof that is an ancestor or equal to the requested key.
@@ -435,6 +442,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 .next_back()
             {
                 None => {
+                    debug_assert!(!self.entries.is_empty());
                     // The requested key doesn't have any ancestor in the trie. This means that
                     // it doesn't share any prefix with any other entry in the trie. This means
                     // that it doesn't exist.
