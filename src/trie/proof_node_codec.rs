@@ -439,7 +439,7 @@ mod tests {
             encoded_bytes
         );
         assert_eq!(
-            decoded.partial_key.collect::<Vec<_>>(),
+            decoded.partial_key.clone().collect::<Vec<_>>(),
             vec![
                 nibble::Nibble::try_from(0x6).unwrap(),
                 nibble::Nibble::try_from(0x3).unwrap()
@@ -469,5 +469,7 @@ mod tests {
                 ][..]
             )
         );
+
+        assert_eq!(super::encode_to_vec(decoded), encoded_bytes);
     }
 }
