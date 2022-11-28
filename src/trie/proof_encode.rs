@@ -15,10 +15,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::{proof_node_codec, trie_structure};
+use super::{nibble, proof_node_codec, trie_structure};
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::iter;
+use core::{array, iter};
 
 pub use super::nibble::Nibble;
 
@@ -120,10 +120,6 @@ impl ProofBuilder {
                 None
             }
             (proof_node_codec::StorageValue::Hashed(ref hash), Some(ref value)) => {
-                debug_assert_eq!(
-                    blake2_rfc::blake2b::blake2b(32, b"", value).as_bytes(),
-                    &hash[..]
-                );
                 Some(value.to_vec())
             }
             (proof_node_codec::StorageValue::None, Some(_)) => panic!(),
@@ -230,10 +226,135 @@ impl ProofBuilder {
     /// This function has a complexity of `O(1)`.
     pub fn trie_root_hash(&self) -> Option<[u8; 32]> {
         let node_value = &self.trie_structure.root_user_data()?.as_ref()?.node_value;
-        Some(
-            *&<[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], node_value).as_bytes())
-                .unwrap(),
-        )
+        Some(blake2_hash(node_value))
+    }
+
+    /// Modifies the node values that have been inserted in the proof builder in order to make the
+    /// proof coherent, if necessary.
+    ///
+    /// If all the node values that have been added through [`ProofBuilder::set_node_value`] come
+    /// from a valid trie, then the proof is already coherent and there is no need to call this
+    /// function. This function is necessary only in situations where the node values have been
+    /// manually modified.
+    ///
+    /// Calling this function when the node values aren't coherent will modify the hash of the trie
+    /// root that is found in the proof. Most of the time, the verifier of a trie proof checks
+    /// whether the hash of the trie root in the proof matches an expected value. If that is the
+    /// case, then calling this function would produce a proof that is no longer accepted by the
+    /// verifier.
+    ///
+    /// This function only updates the hashes of storage values and children. Storage values
+    /// themselves are always left untouched.
+    ///
+    /// This function works even if [`ProofBuilder::missing_node_values`] returns a non-empty
+    /// iterator, but will not be able to update everything. You are encouraged to call this
+    /// function only after having added all missing node values;
+    pub fn make_coherent(&mut self) {
+        // The implementation of this function iterates over the nodes of the trie in a specific
+        // order: we start with the deepest child possible of the root node, then we jump from each
+        // node to the deepest child possible of its next sibling. If a node is the last sibling,
+        // jump to its parent.
+        // This order of iteration guarantees that we traverse all the nodes of the trie, and that
+        // we don't traverse a parent before having traversed of all its children.
+        // When traversing a node, we calculate the hash of its children and update the node value
+        // of that node.
+
+        // Node currently being iterated.
+        let mut iter: trie_structure::NodeAccess<_> = {
+            let mut node = match self.trie_structure.root_node() {
+                Some(c) => c,
+                None => {
+                    // Trie is empty.
+                    return;
+                }
+            };
+
+            loop {
+                match node.into_first_child() {
+                    Ok(c) => node = c,
+                    Err(c) => break c,
+                }
+            }
+        };
+
+        loop {
+            // Due to borrowing issues, we calculate ahead of time the values of the children of
+            // the node.
+            let children_values: [Option<Option<arrayvec::ArrayVec<u8, 32>>>; 16] =
+                array::from_fn(|nibble| {
+                    let nibble = nibble::Nibble::try_from(u8::try_from(nibble).unwrap()).unwrap();
+                    if let Some(child_node_info) = iter.child_user_data(nibble) {
+                        if let Some(child_node_info) = child_node_info {
+                            if child_node_info.node_value.len() < 32 {
+                                Some(Some(child_node_info.node_value.iter().copied().collect()))
+                            } else {
+                                Some(Some(blake2_hash(&child_node_info.node_value).into()))
+                            }
+                        } else {
+                            // Unknown node value. Don't update anything.
+                            None
+                        }
+                    } else {
+                        Some(None)
+                    }
+                });
+
+            // We only update the current node if its node value has been inserted by the user.
+            if let Some(node_info) = iter.user_data().as_mut() {
+                // We already make sure that node values are valid when inserting them. As such,
+                // it is ok to `unwrap()` here.
+                let mut decoded_node_value =
+                    proof_node_codec::decode(&node_info.node_value).unwrap();
+
+                // Update the hash of the storage value contained in `decoded_node_value`.
+                let storage_value_hash = node_info
+                    .storage_value_node
+                    .as_ref()
+                    .map(|v| blake2_hash(v));
+                debug_assert_eq!(
+                    storage_value_hash.is_some(),
+                    matches!(
+                        decoded_node_value.storage_value,
+                        proof_node_codec::StorageValue::Hashed(_)
+                    )
+                );
+                if let Some(storage_value_hash) = storage_value_hash.as_ref() {
+                    decoded_node_value.storage_value =
+                        proof_node_codec::StorageValue::Hashed(&storage_value_hash);
+                }
+
+                // Update the children.
+                for (nibble, child_value) in children_values.iter().enumerate() {
+                    if let Some(child_value) = child_value {
+                        decoded_node_value.children[nibble] = child_value.as_deref();
+                    }
+                }
+
+                // Re-encode the node value and store it.
+                let updated_node_value =
+                    proof_node_codec::encode(decoded_node_value).fold(Vec::new(), |mut a, b| {
+                        a.extend_from_slice(b.as_ref());
+                        a
+                    });
+                node_info.node_value = updated_node_value;
+            }
+
+            // Jump to the next node in the order of iteration described at the top.
+            match iter.into_next_sibling() {
+                Err(n) => match n.into_parent() {
+                    Some(p) => iter = p,
+                    None => break, // Finished.
+                },
+                Ok(mut node) => {
+                    iter = loop {
+                        match node.into_first_child() {
+                            Ok(c) => node = c,
+                            Err(c) => break c,
+                        }
+                    };
+                }
+            }
+        }
     }
 
     /// Builds the Merkle proof.
@@ -299,9 +420,13 @@ impl ProofBuilder {
     }
 }
 
+fn blake2_hash(data: &[u8]) -> [u8; 32] {
+    *&<[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], data).as_bytes()).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::nibble;
+    use super::super::nibble::{self, Nibble};
 
     #[test]
     fn empty_works() {
