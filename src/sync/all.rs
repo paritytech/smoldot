@@ -132,12 +132,28 @@ pub enum Status<'a, TSrc> {
     WarpSyncFragments {
         /// Source from which the fragments are currently being downloaded, if any.
         source: Option<(SourceId, &'a TSrc)>,
+        /// Hash of the highest block that is proven to be finalized.
+        ///
+        /// This isn't necessarily the same block as returned by
+        /// [`InProgressWarpSync::as_chain_information`], as this function first has to download
+        /// extra information compared to just the finalized block.
+        finalized_block_hash: [u8; 32],
+        /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
+        finalized_block_number: u64,
     },
     /// Warp syncing algorithm has reached the head of the finalized chain and is downloading and
     /// building the chain information.
     WarpSyncChainInformation {
         /// Source from which the chain information is being downloaded.
         source: (SourceId, &'a TSrc),
+        /// Hash of the highest block that is proven to be finalized.
+        ///
+        /// This isn't necessarily the same block as returned by
+        /// [`InProgressWarpSync::as_chain_information`], as this function first has to download
+        /// extra information compared to just the finalized block.
+        finalized_block_hash: [u8; 32],
+        /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
+        finalized_block_number: u64,
     },
 }
 
@@ -233,18 +249,32 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         match &self.inner {
             AllSyncInner::AllForks(_) => Status::Sync,
             AllSyncInner::GrandpaWarpSync { inner: sync } => match sync.status() {
-                warp_sync::Status::Fragments { source: None } => {
-                    Status::WarpSyncFragments { source: None }
-                }
+                warp_sync::Status::Fragments {
+                    source: None,
+                    finalized_block_hash,
+                    finalized_block_number,
+                } => Status::WarpSyncFragments {
+                    source: None,
+                    finalized_block_hash,
+                    finalized_block_number,
+                },
                 warp_sync::Status::Fragments {
                     source: Some((_, user_data)),
+                    finalized_block_hash,
+                    finalized_block_number,
                 } => Status::WarpSyncFragments {
                     source: Some((user_data.outer_source_id, &user_data.user_data)),
+                    finalized_block_hash,
+                    finalized_block_number,
                 },
                 warp_sync::Status::ChainInformation {
                     source: (_, user_data),
+                    finalized_block_hash,
+                    finalized_block_number,
                 } => Status::WarpSyncChainInformation {
                     source: (user_data.outer_source_id, &user_data.user_data),
+                    finalized_block_hash,
+                    finalized_block_number,
                 },
             },
             AllSyncInner::Optimistic { .. } => Status::Sync, // TODO: right now we don't differentiate between AllForks and Optimistic, as they're kind of similar anyway
