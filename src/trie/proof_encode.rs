@@ -274,6 +274,7 @@ impl ProofBuilder {
         // The first bytes of the proof contain the number of entries in the proof.
         // `entries` always contains length-value tuples, so we divide by two in order to obtain
         // the number of elements.
+        debug_assert_eq!(entries.len() % 2, 0);
         let num_entries_encoded = crate::util::encode_scale_compact_usize(entries.len() / 2);
 
         iter::once(either::Left(num_entries_encoded)).chain(entries.into_iter().map(either::Right))
