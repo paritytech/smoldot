@@ -108,7 +108,7 @@ impl ProofBuilder {
         // first things first.
         let decoded_node_value = match proof_node_codec::decode(node_value) {
             Ok(d) => d,
-            Err(err) => panic!("failed to decode node value: {:?}", err),
+            Err(err) => panic!("failed to decode node value: {:?} {:?}", err, node_value),
         };
 
         // Check consistency between `node_value` and `unhashed_storage_value` and determine
@@ -447,7 +447,9 @@ fn blake2_hash(data: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-    use super::super::nibble::{self, Nibble};
+    use super::super::{nibble, proof_decode, proof_node_codec, trie_structure};
+    use core::array;
+    use rand::distributions::{Distribution as _, Uniform};
 
     #[test]
     fn empty_works() {
@@ -514,4 +516,90 @@ mod tests {
         );
         let _ = proof_builder.build();
     }
+
+    #[test]
+    fn build_random_proof() {
+        // This test builds a proof of a randomly-generated trie, then fixes it, then checks
+        // whether the decoder considers the proof as valid.
+
+        // Build a trie with entries with randomly generated keys.
+        let mut trie = trie_structure::TrieStructure::new();
+        // Generate at least one node, as otherwise the test panics. Empty proofs are however
+        // valid.
+        for _ in 0..Uniform::new_inclusive(1, 32).sample(&mut rand::thread_rng()) {
+            let mut key = Vec::new();
+            for _ in 0..Uniform::new_inclusive(0, 12).sample(&mut rand::thread_rng()) {
+                key.push(
+                    nibble::Nibble::try_from(
+                        Uniform::new_inclusive(0, 15).sample(&mut rand::thread_rng()),
+                    )
+                    .unwrap(),
+                );
+            }
+
+            match trie.node(key.into_iter()) {
+                trie_structure::Entry::Vacant(e) => {
+                    e.insert_storage_value().insert((), ());
+                }
+                trie_structure::Entry::Occupied(trie_structure::NodeAccess::Branch(e)) => {
+                    e.insert_storage_value();
+                }
+                trie_structure::Entry::Occupied(trie_structure::NodeAccess::Storage(_)) => {}
+            }
+        }
+
+        // Put the content of the trie into the proof builder.
+        let mut proof_builder = super::ProofBuilder::new();
+        for node_index in trie.iter_unordered().collect::<Vec<_>>() {
+            let key = trie
+                .node_full_key_by_index(node_index)
+                .unwrap()
+                .collect::<Vec<_>>();
+
+            let mut storage_value = Vec::new();
+            for _ in 0..Uniform::new_inclusive(0, 64).sample(&mut rand::thread_rng()) {
+                storage_value.push(Uniform::new_inclusive(0, 255).sample(&mut rand::thread_rng()));
+            }
+
+            let node_value = proof_node_codec::encode_to_vec(proof_node_codec::Decoded {
+                children: array::from_fn(|nibble| {
+                    let nibble = nibble::Nibble::try_from(u8::try_from(nibble).unwrap()).unwrap();
+                    if trie
+                        .node_by_index(node_index)
+                        .unwrap()
+                        .child_user_data(nibble)
+                        .is_some()
+                    {
+                        Some(&[][..])
+                    } else {
+                        None
+                    }
+                }),
+                partial_key: trie
+                    .node_by_index(node_index)
+                    .unwrap()
+                    .partial_key()
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+                storage_value: proof_node_codec::StorageValue::Unhashed(&storage_value), // TODO: allow None, but beware that None with no children isn't correct
+            });
+
+            proof_builder.set_node_value(&key, &node_value, None);
+        }
+
+        // Generate the proof.
+        assert!(proof_builder.missing_node_values().next().is_none());
+        proof_builder.make_coherent();
+        let trie_root_hash = proof_builder.trie_root_hash().unwrap();
+        let proof = proof_builder.build_to_vec();
+
+        // Verify the correctness of the proof.
+        proof_decode::decode_and_verify_proof(proof_decode::Config {
+            trie_root_hash: &trie_root_hash,
+            proof,
+        })
+        .unwrap();
+    }
+
+    // TODO: fix the fact that the proof builder can generate a proof with multiple identical entries, which is considered invalid by the verifier
 }
