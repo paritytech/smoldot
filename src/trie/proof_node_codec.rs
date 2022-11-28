@@ -256,9 +256,10 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
     }
 
     Ok(Decoded {
-        partial_key: PartialKey {
-            inner: nibble::bytes_to_nibbles(partial_key.iter().copied()),
-            skip_first: (pk_len % 2) == 1,
+        partial_key: if (pk_len % 2) == 1 {
+            PartialKey::from_bytes_skip_first(partial_key)
+        } else {
+            PartialKey::from_bytes(partial_key)
         },
         children,
         storage_value,
@@ -315,6 +316,33 @@ pub enum StorageValue<'a> {
 pub struct PartialKey<'a> {
     inner: nibble::BytesToNibbles<iter::Copied<slice::Iter<'a, u8>>>,
     skip_first: bool,
+}
+
+impl<'a> PartialKey<'a> {
+    /// Returns a [`PartialKey`] iterator that produces the nibbles encoded as the given bytes.
+    /// Each byte is turned into two nibbles.
+    ///
+    /// > **Note**: This function is a convenient wrapper around [`nibble::bytes_to_nibbles`].
+    pub fn from_bytes(bytes: &'a [u8]) -> Self {
+        PartialKey {
+            inner: nibble::bytes_to_nibbles(bytes.iter().copied()),
+            skip_first: false,
+        }
+    }
+
+    /// Equivalent to [`PartialKey::from_bytes`], but skips the first nibble.
+    ///
+    /// This is useful for situations where the partial key contains a `0` prefix that exists for
+    /// alignment but doesn't actually represent a nibble.
+    ///
+    /// > **Note**: This is equivalent to `from_bytes(bytes).skip(1)`. The possibility to skip the
+    /// >           first nibble is built into this code due to how frequent it is necessary.
+    pub fn from_bytes_skip_first(bytes: &'a [u8]) -> Self {
+        PartialKey {
+            inner: nibble::bytes_to_nibbles(bytes.iter().copied()),
+            skip_first: true,
+        }
+    }
 }
 
 impl<'a> Iterator for PartialKey<'a> {
