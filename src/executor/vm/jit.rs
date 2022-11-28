@@ -147,9 +147,10 @@ impl JitPrototype {
                                             };
                                         }
                                         Shared::ExecutingStart => {
-                                            // TODO: somehow turn this into a `NewErr::StartFunctionNotSupported`?
                                             return Box::new(future::ready(Err(
-                                                wasmtime::Trap::new("start function forbidden"),
+                                                anyhow::Error::new(
+                                                    NewErr::StartFunctionNotSupported,
+                                                ),
                                             )));
                                         }
                                         _ => unreachable!(),
@@ -202,7 +203,9 @@ impl JitPrototype {
                                             Poll::Ready(Ok(()))
                                         }
                                         Shared::AbortRequired => {
-                                            Poll::Ready(Err(wasmtime::Trap::new("abort required")))
+                                            // The actual error doesn't matter, as this is only
+                                            // in order to communicate back with our "frontend".
+                                            Poll::Ready(Err(anyhow::Error::msg("abort required")))
                                         }
                                         _ => unreachable!(),
                                     }
@@ -246,7 +249,7 @@ impl JitPrototype {
         // TODO: detect `start` anyway, for consistency with other backends
         let instance = wasmtime::Instance::new_async(&mut store, &module.inner, &imports)
             .now_or_never()
-            .ok_or(NewErr::StartFunctionNotSupported)?
+            .ok_or(NewErr::StartFunctionNotSupported)? // TODO: hacky error value, as the error could also be different
             .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?;
 
         // Now that we are passed the `start` stage, update the state of execution.
