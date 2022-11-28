@@ -96,16 +96,15 @@ where
             .copied()
             .enumerate()
             .map(
-                |(proof_entry_num, proof_entry)| -> (arrayvec::ArrayVec<u8, 32>, (usize, ops::Range<usize>)) {
-                    let hash = if proof_entry.len() >= 32 {
-                        blake2_rfc::blake2b::blake2b(32, &[], proof_entry)
-                            .as_bytes()
-                            .iter()
-                            .copied()
-                            .collect()
-                    } else {
-                        proof_entry.iter().copied().collect()
-                    };
+                |(proof_entry_num, proof_entry)| -> ([u8; 32], (usize, ops::Range<usize>)) {
+                    // The merkle value of a trie node is normally either its hash or the node
+                    // itself if its length is < 32. In the context of a proof, however, nodes
+                    // whose length is < 32 aren't supposed to be their own entry. For this reason,
+                    // we only hash each entry.
+                    let hash = *<&[u8; 32]>::try_from(
+                        blake2_rfc::blake2b::blake2b(32, &[], proof_entry).as_bytes(),
+                    )
+                    .unwrap();
 
                     let proof_entry_offset = if proof_entry.len() == 0 {
                         0
@@ -115,7 +114,10 @@ where
 
                     (
                         hash,
-                        (proof_entry_num, proof_entry_offset..(proof_entry_offset + proof_entry.len())),
+                        (
+                            proof_entry_num,
+                            proof_entry_offset..(proof_entry_offset + proof_entry.len()),
+                        ),
                     )
                 },
             )
@@ -221,6 +223,12 @@ where
                     if let Some((child_position, child_entry_range)) =
                         merkle_values.get(child_node_value)
                     {
+                        // If the node value of the child is less than 32 bytes long, it should
+                        // have been inlined instead of given separately.
+                        if child_entry_range.end - child_entry_range.start < 32 {
+                            return Err(Error::UnexpectedHashedNode);
+                        }
+
                         // Remove the entry from `unvisited_proof_entries`.
                         // Note that it is questionable what to do if the same entry is visited
                         // multiple times. In case where multiple storage branches are identical,
@@ -600,6 +608,9 @@ pub enum Error {
     UnusedProofEntry,
     /// The same entry has been found multiple times in the proof.
     DuplicateProofEntry,
+    /// A node has been passed separately and refered to by its hash, while its length is inferior
+    /// to 32 bytes.
+    UnexpectedHashedNode,
 }
 
 /// Information about an entry in the proof.

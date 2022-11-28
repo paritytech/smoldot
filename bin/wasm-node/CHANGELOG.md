@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix Merkle proof whose trie root node is inferior to 32 bytes being considered as invalid.
+
 ## 0.7.9 - 2022-11-28
 
 ### Fixed
