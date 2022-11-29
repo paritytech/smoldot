@@ -30,7 +30,7 @@ use core::{cmp, fmt, iter, slice};
 ///
 /// This encoding is independent of the trie version.
 pub fn encode(
-    decoded: Decoded<'_>,
+    decoded: Decoded<'_, impl ExactSizeIterator<Item = nibble::Nibble> + Clone>,
 ) -> impl Iterator<Item = impl AsRef<[u8]> + '_ + Clone> + Clone + '_ {
     // The return value is composed of three parts:
     // - Before the storage value.
@@ -122,7 +122,9 @@ pub fn encode(
 ///
 /// This is a convenient wrapper around [`encode`]. See the documentation of [`encode`] for more
 /// details.
-pub fn encode_to_vec(decoded: Decoded<'_>) -> Vec<u8> {
+pub fn encode_to_vec(
+    decoded: Decoded<'_, impl ExactSizeIterator<Item = nibble::Nibble> + Clone>,
+) -> Vec<u8> {
     let capacity = decoded.partial_key.len() / 2
         + match decoded.storage_value {
             StorageValue::Hashed(_) => 32,
@@ -146,7 +148,7 @@ pub fn encode_to_vec(decoded: Decoded<'_>) -> Vec<u8> {
 /// Decodes a node value found in a proof into its components.
 ///
 /// This can decode nodes no matter their version.
-pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
+pub fn decode(mut node_value: &'_ [u8]) -> Result<Decoded<DecodedPartialKey<'_>>, Error> {
     if node_value.is_empty() {
         return Err(Error::Empty);
     }
@@ -282,9 +284,9 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
 
     Ok(Decoded {
         partial_key: if (pk_len % 2) == 1 {
-            PartialKey::from_bytes_skip_first(partial_key)
+            DecodedPartialKey::from_bytes_skip_first(partial_key)
         } else {
-            PartialKey::from_bytes(partial_key)
+            DecodedPartialKey::from_bytes(partial_key)
         },
         children,
         storage_value,
@@ -293,9 +295,9 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
 
 /// Decoded node value. Returned by [`decode`] or passed as parameter to [`encode`].
 #[derive(Debug, Clone)]
-pub struct Decoded<'a> {
+pub struct Decoded<'a, I> {
     /// Iterator to the nibbles of the partial key of the node.
-    pub partial_key: PartialKey<'a>,
+    pub partial_key: I,
 
     /// All 16 possible children. `Some` if a child is present, and `None` otherwise. The `&[u8]`
     /// can be:
@@ -311,7 +313,7 @@ pub struct Decoded<'a> {
     pub storage_value: StorageValue<'a>,
 }
 
-impl<'a> Decoded<'a> {
+impl<'a, I> Decoded<'a, I> {
     /// Returns a bits map of the children that are present, as found in the node value.
     pub fn children_bitmap(&self) -> u16 {
         let mut out = 0u16;
@@ -338,18 +340,18 @@ pub enum StorageValue<'a> {
 
 /// Iterator to the nibbles of the partial key. See [`Decoded::partial_key`].
 #[derive(Clone)]
-pub struct PartialKey<'a> {
+pub struct DecodedPartialKey<'a> {
     inner: nibble::BytesToNibbles<iter::Copied<slice::Iter<'a, u8>>>,
     skip_first: bool,
 }
 
-impl<'a> PartialKey<'a> {
+impl<'a> DecodedPartialKey<'a> {
     /// Returns a [`PartialKey`] iterator that produces the nibbles encoded as the given bytes.
     /// Each byte is turned into two nibbles.
     ///
     /// > **Note**: This function is a convenient wrapper around [`nibble::bytes_to_nibbles`].
     pub fn from_bytes(bytes: &'a [u8]) -> Self {
-        PartialKey {
+        DecodedPartialKey {
             inner: nibble::bytes_to_nibbles(bytes.iter().copied()),
             skip_first: false,
         }
@@ -363,14 +365,14 @@ impl<'a> PartialKey<'a> {
     /// > **Note**: This is equivalent to `from_bytes(bytes).skip(1)`. The possibility to skip the
     /// >           first nibble is built into this code due to how frequent it is necessary.
     pub fn from_bytes_skip_first(bytes: &'a [u8]) -> Self {
-        PartialKey {
+        DecodedPartialKey {
             inner: nibble::bytes_to_nibbles(bytes.iter().copied()),
             skip_first: true,
         }
     }
 }
 
-impl<'a> Iterator for PartialKey<'a> {
+impl<'a> Iterator for DecodedPartialKey<'a> {
     type Item = nibble::Nibble;
 
     fn next(&mut self) -> Option<nibble::Nibble> {
@@ -394,9 +396,9 @@ impl<'a> Iterator for PartialKey<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for PartialKey<'a> {}
+impl<'a> ExactSizeIterator for DecodedPartialKey<'a> {}
 
-impl<'a> fmt::Debug for PartialKey<'a> {
+impl<'a> fmt::Debug for DecodedPartialKey<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         const HEX_TABLE: &[u8] = b"0123456789abcdef";
         write!(f, "0x")?;
