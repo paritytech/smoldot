@@ -606,6 +606,4 @@ mod tests {
             .unwrap();
         }
     }
-
-    // TODO: fix the fact that the proof builder can generate a proof with multiple identical entries, which is considered invalid by the verifier
 }
