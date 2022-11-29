@@ -106,7 +106,11 @@ use crate::{
     trie::proof_decode,
 };
 
-use alloc::{borrow::Cow, vec::Vec};
+use alloc::{
+    borrow::{Cow, ToOwned as _},
+    vec,
+    vec::Vec,
+};
 use core::{iter, mem, ops};
 
 pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
@@ -126,12 +130,12 @@ pub enum Error {
     /// Error building the chain information.
     #[display(fmt = "Error building the chain information: {}", _0)]
     ChainInformationBuild(chain_information::build::Error),
-    /// Failed to verify call proof.
+    /// Failed to verify Merkle proof.
     // TODO: this is a non-fatal error contrary to all the other errors in this enum
-    InvalidCallProof(proof_decode::Error),
-    /// Call proof is missing the necessary entries.
+    InvalidMerkleProof(proof_decode::Error),
+    /// Merkle proof is missing the necessary entries.
     // TODO: this is a non-fatal error contrary to all the other errors in this enum
-    CallProofEntriesMissing,
+    MerkleProofEntriesMissing,
     /// Warp sync requires fetching the key that follows another one. This isn't implemented in
     /// smoldot.
     NextKeyUnimplemented,
@@ -300,8 +304,8 @@ enum Phase {
         /// Source we downloaded the last fragments from. Assuming that the source isn't malicious,
         /// it is guaranteed to have access to the storage of the finalized block.
         warp_sync_source_id: SourceId,
-        /// Runtime that was downloaded, or `None` if it was not downloaded yet.
-        downloaded_runtime: Option<DownloadedRuntime>,
+        /// Merkle proof containing the runtime information, or `None` if it was not downloaded yet.
+        downloaded_runtime: Option<Vec<u8>>,
     },
     /// All warp sync fragments have been verified, we have downloaded the runtime of the finalized
     /// block, and we are now downloading and computing the information of the chain.
@@ -313,7 +317,7 @@ enum Phase {
         /// Source we downloaded the last fragments from. Assuming that the source isn't malicious,
         /// it is guaranteed to have access to the storage of the finalized block.
         warp_sync_source_id: SourceId,
-        /// Runtime that was downloaded.
+        /// Merkle proof containing the runtime information.
         /// Always `Some`, but wrapped within an `Option` in order to allow extraction.
         downloaded_runtime: Option<DownloadedRuntime>,
         /// State machine that builds the chain information.
@@ -617,8 +621,12 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             if !self.in_progress_requests.iter().any(|(_, rq)| {
                 rq.0 == *warp_sync_source_id
                     && match rq.2 {
-                        RequestDetail::RuntimeParametersGet { block_hash: b }
-                            if b == header.hash(self.block_number_bytes) =>
+                        RequestDetail::StorageGetMerkleProof {
+                            block_hash: ref b,
+                            ref keys,
+                        } if *b == header.hash(self.block_number_bytes)
+                            && keys.iter().any(|k| k == b":code")
+                            && keys.iter().any(|k| k == b":heappages") =>
                         {
                             true
                         }
@@ -628,9 +636,10 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 Some((
                     *warp_sync_source_id,
                     &self.sources[warp_sync_source_id.0].user_data,
-                    DesiredRequest::RuntimeParametersGet {
+                    DesiredRequest::StorageGetMerkleProof {
                         block_hash: header.hash(self.block_number_bytes),
                         state_trie_root: header.state_root,
+                        keys: vec![b":code".to_vec(), b":heappages".to_vec()],
                     },
                 ))
             } else {
@@ -736,7 +745,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     source_id,
                     user_data,
                     RequestDetail::RuntimeCallMerkleProof { .. }
-                    | RequestDetail::RuntimeParametersGet { .. },
+                    | RequestDetail::StorageGetMerkleProof { .. },
                 ),
                 Phase::RuntimeDownload {
                     header,
@@ -761,36 +770,43 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     _,
                     user_data,
                     RequestDetail::RuntimeCallMerkleProof { .. }
-                    | RequestDetail::RuntimeParametersGet { .. },
+                    | RequestDetail::StorageGetMerkleProof { .. },
                 ),
                 _,
             ) => user_data,
         }
     }
 
-    /// Injects a successful response and removes the given request from the state machine. Returns
-    /// the user data that was associated to it.
+    /// Injects a successful Merkle proof and removes the given request from the state machine.
+    /// Returns the user data that was associated to it.
     ///
     /// # Panic
     ///
     /// Panics if the [`RequestId`] is invalid.
-    /// Panics if the [`RequestId`] doesn't correspond to a runtime parameters get request.
+    /// Panics if the [`RequestId`] doesn't correspond to a storage get request.
     ///
-    pub fn runtime_parameters_get_success(
-        &mut self,
-        id: RequestId,
-        code: Option<impl AsRef<[u8]>>,
-        heap_pages: Option<impl AsRef<[u8]>>,
-    ) -> TRq {
+    pub fn storage_get_success(&mut self, id: RequestId, merkle_proof: Vec<u8>) -> TRq {
         // Remove the request from the list, obtaining its user data.
         // If the request corresponds to the runtime parameters we're looking for, the function
         // continues below, otherwise we return early.
         let user_data = match (self.in_progress_requests.remove(id.0), &self.phase) {
             (
-                (_, user_data, RequestDetail::RuntimeParametersGet { block_hash }),
+                (
+                    _,
+                    user_data,
+                    RequestDetail::StorageGetMerkleProof {
+                        ref block_hash,
+                        ref keys,
+                    },
+                ),
                 Phase::RuntimeDownload { header, .. },
-            ) if block_hash == header.hash(self.block_number_bytes) => user_data,
-            ((_, user_data, RequestDetail::RuntimeParametersGet { .. }), _) => return user_data,
+            ) if *block_hash == header.hash(self.block_number_bytes)
+                && keys.iter().any(|k| k == b":code")
+                && keys.iter().any(|k| k == b":heappages") =>
+            {
+                user_data
+            }
+            ((_, user_data, RequestDetail::StorageGetMerkleProof { .. }), _) => return user_data,
             (
                 (
                     _,
@@ -806,10 +822,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             downloaded_runtime, ..
         } = &mut self.phase
         {
-            *downloaded_runtime = Some(DownloadedRuntime {
-                storage_code: code.map(|c| c.as_ref().to_vec()),
-                storage_heap_pages: heap_pages.map(|c| c.as_ref().to_vec()),
-            });
+            *downloaded_runtime = Some(merkle_proof);
         } else {
             // This is checked at the beginning of this function.
             unreachable!()
@@ -868,7 +881,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
 
             // Wrong request type.
             (
-                (_, _, RequestDetail::RuntimeParametersGet { .. })
+                (_, _, RequestDetail::StorageGetMerkleProof { .. })
                 | (_, _, RequestDetail::WarpSyncRequest { .. }),
                 _,
             ) => panic!(),
@@ -997,11 +1010,14 @@ pub enum DesiredRequest {
         block_hash: [u8; 32],
     },
     /// A storage request of the runtime code and heap pages should be started.
-    RuntimeParametersGet {
+    StorageGetMerkleProof {
         /// Hash of the block to request the parameters against.
         block_hash: [u8; 32],
         /// State trie root hash found in the header of the block.
         state_trie_root: [u8; 32],
+        /// Keys whose values are requested.
+        // TODO: consider Cow<'static, [u8]> instead
+        keys: Vec<Vec<u8>>,
     },
     /// A call proof should be started.
     RuntimeCallMerkleProof {
@@ -1024,10 +1040,12 @@ pub enum RequestDetail {
         /// See [`DesiredRequest::WarpSyncRequest::block_hash`].
         block_hash: [u8; 32],
     },
-    /// See [`DesiredRequest::RuntimeParametersGet`].
-    RuntimeParametersGet {
-        /// See [`DesiredRequest::RuntimeParametersGet::block_hash`].
+    /// See [`DesiredRequest::StorageGetMerkleProof`].
+    StorageGetMerkleProof {
+        /// See [`DesiredRequest::StorageGetMerkleProof::block_hash`].
         block_hash: [u8; 32],
+        /// See [`DesiredRequest::StorageGetMerkleProof::keys`].
+        keys: Vec<Vec<u8>>,
     },
     /// See [`DesiredRequest::RuntimeCallMerkleProof`].
     RuntimeCallMerkleProof {
@@ -1183,10 +1201,29 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
         } = &mut self.inner.phase
         {
             let downloaded_runtime = downloaded_runtime.take().unwrap();
+            let decoded_downloaded_runtime =
+                match proof_decode::decode_and_verify_proof(proof_decode::Config {
+                    proof: &downloaded_runtime[..],
+                    trie_root_hash: &header.state_root,
+                }) {
+                    Ok(p) => p,
+                    Err(err) => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::InvalidMerkleProof(err)),
+                        );
+                    }
+                };
 
-            let finalized_storage_code = match downloaded_runtime.storage_code {
-                Some(code) => code,
-                None => {
+            let finalized_storage_code = match decoded_downloaded_runtime.storage_value(b":code") {
+                Some(Some(code)) => code,
+                Some(None) => {
                     self.inner.phase = Phase::DownloadFragments {
                         previous_verifier_values: Some((
                             header.clone(),
@@ -1195,13 +1232,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     };
                     return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
                 }
-            };
-
-            let decoded_heap_pages = match executor::storage_heap_pages_to_value(
-                downloaded_runtime.storage_heap_pages.as_deref(),
-            ) {
-                Ok(hp) => hp,
-                Err(err) => {
+                None => {
                     self.inner.phase = Phase::DownloadFragments {
                         previous_verifier_values: Some((
                             header.clone(),
@@ -1210,10 +1241,44 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     };
                     return (
                         WarpSync::InProgress(self.inner),
-                        Some(Error::InvalidHeapPages(err)),
+                        Some(Error::MerkleProofEntriesMissing),
                     );
                 }
             };
+
+            let finalized_storage_heappages =
+                match decoded_downloaded_runtime.storage_value(b":heappages") {
+                    Some(val) => val,
+                    None => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::MerkleProofEntriesMissing),
+                        );
+                    }
+                };
+
+            let decoded_heap_pages =
+                match executor::storage_heap_pages_to_value(finalized_storage_heappages) {
+                    Ok(hp) => hp,
+                    Err(err) => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::InvalidHeapPages(err)),
+                        );
+                    }
+                };
 
             let runtime = match HostVmPrototype::new(host::Config {
                 module: &finalized_storage_code,
@@ -1256,8 +1321,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                         WarpSync::Finished(Success {
                             chain_information,
                             finalized_runtime: virtual_machine,
-                            finalized_storage_code: Some(finalized_storage_code),
-                            finalized_storage_heap_pages: downloaded_runtime.storage_heap_pages,
+                            finalized_storage_code: Some(finalized_storage_code.to_owned()),
+                            finalized_storage_heap_pages: finalized_storage_heappages
+                                .map(|v| v.to_vec()),
                             sources: self
                                 .inner
                                 .sources
@@ -1303,8 +1369,8 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 chain_information_finality: chain_information_finality.clone(),
                 warp_sync_source_id: *warp_sync_source_id,
                 downloaded_runtime: Some(DownloadedRuntime {
-                    storage_code: Some(finalized_storage_code),
-                    storage_heap_pages: downloaded_runtime.storage_heap_pages,
+                    storage_code: Some(finalized_storage_code.to_vec()),
+                    storage_heap_pages: finalized_storage_heappages.map(|v| v.to_vec()),
                 }),
                 chain_info_builder: Some(chain_info_builder),
                 calls,
@@ -1363,7 +1429,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                 };
                                 return (
                                     WarpSync::InProgress(self.inner),
-                                    Some(Error::InvalidCallProof(err)),
+                                    Some(Error::InvalidMerkleProof(err)),
                                 );
                             }
                         };
@@ -1390,7 +1456,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                 };
                                 return (
                                     WarpSync::InProgress(self.inner),
-                                    Some(Error::CallProofEntriesMissing),
+                                    Some(Error::MerkleProofEntriesMissing),
                                 );
                             }
                         };

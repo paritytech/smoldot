@@ -892,13 +892,14 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                                     sync_start_block_hash: block_hash,
                                 }
                             }
-                            warp_sync::DesiredRequest::RuntimeParametersGet {
+                            warp_sync::DesiredRequest::StorageGetMerkleProof {
                                 block_hash,
                                 state_trie_root,
-                            } => DesiredRequest::StorageGet {
+                                keys,
+                            } => DesiredRequest::StorageGetMerkleProof {
                                 block_hash,
                                 state_trie_root,
-                                keys: vec![b":code".to_vec(), b":heappages".to_vec()],
+                                keys,
                             },
                             warp_sync::DesiredRequest::RuntimeCallMerkleProof {
                                 block_hash,
@@ -1038,7 +1039,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (
                 AllSyncInner::GrandpaWarpSync { inner },
                 RequestDetail::StorageGet { block_hash, keys },
-            ) if keys == &[&b":code"[..], &b":heappages"[..]] => {
+            ) => {
                 let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
                     SourceMapping::GrandpaWarpSync(inner_source_id) => *inner_source_id,
                     _ => unreachable!(),
@@ -1053,8 +1054,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         outer_request_id,
                         user_data,
                     },
-                    warp_sync::RequestDetail::RuntimeParametersGet {
+                    warp_sync::RequestDetail::StorageGetMerkleProof {
                         block_hash: *block_hash,
+                        keys: keys.clone(), // TODO: clone?
                     },
                 );
 
@@ -1579,7 +1581,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn storage_get_response(
         &mut self,
         request_id: RequestId,
-        response: Result<impl Iterator<Item = Option<impl AsRef<[u8]>>>, ()>,
+        response: Result<Vec<u8>, ()>,
     ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
@@ -1591,17 +1593,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         ) {
             (
                 AllSyncInner::GrandpaWarpSync { inner: mut sync },
-                Ok(mut response),
+                Ok(response),
                 RequestMapping::WarpSync(request_id),
             ) => {
-                // In this state, we expect the response to be one value for `:code` and one for
-                // `:heappages`. As documented, we panic if the number of items isn't 2.
-                let code = response.next().unwrap();
-                let heap_pages = response.next().unwrap();
-                assert!(response.next().is_none());
-
-                let user_data = sync.runtime_parameters_get_success(request_id, code, heap_pages);
-
+                let user_data = sync.storage_get_success(request_id, response);
                 self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
                 (user_data.user_data, ResponseOutcome::Queued)
             }
@@ -1783,7 +1778,7 @@ pub enum DesiredRequest {
     },
 
     /// Sending a storage query is requested.
-    StorageGet {
+    StorageGetMerkleProof {
         /// Hash of the block whose storage is requested.
         block_hash: [u8; 32],
         /// Merkle value of the root of the storage trie of the block.
@@ -1914,7 +1909,7 @@ impl From<DesiredRequest> for RequestDetail {
             } => RequestDetail::GrandpaWarpSync {
                 sync_start_block_hash,
             },
-            DesiredRequest::StorageGet {
+            DesiredRequest::StorageGetMerkleProof {
                 block_hash, keys, ..
             } => RequestDetail::StorageGet { block_hash, keys },
             DesiredRequest::RuntimeCallMerkleProof {
@@ -2811,11 +2806,8 @@ impl<TRq> Shared<TRq> {
                         sync_start_block_hash: block_hash,
                     }
                 }
-                warp_sync::RequestDetail::RuntimeParametersGet { block_hash } => {
-                    RequestDetail::StorageGet {
-                        block_hash,
-                        keys: vec![b":code".to_vec(), b":heappages".to_vec()],
-                    }
+                warp_sync::RequestDetail::StorageGetMerkleProof { block_hash, keys } => {
+                    RequestDetail::StorageGet { block_hash, keys }
                 }
                 warp_sync::RequestDetail::RuntimeCallMerkleProof {
                     block_hash,
