@@ -517,89 +517,94 @@ mod tests {
         // This test builds a proof of a randomly-generated trie, then fixes it, then checks
         // whether the decoder considers the proof as valid.
 
-        // Build a trie with entries with randomly generated keys.
-        let mut trie = trie_structure::TrieStructure::new();
-        // Generate at least one node, as otherwise the test panics. Empty proofs are however
-        // valid.
-        for _ in 0..Uniform::new_inclusive(1, 32).sample(&mut rand::thread_rng()) {
-            let mut key = Vec::new();
-            for _ in 0..Uniform::new_inclusive(0, 12).sample(&mut rand::thread_rng()) {
-                key.push(
-                    nibble::Nibble::try_from(
-                        Uniform::new_inclusive(0, 15).sample(&mut rand::thread_rng()),
-                    )
-                    .unwrap(),
-                );
-            }
-
-            match trie.node(key.into_iter()) {
-                trie_structure::Entry::Vacant(e) => {
-                    e.insert_storage_value().insert((), ());
+        // We repeat the test many times due to its random factor.
+        for _ in 0..1500 {
+            // Build a trie with entries with randomly generated keys.
+            let mut trie = trie_structure::TrieStructure::new();
+            // Generate at least one node, as otherwise the test panics. Empty proofs are however
+            // valid.
+            for _ in 0..Uniform::new_inclusive(1, 32).sample(&mut rand::thread_rng()) {
+                let mut key = Vec::new();
+                for _ in 0..Uniform::new_inclusive(0, 12).sample(&mut rand::thread_rng()) {
+                    key.push(
+                        nibble::Nibble::try_from(
+                            Uniform::new_inclusive(0, 15).sample(&mut rand::thread_rng()),
+                        )
+                        .unwrap(),
+                    );
                 }
-                trie_structure::Entry::Occupied(trie_structure::NodeAccess::Branch(e)) => {
-                    e.insert_storage_value();
+
+                match trie.node(key.into_iter()) {
+                    trie_structure::Entry::Vacant(e) => {
+                        e.insert_storage_value().insert((), ());
+                    }
+                    trie_structure::Entry::Occupied(trie_structure::NodeAccess::Branch(e)) => {
+                        e.insert_storage_value();
+                    }
+                    trie_structure::Entry::Occupied(trie_structure::NodeAccess::Storage(_)) => {}
                 }
-                trie_structure::Entry::Occupied(trie_structure::NodeAccess::Storage(_)) => {}
-            }
-        }
-
-        // Put the content of the trie into the proof builder.
-        let mut proof_builder = super::ProofBuilder::new();
-        for node_index in trie.iter_unordered().collect::<Vec<_>>() {
-            let key = trie
-                .node_full_key_by_index(node_index)
-                .unwrap()
-                .collect::<Vec<_>>();
-
-            // This randomly-generated storage might end up not being used, but that's not
-            // problematic.
-            let mut storage_value = Vec::new();
-            for _ in 0..Uniform::new_inclusive(0, 64).sample(&mut rand::thread_rng()) {
-                storage_value.push(Uniform::new_inclusive(0, 255).sample(&mut rand::thread_rng()));
             }
 
-            let node_value = proof_node_codec::encode_to_vec(proof_node_codec::Decoded {
-                children: array::from_fn(|nibble| {
-                    let nibble = nibble::Nibble::try_from(u8::try_from(nibble).unwrap()).unwrap();
-                    if trie
+            // Put the content of the trie into the proof builder.
+            let mut proof_builder = super::ProofBuilder::new();
+            for node_index in trie.iter_unordered().collect::<Vec<_>>() {
+                let key = trie
+                    .node_full_key_by_index(node_index)
+                    .unwrap()
+                    .collect::<Vec<_>>();
+
+                // This randomly-generated storage might end up not being used, but that's not
+                // problematic.
+                let mut storage_value = Vec::new();
+                for _ in 0..Uniform::new_inclusive(0, 64).sample(&mut rand::thread_rng()) {
+                    storage_value
+                        .push(Uniform::new_inclusive(0, 255).sample(&mut rand::thread_rng()));
+                }
+
+                let node_value = proof_node_codec::encode_to_vec(proof_node_codec::Decoded {
+                    children: array::from_fn(|nibble| {
+                        let nibble =
+                            nibble::Nibble::try_from(u8::try_from(nibble).unwrap()).unwrap();
+                        if trie
+                            .node_by_index(node_index)
+                            .unwrap()
+                            .child_user_data(nibble)
+                            .is_some()
+                        {
+                            Some(&[][..])
+                        } else {
+                            None
+                        }
+                    }),
+                    partial_key: trie
                         .node_by_index(node_index)
                         .unwrap()
-                        .child_user_data(nibble)
-                        .is_some()
-                    {
-                        Some(&[][..])
+                        .partial_key()
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                    storage_value: if trie.node_by_index(node_index).unwrap().has_storage_value() {
+                        proof_node_codec::StorageValue::Unhashed(&storage_value)
                     } else {
-                        None
-                    }
-                }),
-                partial_key: trie
-                    .node_by_index(node_index)
-                    .unwrap()
-                    .partial_key()
-                    .collect::<Vec<_>>()
-                    .into_iter(),
-                storage_value: if trie.node_by_index(node_index).unwrap().has_storage_value() {
-                    proof_node_codec::StorageValue::Unhashed(&storage_value)
-                } else {
-                    proof_node_codec::StorageValue::None
-                },
-            });
+                        proof_node_codec::StorageValue::None
+                    },
+                });
 
-            proof_builder.set_node_value(&key, &node_value, None);
+                proof_builder.set_node_value(&key, &node_value, None);
+            }
+
+            // Generate the proof.
+            assert!(proof_builder.missing_node_values().next().is_none());
+            proof_builder.make_coherent();
+            let trie_root_hash = proof_builder.trie_root_hash().unwrap();
+            let proof = proof_builder.build_to_vec();
+
+            // Verify the correctness of the proof.
+            proof_decode::decode_and_verify_proof(proof_decode::Config {
+                trie_root_hash: &trie_root_hash,
+                proof,
+            })
+            .unwrap();
         }
-
-        // Generate the proof.
-        assert!(proof_builder.missing_node_values().next().is_none());
-        proof_builder.make_coherent();
-        let trie_root_hash = proof_builder.trie_root_hash().unwrap();
-        let proof = proof_builder.build_to_vec();
-
-        // Verify the correctness of the proof.
-        proof_decode::decode_and_verify_proof(proof_decode::Config {
-            trie_root_hash: &trie_root_hash,
-            proof,
-        })
-        .unwrap();
     }
 
     // TODO: fix the fact that the proof builder can generate a proof with multiple identical entries, which is considered invalid by the verifier
