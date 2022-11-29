@@ -346,8 +346,8 @@ pub struct DecodedPartialKey<'a> {
 }
 
 impl<'a> DecodedPartialKey<'a> {
-    /// Returns a [`PartialKey`] iterator that produces the nibbles encoded as the given bytes.
-    /// Each byte is turned into two nibbles.
+    /// Returns a [`DecodedPartialKey`] iterator that produces the nibbles encoded as the given
+    /// bytes. Each byte is turned into two nibbles.
     ///
     /// > **Note**: This function is a convenient wrapper around [`nibble::bytes_to_nibbles`].
     pub fn from_bytes(bytes: &'a [u8]) -> Self {
@@ -357,7 +357,7 @@ impl<'a> DecodedPartialKey<'a> {
         }
     }
 
-    /// Equivalent to [`PartialKey::from_bytes`], but skips the first nibble.
+    /// Equivalent to [`DecodedPartialKey::from_bytes`], but skips the first nibble.
     ///
     /// This is useful for situations where the partial key contains a `0` prefix that exists for
     /// alignment but doesn't actually represent a nibble.
