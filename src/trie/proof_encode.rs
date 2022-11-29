@@ -551,6 +551,8 @@ mod tests {
                 .unwrap()
                 .collect::<Vec<_>>();
 
+            // This randomly-generated storage might end up not being used, but that's not
+            // problematic.
             let mut storage_value = Vec::new();
             for _ in 0..Uniform::new_inclusive(0, 64).sample(&mut rand::thread_rng()) {
                 storage_value.push(Uniform::new_inclusive(0, 255).sample(&mut rand::thread_rng()));
@@ -576,7 +578,11 @@ mod tests {
                     .partial_key()
                     .collect::<Vec<_>>()
                     .into_iter(),
-                storage_value: proof_node_codec::StorageValue::Unhashed(&storage_value), // TODO: allow None, but beware that None with no children isn't correct
+                storage_value: if trie.node_by_index(node_index).unwrap().has_storage_value() {
+                    proof_node_codec::StorageValue::Unhashed(&storage_value)
+                } else {
+                    proof_node_codec::StorageValue::None
+                },
             });
 
             proof_builder.set_node_value(&key, &node_value, None);
