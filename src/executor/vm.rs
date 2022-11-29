@@ -695,6 +695,11 @@ pub enum NewErr {
     ModuleError(ModuleError),
 }
 
+// TODO: an implementation of the `Error` trait is required in order to interact with wasmtime, but it's not possible to implement this trait on non-std yet
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+impl std::error::Error for NewErr {}
+
 /// Error that can happen when calling [`VirtualMachinePrototype::start`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum StartErr {

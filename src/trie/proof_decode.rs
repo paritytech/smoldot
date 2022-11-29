@@ -608,7 +608,7 @@ pub enum Error {
     UnusedProofEntry,
     /// The same entry has been found multiple times in the proof.
     DuplicateProofEntry,
-    /// A node has been passed separately and refered to by its hash, while its length is inferior
+    /// A node has been passed separately and referred to by its hash, while its length is inferior
     /// to 32 bytes.
     UnexpectedHashedNode,
 }

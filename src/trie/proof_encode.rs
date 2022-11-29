@@ -36,9 +36,6 @@ pub struct ProofBuilder {
 
     /// List of keys of the nodes in [`ProofBuilder::trie_structure`] whose user data is `None`.
     missing_node_values: hashbrown::HashSet<Vec<Nibble>, fnv::FnvBuildHasher>,
-
-    /// Total number of entries that are going to be in the proof.
-    num_proof_entries: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -68,7 +65,6 @@ impl ProofBuilder {
                 capacity,
                 Default::default(),
             ),
-            num_proof_entries: 0,
         }
     }
 
@@ -135,24 +131,8 @@ impl ProofBuilder {
             storage_value_node,
         };
 
-        // Update `num_proof_entries`.
-        self.num_proof_entries += 1 + if trie_structure_value.storage_value_node.is_some() {
-            1
-        } else {
-            0
-        };
-
         match self.trie_structure.node(key.iter().copied()) {
             trie_structure::Entry::Occupied(mut entry) => {
-                // Update the value in the trie structure, and cancel out the previous change
-                // to `num_proof_entries`.
-                if let Some(prev_entry) = entry.user_data() {
-                    self.num_proof_entries -= 1 + if prev_entry.storage_value_node.is_some() {
-                        1
-                    } else {
-                        0
-                    };
-                }
                 let _was_in = self.missing_node_values.remove(key);
                 debug_assert_eq!(_was_in, entry.user_data().is_none());
                 *entry.user_data() = Some(trie_structure_value);
@@ -388,10 +368,10 @@ impl ProofBuilder {
     /// This function will succeed even if [`ProofBuilder::missing_node_values`] returns a
     /// non-zero number of elements. However, the proof produced will then be invalid.
     pub fn build(mut self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
-        // The first bytes of the proof contain the number of entries in the proof.
-        let num_entries_encoded = crate::util::encode_scale_compact_usize(self.num_proof_entries);
+        // Index of the root node in the trie, if any.
+        let root_node_index = self.trie_structure.root_node().map(|n| n.node_index());
 
-        // Iterator to the entries in the proof.
+        // Collect the entries in the proof into a `Vec`.
         // TODO: we need to collect the indices into a Vec due to the API of trie_structure not allowing non-mutable access to nodes
         let entries = self
             .trie_structure
@@ -405,6 +385,14 @@ impl ProofBuilder {
                     .unwrap()
                     .user_data()
                     .take()?;
+
+                // Nodes of length < 32 should have been inlined within their parent or ancestor.
+                // We thus skip them, unless they're the root node.
+                if root_node_index != Some(node_index) && trie_structure_value.node_value.len() < 32
+                {
+                    debug_assert!(trie_structure_value.storage_value_node.is_none());
+                    return None;
+                }
 
                 // For each node, there are either two things or four things to output: the
                 // length of the node value and the node value, and optionally the length of the
@@ -425,9 +413,16 @@ impl ProofBuilder {
                     storage_value.map(either::Right),
                 ])
             })
-            .flat_map(|v| v.into_iter().flat_map(|v| v.into_iter()));
+            .flat_map(|v| v.into_iter().flat_map(|v| v.into_iter()))
+            .collect::<Vec<_>>();
 
-        iter::once(either::Left(num_entries_encoded)).chain(entries.map(either::Right))
+        // The first bytes of the proof contain the number of entries in the proof.
+        // `entries` always contains length-value tuples, so we divide by two in order to obtain
+        // the number of elements.
+        debug_assert_eq!(entries.len() % 2, 0);
+        let num_entries_encoded = crate::util::encode_scale_compact_usize(entries.len() / 2);
+
+        iter::once(either::Left(num_entries_encoded)).chain(entries.into_iter().map(either::Right))
     }
 
     /// Similar to [`ProofBuilder::build`], but returns a `Vec`.

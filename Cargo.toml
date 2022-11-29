@@ -28,6 +28,7 @@ database-sqlite = [
     "std"   # A database stored on the filesystem can't reasonably work without a filesystem.
 ]
 std = [
+    "anyhow",
     "async-std",
     "futures/thread-pool",
     "pin-project",
@@ -72,7 +73,7 @@ rand = { version = "0.8.5", default-features = false, features = ["std", "std_rn
 rand_chacha = { version = "0.3.1", default-features = false }
 ruzstd = { version = "0.3.0" }  # TODO: doesn't support no_std :-/
 schnorrkel = { version = "0.10.2", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
-serde = { version = "1.0.147", default-features = false, features = ["alloc", "derive"] }
+serde = { version = "1.0.148", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.89", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10.6", default-features = false }
 siphasher = { version = "0.3.10", default-features = false }
@@ -99,7 +100,8 @@ parity-scale-codec = { version = "3.2.1", features = ["derive"], default-feature
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
-wasmtime = { version = "2.0.2", default-features = false, features = ["async", "cranelift"], optional = true }
+anyhow = { version = "1.0.66", default-features = false, features = ["std"], optional = true }  # Used only in order to interact with wasmtime
+wasmtime = { version = "3.0.0", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
 async-std = "1.12.0"
