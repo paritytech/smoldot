@@ -38,7 +38,7 @@ use crate::{
     verify,
 };
 
-use alloc::{borrow::Cow, vec, vec::Vec};
+use alloc::{borrow::Cow, vec::Vec};
 use core::{
     cmp, iter, marker, mem,
     num::{NonZeroU32, NonZeroU64},
