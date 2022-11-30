@@ -367,60 +367,52 @@ impl ProofBuilder {
     ///
     /// This function will succeed even if [`ProofBuilder::missing_node_values`] returns a
     /// non-zero number of elements. However, the proof produced will then be invalid.
-    pub fn build(mut self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
+    pub fn build(mut self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> {
         // Index of the root node in the trie, if any.
         let root_node_index = self.trie_structure.root_node().map(|n| n.node_index());
 
-        // Collect the entries in the proof into a `Vec`.
+        // Collect the entries in the proof into a `HashSet` in order to de-duplicate them.
         // TODO: we need to collect the indices into a Vec due to the API of trie_structure not allowing non-mutable access to nodes
         let entries = self
             .trie_structure
             .iter_unordered()
             .collect::<Vec<_>>()
             .into_iter()
-            .filter_map(move |node_index| {
-                let trie_structure_value = self
+            .flat_map(move |node_index| {
+                let Some(trie_structure_value) = self
                     .trie_structure
                     .node_by_index(node_index)
                     .unwrap()
                     .user_data()
-                    .take()?;
+                    .take()
+                // Ignore nodes whose value is missing.
+                else { return either::Right(iter::empty()); };
 
                 // Nodes of length < 32 should have been inlined within their parent or ancestor.
                 // We thus skip them, unless they're the root node.
                 if root_node_index != Some(node_index) && trie_structure_value.node_value.len() < 32
                 {
                     debug_assert!(trie_structure_value.storage_value_node.is_none());
-                    return None;
+                    return either::Right(iter::empty());
                 }
 
-                // For each node, there are either two things or four things to output: the
-                // length of the node value and the node value, and optionally the length of the
-                // storage value and storage value
-                let node_value_length = Some(crate::util::encode_scale_compact_usize(
-                    trie_structure_value.node_value.len(),
-                ));
-                let node_value = Some(trie_structure_value.node_value);
-                let storage_value = trie_structure_value.storage_value_node;
-                let storage_value_length = storage_value
-                    .as_ref()
-                    .map(|v| crate::util::encode_scale_compact_usize(v.len()));
-
-                Some([
-                    node_value_length.map(either::Left),
-                    node_value.map(either::Right),
-                    storage_value_length.map(either::Left),
-                    storage_value.map(either::Right),
-                ])
+                // For each node, there are either one or two things to output: the node value,
+                // and the storage value.
+                either::Left(
+                    iter::once(trie_structure_value.node_value)
+                        .chain(trie_structure_value.storage_value_node.into_iter()),
+                )
             })
-            .flat_map(|v| v.into_iter().flat_map(|v| v.into_iter()))
-            .collect::<Vec<_>>();
+            .collect::<hashbrown::HashSet<_, fnv::FnvBuildHasher>>();
 
         // The first bytes of the proof contain the number of entries in the proof.
-        // `entries` always contains length-value tuples, so we divide by two in order to obtain
-        // the number of elements.
-        debug_assert_eq!(entries.len() % 2, 0);
-        let num_entries_encoded = crate::util::encode_scale_compact_usize(entries.len() / 2);
+        let num_entries_encoded = crate::util::encode_scale_compact_usize(entries.len());
+
+        // Add the size of each entry before each entry.
+        let entries = entries.into_iter().flat_map(|entry| {
+            let len = crate::util::encode_scale_compact_usize(entry.len());
+            [either::Left(len), either::Right(entry)].into_iter()
+        });
 
         iter::once(either::Left(num_entries_encoded)).chain(entries.into_iter().map(either::Right))
     }
@@ -605,5 +597,60 @@ mod tests {
             })
             .unwrap();
         }
+    }
+
+    #[test]
+    fn identical_nodes_deduplicated() {
+        let mut proof_builder = super::ProofBuilder::new();
+
+        // One root node containing two children with an identical hash.
+        proof_builder.set_node_value(
+            &nibble::bytes_to_nibbles([].into_iter()).collect::<Vec<_>>(),
+            &[
+                128, 3, 0, 128, 205, 154, 249, 23, 88, 152, 61, 75, 170, 87, 182, 7, 127, 171, 174,
+                60, 2, 124, 79, 166, 31, 155, 155, 185, 182, 155, 250, 63, 139, 166, 222, 184, 128,
+                205, 154, 249, 23, 88, 152, 61, 75, 170, 87, 182, 7, 127, 171, 174, 60, 2, 124, 79,
+                166, 31, 155, 155, 185, 182, 155, 250, 63, 139, 166, 222, 184,
+            ],
+            None,
+        );
+
+        // Two identical nodes but at a different key.
+        // Importantly, the node values are more than 32 bytes long to ensure that they're
+        // separate node and should not be inlined.
+        proof_builder.set_node_value(
+            &nibble::bytes_to_nibbles([0].into_iter()).collect::<Vec<_>>(),
+            &[
+                65, 0, 81, 1, 108, 111, 110, 103, 32, 115, 116, 111, 114, 97, 103, 101, 32, 118,
+                97, 108, 117, 101, 32, 105, 110, 32, 111, 114, 100, 101, 114, 32, 116, 111, 32,
+                101, 110, 115, 117, 114, 101, 32, 116, 104, 97, 116, 32, 116, 104, 101, 32, 110,
+                111, 100, 101, 32, 118, 97, 108, 117, 101, 32, 105, 115, 32, 109, 111, 114, 101,
+                32, 116, 104, 97, 110, 32, 51, 50, 32, 98, 121, 116, 101, 115, 32, 108, 111, 110,
+                103,
+            ],
+            None,
+        );
+        proof_builder.set_node_value(
+            &nibble::bytes_to_nibbles([0x10].into_iter()).collect::<Vec<_>>(),
+            &[
+                65, 0, 81, 1, 108, 111, 110, 103, 32, 115, 116, 111, 114, 97, 103, 101, 32, 118,
+                97, 108, 117, 101, 32, 105, 110, 32, 111, 114, 100, 101, 114, 32, 116, 111, 32,
+                101, 110, 115, 117, 114, 101, 32, 116, 104, 97, 116, 32, 116, 104, 101, 32, 110,
+                111, 100, 101, 32, 118, 97, 108, 117, 101, 32, 105, 115, 32, 109, 111, 114, 101,
+                32, 116, 104, 97, 110, 32, 51, 50, 32, 98, 121, 116, 101, 115, 32, 108, 111, 110,
+                103,
+            ],
+            None,
+        );
+
+        // The proof builder should de-duplicate the two children, otherwise the proof is invalid.
+        proof_decode::decode_and_verify_proof(proof_decode::Config {
+            proof: proof_builder.build_to_vec(),
+            trie_root_hash: &[
+                198, 201, 55, 96, 115, 79, 43, 132, 215, 236, 180, 232, 125, 60, 98, 103, 17, 46,
+                150, 56, 154, 235, 33, 17, 222, 105, 142, 178, 235, 61, 88, 52,
+            ],
+        })
+        .unwrap();
     }
 }
