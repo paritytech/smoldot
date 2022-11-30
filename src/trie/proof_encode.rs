@@ -104,7 +104,10 @@ impl ProofBuilder {
         // first things first.
         let decoded_node_value = match proof_node_codec::decode(node_value) {
             Ok(d) => d,
-            Err(err) => panic!("failed to decode node value: {:?}; value: {:?}", err, node_value),
+            Err(err) => panic!(
+                "failed to decode node value: {:?}; value: {:?}",
+                err, node_value
+            ),
         };
 
         // Check consistency between `node_value` and `unhashed_storage_value` and determine
@@ -233,7 +236,7 @@ impl ProofBuilder {
     ///
     /// Calling this function when the node values aren't coherent will modify the hash of the trie
     /// root that is found in the proof. Most of the time, the verifier of a trie proof checks
-    /// whether the hash of the trie root in the proof matches an expected value. If that is the
+    /// whether the hash of the trie root in the proof matches an expected value. When that is the
     /// case, then calling this function would produce a proof that is no longer accepted by the
     /// verifier.
     ///
@@ -284,15 +287,17 @@ impl ProofBuilder {
             let children_values: [Option<Option<arrayvec::ArrayVec<u8, 32>>>; 16] =
                 array::from_fn(|nibble| {
                     let nibble = nibble::Nibble::try_from(u8::try_from(nibble).unwrap()).unwrap();
+
                     if let Some(child_node_info) = iter.child_user_data(nibble) {
                         if let Some(child_node_info) = child_node_info {
+                            // Node values of length < 32 are inlined.
                             if child_node_info.node_value.len() < 32 {
                                 Some(Some(child_node_info.node_value.iter().copied().collect()))
                             } else {
                                 Some(Some(blake2_hash(&child_node_info.node_value).into()))
                             }
                         } else {
-                            // Unknown node value. Don't update anything.
+                            // Missing node value. Don't update anything.
                             None
                         }
                     } else {
@@ -308,6 +313,7 @@ impl ProofBuilder {
                     proof_node_codec::decode(&node_info.node_value).unwrap();
 
                 // Update the hash of the storage value contained in `decoded_node_value`.
+                // This is done in a slightly weird way due to borrowing issues.
                 let storage_value_hash = node_info
                     .storage_value_node
                     .as_ref()
@@ -329,9 +335,11 @@ impl ProofBuilder {
                     if let Some(child_value) = child_value {
                         decoded_node_value.children[nibble] = child_value.as_deref();
                     }
+                    // As documented, children are never removed. If `child_value` is `None`, we
+                    // intentionally keep the existing value in `decoded_node_value.children`.
                 }
 
-                // Re-encode the node value and store it.
+                // Re-encode the node value after its updates, and store it.
                 let updated_node_value =
                     proof_node_codec::encode(decoded_node_value).fold(Vec::new(), |mut a, b| {
                         a.extend_from_slice(b.as_ref());
@@ -340,7 +348,8 @@ impl ProofBuilder {
                 node_info.node_value = updated_node_value;
             }
 
-            // Jump to the next node in the order of iteration described at the top.
+            // Jump to the next node in the order of iteration described at the top of this
+            // function.
             match iter.into_next_sibling() {
                 Err(n) => match n.into_parent() {
                     Some(p) => iter = p,
