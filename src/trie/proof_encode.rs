@@ -104,7 +104,7 @@ impl ProofBuilder {
         // first things first.
         let decoded_node_value = match proof_node_codec::decode(node_value) {
             Ok(d) => d,
-            Err(err) => panic!("failed to decode node value: {:?} {:?}", err, node_value),
+            Err(err) => panic!("failed to decode node value: {:?}; value: {:?}", err, node_value),
         };
 
         // Check consistency between `node_value` and `unhashed_storage_value` and determine
