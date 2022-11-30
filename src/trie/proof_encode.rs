@@ -233,10 +233,9 @@ impl ProofBuilder {
     /// manually modified.
     ///
     /// Calling this function when the node values aren't coherent will modify the hash of the trie
-    /// root that is found in the proof. Most of the time, the verifier of a trie proof checks
+    /// root that is found in the proof. Most of the time, the verification of a trie proof checks
     /// whether the hash of the trie root in the proof matches an expected value. When that is the
-    /// case, then calling this function would produce a proof that is no longer accepted by the
-    /// verifier.
+    /// case, then calling this function would produce a proof that is no longer accepted.
     ///
     /// This function only updates the hashes of storage values and children. Storage values
     /// themselves are always left untouched.
