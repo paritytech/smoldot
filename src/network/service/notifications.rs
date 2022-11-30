@@ -221,6 +221,9 @@ where
                     })
                 };
 
+                debug_assert!(self
+                    .inner
+                    .can_queue_notification(&peer_id, notifications_protocol_index));
                 let _ = self.inner.queue_notification(
                     &peer_id,
                     notifications_protocol_index,
@@ -663,6 +666,12 @@ where
         scale_encoded_header: &[u8],
         is_best: bool,
     ) -> Result<(), QueueNotificationError> {
+        // In order to provide clarity about the problem, check ahead of time whether calling
+        // `queue_notification` will panic below.
+        debug_assert!(self
+            .inner
+            .can_queue_notification(target, chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN));
+
         let buffers_to_send = protocol::encode_block_announce(protocol::BlockAnnounceRef {
             scale_encoded_header,
             is_best,
@@ -713,6 +722,12 @@ where
         chain_index: usize,
         extrinsic: &[u8],
     ) -> Result<(), QueueNotificationError> {
+        // In order to provide clarity about the problem, check ahead of time whether calling
+        // `queue_notification` will panic below.
+        debug_assert!(self
+            .inner
+            .can_queue_notification(target, chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1));
+
         let mut val = Vec::with_capacity(1 + extrinsic.len());
         val.extend_from_slice(util::encode_scale_compact_usize(1).as_ref());
         val.extend_from_slice(extrinsic);
