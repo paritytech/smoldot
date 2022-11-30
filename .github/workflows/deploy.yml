@@ -59,7 +59,7 @@ jobs:
           node-version: current
       - run: npm install
         working-directory: ./repo/bin/wasm-node/javascript
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
       - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light
         working-directory: ./repo
       - run: npm run doc
@@ -99,7 +99,7 @@ jobs:
           # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
           toolchain: stable
           profile: minimal
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
       - run: npm install
         working-directory: ./bin/wasm-node/javascript
       - run: npm publish --unsafe-perm --dry-run
@@ -133,7 +133,7 @@ jobs:
           # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
           toolchain: stable
           profile: minimal
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
       - id: compute-tag  # Compute the tag that we might push.
         run: echo "::set-output name=tag::light-js-deno-v`jq -r .version ./bin/wasm-node/javascript/package.json`"
       - id: check-tag-exists  # Check whether the tag already exists.
