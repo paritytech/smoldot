@@ -33,7 +33,6 @@ use smoldot::{
     libp2p,
     network::{self, protocol},
     sync::all,
-    trie::proof_decode,
 };
 
 /// Starts a sync service background task to synchronize a standalone chain (relay chain or not).
@@ -281,11 +280,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 // `result` is an error if the request got cancelled by the sync state machine.
                 if let Ok(result) = result {
                     // Inject the result of the request into the sync state machine.
-                    task.sync.storage_get_response(
-                        request_id,
-                        result.map(|list| list.into_iter()),
-                    ).1
-
+                    task.sync.storage_get_response(request_id, result).1
                 } else {
                     // The sync state machine has emitted a `Action::Cancel` earlier, and is
                     // thus no longer interested in the response.
@@ -439,13 +434,7 @@ struct Task<TPlat: Platform> {
 
     /// List of storage requests currently in progress.
     pending_storage_requests: stream::FuturesUnordered<
-        future::BoxFuture<
-            'static,
-            (
-                all::RequestId,
-                Result<Result<Vec<Option<Vec<u8>>>, ()>, future::Aborted>,
-            ),
-        >,
+        future::BoxFuture<'static, (all::RequestId, Result<Result<Vec<u8>, ()>, future::Aborted>)>,
     >,
 
     /// List of call proof requests currently in progress.
@@ -560,10 +549,10 @@ impl<TPlat: Platform> Task<TPlat> {
                     .push(async move { (request_id, grandpa_request.await) }.boxed());
             }
 
-            all::DesiredRequest::StorageGet {
+            all::DesiredRequest::StorageGetMerkleProof {
                 block_hash,
-                state_trie_root,
                 ref keys,
+                ..
             } => {
                 let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
@@ -577,28 +566,10 @@ impl<TPlat: Platform> Task<TPlat> {
                     Duration::from_secs(16),
                 );
 
-                let keys = keys.clone();
                 let storage_request = async move {
                     if let Ok(outcome) = storage_request.await {
-                        // TODO: lots of copying around
                         // TODO: log what happens
-                        if let Ok(decoded) =
-                            proof_decode::decode_and_verify_proof(proof_decode::Config {
-                                proof: outcome.decode(),
-                                trie_root_hash: &state_trie_root,
-                            })
-                        {
-                            keys.iter()
-                                .map(|key| {
-                                    decoded
-                                        .storage_value(key)
-                                        .ok_or(())
-                                        .map(|v| v.map(|v| v.to_vec()))
-                                })
-                                .collect::<Result<Vec<_>, ()>>()
-                        } else {
-                            Err(())
-                        }
+                        Ok(outcome.decode().to_vec()) // TODO: no to_vec() here, needs some API change on the networking
                     } else {
                         Err(())
                     }

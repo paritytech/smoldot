@@ -191,6 +191,13 @@ impl<TUd> TrieStructure<TUd> {
         Some(self.node_by_index_inner(self.root_index?).unwrap())
     }
 
+    /// Returns the user data associated with the root node of the trie, or `None` if the trie
+    /// is empty.
+    // TODO: this function exists only because `root_node` mutably borrows
+    pub fn root_user_data(&self) -> Option<&TUd> {
+        Some(&self.nodes[self.root_index?].user_data)
+    }
+
     /// Returns an [`Entry`] corresponding to the node whose key is the concatenation of the list
     /// of nibbles passed as parameter.
     ///
