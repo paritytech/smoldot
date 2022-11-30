@@ -211,6 +211,7 @@ where
                         } else {
                             0
                         };
+                    debug_assert!(offset == 0 || offset >= proof_entry_range.start);
                     debug_assert!(offset <= (proof_entry_range.start + proof_entry.len()));
                     remain_iterate.push((
                         offset..(offset + child_node_value.len()),
@@ -271,7 +272,7 @@ where
                         } else {
                             0
                         };
-                        debug_assert!(offset >= proof_entry_range.start);
+                        debug_assert!(offset == 0 || offset >= proof_entry_range.start);
                         debug_assert!(offset <= (proof_entry_range.start + proof_entry.len()));
                         StorageValueInner::Known {
                             is_inline: true,
