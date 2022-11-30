@@ -121,9 +121,7 @@ impl ProofBuilder {
                 assert_eq!(in_node_value, user_provided);
                 None
             }
-            (proof_node_codec::StorageValue::Hashed(ref hash), Some(ref value)) => {
-                Some(value.to_vec())
-            }
+            (proof_node_codec::StorageValue::Hashed(_), Some(ref value)) => Some(value.to_vec()),
             (proof_node_codec::StorageValue::None, Some(_)) => panic!(),
             (_, None) => None,
         };
