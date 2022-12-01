@@ -22,5 +22,5 @@ nom = { version = "7.1.1", default-features = false }
 pin-project = "1.0.12"
 rand = "0.8.5"
 slab = { version = "0.4.7", default-features = false }
-smoldot = { version = "0.4.0", path = "../../..", default-features = false }
-smoldot-light = { version = "0.2.0", path = "../../light-base", default-features = false }
+smoldot = { version = "0.5.0", path = "../../..", default-features = false }
+smoldot-light = { version = "0.3.0", path = "../../light-base", default-features = false }
