@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- JSON-RPC requests without a `params` field are no longer invalid.
+- JSON-RPC requests without a `params` field are no longer invalid. ([#3090](https://github.com/paritytech/smoldot/pull/3090))
 - Fix Merkle proofs whose trie root node has a size inferior to 32 bytes being considered as invalid. ([#3046](https://github.com/paritytech/smoldot/pull/3046))
 
 ## 0.7.9 - 2022-11-28
