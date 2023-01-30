@@ -71,7 +71,7 @@ pub struct Call<'a> {
     pub id_json: Option<&'a str>,
     /// Name of the method that is being called.
     pub method: &'a str,
-    /// JSON-formatted list of parameters.
+    /// JSON-formatted list of parameters. `None` iff the `params` field is missing.
     pub params_json: Option<&'a str>,
 }
 
