@@ -66,10 +66,10 @@ export default (config: Config): WebAssembly.ModuleImports => {
             len >>>= 0;
 
             const baseBuffer = new Uint8Array(instance.exports.memory.buffer)
-                .slice(ptr, ptr + len);
+                .subarray(ptr, ptr + len);
             for (let iter = 0; iter < len; iter += 65536) {
-                // `baseBuffer.slice` automatically saturates at the end of the buffer
-                config.getRandomValues(baseBuffer.slice(iter, iter + 65536))
+                // `baseBuffer.subarray` automatically saturates at the end of the buffer
+                config.getRandomValues(baseBuffer.subarray(iter, iter + 65536))
             }
 
             return 0;
