@@ -119,6 +119,17 @@ jobs:
     - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features std
     - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features std
 
+  check-no-std:
+    runs-on: ubuntu-latest
+    container:
+      image: rust
+    steps:
+    - uses: actions/checkout@v2.4.0
+    - uses: Swatinem/rust-cache@v1
+    - run: rustup default nightly
+    - run: rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu # Necessary for `-Z build-std` below
+    - run: RUSTFLAGS=-Dwarnings cargo +nightly build --package smoldot --no-default-features -Z build-std=core,alloc --target=x86_64-unknown-uefi
+
   fuzzing-binaries-compile:
     runs-on: ubuntu-latest
     steps:
@@ -230,7 +241,7 @@ jobs:
   all-ci:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, fuzzing-binaries-compile, check-rustdoc-links, fmt, clippy, cargo-deny, cargo-spellcheck, wasm-node-versions-match]
+    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, check-no-std, fuzzing-binaries-compile, check-rustdoc-links, fmt, clippy, cargo-deny, cargo-spellcheck, wasm-node-versions-match]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success
