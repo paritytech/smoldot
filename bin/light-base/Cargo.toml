@@ -12,6 +12,7 @@ name = "basic"
 required-features = ["std"]
 
 [dependencies]
+anyhow = { version = "1.0", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
 derive_more = "0.99.17"
 either = { version = "1.8.0", default-features = false }

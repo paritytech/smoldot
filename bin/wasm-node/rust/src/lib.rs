@@ -257,7 +257,9 @@ fn add_chain(
                 .as_mut()
                 .unwrap()
                 .chains
-                .insert(init::Chain::Erroneous { error });
+                .insert(init::Chain::Erroneous {
+                    error: error.to_string(),
+                });
 
             return u32::try_from(chain_id).unwrap();
         }

@@ -2393,6 +2393,7 @@ dependencies = [
 name = "smoldot-light"
 version = "0.3.0"
 dependencies = [
+ "anyhow",
  "async-std",
  "blake2-rfc",
  "derive_more",

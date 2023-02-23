@@ -64,6 +64,11 @@ impl ValidChainInformation {
     pub fn as_ref(&self) -> ChainInformationRef {
         From::from(&self.inner)
     }
+
+    /// Get the number of the last finalized block.
+    pub fn finalized_block_number(&self) -> u64 {
+        self.as_ref().finalized_block_header.number
+    }
 }
 
 impl<'a> From<ValidChainInformationRef<'a>> for ValidChainInformation {
