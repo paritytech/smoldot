@@ -1,3 +1,9 @@
+# DEPRECATED
+
+This repository is deprecated in favor of: <https://github.com/smol-dot/smoldot>
+
+
+
 Lightweight Substrate and Polkadot client.
 
 # Introduction
