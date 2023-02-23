@@ -1,6 +1,6 @@
 # DEPRECATED
 
-This repo is deprecated in favor of: <https://github.com/smol-dot/smoldot>
+This repository is deprecated in favor of: <https://github.com/smol-dot/smoldot>
 
 
 
