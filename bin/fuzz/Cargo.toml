@@ -9,7 +9,7 @@ edition = "2018"
 cargo-fuzz = true
 
 [dependencies]
-arbitrary = "1.2.0"
+arbitrary = "1.2.3"
 fnv = { version = "1.0.7", default-features = false }
 hashbrown = { version = "0.13.1", default-features = false }
 libfuzzer-sys = "0.4"
