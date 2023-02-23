@@ -76,7 +76,7 @@ jobs:
     - uses: baptiste0928/cargo-install@v1  # This action ensures that the twiggy compilation is cached.
       with:
         crate: twiggy
-        version: 0.6
+        version: 0.7
     - run: git checkout ${{ github.event.pull_request.base.sha }}
     - run: cd bin/wasm-node/javascript && npm ci && npm run-script build
     - run: cp ./target/wasm32-wasi/min-size-release/smoldot_light_wasm.wasm ./.ci-parent-build.wasm  # TODO: maybe get the path from the `npm build` output or something?
