@@ -41,7 +41,7 @@ pub fn parse_call(call_json: &str) -> Result<Call, ParseError> {
     Ok(Call {
         id_json: serde_call.id.map(|v| v.get()),
         method: serde_call.method,
-        params_json: serde_call.params.get(),
+        params_json: serde_call.params.map(|p| p.get()),
     })
 }
 
@@ -59,7 +59,7 @@ pub fn build_call(call: Call) -> String {
         jsonrpc: SerdeVersion::V2,
         id: call.id_json.map(|id| serde_json::from_str(id).unwrap()),
         method: call.method,
-        params: serde_json::from_str(call.params_json).unwrap(),
+        params: call.params_json.map(|p| serde_json::from_str(p).unwrap()),
     })
     .unwrap()
 }
@@ -71,8 +71,8 @@ pub struct Call<'a> {
     pub id_json: Option<&'a str>,
     /// Name of the method that is being called.
     pub method: &'a str,
-    /// JSON-formatted list of parameters.
-    pub params_json: &'a str,
+    /// JSON-formatted list of parameters. `None` iff the `params` field is missing.
+    pub params_json: Option<&'a str>,
 }
 
 /// Error while parsing a call.
@@ -206,7 +206,7 @@ struct SerdeCall<'a> {
     #[serde(borrow)]
     method: &'a str,
     #[serde(borrow)]
-    params: &'a serde_json::value::RawValue,
+    params: Option<&'a serde_json::value::RawValue>,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy, Hash, Eq)]
@@ -335,7 +335,7 @@ mod tests {
         .unwrap();
         assert_eq!(call.id_json.unwrap(), "5");
         assert_eq!(call.method, "foo");
-        assert_eq!(call.params_json, "[5,true, \"hello\"]");
+        assert_eq!(call.params_json, Some("[5,true, \"hello\"]"));
     }
 
     #[test]
@@ -343,7 +343,7 @@ mod tests {
         let call = super::parse_call(r#"{"jsonrpc":"2.0","method":"foo","params":[]}"#).unwrap();
         assert!(call.id_json.is_none());
         assert_eq!(call.method, "foo");
-        assert_eq!(call.params_json, "[]");
+        assert_eq!(call.params_json, Some("[]"));
     }
 
     #[test]
@@ -353,7 +353,7 @@ mod tests {
                 .unwrap();
         assert_eq!(call.id_json.unwrap(), "\"hello\"");
         assert_eq!(call.method, "foo");
-        assert_eq!(call.params_json, "[]");
+        assert_eq!(call.params_json, Some("[]"));
     }
 
     #[test]
@@ -363,7 +363,15 @@ mod tests {
                 .unwrap();
         assert_eq!(call.id_json.unwrap(), r#""extern:\"health-checker:0\"""#);
         assert_eq!(call.method, "system_health");
-        assert_eq!(call.params_json, "[]");
+        assert_eq!(call.params_json, Some("[]"));
+    }
+
+    #[test]
+    fn missing_params() {
+        let call = super::parse_call(r#"{"jsonrpc":"2.0","id":2,"method":"foo"}"#).unwrap();
+        assert_eq!(call.id_json.unwrap(), r#"2"#);
+        assert_eq!(call.method, "foo");
+        assert_eq!(call.params_json, None);
     }
 
     #[test]

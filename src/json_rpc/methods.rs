@@ -219,11 +219,13 @@ macro_rules! define_methods {
                 parse::build_call(parse::Call {
                     id_json,
                     method: self.name(),
-                    params_json: &self.params_to_json_object(),
+                    // Note that we never skip the `params` field, even if empty. This is an
+                    // arbitrary choice.
+                    params_json: Some(&self.params_to_json_object()),
                 })
             }
 
-            fn from_defs(name: &'a str, params: &'a str) -> Result<Self, MethodError<'a>> {
+            fn from_defs(name: &'a str, params: Option<&'a str>) -> Result<Self, MethodError<'a>> {
                 #![allow(unused, unused_mut)]
 
                 $(
@@ -243,7 +245,7 @@ macro_rules! define_methods {
                             #[serde(borrow, skip)]
                             _dummy: core::marker::PhantomData<&'a ()>,
                         }
-                        if let Ok(params) = serde_json::from_str(params) {
+                        if let Some(Ok(params)) = params.as_ref().map(|p| serde_json::from_str(p)) {
                             let Params { _dummy: _, $($p_name),* } = params;
                             return Ok($rq_name::$name {
                                 $($p_name,)*
@@ -257,7 +259,7 @@ macro_rules! define_methods {
                         //
                         // The code below allocates a `Vec`, but at the time of writing there is
                         // no way to ask `serde_json` to parse an array without doing so.
-                        if let Ok(params) = serde_json::from_str::<Vec<&'a serde_json::value::RawValue>>(params) {
+                        if let Some(Ok(params)) = params.as_ref().map(|p| serde_json::from_str::<Vec<&'a serde_json::value::RawValue>>(p)) {
                             let mut n = 0;
                             $(
                                 // Missing parameters are implicitly equal to null.
