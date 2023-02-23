@@ -1,7 +1,14 @@
 name: recurrent-audit
+
 on:
   schedule:
     - cron: '0 0 * * *'
+  workflow_dispatch:  # Allow triggering through the UI
+
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   audit:
     runs-on: ubuntu-latest
