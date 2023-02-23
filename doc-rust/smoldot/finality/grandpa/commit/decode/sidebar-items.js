@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":[["decode_grandpa_commit","Attempt to decode the given SCALE-encoded Grandpa commit."],["decode_partial_grandpa_commit","Attempt to decode the given SCALE-encoded commit."]],"struct":[["CommitMessageRef",""],["CompactCommitRef",""],["Error","Error potentially returned by [`decode_grandpa_commit`]."],["UnsignedPrecommitRef",""]]};

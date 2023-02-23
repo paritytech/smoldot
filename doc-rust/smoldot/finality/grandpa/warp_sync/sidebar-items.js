@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":[["Error",""],["Next",""]],"struct":[["Verifier",""],["WarpSyncFragment","Fragment to be verified."]]};

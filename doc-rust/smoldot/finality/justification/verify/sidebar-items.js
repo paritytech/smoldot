@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":[["Error","Error that can happen while verifying a justification."]],"fn":[["verify","Verifies that a justification is valid."]],"struct":[["Config","Configuration for a justification verification process."]]};

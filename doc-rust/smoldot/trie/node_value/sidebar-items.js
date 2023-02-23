@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":[["NodeTy","Type of node whose node value is to be calculated."]],"fn":[["calculate_merkle_value","Calculates the Merkle value of a node given the information about this node."]],"struct":[["Config","Information about a node whose Merkle value is to be calculated."],["Output","Output of the calculation."]]};

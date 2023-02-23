@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":[["with_buffers","Augments an implementation of `AsyncRead` and `AsyncWrite` with a read buffer and a write buffer."]]};

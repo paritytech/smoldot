@@ -1,0 +1,48 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Calculation of the Merkle value of a node given the information about it."><meta name="keywords" content="rust, rustlang, rust-lang, node_value"><title>smoldot::trie::node_value - Rust</title><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/SourceSerif4-Regular-1f7d512b176f0f72.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/FiraSans-Regular-018c141bf0843ffd.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/FiraSans-Medium-8f9a781e4970d388.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/SourceCodePro-Regular-562dcc5011b6de7d.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/SourceSerif4-Bold-124a1ca42af929b6.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/SourceCodePro-Semibold-d899c5a5c4aeb14a.ttf.woff2"><link rel="stylesheet" href="../../../static.files/normalize-76eba96aa4d2e634.css"><link rel="stylesheet" href="../../../static.files/rustdoc-6827029ac823cab7.css" id="mainThemeStyle"><link rel="stylesheet" id="themeStyle" href="../../../static.files/light-ebce58d0a40c3431.css"><link rel="stylesheet" disabled href="../../../static.files/dark-f23faae4a2daf9a6.css"><link rel="stylesheet" disabled href="../../../static.files/ayu-8af5e100b21cd173.css"><script id="default-settings" ></script><script src="../../../static.files/storage-d43fa987303ecbbb.js"></script><script defer src="../../../static.files/main-c55e1eb52e1886b4.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-13285aec31fa243e.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-16x16-8b506e7a72182f1c.png"><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-422f7d1d52889060.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-2c020d218678b618.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="mobile-topbar"><button class="sidebar-menu-toggle">&#9776;</button><a class="sidebar-logo" href="../../../smoldot/index.html"><div class="logo-container"><img class="rust-logo" src="../../../static.files/rust-logo-151179464ae7ed46.svg" alt="logo"></div></a><h2></h2></nav><nav class="sidebar"><a class="sidebar-logo" href="../../../smoldot/index.html"><div class="logo-container"><img class="rust-logo" src="../../../static.files/rust-logo-151179464ae7ed46.svg" alt="logo"></div></a><h2 class="location"><a href="#">Module node_value</a></h2><div class="sidebar-elems"><section><ul class="block"><li><a href="#structs">Structs</a></li><li><a href="#enums">Enums</a></li><li><a href="#functions">Functions</a></li></ul></section></div></nav><main><div class="width-limiter"><nav class="sub"><form class="search-form"><span></span><input class="search-input" name="search" aria-label="Run search in the documentation" autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"><div id="help-button" title="help" tabindex="-1"><a href="../../../help.html">?</a></div><div id="settings-menu" tabindex="-1"><a href="../../../settings.html" title="settings"><img width="22" height="22" alt="Change settings" src="../../../static.files/wheel-5ec35bf9ca753509.svg"></a></div></form></nav><section id="main-content" class="content"><div class="main-heading"><h1 class="fqn">Module <a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">trie</a>::<wbr><a class="mod" href="#">node_value</a><button id="copy-path" onclick="copy_path(this)" title="Copy item path to clipboard"><img src="../../../static.files/clipboard-7571035ce49a181d.svg" width="19" height="18" alt="Copy item path"></button></h1><span class="out-of-band"><a class="srclink" href="../../../src/smoldot/trie/node_value.rs.html#18-470">source</a> · <button id="toggle-all-docs" title="collapse all docs">[<span>&#x2212;</span>]</button></span></div><details class="rustdoc-toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Calculation of the Merkle value of a node given the information about it.</p>
+<p>Use the <a href="fn.calculate_merkle_value.html" title="calculate_merkle_value"><code>calculate_merkle_value</code></a> function to calculate the Merkle value. The <a href="struct.Config.html" title="Config"><code>Config</code></a>
+struct contains all the input required for the calculation.</p>
+<h2 id="example"><a href="#example">Example</a></h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>smoldot::trie::{Nibble, TrieEntryVersion, node_value};
+
+<span class="kw">let </span>merkle_value = {
+    <span class="comment">// The example node whose value we calculate has three children.
+    </span><span class="kw">let </span>children = {
+        <span class="kw">let </span><span class="kw-2">mut </span>children = Vec::new();
+        <span class="kw">for _ in </span><span class="number">0</span>..<span class="number">2 </span>{
+            children.push(<span class="prelude-val">None</span>);
+        }
+        children.push(<span class="prelude-val">Some</span>(node_value::Output::from_bytes(<span class="string">b&quot;foo&quot;</span>)));
+        <span class="kw">for _ in </span><span class="number">0</span>..<span class="number">7 </span>{
+            children.push(<span class="prelude-val">None</span>);
+        }
+        children.push(<span class="prelude-val">Some</span>(node_value::Output::from_bytes(<span class="string">b&quot;bar&quot;</span>)));
+        <span class="kw">for _ in </span><span class="number">0</span>..<span class="number">5 </span>{
+            children.push(<span class="prelude-val">None</span>);
+        }
+        children
+    };
+
+    node_value::calculate_merkle_value(node_value::Config {
+        ty: node_value::NodeTy::NonRoot {
+            partial_key: [
+                Nibble::try_from(<span class="number">8</span>).unwrap(),
+                Nibble::try_from(<span class="number">12</span>).unwrap(),
+                Nibble::try_from(<span class="number">1</span>).unwrap(),
+            ]
+            .iter()
+            .cloned(),
+        },
+        children: children.iter().map(|opt| opt.as_ref()),
+        stored_value: <span class="prelude-val">Some</span>(<span class="string">b&quot;hello world&quot;</span>),
+        version: TrieEntryVersion::V1,
+    })
+};
+
+<span class="macro">assert_eq!</span>(
+    merkle_value.as_ref(),
+    <span class="kw-2">&amp;</span>[
+        <span class="number">195</span>, <span class="number">8</span>, <span class="number">193</span>, <span class="number">4</span>, <span class="number">4</span>, <span class="number">44</span>, <span class="number">104</span>, <span class="number">101</span>, <span class="number">108</span>, <span class="number">108</span>, <span class="number">111</span>, <span class="number">32</span>, <span class="number">119</span>, <span class="number">111</span>, <span class="number">114</span>, <span class="number">108</span>, <span class="number">100</span>, <span class="number">12</span>,
+        <span class="number">102</span>, <span class="number">111</span>, <span class="number">111</span>, <span class="number">12</span>, <span class="number">98</span>, <span class="number">97</span>, <span class="number">114
+    </span>]
+);</code></pre></div>
+</div></details><h2 id="structs" class="small-section-header"><a href="#structs">Structs</a></h2><div class="item-table"><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.Config.html" title="smoldot::trie::node_value::Config struct">Config</a></div><div class="item-right docblock-short">Information about a node whose Merkle value is to be calculated.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.Output.html" title="smoldot::trie::node_value::Output struct">Output</a></div><div class="item-right docblock-short">Output of the calculation.</div></div></div><h2 id="enums" class="small-section-header"><a href="#enums">Enums</a></h2><div class="item-table"><div class="item-row"><div class="item-left module-item"><a class="enum" href="enum.NodeTy.html" title="smoldot::trie::node_value::NodeTy enum">NodeTy</a></div><div class="item-right docblock-short">Type of node whose node value is to be calculated.</div></div></div><h2 id="functions" class="small-section-header"><a href="#functions">Functions</a></h2><div class="item-table"><div class="item-row"><div class="item-left module-item"><a class="fn" href="fn.calculate_merkle_value.html" title="smoldot::trie::node_value::calculate_merkle_value fn">calculate_merkle_value</a></div><div class="item-right docblock-short">Calculates the Merkle value of a node given the information about this node.</div></div></div></section></div></main><div id="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="smoldot" data-themes="" data-resource-suffix="" data-rustdoc-version="1.67.1 (d5a82bbd2 2023-02-07)" data-search-js="search-444266647c4dba98.js" data-settings-js="settings-bebeae96e00e4617.js" data-settings-css="settings-af96d9e2fc13e081.css" ></div></body></html>

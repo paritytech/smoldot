@@ -1,0 +1,76 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="WebSocket server."><meta name="keywords" content="rust, rustlang, rust-lang, websocket_server"><title>smoldot::json_rpc::websocket_server - Rust</title><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/SourceSerif4-Regular-1f7d512b176f0f72.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/FiraSans-Regular-018c141bf0843ffd.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/FiraSans-Medium-8f9a781e4970d388.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/SourceCodePro-Regular-562dcc5011b6de7d.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/SourceSerif4-Bold-124a1ca42af929b6.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/SourceCodePro-Semibold-d899c5a5c4aeb14a.ttf.woff2"><link rel="stylesheet" href="../../../static.files/normalize-76eba96aa4d2e634.css"><link rel="stylesheet" href="../../../static.files/rustdoc-6827029ac823cab7.css" id="mainThemeStyle"><link rel="stylesheet" id="themeStyle" href="../../../static.files/light-ebce58d0a40c3431.css"><link rel="stylesheet" disabled href="../../../static.files/dark-f23faae4a2daf9a6.css"><link rel="stylesheet" disabled href="../../../static.files/ayu-8af5e100b21cd173.css"><script id="default-settings" ></script><script src="../../../static.files/storage-d43fa987303ecbbb.js"></script><script defer src="../../../static.files/main-c55e1eb52e1886b4.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-13285aec31fa243e.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-16x16-8b506e7a72182f1c.png"><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-422f7d1d52889060.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-2c020d218678b618.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="mobile-topbar"><button class="sidebar-menu-toggle">&#9776;</button><a class="sidebar-logo" href="../../../smoldot/index.html"><div class="logo-container"><img class="rust-logo" src="../../../static.files/rust-logo-151179464ae7ed46.svg" alt="logo"></div></a><h2></h2></nav><nav class="sidebar"><a class="sidebar-logo" href="../../../smoldot/index.html"><div class="logo-container"><img class="rust-logo" src="../../../static.files/rust-logo-151179464ae7ed46.svg" alt="logo"></div></a><h2 class="location"><a href="#">Module websocket_server</a></h2><div class="sidebar-elems"><section><ul class="block"><li><a href="#structs">Structs</a></li><li><a href="#enums">Enums</a></li></ul></section></div></nav><main><div class="width-limiter"><nav class="sub"><form class="search-form"><span></span><input class="search-input" name="search" aria-label="Run search in the documentation" autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"><div id="help-button" title="help" tabindex="-1"><a href="../../../help.html">?</a></div><div id="settings-menu" tabindex="-1"><a href="../../../settings.html" title="settings"><img width="22" height="22" alt="Change settings" src="../../../static.files/wheel-5ec35bf9ca753509.svg"></a></div></form></nav><section id="main-content" class="content"><div class="main-heading"><h1 class="fqn">Module <a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">json_rpc</a>::<wbr><a class="mod" href="#">websocket_server</a><button id="copy-path" onclick="copy_path(this)" title="Copy item path to clipboard"><img src="../../../static.files/clipboard-7571035ce49a181d.svg" width="19" height="18" alt="Copy item path"></button></h1><span class="out-of-band"><a class="srclink" href="../../../src/smoldot/json_rpc/websocket_server.rs.html#18-571">source</a> · <button id="toggle-all-docs" title="collapse all docs">[<span>&#x2212;</span>]</button></span></div><details class="rustdoc-toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>WebSocket server.</p>
+<p>Only handles text frames from the WebSocket protocol. While adding support for binary frames
+isn’t difficult, it is out of scope of the use-case of this code.</p>
+<h2 id="usage"><a href="#usage">Usage</a></h2>
+<p>Call <a href="struct.WsServer.html#method.new" title="WsServer::new"><code>WsServer::new</code></a>, passing a <a href="struct.Config.html" title="Config"><code>Config</code></a>, in order to create a listening TCP socket
+wrapped inside of a <a href="struct.WsServer.html" title="WsServer"><code>WsServer</code></a>.</p>
+<p>After initialization, call <a href="struct.WsServer.html#method.next_event" title="WsServer::next_event"><code>WsServer::next_event</code></a> in order to wait for something to happen
+on the listening TCP socket or on one of the currently active clients that have connected.</p>
+<p>When <a href="enum.Event.html#variant.ConnectionOpen" title="Event::ConnectionOpen"><code>Event::ConnectionOpen</code></a> is returned, call <a href="struct.WsServer.html#method.accept" title="WsServer::accept"><code>WsServer::accept</code></a> or <a href="struct.WsServer.html#method.reject" title="WsServer::reject"><code>WsServer::reject</code></a>
+to either accept or refuse the new incoming connection. The
+<a href="enum.Event.html#variant.ConnectionOpen"><code>ConnectionOpen</code></a> event holds the <a href="https://doc.rust-lang.org/1.67.1/std/net/socket_addr/enum.SocketAddr.html" title="SocketAddr"><code>SocketAddr</code></a> of the client, which
+can be used to make a decision. This module doesn’t enforce any limit to the number of
+simultaneously connected client. In order to enforce one (which is recommended), call
+<a href="struct.WsServer.html#method.reject" title="WsServer::reject"><code>WsServer::reject</code></a> if <a href="struct.WsServer.html#method.len" title="WsServer::len"><code>WsServer::len</code></a> is superior or equal to a certain value.</p>
+<p>Each active client connection is identified with a <a href="struct.ConnectionId.html" title="ConnectionId"><code>ConnectionId</code></a>, provided when
+<a href="struct.WsServer.html#method.accept"><code>accept</code></a> is called. Call <a href="struct.WsServer.html#method.close" title="WsServer::close"><code>WsServer::close</code></a> in order to forcefully shut
+down a certain connection. An <a href="enum.Event.html#variant.ConnectionError" title="Event::ConnectionError"><code>Event::ConnectionError</code></a> event is returned by
+<a href="struct.WsServer.html#method.next_event"><code>next_event</code></a> if the client shuts down its side of the connection or
+if a protocol error is detected. Calling <a href="struct.WsServer.html#method.close"><code>close</code></a> does <em>not</em> generate a
+<a href="enum.Event.html#variant.ConnectionError"><code>ConnectionError</code></a> event, as the closing is assumed to be
+instantaneous for API-related purposes.</p>
+<p>After either <a href="struct.WsServer.html#method.close"><code>close</code></a> is called or
+<a href="enum.Event.html#variant.ConnectionError"><code>ConnectionError</code></a> is returned, the given <a href="struct.ConnectionId.html" title="ConnectionId"><code>ConnectionId</code></a> is no
+longer valid and can later get reused for a different connection.</p>
+<p>When <a href="struct.WsServer.html#method.accept"><code>accept</code></a> is called, a “user data” parameter must be passed. This is
+a value opaque to the code in this module that can be used by the API user in order to hold
+additional connection-specific state.</p>
+<p>Use <a href="struct.WsServer.html#method.queue_send" title="WsServer::queue_send"><code>WsServer::queue_send</code></a> to send a text frame to a client. The message is buffered and
+will be progressively delivered when the client is ready to receive it.</p>
+<h2 id="example"><a href="#example">Example</a></h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>smoldot::json_rpc::websocket_server::{Config, Event, WsServer};
+
+<span class="kw">let </span><span class="kw-2">mut </span>server = WsServer::new(Config {
+    bind_address: <span class="string">&quot;127.0.0.1:0&quot;</span>.parse().unwrap(),
+    max_frame_size: <span class="number">1024 </span>* <span class="number">1024</span>,
+    send_buffer_len: <span class="number">32</span>,
+    capacity: <span class="number">32</span>,
+})
+.<span class="kw">await
+</span>.unwrap();
+
+<span class="kw">loop </span>{
+    <span class="kw">match </span>server.next_event().<span class="kw">await </span>{
+        <span class="comment">// New connection on the listener.
+        </span>Event::ConnectionOpen { address } =&gt; {
+            <span class="macro">println!</span>(<span class="string">&quot;New connection from {:?}&quot;</span>, address);
+            <span class="kw">if </span>server.len() &lt; <span class="number">512 </span>{
+                <span class="comment">// Rather than passing `()`, it is possible to pass any value. The value is
+                // provided back on `TextFrame` and `ConnectionError` events.
+                </span>server.accept(());
+            } <span class="kw">else </span>{
+                server.reject();
+            }
+        }
+
+        <span class="comment">// Received a message from a connection.
+        </span>Event::TextFrame { message, connection_id, .. } =&gt; {
+            <span class="macro">println!</span>(<span class="string">&quot;Received message: {:?}&quot;</span>, message);
+            server.queue_send(connection_id, <span class="string">&quot;hello back!&quot;</span>.to_string());
+        },
+
+        <span class="comment">// Connection has been closed.
+        </span>Event::ConnectionError { .. } =&gt; {},
+    }
+}</code></pre></div>
+<h2 id="about-performances"><a href="#about-performances">About performances</a></h2>
+<p>The <a href="struct.WsServer.html" title="WsServer"><code>WsServer</code></a> is entirely single-threaded, as calling <a href="struct.WsServer.html#method.next_event" title="WsServer::next_event"><code>WsServer::next_event</code></a> is the only
+way to process the state of all the sockets and it requires a mutable borrow to the server.</p>
+<p>This restriction to being single-threaded only becomes a problem if a single CPU core isn’t
+capable of processing the volume of data, which is expected to happen only with a very large
+number of clients (the complexity being <code>O(n)</code>).</p>
+<p>The single-threadedness can even be beneficial when the WebSocket server isn’t the primary
+purpose of a certain program, which is what this module has been designed for. In the
+case of a (D)DoS attack on the WebSocket server, only up to one core of CPU processing power
+can be occupied by the attacker.</p>
+</div></details><h2 id="structs" class="small-section-header"><a href="#structs">Structs</a></h2><div class="item-table"><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.Config.html" title="smoldot::json_rpc::websocket_server::Config struct">Config</a></div><div class="item-right docblock-short">Configuration for a <a href="struct.WsServer.html" title="WsServer"><code>WsServer</code></a>.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.ConnectionId.html" title="smoldot::json_rpc::websocket_server::ConnectionId struct">ConnectionId</a></div><div class="item-right docblock-short">Identifier for a connection with regard to a <a href="struct.WsServer.html" title="WsServer"><code>WsServer</code></a>.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.WsServer.html" title="smoldot::json_rpc::websocket_server::WsServer struct">WsServer</a></div><div class="item-right docblock-short">Listening socket and list of open connections.</div></div></div><h2 id="enums" class="small-section-header"><a href="#enums">Enums</a></h2><div class="item-table"><div class="item-row"><div class="item-left module-item"><a class="enum" href="enum.Event.html" title="smoldot::json_rpc::websocket_server::Event enum">Event</a></div><div class="item-right docblock-short">Event that has happened on a <a href="struct.WsServer.html" title="WsServer"><code>WsServer</code></a>.</div></div></div></section></div></main><div id="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="smoldot" data-themes="" data-resource-suffix="" data-rustdoc-version="1.67.1 (d5a82bbd2 2023-02-07)" data-search-js="search-444266647c4dba98.js" data-settings-js="settings-bebeae96e00e4617.js" data-settings-css="settings-af96d9e2fc13e081.css" ></div></body></html>

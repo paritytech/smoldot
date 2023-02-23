@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":[["Entry",""],["InsertError","Error that can happen in [`VacantEntry::insert`]."],["OrInsertError","Error that can happen in [`Entry::or_insert`]."],["PeerState",""]],"struct":[["KBuckets","K-buckets, as popularized by the Kademlia algorithm, and defined by the libp2p specification."],["OccupiedEntry",""],["VacantEntry",""]]};

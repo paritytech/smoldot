@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":[["Error","Possible error returned by [`PrefixScan::resume`]."],["ResumeOutcome","Outcome of calling [`PrefixScan::resume`]."]],"fn":[["prefix_scan","Start a new scanning process."]],"struct":[["Config","Configuration to pass to [`prefix_scan`]."],["PrefixScan","Scan of a prefix in progress."]]};

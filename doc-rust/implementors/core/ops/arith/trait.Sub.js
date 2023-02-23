@@ -1,0 +1,3 @@
+(function() {var implementors = {
+"smoldot":[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.67.1/core/ops/arith/trait.Sub.html\" title=\"trait core::ops::arith::Sub\">Sub</a>&lt;<a class=\"struct\" href=\"smoldot/executor/vm/struct.HeapPages.html\" title=\"struct smoldot::executor::vm::HeapPages\">HeapPages</a>&gt; for <a class=\"struct\" href=\"smoldot/executor/vm/struct.HeapPages.html\" title=\"struct smoldot::executor::vm::HeapPages\">HeapPages</a>"]]
+};if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

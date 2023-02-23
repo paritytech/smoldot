@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":[["KeyLoadError",""],["KeyNamespace","Namespace of the key."],["SignError",""],["SignVrfError",""]],"struct":[["Keystore","Collection of key pairs."],["VrfSignature",""]]};

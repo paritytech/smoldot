@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":[["FromBytesError","Error when turning bytes into a [`MultihashRef`]."]],"struct":[["MultihashRef","A multihash made of a code and a slice of data."]]};

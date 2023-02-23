@@ -1,0 +1,144 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Wasm virtual machine specific to the Substrate/Polkadot Runtime Environment."><meta name="keywords" content="rust, rustlang, rust-lang, host"><title>smoldot::executor::host - Rust</title><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/SourceSerif4-Regular-1f7d512b176f0f72.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/FiraSans-Regular-018c141bf0843ffd.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/FiraSans-Medium-8f9a781e4970d388.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/SourceCodePro-Regular-562dcc5011b6de7d.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/SourceSerif4-Bold-124a1ca42af929b6.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/SourceCodePro-Semibold-d899c5a5c4aeb14a.ttf.woff2"><link rel="stylesheet" href="../../../static.files/normalize-76eba96aa4d2e634.css"><link rel="stylesheet" href="../../../static.files/rustdoc-6827029ac823cab7.css" id="mainThemeStyle"><link rel="stylesheet" id="themeStyle" href="../../../static.files/light-ebce58d0a40c3431.css"><link rel="stylesheet" disabled href="../../../static.files/dark-f23faae4a2daf9a6.css"><link rel="stylesheet" disabled href="../../../static.files/ayu-8af5e100b21cd173.css"><script id="default-settings" ></script><script src="../../../static.files/storage-d43fa987303ecbbb.js"></script><script defer src="../../../static.files/main-c55e1eb52e1886b4.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-13285aec31fa243e.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-16x16-8b506e7a72182f1c.png"><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-422f7d1d52889060.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-2c020d218678b618.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="mobile-topbar"><button class="sidebar-menu-toggle">&#9776;</button><a class="sidebar-logo" href="../../../smoldot/index.html"><div class="logo-container"><img class="rust-logo" src="../../../static.files/rust-logo-151179464ae7ed46.svg" alt="logo"></div></a><h2></h2></nav><nav class="sidebar"><a class="sidebar-logo" href="../../../smoldot/index.html"><div class="logo-container"><img class="rust-logo" src="../../../static.files/rust-logo-151179464ae7ed46.svg" alt="logo"></div></a><h2 class="location"><a href="#">Module host</a></h2><div class="sidebar-elems"><section><ul class="block"><li><a href="#reexports">Re-exports</a></li><li><a href="#modules">Modules</a></li><li><a href="#structs">Structs</a></li><li><a href="#enums">Enums</a></li></ul></section></div></nav><main><div class="width-limiter"><nav class="sub"><form class="search-form"><span></span><input class="search-input" name="search" aria-label="Run search in the documentation" autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"><div id="help-button" title="help" tabindex="-1"><a href="../../../help.html">?</a></div><div id="settings-menu" tabindex="-1"><a href="../../../settings.html" title="settings"><img width="22" height="22" alt="Change settings" src="../../../static.files/wheel-5ec35bf9ca753509.svg"></a></div></form></nav><section id="main-content" class="content"><div class="main-heading"><h1 class="fqn">Module <a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">executor</a>::<wbr><a class="mod" href="#">host</a><button id="copy-path" onclick="copy_path(this)" title="Copy item path to clipboard"><img src="../../../static.files/clipboard-7571035ce49a181d.svg" width="19" height="18" alt="Copy item path"></button></h1><span class="out-of-band"><a class="srclink" href="../../../src/smoldot/executor/host.rs.html#18-3459">source</a> · <button id="toggle-all-docs" title="collapse all docs">[<span>&#x2212;</span>]</button></span></div><details class="rustdoc-toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Wasm virtual machine specific to the Substrate/Polkadot Runtime Environment.</p>
+<p>Contrary to <a href="../vm/struct.VirtualMachine.html"><code>VirtualMachine</code></a>, this code is not just a generic
+Wasm virtual machine, but is aware of the Substrate/Polkadot runtime environment. The host
+functions that the Wasm code calls are automatically resolved and either handled or notified
+to the user of this module.</p>
+<p>Any host function that requires pure CPU computations (for example building or verifying
+a cryptographic signature) is directly handled by the code in this module. Other host
+functions (for example accessing the state or printing a message) are instead handled by
+interrupting the virtual machine and waiting for the user of this module to handle the call.</p>
+<blockquote>
+<p><strong>Note</strong>: The <code>ext_offchain_random_seed_version_1</code> and <code>ext_offchain_timestamp_version_1</code>
+functions, which requires the host to respectively produce a random seed and
+return the current time, must also be handled by the user. While these functions
+could theoretically be handled directly by this module, it might be useful for
+testing purposes to have the possibility to return a deterministic value.</p>
+</blockquote>
+<p>Contrary to most programs, runtime code doesn’t have a singe <code>main</code> or <code>start</code> function.
+Instead, it exposes several entry points. Which one to call indicates which action it has to
+perform. Not all entry points are necessarily available on all runtimes.</p>
+<h2 id="runtime-requirements"><a href="#runtime-requirements">Runtime requirements</a></h2>
+<p>See the <a href="../vm/index.html">documentation of the <code>vm</code> module</a> for details about the requirements a
+runtime must adhere to.</p>
+<p>In addition to the requirements described there, the WebAssembly runtime code can also be
+zstandard-compressed and must also export a global symbol named <code>__heap_base</code>.
+More details below.</p>
+<h3 id="zstandard-compression"><a href="#zstandard-compression"><code>Zstandard</code> compression</a></h3>
+<p>The runtime code passed as parameter to <a href="struct.HostVmPrototype.html#method.new" title="HostVmPrototype::new"><code>HostVmPrototype::new</code></a> can be compressed using the
+<a href="https://en.wikipedia.org/wiki/Zstandard"><code>zstd</code></a> algorithm.</p>
+<p>If the code starts with the magic bytes <code>[82, 188, 83, 118, 70, 219, 142, 5]</code>, then it is
+assumed that the rest of the data is a zstandard-compressed WebAssembly module.</p>
+<h3 id="runtime-version"><a href="#runtime-version">Runtime version</a></h3>
+<p>Wasm files can contain so-called custom sections. A runtime can contain two custom sections
+whose names are <code>&quot;runtime_version&quot;</code> and <code>&quot;runtime_apis&quot;</code>, in which case they must contain a
+so-called runtime version.</p>
+<p>The runtime version contains important field that identifies a runtime.</p>
+<p>If no <code>&quot;runtime_version&quot;</code> and <code>&quot;runtime_apis&quot;</code> custom sections can be found, the
+<code>Core_version</code> entry point is used as a fallback in order to obtain the runtime version. This
+fallback mechanism is maintained for backwards compatibility purposes, but is considered
+deprecated.</p>
+<h3 id="memory-allocations"><a href="#memory-allocations">Memory allocations</a></h3>
+<p>One of the instructions available in WebAssembly code is
+<a href="https://webassembly.github.io/spec/core/bikeshed/#-hrefsyntax-instr-memorymathsfmemorygrow">the <code>memory.grow</code> instruction</a>,
+which allows increasing the size of the memory.</p>
+<p>WebAssembly code is normally intended to perform its own heap-management logic internally, and
+use the <code>memory.grow</code> instruction if more memory is needed.</p>
+<p>In order to minimize the size of the runtime binary, and in order to accommodate for the API of
+the host functions that return a buffer of variable length, the Substrate/Polkadot runtimes,
+however, do not perform their heap management internally. Instead, they use the
+<code>ext_allocator_malloc_version_1</code> and <code>ext_allocator_free_version_1</code> host functions for this
+purpose. Calling <code>memory.grow</code> is forbidden.</p>
+<p>The runtime code must export a global symbol named <code>__heap_base</code> of type <code>i32</code>. Any memory
+whose offset is below the value of <code>__heap_base</code> can be used at will by the program, while
+any memory above <code>__heap_base</code> but below <code>__heap_base + heap_pages</code> (where <code>heap_pages</code> is
+the value passed as parameter to <a href="struct.HostVmPrototype.html#method.new" title="HostVmPrototype::new"><code>HostVmPrototype::new</code></a>) is available for use by the
+implementation of <code>ext_allocator_malloc_version_1</code>.</p>
+<h3 id="entry-points"><a href="#entry-points">Entry points</a></h3>
+<p>All entry points that can be called from the host (using, for example,
+<a href="struct.HostVmPrototype.html#method.run" title="HostVmPrototype::run"><code>HostVmPrototype::run</code></a>) have the same signature:</p>
+
+<div class="example-wrap ignore"><div class='tooltip'>ⓘ</div><pre class="rust rust-example-rendered"><code>(func <span class="macro-nonterminal">$runtime_entry</span>(param <span class="macro-nonterminal">$data </span>i32) (param <span class="macro-nonterminal">$len </span>i32) (result i64))</code></pre></div>
+<p>In order to call into the runtime, one must write a buffer of data containing the input
+parameters into the Wasm virtual machine’s memory, then pass a pointer and length of this
+buffer as the parameters of the entry point.</p>
+<p>The function returns a 64 bits number. The 32 less significant bits represent a pointer to the
+Wasm virtual machine’s memory, and the 32 most significant bits a length. This pointer and
+length designate a buffer containing the actual return value.</p>
+<h3 id="host-functions"><a href="#host-functions">Host functions</a></h3>
+<p>The list of host functions available to the runtime is long and isn’t documented here. See
+the official specification for details.</p>
+<h2 id="usage"><a href="#usage">Usage</a></h2>
+<p>The first step is to create a <a href="struct.HostVmPrototype.html" title="HostVmPrototype"><code>HostVmPrototype</code></a> object from the WebAssembly code. Creating
+this object performs some initial steps, such as parsing and compiling the WebAssembly code.
+You are encouraged to maintain a cache of <a href="struct.HostVmPrototype.html" title="HostVmPrototype"><code>HostVmPrototype</code></a> objects (one instance per
+WebAssembly byte code) in order to avoid performing these operations too often.</p>
+<p>To start calling the runtime, create a <a href="enum.HostVm.html" title="HostVm"><code>HostVm</code></a> by calling <a href="struct.HostVmPrototype.html#method.run" title="HostVmPrototype::run"><code>HostVmPrototype::run</code></a>.</p>
+<p>While the Wasm runtime code has side-effects (such as storing values in the storage), the
+<a href="enum.HostVm.html" title="HostVm"><code>HostVm</code></a> itself is a pure state machine with no side effects.</p>
+<p>At any given point, you can examine the <a href="enum.HostVm.html" title="HostVm"><code>HostVm</code></a> in order to know in which state the
+execution currently is.
+In case of a <a href="enum.HostVm.html#variant.ReadyToRun" title="HostVm::ReadyToRun"><code>HostVm::ReadyToRun</code></a> (which initially is the case when you create the
+<a href="enum.HostVm.html" title="HostVm"><code>HostVm</code></a>), you can execute the Wasm code by calling <a href="struct.ReadyToRun.html#method.run" title="ReadyToRun::run"><code>ReadyToRun::run</code></a>.
+No background thread of any kind is used, and calling <a href="struct.ReadyToRun.html#method.run" title="ReadyToRun::run"><code>ReadyToRun::run</code></a> directly performs
+the execution of the Wasm code. If you need parallelism, you are encouraged to spawn a
+background thread yourself and call this function from there.
+<a href="struct.ReadyToRun.html#method.run" title="ReadyToRun::run"><code>ReadyToRun::run</code></a> tries to make the execution progress as much as possible, and returns
+the new state of the virtual machine once that is done.</p>
+<p>If the runtime has finished, or has crashed, or wants to perform an operation with side
+effects, then the <a href="enum.HostVm.html" title="HostVm"><code>HostVm</code></a> determines what to do next. For example, for
+<a href="enum.HostVm.html#variant.ExternalStorageGet" title="HostVm::ExternalStorageGet"><code>HostVm::ExternalStorageGet</code></a>, you must load a value from the storage and pass it back by
+calling <a href="struct.ExternalStorageGet.html#method.resume" title="ExternalStorageGet::resume"><code>ExternalStorageGet::resume</code></a>.</p>
+<p>The Wasm execution is fully deterministic, and the outcome of the execution only depends on
+the inputs. There is, for example, no implicit injection of randomness or of the current time.</p>
+<h3 id="example"><a href="#example">Example</a></h3>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>smoldot::executor::host::{Config, HeapPages, HostVm, HostVmPrototype};
+
+
+<span class="comment">// Start executing a function on the runtime.
+</span><span class="kw">let </span><span class="kw-2">mut </span>vm: HostVm = {
+    <span class="kw">let </span>prototype = HostVmPrototype::new(Config {
+        module: <span class="kw-2">&amp;</span>wasm_binary_code,
+        heap_pages: HeapPages::from(<span class="number">2048</span>),
+        exec_hint: smoldot::executor::vm::ExecHint::Oneshot,
+        allow_unresolved_imports: <span class="bool-val">false
+    </span>}).unwrap();
+    prototype.run_no_param(<span class="string">&quot;Core_version&quot;</span>).unwrap().into()
+};
+
+<span class="comment">// We need to answer the calls that the runtime might perform.
+</span><span class="kw">loop </span>{
+    <span class="kw">match </span>vm {
+        <span class="comment">// Calling `runner.run()` is what actually executes WebAssembly code and updates
+        // the state.
+        </span>HostVm::ReadyToRun(runner) =&gt; vm = runner.run(),
+
+        HostVm::Finished(finished) =&gt; {
+            <span class="comment">// `finished.value()` here is an opaque blob of bytes returned by the runtime.
+            // In the case of a call to `&quot;Core_version&quot;`, we know that it must be empty.
+            </span><span class="macro">assert!</span>(finished.value().as_ref().is_empty());
+            <span class="macro">println!</span>(<span class="string">&quot;Success!&quot;</span>);
+            <span class="kw">break</span>;
+        },
+
+        <span class="comment">// Errors can happen if the WebAssembly code panics or does something wrong.
+        // In a real-life situation, the host should obviously not panic in these situations.
+        </span>HostVm::Error { .. } =&gt; {
+            <span class="macro">panic!</span>(<span class="string">&quot;Error while executing code&quot;</span>)
+        },
+
+        <span class="comment">// All the other variants correspond to function calls that the runtime might perform.
+        // `ExternalStorageGet` is shown here as an example.
+        </span>HostVm::ExternalStorageGet(req) =&gt; {
+            <span class="macro">println!</span>(<span class="string">&quot;Runtime requires the storage value at {:?}&quot;</span>, req.key().as_ref());
+            <span class="comment">// Injects the value into the virtual machine and updates the state.
+            </span>vm = req.resume(<span class="prelude-val">None</span>); <span class="comment">// Just a stub
+        </span>}
+        <span class="kw">_ </span>=&gt; <span class="macro">unimplemented!</span>()
+    }
+}</code></pre></div>
+</div></details><h2 id="reexports" class="small-section-header"><a href="#reexports">Re-exports</a></h2><div class="item-table"><div class="item-row"><div class="item-left import-item" id="reexport.CoreVersion"><code>pub use runtime_version::<a class="struct" href="runtime_version/struct.CoreVersion.html" title="struct smoldot::executor::host::runtime_version::CoreVersion">CoreVersion</a>;</code></div></div><div class="item-row"><div class="item-left import-item" id="reexport.CoreVersionError"><code>pub use runtime_version::<a class="enum" href="runtime_version/enum.CoreVersionError.html" title="enum smoldot::executor::host::runtime_version::CoreVersionError">CoreVersionError</a>;</code></div></div><div class="item-row"><div class="item-left import-item" id="reexport.CoreVersionRef"><code>pub use runtime_version::<a class="struct" href="runtime_version/struct.CoreVersionRef.html" title="struct smoldot::executor::host::runtime_version::CoreVersionRef">CoreVersionRef</a>;</code></div></div><div class="item-row"><div class="item-left import-item" id="reexport.HeapPages"><code>pub use vm::<a class="struct" href="../vm/struct.HeapPages.html" title="struct smoldot::executor::vm::HeapPages">HeapPages</a>;</code></div></div></div><h2 id="modules" class="small-section-header"><a href="#modules">Modules</a></h2><div class="item-table"><div class="item-row"><div class="item-left module-item"><a class="mod" href="runtime_version/index.html" title="smoldot::executor::host::runtime_version mod">runtime_version</a></div><div class="item-right docblock-short">Wasm runtimes can optionally contain a custom section (as defined in the official WebAssembly
+core specification).</div></div></div><h2 id="structs" class="small-section-header"><a href="#structs">Structs</a></h2><div class="item-table"><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.CallRuntimeVersion.html" title="smoldot::executor::host::CallRuntimeVersion struct">CallRuntimeVersion</a></div><div class="item-right docblock-short">Must provide the runtime version obtained by calling the <code>Core_version</code> entry point of a Wasm
+blob.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.Config.html" title="smoldot::executor::host::Config struct">Config</a></div><div class="item-right docblock-short">Configuration for <a href="struct.HostVmPrototype.html#method.new" title="HostVmPrototype::new"><code>HostVmPrototype::new</code></a>.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.EndStorageTransaction.html" title="smoldot::executor::host::EndStorageTransaction struct">EndStorageTransaction</a></div><div class="item-right docblock-short">Declares the end of a transaction.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.ExternalOffchainStorageSet.html" title="smoldot::executor::host::ExternalOffchainStorageSet struct">ExternalOffchainStorageSet</a></div><div class="item-right docblock-short">Must set the value of the off-chain storage.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.ExternalStorageAppend.html" title="smoldot::executor::host::ExternalStorageAppend struct">ExternalStorageAppend</a></div><div class="item-right docblock-short">Must load a storage value, treat it as if it was a SCALE-encoded container, and put <code>value</code>
+at the end of the container, increasing the number of elements.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.ExternalStorageClearPrefix.html" title="smoldot::executor::host::ExternalStorageClearPrefix struct">ExternalStorageClearPrefix</a></div><div class="item-right docblock-short">Must remove from the storage keys which start with a certain prefix. Use
+<a href="struct.ExternalStorageClearPrefix.html#method.max_keys_to_remove" title="ExternalStorageClearPrefix::max_keys_to_remove"><code>ExternalStorageClearPrefix::max_keys_to_remove</code></a> to determine the maximum number of keys
+to remove.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.ExternalStorageGet.html" title="smoldot::executor::host::ExternalStorageGet struct">ExternalStorageGet</a></div><div class="item-right docblock-short">Must provide the value of a storage entry.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.ExternalStorageNextKey.html" title="smoldot::executor::host::ExternalStorageNextKey struct">ExternalStorageNextKey</a></div><div class="item-right docblock-short">Must provide the storage key that follows, in lexicographic order, a specific one.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.ExternalStorageRoot.html" title="smoldot::executor::host::ExternalStorageRoot struct">ExternalStorageRoot</a></div><div class="item-right docblock-short">Must provide the trie root hash of the storage.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.ExternalStorageSet.html" title="smoldot::executor::host::ExternalStorageSet struct">ExternalStorageSet</a></div><div class="item-right docblock-short">Must set the value of a storage entry.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.Finished.html" title="smoldot::executor::host::Finished struct">Finished</a></div><div class="item-right docblock-short">Function execution has succeeded. Contains the return value of the call.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.GetMaxLogLevel.html" title="smoldot::executor::host::GetMaxLogLevel struct">GetMaxLogLevel</a></div><div class="item-right docblock-short">Queries the maximum log level.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.HostVmPrototype.html" title="smoldot::executor::host::HostVmPrototype struct">HostVmPrototype</a></div><div class="item-right docblock-short">Prototype for an <a href="enum.HostVm.html" title="HostVm"><code>HostVm</code></a>.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.LogEmit.html" title="smoldot::executor::host::LogEmit struct">LogEmit</a></div><div class="item-right docblock-short">Report about a log entry being emitted.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.ReadyToRun.html" title="smoldot::executor::host::ReadyToRun struct">ReadyToRun</a></div><div class="item-right docblock-short">Virtual machine is ready to run.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.SignatureVerification.html" title="smoldot::executor::host::SignatureVerification struct">SignatureVerification</a></div><div class="item-right docblock-short">Must verify whether a signature is correct.</div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.StartStorageTransaction.html" title="smoldot::executor::host::StartStorageTransaction struct">StartStorageTransaction</a></div><div class="item-right docblock-short">Declares the start of a transaction.</div></div></div><h2 id="enums" class="small-section-header"><a href="#enums">Enums</a></h2><div class="item-table"><div class="item-row"><div class="item-left module-item"><a class="enum" href="enum.Error.html" title="smoldot::executor::host::Error enum">Error</a></div><div class="item-right docblock-short">Reason why the Wasm blob isn’t conforming to the runtime environment.</div></div><div class="item-row"><div class="item-left module-item"><a class="enum" href="enum.HostVm.html" title="smoldot::executor::host::HostVm enum">HostVm</a></div><div class="item-right docblock-short">Running virtual machine.</div></div><div class="item-row"><div class="item-left module-item"><a class="enum" href="enum.ModuleFormatError.html" title="smoldot::executor::host::ModuleFormatError enum">ModuleFormatError</a></div><div class="item-right docblock-short">Error possibly returned when decoding a zstd-compressed Wasm blob.</div></div><div class="item-row"><div class="item-left module-item"><a class="enum" href="enum.NewErr.html" title="smoldot::executor::host::NewErr enum">NewErr</a></div><div class="item-right docblock-short">Error that can happen when initializing a VM.</div></div><div class="item-row"><div class="item-left module-item"><a class="enum" href="enum.StartErr.html" title="smoldot::executor::host::StartErr enum">StartErr</a></div><div class="item-right docblock-short">Error that can happen when starting a VM.</div></div></div></section></div></main><div id="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="smoldot" data-themes="" data-resource-suffix="" data-rustdoc-version="1.67.1 (d5a82bbd2 2023-02-07)" data-search-js="search-444266647c4dba98.js" data-settings-js="settings-bebeae96e00e4617.js" data-settings-css="settings-af96d9e2fc13e081.css" ></div></body></html>

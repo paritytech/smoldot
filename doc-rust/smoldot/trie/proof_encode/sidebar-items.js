@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":[["Nibble","A single nibble with four bits."],["ProofBuilder","Prototype for a Merkle proof whose building is in progress."]]};

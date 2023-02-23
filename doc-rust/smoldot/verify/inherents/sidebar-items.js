@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":[["InherentData","Values of the inherents to pass to the runtime."]]};

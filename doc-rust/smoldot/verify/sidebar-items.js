@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":[["aura","AURA consensus."],["babe","BABE consensus."],["header_body",""],["header_only",""],["inherents","Inherents, together with transactions, form the body of a block."]]};

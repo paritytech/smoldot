@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":[["commit","GrandPa commits contain a proof of the finality of a block."],["warp_sync",""]]};

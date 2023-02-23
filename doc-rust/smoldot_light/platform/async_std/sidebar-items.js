@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":[["AsyncStdTcpWebSocket","Implementation of the [`Platform`] trait that uses the `async-std` library and provides TCP and WebSocket connections."],["Stream","Implementation detail of [`AsyncStdTcpWebSocket`]."]]};
