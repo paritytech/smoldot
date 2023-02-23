@@ -135,9 +135,9 @@ jobs:
           profile: minimal
       - uses: Swatinem/rust-cache@v2
       - id: compute-tag  # Compute the tag that we might push.
-        run: echo "::set-output name=tag::light-js-deno-v`jq -r .version ./bin/wasm-node/javascript/package.json`"
+        run: echo "tag=light-js-deno-v`jq -r .version ./bin/wasm-node/javascript/package.json`" >> $GITHUB_OUTPUT
       - id: check-tag-exists  # Check whether the tag already exists.
-        run: echo "::set-output name=num-existing::`git tag -l | grep ${{ steps.compute-tag.outputs.tag }} | wc -l`"
+        run: echo "num-existing=`git tag -l | grep ${{ steps.compute-tag.outputs.tag }} | wc -l`" >> $GITHUB_OUTPUT
       - run: npm install
         working-directory: ./bin/wasm-node/javascript
       - run: npm publish --unsafe-perm --dry-run

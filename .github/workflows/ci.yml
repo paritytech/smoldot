@@ -219,9 +219,9 @@ jobs:
           override: true
       # Compares whether the version in `package.json` matches the version in `Cargo.toml`.
       - id: js-version
-        run: echo "::set-output name=version::`jq .version ./bin/wasm-node/javascript/package.json`"
+        run: echo "version=`jq .version ./bin/wasm-node/javascript/package.json`" >> $GITHUB_OUTPUT
       - id: rust-version
-        run: echo "::set-output name=version::`cargo read-manifest --manifest-path=./bin/wasm-node/rust/Cargo.toml | jq .version`"
+        run: echo "version=`cargo read-manifest --manifest-path=./bin/wasm-node/rust/Cargo.toml | jq .version`" >> $GITHUB_OUTPUT
       - run: exit 1
         if: ${{ steps.js-version.outputs.version == '' }}   # Defensive test against mistakes in the CI script
       - run: exit 1
