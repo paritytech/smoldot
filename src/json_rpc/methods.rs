@@ -1006,6 +1006,7 @@ pub enum SystemPeerRole {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum TransactionStatus {
     Future,
     Ready,
