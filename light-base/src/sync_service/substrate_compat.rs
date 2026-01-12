@@ -19,7 +19,7 @@ use super::{
     BlockNotification, ConfigSubstrateCompatibleRuntimeCodeHint, FinalizedBlockRuntime,
     Notification, SubscribeAll, ToBackground,
 };
-use crate::{log, network_service, platform::PlatformRef, util};
+use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 
 use alloc::{
     borrow::{Cow, ToOwned as _},
@@ -48,6 +48,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
     platform: TPlat,
     chain_information: chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
+    _relay_chain: Option<(Arc<runtime_service::RuntimeService<TPlat>>, u32)>,
     runtime_code_hint: Option<ConfigSubstrateCompatibleRuntimeCodeHint>,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,

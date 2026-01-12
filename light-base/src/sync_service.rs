@@ -73,13 +73,13 @@ pub struct Config<TPlat: PlatformRef> {
 /// See [`Config::chain_type`].
 pub enum ConfigChainType<TPlat: PlatformRef> {
     /// Chain is a Substrate-compatible non-parachain.
-    SubstrateCompatible(ConfigSubstrateCompatible),
+    SubstrateCompatible(ConfigSubstrateCompatible<TPlat>),
     /// Chain is a parachain.
     Parachain(ConfigParachain<TPlat>),
 }
 
 /// See [`ConfigChainType::SubstrateCompatible`].
-pub struct ConfigSubstrateCompatible {
+pub struct ConfigSubstrateCompatible<TPlat: PlatformRef> {
     /// State of the finalized chain.
     pub chain_information: chain::chain_information::ValidChainInformation,
 
@@ -90,6 +90,10 @@ pub struct ConfigSubstrateCompatible {
     /// instead of downloading it. If the hint doesn't match, an extra round-trip will be needed,
     /// but if the hint matches it saves a big download.
     pub runtime_code_hint: Option<ConfigSubstrateCompatibleRuntimeCodeHint>,
+
+    /// If this chain is a parachain, contains the information of the relay chain.
+    /// `None` if this chain isn't a parachain.
+    pub relay_chain: Option<ConfigRelayChain<TPlat>>,
 }
 
 /// See [`ConfigSubstrateCompatible::runtime_code_hint`].
@@ -105,13 +109,19 @@ pub struct ConfigSubstrateCompatibleRuntimeCodeHint {
 
 /// See [`ConfigChainType::Parachain`].
 pub struct ConfigParachain<TPlat: PlatformRef> {
-    /// Runtime service that synchronizes the relay chain of this parachain.
-    pub relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
+    /// Parameters of the relay chain.
+    pub relay_chain: ConfigRelayChain<TPlat>,
 
     /// SCALE-encoded header of a known finalized block of the parachain. Used in the situation
     /// where the API user subscribes using [`SyncService::subscribe_all`] before any parachain
     /// block can be gathered.
     pub finalized_block_header: Vec<u8>,
+}
+
+/// See [`ConfigSubstrateCompatible::relay_chain`] and [`ConfigParachain::relay_chain`].
+pub struct ConfigRelayChain<TPlat: PlatformRef> {
+    /// Runtime service that synchronizes the relay chain of this parachain.
+    pub relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
 
     /// Id of the parachain within the relay chain.
     ///
@@ -149,8 +159,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 config.platform.clone(),
                 config_parachain.finalized_block_header,
                 config.block_number_bytes,
-                config_parachain.relay_chain_sync.clone(),
-                config_parachain.para_id,
+                config_parachain.relay_chain.relay_chain_sync.clone(),
+                config_parachain.relay_chain.para_id,
                 from_foreground,
                 config.network_service.clone(),
             )),
@@ -160,6 +170,9 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     config.platform.clone(),
                     config_substrate_compat.chain_information,
                     config.block_number_bytes,
+                    config_substrate_compat
+                        .relay_chain
+                        .map(|rc| (rc.relay_chain_sync, rc.para_id)),
                     config_substrate_compat.runtime_code_hint,
                     from_foreground,
                     config.network_service.clone(),

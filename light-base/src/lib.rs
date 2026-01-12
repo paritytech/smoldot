@@ -1214,8 +1214,10 @@ fn start_services<TPlat: platform::PlatformRef>(
                 chain_type: sync_service::ConfigChainType::Parachain(
                     sync_service::ConfigParachain {
                         finalized_block_header,
-                        para_id,
-                        relay_chain_sync: relay_chain.runtime_service.clone(),
+                        relay_chain: sync_service::ConfigRelayChain {
+                            para_id,
+                            relay_chain_sync: relay_chain.runtime_service.clone(),
+                        },
                     },
                 ),
             }));
@@ -1255,6 +1257,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                                 closest_ancestor_excluding: hint.closest_ancestor_excluding,
                             }
                         }),
+                        relay_chain: None,
                     },
                 ),
             }));
