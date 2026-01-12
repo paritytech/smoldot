@@ -714,7 +714,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             }
                         }
                         (None, Some(chain_information)) => {
-                            StartServicesChainTy::RelayChain { chain_information }
+                            StartServicesChainTy::SubstrateCompatible { chain_information }
                         }
                         (None, None) => {
                             // Checked above.
@@ -1110,7 +1110,7 @@ pub enum AddChainError {
 }
 
 enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
-    RelayChain {
+    SubstrateCompatible {
         chain_information: &'a chain::chain_information::ValidChainInformation,
     },
     Parachain {
@@ -1148,27 +1148,25 @@ fn start_services<TPlat: platform::PlatformRef>(
     let network_service_chain = network_service.add_chain(network_service::ConfigChain {
         log_name: log_name.clone(),
         num_out_slots: 4,
-        grandpa_protocol_finalized_block_height: if let StartServicesChainTy::RelayChain {
-            chain_information,
-        } = &config
-        {
-            if matches!(
-                chain_information.as_ref().finality,
-                chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-            ) {
-                Some(chain_information.as_ref().finalized_block_header.number)
+        grandpa_protocol_finalized_block_height:
+            if let StartServicesChainTy::SubstrateCompatible { chain_information } = &config {
+                if matches!(
+                    chain_information.as_ref().finality,
+                    chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
+                ) {
+                    Some(chain_information.as_ref().finalized_block_header.number)
+                } else {
+                    None
+                }
             } else {
+                // Parachains never use GrandPa.
                 None
-            }
-        } else {
-            // Parachains never use GrandPa.
-            None
-        },
+            },
         genesis_block_hash: header::hash_from_scale_encoded_header(
             &genesis_block_scale_encoded_header,
         ),
         best_block: match &config {
-            StartServicesChainTy::RelayChain { chain_information } => (
+            StartServicesChainTy::SubstrateCompatible { chain_information } => (
                 chain_information.as_ref().finalized_block_header.number,
                 chain_information
                     .as_ref()
@@ -1236,8 +1234,8 @@ fn start_services<TPlat: platform::PlatformRef>(
 
             (sync_service, runtime_service)
         }
-        StartServicesChainTy::RelayChain { chain_information } => {
-            // Chain is a relay chain.
+        StartServicesChainTy::SubstrateCompatible { chain_information } => {
+            // Chain is a Substrate-compatible non-parachain chain.
 
             // The sync service is leveraging the network service, downloads block headers,
             // and verifies them, to determine what are the best and finalized blocks of the
@@ -1247,11 +1245,11 @@ fn start_services<TPlat: platform::PlatformRef>(
                 block_number_bytes,
                 platform: platform.clone(),
                 network_service: network_service_chain.clone(),
-                chain_type: sync_service::ConfigChainType::RelayChain(
-                    sync_service::ConfigRelayChain {
+                chain_type: sync_service::ConfigChainType::SubstrateCompatible(
+                    sync_service::ConfigSubstrateCompatible {
                         chain_information: chain_information.clone(),
                         runtime_code_hint: runtime_code_hint.map(|hint| {
-                            sync_service::ConfigRelayChainRuntimeCodeHint {
+                            sync_service::ConfigSubstrateCompatibleRuntimeCodeHint {
                                 storage_value: hint.code,
                                 merkle_value: hint.code_merkle_value,
                                 closest_ancestor_excluding: hint.closest_ancestor_excluding,

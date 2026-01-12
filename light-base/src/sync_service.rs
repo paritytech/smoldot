@@ -45,7 +45,7 @@ use smoldot::{
 };
 
 mod parachain;
-mod standalone;
+mod substrate_compat;
 
 pub use network_service::Role;
 
@@ -66,20 +66,20 @@ pub struct Config<TPlat: PlatformRef> {
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
     pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
-    /// Extra fields depending on whether the chain is a relay chain or a parachain.
+    /// Extra fields depending on whether the chain is a parachain.
     pub chain_type: ConfigChainType<TPlat>,
 }
 
 /// See [`Config::chain_type`].
 pub enum ConfigChainType<TPlat: PlatformRef> {
-    /// Chain is a relay chain.
-    RelayChain(ConfigRelayChain),
+    /// Chain is a Substrate-compatible non-parachain.
+    SubstrateCompatible(ConfigSubstrateCompatible),
     /// Chain is a parachain.
     Parachain(ConfigParachain<TPlat>),
 }
 
-/// See [`ConfigChainType::RelayChain`].
-pub struct ConfigRelayChain {
+/// See [`ConfigChainType::SubstrateCompatible`].
+pub struct ConfigSubstrateCompatible {
     /// State of the finalized chain.
     pub chain_information: chain::chain_information::ValidChainInformation,
 
@@ -89,13 +89,13 @@ pub struct ConfigRelayChain {
     /// if it matches the Merkle value provided in the hint, use the storage value in the hint
     /// instead of downloading it. If the hint doesn't match, an extra round-trip will be needed,
     /// but if the hint matches it saves a big download.
-    pub runtime_code_hint: Option<ConfigRelayChainRuntimeCodeHint>,
+    pub runtime_code_hint: Option<ConfigSubstrateCompatibleRuntimeCodeHint>,
 }
 
-/// See [`ConfigRelayChain::runtime_code_hint`].
-pub struct ConfigRelayChainRuntimeCodeHint {
+/// See [`ConfigSubstrateCompatible::runtime_code_hint`].
+pub struct ConfigSubstrateCompatibleRuntimeCodeHint {
     /// Storage value of the `:code` trie node corresponding to
-    /// [`ConfigRelayChainRuntimeCodeHint::merkle_value`].
+    /// [`ConfigSubstrateCompatibleRuntimeCodeHint::merkle_value`].
     pub storage_value: Vec<u8>,
     /// Merkle value of the `:code` trie node in the storage main trie.
     pub merkle_value: Vec<u8>,
@@ -154,13 +154,13 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 from_foreground,
                 config.network_service.clone(),
             )),
-            ConfigChainType::RelayChain(config_relay_chain) => {
-                Box::pin(standalone::start_standalone_chain(
+            ConfigChainType::SubstrateCompatible(config_substrate_compat) => {
+                Box::pin(substrate_compat::start_substrate_compatible_chain(
                     log_target.clone(),
                     config.platform.clone(),
-                    config_relay_chain.chain_information,
+                    config_substrate_compat.chain_information,
                     config.block_number_bytes,
-                    config_relay_chain.runtime_code_hint,
+                    config_substrate_compat.runtime_code_hint,
                     from_foreground,
                     config.network_service.clone(),
                 ))
