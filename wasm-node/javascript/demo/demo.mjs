@@ -24,7 +24,6 @@ import * as fs from 'node:fs';
 import { Worker } from 'node:worker_threads';
 
 // List of files containing chains available to the user.
-// The first item has a specific role in that we always connect to it at initialization.
 const chainSpecsFiles = [
     '../../demo-chain-specs/westend.json',
     '../../demo-chain-specs/westend-westmint.json',
@@ -38,14 +37,31 @@ const chainSpecsFiles = [
     '../../demo-chain-specs/rococo-canvas.json',
 ];
 
+// Check for custom chainspec passed as command line argument.
+// Usage: npm start -- /path/to/chainspec.json
+const customChainSpecPath = process.argv[2];
+
 // Load all the files in a single map.
 const chainSpecsById = {};
-let firstChainSpecId = null;
+let defaultChainSpecId = null;
+
+// If a custom chainspec is provided, load it first so it becomes the default.
+if (customChainSpecPath) {
+    const content = fs.readFileSync(customChainSpecPath, 'utf8');
+    const decoded = JSON.parse(content);
+    defaultChainSpecId = decoded.id;
+    chainSpecsById[decoded.id] = {
+        chainSpec: content,
+        relayChain: decoded.relay_chain,
+    };
+    console.log('Loaded custom chainspec: ' + customChainSpecPath + ' (id: ' + decoded.id + ')');
+}
+
 for (const file of chainSpecsFiles) {
     const content = fs.readFileSync(file, 'utf8');
     const decoded = JSON.parse(content);
-    if (!firstChainSpecId)
-        firstChainSpecId = decoded.id;
+    if (!defaultChainSpecId)
+        defaultChainSpecId = decoded.id;
     chainSpecsById[decoded.id] = {
         chainSpec: content,
         relayChain: decoded.relay_chain,
@@ -92,7 +108,7 @@ try {
 // a WebSocket connection has been established.
 const defaultChain = client
     .addChain({
-        chainSpec: chainSpecsById[firstChainSpecId].chainSpec,
+        chainSpec: chainSpecsById[defaultChainSpecId].chainSpec,
         databaseContent: defaultChainDb
     })
     .catch((error) => {
