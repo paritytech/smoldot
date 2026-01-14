@@ -2356,7 +2356,7 @@ pub struct ExternalStorageGet {
     inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`].
     calling: usize,
 
     /// Used only for the `ext_storage_read_version_1` function. Stores the pointer where the
@@ -2757,7 +2757,7 @@ impl fmt::Debug for ExternalStorageAppend {
 pub struct ExternalStorageClearPrefix {
     inner: Box<Inner>,
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`].
     calling: usize,
 
     /// Pointer and size to the prefix. `None` if `&[]`. Guaranteed to be in range.
@@ -2870,7 +2870,7 @@ pub struct ExternalStorageRoot {
     inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`].
     calling: usize,
 
     /// Pointer and size of the child trie, if any. Guaranteed to be in range.
@@ -3387,7 +3387,7 @@ pub struct ExternalOffchainStorageGet {
     inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`].
     calling: usize,
 
     /// Pointer to the key whose value must be loaded. Guaranteed to be in range.
@@ -3461,7 +3461,7 @@ pub struct OffchainRandomSeed {
     inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`].
     calling: usize,
 }
 
@@ -3488,7 +3488,7 @@ pub struct OffchainSubmitTransaction {
     inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`].
     calling: usize,
 
     /// Pointer to the transaction whose value must be set. Guaranteed to be in range.

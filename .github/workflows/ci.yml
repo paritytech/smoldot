@@ -30,7 +30,7 @@ jobs:
   test-64bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
     - uses: actions/checkout@v4
     - uses: Swatinem/rust-cache@v2
@@ -39,7 +39,7 @@ jobs:
   test-32bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
     - run: apt-get update && apt install -y libc6-dev-i386
     - uses: actions/checkout@v4
@@ -50,7 +50,7 @@ jobs:
   wasm-node-check:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
     - uses: actions/checkout@v4
     - run: rustup target add wasm32-unknown-unknown
@@ -67,7 +67,7 @@ jobs:
   check-features:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
     - uses: actions/checkout@v4
     - uses: Swatinem/rust-cache@v2
@@ -101,7 +101,7 @@ jobs:
   check-no-std:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
     - uses: actions/checkout@v4
     - run: rustup target add thumbv7m-none-eabi
@@ -113,7 +113,7 @@ jobs:
   check-rustdoc-links:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
     - uses: actions/checkout@v4
     - uses: Swatinem/rust-cache@v2
@@ -122,7 +122,7 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
       # Checks `rustfmt` formatting
       - uses: actions/checkout@v4
@@ -136,7 +136,7 @@ jobs:
   clippy:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
       - uses: actions/checkout@v4
         # Since build artifacts are specific to a nightly version, we pin the specific nightly
@@ -177,7 +177,7 @@ jobs:
   wasm-node-versions-match:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
       - uses: actions/checkout@v4
       - run: apt-get update && apt install -y jq

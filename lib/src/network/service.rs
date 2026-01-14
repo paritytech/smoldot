@@ -4495,7 +4495,7 @@ impl From<StartRequestError> for StartRequestMaybeTooLargeError {
 
 /// Response to an outgoing request.
 ///
-/// See [`Event::RequestResult`̀].
+/// See [`Event::RequestResult`].
 #[derive(Debug)]
 pub enum RequestResult {
     Blocks(Result<Vec<codec::BlockData>, BlocksRequestError>),

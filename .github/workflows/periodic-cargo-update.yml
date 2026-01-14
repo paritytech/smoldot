@@ -9,7 +9,7 @@ jobs:
   cargo-update:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
     - uses: actions/checkout@v4
     # Note: `cargo update --workspace` doesn't seem to have any effect.
