@@ -199,6 +199,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+            child_storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             chains_by_next_discovery: BTreeMap::new(),
         }));
 
@@ -474,6 +475,38 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
+    /// Sends a child storage proof request to the given peer.
+    pub async fn child_storage_proof_request(
+        self: Arc<Self>,
+        target: PeerId,
+        config: codec::ChildStorageProofRequestConfig<
+            impl AsRef<[u8]> + Clone,
+            impl Iterator<Item = impl AsRef<[u8]> + Clone>,
+        >,
+        timeout: Duration,
+    ) -> Result<service::EncodedMerkleProof, ChildStorageProofRequestError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackgroundChain::StartChildStorageProofRequest {
+                target: target.clone(),
+                config: ChildStorageProofRequestConfigOwned {
+                    block_hash: config.block_hash,
+                    child_trie: config.child_trie.as_ref().to_vec(),
+                    keys: config
+                        .keys
+                        .map(|key| key.as_ref().to_vec())
+                        .collect::<Vec<_>>(),
+                },
+                timeout,
+                result: tx,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
     /// Announces transaction to the peers we are connected to.
     ///
     /// Returns a list of peers that we have sent the transaction to. Can return an empty `Vec`
@@ -662,6 +695,37 @@ impl CallProofRequestError {
     }
 }
 
+/// Error returned by [`NetworkServiceChain::child_storage_proof_request`].
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+pub enum ChildStorageProofRequestError {
+    /// No established connection with the target.
+    NoConnection,
+    /// Child storage proof request is too large and can't be sent.
+    RequestTooLarge,
+    /// Error during the request.
+    #[display("{_0}")]
+    Request(service::StorageProofRequestError),
+}
+
+impl ChildStorageProofRequestError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    pub fn is_network_problem(&self) -> bool {
+        match self {
+            ChildStorageProofRequestError::Request(err) => err.is_network_problem(),
+            ChildStorageProofRequestError::RequestTooLarge => false,
+            ChildStorageProofRequestError::NoConnection => true,
+        }
+    }
+}
+
+/// Owned version of [`codec::ChildStorageProofRequestConfig`] for sending across channel.
+struct ChildStorageProofRequestConfigOwned {
+    block_hash: [u8; 32],
+    child_trie: Vec<u8>,
+    keys: Vec<Vec<u8>>,
+}
+
 enum ToBackground<TPlat: PlatformRef> {
     AddChain {
         messages_rx: async_channel::Receiver<ToBackgroundChain>,
@@ -707,6 +771,13 @@ enum ToBackgroundChain {
         config: codec::CallProofRequestConfig<'static, vec::IntoIter<Vec<u8>>>,
         timeout: Duration,
         result: oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
+    },
+    // TODO: serialize the request before sending over channel
+    StartChildStorageProofRequest {
+        target: PeerId,
+        config: ChildStorageProofRequestConfigOwned,
+        timeout: Duration,
+        result: oneshot::Sender<Result<service::EncodedMerkleProof, ChildStorageProofRequestError>>,
     },
     SetLocalBestBlock {
         best_hash: [u8; 32],
@@ -831,6 +902,12 @@ struct BackgroundTask<TPlat: PlatformRef> {
     call_proof_requests: HashMap<
         service::SubstreamId,
         oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    child_storage_proof_requests: HashMap<
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedMerkleProof, ChildStorageProofRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -1484,6 +1561,65 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             error = "RequestTooLarge"
                         );
                         let _ = result.send(Err(CallProofRequestError::RequestTooLarge));
+                    }
+                };
+            }
+            WakeUpReason::MessageForChain(
+                chain_id,
+                ToBackgroundChain::StartChildStorageProofRequest {
+                    target,
+                    config,
+                    timeout,
+                    result,
+                },
+            ) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "child-storage-proof-request-started",
+                    chain = task.network[chain_id].log_name,
+                    target,
+                    block_hash = HashDisplay(&config.block_hash)
+                );
+
+                match task.network.start_child_storage_proof_request(
+                    &target,
+                    chain_id,
+                    codec::ChildStorageProofRequestConfig {
+                        block_hash: config.block_hash,
+                        child_trie: &config.child_trie,
+                        keys: config.keys.iter().map(|k| k.as_slice()),
+                    },
+                    timeout,
+                ) {
+                    Ok(substream_id) => {
+                        task.child_storage_proof_requests
+                            .insert(substream_id, result);
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::NoConnection) => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            "network",
+                            "child-storage-proof-request-error",
+                            chain = task.network[chain_id].log_name,
+                            target,
+                            error = "NoConnection"
+                        );
+                        let _ = result.send(Err(ChildStorageProofRequestError::NoConnection));
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::RequestTooLarge) => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            "network",
+                            "child-storage-proof-request-error",
+                            chain = task.network[chain_id].log_name,
+                            target,
+                            error = "RequestTooLarge"
+                        );
+                        let _ = result.send(Err(ChildStorageProofRequestError::RequestTooLarge));
                     }
                 };
             }
@@ -2146,11 +2282,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
 
-                let _ = task
-                    .storage_proof_requests
-                    .remove(&substream_id)
-                    .unwrap()
-                    .send(response.map_err(StorageProofRequestError::Request));
+                // Both regular storage proof and child storage proof use the same protocol,
+                // so check both HashMaps for the request.
+                if let Some(sender) = task.storage_proof_requests.remove(&substream_id) {
+                    let _ = sender.send(response.map_err(StorageProofRequestError::Request));
+                } else if let Some(sender) = task.child_storage_proof_requests.remove(&substream_id)
+                {
+                    let _ = sender.send(response.map_err(ChildStorageProofRequestError::Request));
+                } else {
+                    unreachable!()
+                }
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,

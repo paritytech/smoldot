@@ -13,7 +13,7 @@ name = "basic"
 required-features = ["std"]
 
 [dependencies]
-async-channel = { version = "2.3.0", default-features = false }
+async-channel = { version = "2.5.0", default-features = false }
 async-lock = { version = "3.0.0", default-features = false }
 base64 = { version = "0.22.0", default-features = false, features = ["alloc"] }
 blake2-rfc = { version = "0.2.18", default-features = false }
@@ -25,7 +25,7 @@ fnv = { version = "1.0.7", default-features = false }
 futures-channel = { version = "0.3.31", default-features = false, features = ["alloc"] }
 futures-lite = { version = "2.3.0", default-features = false, features = ["alloc"] }
 futures-util = { version = "0.3.27", default-features = false, features = ["alloc", "sink"] }  # TODO: slim down these features and consider removing this dependency altogether
-hashbrown = { version = "0.15.0", default-features = false }
+hashbrown = { version = "0.16.0", default-features = false }
 hex = { version = "0.4.3", default-features = false }
 itertools = { version = "0.14.0", default-features = false, features = ["use_alloc"] }
 lru = { version = "0.16.3", default-features = false, features = ["hashbrown"] } # The `hashbrown` feature brings no-std compatibility.

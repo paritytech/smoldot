@@ -50,7 +50,7 @@ either = { version = "1.9.0", default-features = false }
 event-listener = { version = "5.3.0", default-features = false }
 fnv = { version = "1.0.7", default-features = false }
 futures-lite = { version = "2.3.0", default-features = false, features = ["alloc"] }
-hashbrown = { version = "0.15.0", default-features = false, features = ["raw-entry", "serde"] }   # TODO: remove serde feature
+hashbrown = { version = "0.16.0", default-features = false, features = ["raw-entry", "serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 hmac = { version = "0.12.1", default-features = false }
 itertools = { version = "0.14.0", default-features = false }

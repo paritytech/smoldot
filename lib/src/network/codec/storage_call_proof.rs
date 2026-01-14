@@ -19,6 +19,9 @@ use crate::util::protobuf;
 
 use alloc::{borrow::Cow, vec::Vec};
 
+/// Maximum size in bytes for light protocol requests (1 MiB).
+pub const LIGHT_PROTOCOL_REQUEST_MAX_SIZE: usize = 1024 * 1024;
+
 /// Description of a storage proof request that can be sent to a peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageProofRequestConfig<TKeysIter> {
@@ -102,7 +105,8 @@ pub fn decode_storage_or_call_proof_response(
 ) -> Result<Option<&[u8]>, DecodeStorageCallProofResponseError> {
     let field_num = match ty {
         StorageOrCallProof::CallProof => 1,
-        StorageOrCallProof::StorageProof => 2,
+        // Both storage and child storage use remote_read_response (field 2)
+        StorageOrCallProof::StorageProof | StorageOrCallProof::ChildStorageProof => 2,
     };
 
     // TODO: while the `proof` field is correctly optional, the `response` field isn't supposed to be optional; make it `#[required]` again once https://github.com/paritytech/substrate/pull/12732 has been merged and released
@@ -140,4 +144,49 @@ pub enum DecodeStorageCallProofResponseError {
 pub enum StorageOrCallProof {
     StorageProof,
     CallProof,
+    ChildStorageProof,
+}
+
+/// Description of a child storage proof request that can be sent to a peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildStorageProofRequestConfig<TChildTrie, TKeysIter> {
+    /// Hash of the block to request the storage of.
+    pub block_hash: [u8; 32],
+    /// Child storage key (the child trie name, without the `:child_storage:default:` prefix).
+    pub child_trie: TChildTrie,
+    /// List of storage keys to query within the child trie.
+    pub keys: TKeysIter,
+}
+
+// See https://github.com/paritytech/substrate/blob/c8653447fc8ef8d95a92fe164c96dffb37919e85/client/network/light/src/schema/light.v1.proto
+// for protocol definition (RemoteReadChildRequest message).
+
+/// Builds the bytes corresponding to a child storage proof request.
+pub fn build_child_storage_proof_request<'a>(
+    config: ChildStorageProofRequestConfig<
+        impl AsRef<[u8]> + Clone + 'a,
+        impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + 'a,
+    >,
+) -> impl Iterator<Item = impl AsRef<[u8]>> {
+    // Message format for RemoteReadChildRequest (tag 4 in Request oneof):
+    // - Field 2: block hash
+    // - Field 3: child storage key (child trie name)
+    // - Field 6: keys to fetch
+    protobuf::message_tag_encode(
+        4,
+        protobuf::bytes_tag_encode(2, config.block_hash)
+            .map(either::Left)
+            .chain(
+                protobuf::bytes_tag_encode(3, config.child_trie)
+                    .map(either::Left)
+                    .map(either::Right),
+            )
+            .chain(
+                config
+                    .keys
+                    .flat_map(|key| protobuf::bytes_tag_encode(6, key))
+                    .map(either::Right)
+                    .map(either::Right),
+            ),
+    )
 }

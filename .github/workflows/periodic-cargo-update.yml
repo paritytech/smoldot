@@ -17,7 +17,7 @@ jobs:
       working-directory: wasm-node/rust
     - run: cargo update
       working-directory: full-node
-    - uses: peter-evans/create-pull-request@v7
+    - uses: peter-evans/create-pull-request@v8
       with:
         # We use a custom secret (rather than the default GITHUB_TOKEN) so that opening the pull
         # request triggers other actions such as the CI checks. GitHub prevents actions that use

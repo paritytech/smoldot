@@ -2997,6 +2997,46 @@ where
         )?)
     }
 
+    /// Sends a child storage proof request to the given peer.
+    ///
+    /// This is similar to [`ChainNetwork::start_storage_proof_request`] but for child tries.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn start_child_storage_proof_request(
+        &mut self,
+        target: &PeerId,
+        chain_id: ChainId,
+        config: codec::ChildStorageProofRequestConfig<
+            impl AsRef<[u8]> + Clone,
+            impl Iterator<Item = impl AsRef<[u8]> + Clone>,
+        >,
+        timeout: Duration,
+    ) -> Result<SubstreamId, StartRequestMaybeTooLargeError> {
+        let request_data =
+            codec::build_child_storage_proof_request(config).fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            });
+
+        // The request data can possibly be higher than the protocol limit.
+        // TODO: check limit
+
+        Ok(self.start_request(
+            target,
+            request_data,
+            Protocol::LightStorage {
+                chain_index: chain_id.0,
+            },
+            timeout,
+        )?)
+    }
+
     /// Sends a Kademlia find node request to the given peer.
     ///
     /// This function might generate a message destined a connection. Use
@@ -4486,6 +4526,18 @@ pub enum StorageProofRequestError {
     Decode(codec::DecodeStorageCallProofResponseError),
     /// The remote is incapable of answering this specific request.
     RemoteCouldntAnswer,
+}
+
+impl StorageProofRequestError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    pub fn is_network_problem(&self) -> bool {
+        match self {
+            StorageProofRequestError::Request(_) => true,
+            StorageProofRequestError::Decode(_) => false,
+            StorageProofRequestError::RemoteCouldntAnswer => true,
+        }
+    }
 }
 
 /// Error returned by [`ChainNetwork::start_call_proof_request`].

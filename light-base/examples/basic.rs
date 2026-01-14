@@ -95,7 +95,7 @@ fn main() {
     } = client
         .add_chain(smoldot_light::AddChainConfig {
             // These options are the same as above.
-            specification: include_str!("../../demo-chain-specs/polkadot-asset-hub.json"),
+            specification: include_str!("../../demo-chain-specs/polkadot_asset_hub.json"),
             json_rpc: smoldot_light::AddChainConfigJsonRpc::Enabled {
                 max_pending_requests: NonZero::<u32>::new(128).unwrap(),
                 max_subscriptions: 1024,

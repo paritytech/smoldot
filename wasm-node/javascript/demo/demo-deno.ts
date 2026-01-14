@@ -20,7 +20,7 @@
 import * as smoldot from '../dist/mjs/index-deno.js';
 
 // Load the chain spec file.
-const chainSpec = new TextDecoder("utf-8").decode(await Deno.readFile('../../demo-chain-specs/westend.json'));
+const chainSpec = new TextDecoder("utf-8").decode(await Deno.readFile('../../demo-chain-specs/polkadot.json'));
 
 const client = smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity
@@ -56,7 +56,7 @@ console.log('Please visit: https://ipfs.io/ipns/dotapps.io/?rpc=ws%3A%2F%2F127.0
 const conn = Deno.listen({ port: 9944 });
 const httpConn = Deno.serveHttp(await conn.accept());
 
-while(true) {
+while (true) {
     const event = await httpConn.nextRequest();
     if (!event)
         break;
@@ -72,7 +72,7 @@ while(true) {
             for await (const response of chain.jsonRpcResponses) {
                 socket.send(response);
             }
-        } catch(_error) {}
+        } catch (_error) { }
     })()
 
     socket.onclose = () => {

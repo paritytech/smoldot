@@ -660,6 +660,10 @@ pub enum RuntimeCallInaccessibleError {
     InvalidCallProof(proof_decode::Error),
     /// One or more entries are missing from the downloaded call proof.
     MissingProofEntry,
+    /// Failed to download a storage proof from the network.
+    StorageRequest(network_service::StorageProofRequestError),
+    /// Failed to download a child storage proof from the network.
+    ChildStorageRequest(network_service::ChildStorageProofRequestError),
 }
 
 /// Error when analyzing the runtime.
@@ -2080,7 +2084,160 @@ async fn run_background<TPlat: PlatformRef>(
 
             WakeUpReason::ProgressRuntimeCallRequest(progress) => {
                 let (mut operation, call_proof_and_sender) = match progress {
-                    ProgressRuntimeCallRequest::Initialize(operation) => (operation, None),
+                    ProgressRuntimeCallRequest::StorageOnDemandStorageRequest {
+                        result,
+                        storage_request_sender,
+                        mut state,
+                    } => {
+                        match result {
+                            Ok(proof) => {
+                                handle_storage_on_demand_progress(
+                                    &background.platform,
+                                    &background.log_target,
+                                    &background.network_service,
+                                    &background.sync_service,
+                                    &mut background.progress_runtime_call_requests,
+                                    state,
+                                    Some(proof),
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                log!(
+                                    &background.platform,
+                                    Trace,
+                                    &background.log_target,
+                                    "storage-on-demand-request-fail",
+                                    block_hash = HashDisplay(&state.block_hash),
+                                    function_name = state.function_name,
+                                    ?error
+                                );
+                                state.failed_attempts += 1;
+                                state
+                                    .inaccessible_errors
+                                    .push(RuntimeCallInaccessibleError::StorageRequest(error));
+                                background
+                                    .network_service
+                                    .ban_and_disconnect(
+                                        storage_request_sender,
+                                        network_service::BanSeverity::Low,
+                                        "storage-proof-request-failed",
+                                    )
+                                    .await;
+                                handle_storage_on_demand_progress(
+                                    &background.platform,
+                                    &background.log_target,
+                                    &background.network_service,
+                                    &background.sync_service,
+                                    &mut background.progress_runtime_call_requests,
+                                    state,
+                                    None,
+                                )
+                                .await;
+                            }
+                        }
+                        continue;
+                    }
+                    ProgressRuntimeCallRequest::StorageOnDemandChildStorageRequest {
+                        result,
+                        storage_request_sender,
+                        mut state,
+                    } => {
+                        match result {
+                            Ok(proof) => {
+                                handle_storage_on_demand_progress(
+                                    &background.platform,
+                                    &background.log_target,
+                                    &background.network_service,
+                                    &background.sync_service,
+                                    &mut background.progress_runtime_call_requests,
+                                    state,
+                                    Some(proof),
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                log!(
+                                    &background.platform,
+                                    Trace,
+                                    &background.log_target,
+                                    "storage-on-demand-child-request-fail",
+                                    block_hash = HashDisplay(&state.block_hash),
+                                    function_name = state.function_name,
+                                    ?error
+                                );
+                                state.failed_attempts += 1;
+                                state
+                                    .inaccessible_errors
+                                    .push(RuntimeCallInaccessibleError::ChildStorageRequest(error));
+                                background
+                                    .network_service
+                                    .ban_and_disconnect(
+                                        storage_request_sender,
+                                        network_service::BanSeverity::Low,
+                                        "child-storage-proof-request-failed",
+                                    )
+                                    .await;
+                                handle_storage_on_demand_progress(
+                                    &background.platform,
+                                    &background.log_target,
+                                    &background.network_service,
+                                    &background.sync_service,
+                                    &mut background.progress_runtime_call_requests,
+                                    state,
+                                    None,
+                                )
+                                .await;
+                            }
+                        }
+                        continue;
+                    }
+                    ProgressRuntimeCallRequest::Initialize(operation) => {
+                        // Check if parameters are too large for call proof request.
+                        // If so, use storage-on-demand approach instead.
+                        if operation.parameters_vectored.len()
+                            > CALL_PROOF_REQUEST_PARAMETERS_SIZE_THRESHOLD
+                        {
+                            log!(
+                                &background.platform,
+                                Debug,
+                                &background.log_target,
+                                "foreground-runtime-call-storage-on-demand-start",
+                                block_hash = HashDisplay(&operation.block_hash),
+                                function_name = operation.function_name,
+                                parameters_size = operation.parameters_vectored.len()
+                            );
+
+                            let state = StorageOnDemandState {
+                                block_hash: operation.block_hash,
+                                block_number: operation.block_number,
+                                block_state_trie_root_hash: operation.block_state_trie_root_hash,
+                                function_name: operation.function_name,
+                                api_version: operation.api_version,
+                                call: None,
+                                runtime: Some(operation.runtime),
+                                parameters_vectored: operation.parameters_vectored,
+                                total_attempts: operation.total_attempts,
+                                timeout_per_request: operation.timeout_per_request,
+                                failed_attempts: 0,
+                                inaccessible_errors: operation.inaccessible_errors,
+                                result_tx: operation.result_tx,
+                            };
+
+                            handle_storage_on_demand_progress(
+                                &background.platform,
+                                &background.log_target,
+                                &background.network_service,
+                                &background.sync_service,
+                                &mut background.progress_runtime_call_requests,
+                                state,
+                                None,
+                            )
+                            .await;
+                            continue;
+                        }
+                        (operation, None)
+                    }
                     ProgressRuntimeCallRequest::CallProofRequestDone {
                         result: Ok(proof),
                         call_proof_sender,
@@ -2809,6 +2966,11 @@ enum Tree<TPlat: PlatformRef> {
     },
 }
 
+/// Threshold in bytes above which we use the storage-on-demand approach instead of
+/// call proof requests. This avoids exceeding protocol limits for large transactions.
+const CALL_PROOF_REQUEST_PARAMETERS_SIZE_THRESHOLD: usize =
+    smoldot::network::codec::LIGHT_PROTOCOL_REQUEST_MAX_SIZE.saturating_sub(1024);
+
 /// See [`Background::progress_runtime_call_requests`].
 enum ProgressRuntimeCallRequest {
     /// Must start the first call proof request.
@@ -2821,6 +2983,49 @@ enum ProgressRuntimeCallRequest {
         call_proof_sender: network_service::PeerId,
         operation: RuntimeCallRequest,
     },
+    /// Executing locally with storage-on-demand. Waiting for a storage proof request.
+    StorageOnDemandStorageRequest {
+        /// Outcome of the storage proof request.
+        result:
+            Result<network_service::EncodedMerkleProof, network_service::StorageProofRequestError>,
+        /// Identity of the peer the storage request was made against.
+        storage_request_sender: network_service::PeerId,
+        /// State of the ongoing execution.
+        state: StorageOnDemandState,
+    },
+    /// Executing locally with storage-on-demand. Waiting for a child storage proof request.
+    StorageOnDemandChildStorageRequest {
+        /// Outcome of the child storage proof request.
+        result: Result<
+            network_service::EncodedMerkleProof,
+            network_service::ChildStorageProofRequestError,
+        >,
+        /// Identity of the peer the storage request was made against.
+        storage_request_sender: network_service::PeerId,
+        /// State of the ongoing execution.
+        state: StorageOnDemandState,
+    },
+}
+
+/// State of a runtime call being executed with storage fetched on demand.
+struct StorageOnDemandState {
+    block_hash: [u8; 32],
+    block_number: u64,
+    block_state_trie_root_hash: [u8; 32],
+    function_name: String,
+    api_version: Option<u32>,
+    /// The runtime call in progress. `None` if we need to initialize it.
+    call: Option<executor::runtime_call::RuntimeCall>,
+    /// The runtime prototype, used to initialize the call if `call` is `None`.
+    runtime: Option<executor::host::HostVmPrototype>,
+    /// Parameters for initializing the call.
+    parameters_vectored: Vec<u8>,
+    total_attempts: u32,
+    timeout_per_request: Duration,
+    /// Number of failed storage requests so far.
+    failed_attempts: u32,
+    inaccessible_errors: Vec<RuntimeCallInaccessibleError>,
+    result_tx: oneshot::Sender<Result<RuntimeCallSuccess, RuntimeCallError>>,
 }
 
 /// See [`ProgressRuntimeCallRequest`].
@@ -3144,13 +3349,13 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
                 );
             }
             executor::runtime_call::RuntimeCall::StorageGet(ref get) => {
-                get.child_trie().map(|c| c.as_ref().to_owned()) // TODO: overhead
+                get.child_trie().map(|c| c.as_ref().to_owned())
             }
             executor::runtime_call::RuntimeCall::ClosestDescendantMerkleValue(ref mv) => {
                 mv.child_trie().map(|c| c.as_ref().to_owned())
-            } // TODO: overhead
+            }
             executor::runtime_call::RuntimeCall::NextKey(ref nk) => {
-                nk.child_trie().map(|c| c.as_ref().to_owned()) // TODO: overhead
+                nk.child_trie().map(|c| c.as_ref().to_owned())
             }
             executor::runtime_call::RuntimeCall::SignatureVerification(r) => {
                 let runtime_call_duration_before = platform.now();
@@ -3317,4 +3522,462 @@ enum SingleRuntimeCallAttemptError {
     /// Trying the same call again might succeed.
     #[display("Error trying to access the storage required for the runtime call: {_0}")]
     Inaccessible(RuntimeCallInaccessibleError),
+}
+
+/// Handles progress of a storage-on-demand runtime call execution.
+///
+/// This function executes the runtime locally and fetches storage values on-demand
+/// via individual storage proof requests. This is used when the call proof request
+/// would be too large (e.g., large transactions).
+async fn handle_storage_on_demand_progress<TPlat: PlatformRef>(
+    platform: &TPlat,
+    log_target: &str,
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    sync_service: &Arc<sync_service::SyncService<TPlat>>,
+    progress_requests: &mut stream::FuturesUnordered<
+        Pin<Box<dyn future::Future<Output = ProgressRuntimeCallRequest> + Send>>,
+    >,
+    mut state: StorageOnDemandState,
+    storage_proof: Option<network_service::EncodedMerkleProof>,
+) {
+    // If the foreground is no longer interested, abort.
+    if state.result_tx.is_canceled() {
+        return;
+    }
+
+    // Initialize the runtime call if not already done.
+    let call = if let Some(call) = state.call.take() {
+        call
+    } else {
+        let runtime = state
+            .runtime
+            .take()
+            .expect("runtime must be set for initialization");
+        match executor::runtime_call::run(executor::runtime_call::Config {
+            virtual_machine: runtime,
+            function_to_call: &state.function_name,
+            parameter: iter::once(&state.parameters_vectored[..]),
+            storage_proof_size_behavior:
+                executor::runtime_call::StorageProofSizeBehavior::proof_recording_disabled(),
+            storage_main_trie_changes: Default::default(),
+            max_log_level: 0,
+            calculate_trie_changes: false,
+        }) {
+            Ok(call) => call,
+            Err((error, _)) => {
+                log!(
+                    platform,
+                    Debug,
+                    log_target,
+                    "storage-on-demand-start-fail",
+                    block_hash = HashDisplay(&state.block_hash),
+                    function_name = state.function_name,
+                    ?error
+                );
+                let _ = state.result_tx.send(Err(RuntimeCallError::Execution(
+                    RuntimeCallExecutionError::Start(error),
+                )));
+                return;
+            }
+        }
+    };
+
+    // If we have a storage proof from a previous request, inject the value.
+    let mut call = if let Some(proof) = storage_proof {
+        let decoded_proof =
+            match trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+                proof: proof.decode(),
+            }) {
+                Ok(p) => Some(p),
+                Err(error) => {
+                    log!(
+                        platform,
+                        Debug,
+                        log_target,
+                        "storage-on-demand-invalid-proof",
+                        block_hash = HashDisplay(&state.block_hash),
+                        function_name = state.function_name,
+                        ?error
+                    );
+                    state.failed_attempts += 1;
+                    state
+                        .inaccessible_errors
+                        .push(RuntimeCallInaccessibleError::InvalidCallProof(error));
+                    None
+                }
+            };
+
+        // Inject the storage value based on the call state (only if proof was valid).
+        if let Some(decoded_proof) = decoded_proof {
+            inject_proof_into_call(call, &decoded_proof, &mut state)
+        } else {
+            call
+        }
+    } else {
+        call
+    };
+
+    // Check if we've exceeded the maximum number of failed attempts.
+    let Some(state) = check_too_many_attempts(platform, log_target, state) else {
+        return;
+    };
+
+    // Run the call until it needs storage or finishes.
+    loop {
+        // Yield to avoid blocking for too long.
+        futures_lite::future::yield_now().await;
+
+        match call {
+            executor::runtime_call::RuntimeCall::Finished(Ok(finished)) => {
+                log!(
+                    platform,
+                    Debug,
+                    log_target,
+                    "storage-on-demand-success",
+                    block_hash = HashDisplay(&state.block_hash),
+                    function_name = state.function_name
+                );
+                let output = finished.virtual_machine.value().as_ref().to_owned();
+                let _ = state.result_tx.send(Ok(RuntimeCallSuccess {
+                    output,
+                    api_version: state.api_version,
+                }));
+                return;
+            }
+            executor::runtime_call::RuntimeCall::Finished(Err(error)) => {
+                log!(
+                    platform,
+                    Debug,
+                    log_target,
+                    "storage-on-demand-execution-error",
+                    block_hash = HashDisplay(&state.block_hash),
+                    function_name = state.function_name,
+                    error = ?error.detail
+                );
+                let _ = state.result_tx.send(Err(RuntimeCallError::Execution(
+                    RuntimeCallExecutionError::Execution(error.detail),
+                )));
+                return;
+            }
+            executor::runtime_call::RuntimeCall::StorageGet(ref get) => {
+                let key = get.key().as_ref().to_vec();
+                let child_trie = get.child_trie().map(|c| c.as_ref().to_vec());
+                start_storage_request(
+                    platform,
+                    log_target,
+                    network_service,
+                    sync_service,
+                    progress_requests,
+                    state,
+                    call,
+                    key,
+                    child_trie,
+                )
+                .await;
+                return;
+            }
+            executor::runtime_call::RuntimeCall::ClosestDescendantMerkleValue(ref mv) => {
+                let key: Vec<u8> = trie::nibbles_to_bytes_suffix_extend(mv.key()).collect();
+                let child_trie = mv.child_trie().map(|c| c.as_ref().to_vec());
+                start_storage_request(
+                    platform,
+                    log_target,
+                    network_service,
+                    sync_service,
+                    progress_requests,
+                    state,
+                    call,
+                    key,
+                    child_trie,
+                )
+                .await;
+                return;
+            }
+            executor::runtime_call::RuntimeCall::NextKey(ref nk) => {
+                let key: Vec<u8> = trie::nibbles_to_bytes_suffix_extend(nk.key()).collect();
+                let child_trie = nk.child_trie().map(|c| c.as_ref().to_vec());
+                start_storage_request(
+                    platform,
+                    log_target,
+                    network_service,
+                    sync_service,
+                    progress_requests,
+                    state,
+                    call,
+                    key,
+                    child_trie,
+                )
+                .await;
+                return;
+            }
+            executor::runtime_call::RuntimeCall::SignatureVerification(r) => {
+                call = r.verify_and_resume();
+            }
+            executor::runtime_call::RuntimeCall::LogEmit(r) => {
+                call = r.resume();
+            }
+            executor::runtime_call::RuntimeCall::Offchain(_) => {
+                let _ = state.result_tx.send(Err(RuntimeCallError::Execution(
+                    RuntimeCallExecutionError::ForbiddenHostFunction,
+                )));
+                return;
+            }
+            executor::runtime_call::RuntimeCall::OffchainStorageSet(r) => {
+                call = r.resume();
+            }
+        }
+    }
+}
+
+/// Helper function to get the trie root for a child trie from a proof or the main trie.
+///
+/// Returns the child trie root hash if `child_trie` is Some, or the main trie root if None.
+fn get_trie_root_for_child_or_main<'a>(
+    proof: &'a proof_decode::DecodedTrieProof<impl AsRef<[u8]>>,
+    block_state_trie_root_hash: &'a [u8; 32],
+    child_trie: Option<&[u8]>,
+) -> Result<Option<&'a [u8; 32]>, ()> {
+    if let Some(child_trie) = child_trie {
+        const PREFIX: &[u8] = b":child_storage:default:";
+        let mut key = Vec::with_capacity(PREFIX.len() + child_trie.len());
+        key.extend_from_slice(PREFIX);
+        key.extend_from_slice(child_trie);
+        match proof.storage_value(block_state_trie_root_hash, &key) {
+            Err(_) => Err(()),
+            Ok(None) => Ok(None),
+            Ok(Some((value, _))) => match <&[u8; 32]>::try_from(value) {
+                Ok(hash) => Ok(Some(hash)),
+                Err(_) => Err(()),
+            },
+        }
+    } else {
+        Ok(Some(block_state_trie_root_hash))
+    }
+}
+
+/// Injects a value from the decoded proof into the call.
+fn inject_proof_into_call(
+    call: executor::runtime_call::RuntimeCall,
+    decoded_proof: &trie::proof_decode::DecodedTrieProof<impl AsRef<[u8]>>,
+    state: &mut StorageOnDemandState,
+) -> executor::runtime_call::RuntimeCall {
+    match call {
+        executor::runtime_call::RuntimeCall::StorageGet(get) => {
+            let key: Vec<u8> = get.key().as_ref().to_vec();
+            let child_trie = get.child_trie().map(|c| c.as_ref().to_vec());
+
+            match get_trie_root_for_child_or_main(
+                decoded_proof,
+                &state.block_state_trie_root_hash,
+                child_trie.as_deref(),
+            ) {
+                Ok(Some(trie_root)) => match decoded_proof.storage_value(trie_root, &key) {
+                    Ok(value) => get.inject_value(value.map(|(val, vers)| (iter::once(val), vers))),
+                    Err(_) => {
+                        state.failed_attempts += 1;
+                        state
+                            .inaccessible_errors
+                            .push(RuntimeCallInaccessibleError::MissingProofEntry);
+                        executor::runtime_call::RuntimeCall::StorageGet(get)
+                    }
+                },
+                Ok(None) => {
+                    // Child trie doesn't exist, inject None
+                    get.inject_value(None::<(iter::Empty<Vec<u8>>, _)>)
+                }
+                Err(_) => {
+                    state.failed_attempts += 1;
+                    state
+                        .inaccessible_errors
+                        .push(RuntimeCallInaccessibleError::MissingProofEntry);
+                    executor::runtime_call::RuntimeCall::StorageGet(get)
+                }
+            }
+        }
+        executor::runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv) => {
+            let child_trie = mv.child_trie().map(|c| c.as_ref().to_vec());
+            match get_trie_root_for_child_or_main(
+                decoded_proof,
+                &state.block_state_trie_root_hash,
+                child_trie.as_deref(),
+            ) {
+                Ok(Some(trie_root)) => {
+                    match decoded_proof.closest_descendant_merkle_value(trie_root, mv.key()) {
+                        Ok(value) => mv.inject_merkle_value(value),
+                        Err(_) => {
+                            state.failed_attempts += 1;
+                            state
+                                .inaccessible_errors
+                                .push(RuntimeCallInaccessibleError::MissingProofEntry);
+                            executor::runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv)
+                        }
+                    }
+                }
+                Ok(None) => mv.inject_merkle_value(None),
+                Err(_) => {
+                    state.failed_attempts += 1;
+                    state
+                        .inaccessible_errors
+                        .push(RuntimeCallInaccessibleError::MissingProofEntry);
+                    executor::runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv)
+                }
+            }
+        }
+        executor::runtime_call::RuntimeCall::NextKey(nk) => {
+            let child_trie = nk.child_trie().map(|c| c.as_ref().to_vec());
+            match get_trie_root_for_child_or_main(
+                decoded_proof,
+                &state.block_state_trie_root_hash,
+                child_trie.as_deref(),
+            ) {
+                Ok(Some(trie_root)) => {
+                    match decoded_proof.next_key(
+                        trie_root,
+                        nk.key(),
+                        nk.or_equal(),
+                        nk.prefix(),
+                        nk.branch_nodes(),
+                    ) {
+                        Ok(next_key) => nk.inject_key(next_key),
+                        Err(_) => {
+                            state.failed_attempts += 1;
+                            state
+                                .inaccessible_errors
+                                .push(RuntimeCallInaccessibleError::MissingProofEntry);
+                            executor::runtime_call::RuntimeCall::NextKey(nk)
+                        }
+                    }
+                }
+                Ok(None) => nk.inject_key(None::<iter::Empty<trie::Nibble>>),
+                Err(_) => {
+                    state.failed_attempts += 1;
+                    state
+                        .inaccessible_errors
+                        .push(RuntimeCallInaccessibleError::MissingProofEntry);
+                    executor::runtime_call::RuntimeCall::NextKey(nk)
+                }
+            }
+        }
+        // Other variants don't need proof injection
+        other => other,
+    }
+}
+
+/// Checks if too many failed attempts have occurred.
+/// Returns `None` if too many attempts (error sent), `Some(state)` to continue.
+fn check_too_many_attempts<TPlat: PlatformRef>(
+    platform: &TPlat,
+    log_target: &str,
+    state: StorageOnDemandState,
+) -> Option<StorageOnDemandState> {
+    if state.failed_attempts >= state.total_attempts {
+        log!(
+            platform,
+            Debug,
+            log_target,
+            "storage-on-demand-fail",
+            block_hash = HashDisplay(&state.block_hash),
+            function_name = state.function_name,
+            error = "too-many-failed-attempts"
+        );
+        let _ = state.result_tx.send(Err(RuntimeCallError::Inaccessible(
+            state.inaccessible_errors,
+        )));
+        None
+    } else {
+        Some(state)
+    }
+}
+
+/// Helper function to start a storage proof request.
+async fn start_storage_request<TPlat: PlatformRef>(
+    platform: &TPlat,
+    log_target: &str,
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    sync_service: &Arc<sync_service::SyncService<TPlat>>,
+    progress_requests: &mut stream::FuturesUnordered<
+        Pin<Box<dyn future::Future<Output = ProgressRuntimeCallRequest> + Send>>,
+    >,
+    mut state: StorageOnDemandState,
+    call: executor::runtime_call::RuntimeCall,
+    key: Vec<u8>,
+    child_trie: Option<Vec<u8>>,
+) {
+    // Choose a peer to query.
+    let Some(target) = sync_service
+        .peers_assumed_know_blocks(state.block_number, &state.block_hash)
+        .await
+        .choose(&mut rand_chacha::ChaCha20Rng::from_seed({
+            let mut seed = [0; 32];
+            platform.fill_random_bytes(&mut seed);
+            seed
+        }))
+    else {
+        log!(
+            platform,
+            Debug,
+            log_target,
+            "storage-on-demand-no-peer",
+            block_hash = HashDisplay(&state.block_hash),
+            function_name = state.function_name
+        );
+        let _ = state.result_tx.send(Err(RuntimeCallError::Inaccessible(
+            state.inaccessible_errors,
+        )));
+        return;
+    };
+
+    log!(
+        platform,
+        Trace,
+        log_target,
+        "storage-on-demand-request-start",
+        block_hash = HashDisplay(&state.block_hash),
+        function_name = state.function_name,
+        key = HashDisplay(&key),
+        target
+    );
+
+    // Store the call for when the request completes.
+    state.call = Some(call);
+
+    // Start the storage proof request (or child storage proof request for child tries).
+    if let Some(child_trie) = child_trie {
+        let child_storage_request_future = network_service.clone().child_storage_proof_request(
+            target.clone(),
+            smoldot::network::codec::ChildStorageProofRequestConfig {
+                block_hash: state.block_hash,
+                child_trie,
+                keys: iter::once(key),
+            },
+            state.timeout_per_request,
+        );
+
+        progress_requests.push(Box::pin(async move {
+            let result = child_storage_request_future.await;
+            ProgressRuntimeCallRequest::StorageOnDemandChildStorageRequest {
+                result,
+                storage_request_sender: target,
+                state,
+            }
+        }));
+    } else {
+        let storage_request_future = network_service.clone().storage_proof_request(
+            target.clone(),
+            smoldot::network::codec::StorageProofRequestConfig {
+                block_hash: state.block_hash,
+                keys: iter::once(key),
+            },
+            state.timeout_per_request,
+        );
+
+        progress_requests.push(Box::pin(async move {
+            let result = storage_request_future.await;
+            ProgressRuntimeCallRequest::StorageOnDemandStorageRequest {
+                result,
+                storage_request_sender: target,
+                state,
+            }
+        }));
+    }
 }
