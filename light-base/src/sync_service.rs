@@ -45,6 +45,7 @@ use smoldot::{
 };
 
 mod parachain;
+mod paraheads;
 mod substrate_compat;
 
 pub use network_service::Role;
