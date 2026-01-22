@@ -25,6 +25,7 @@ use core::{fmt, iter};
 // Implementation note: each protocol goes into a different sub-module whose content is
 // re-exported here.
 
+mod bitswap;
 mod block_announces;
 mod block_request;
 mod grandpa;
@@ -34,6 +35,7 @@ mod kademlia;
 mod state_request;
 mod storage_call_proof;
 
+pub use self::bitswap::*;
 pub use self::block_announces::*;
 pub use self::block_request::*;
 pub use self::grandpa::*;
