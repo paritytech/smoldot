@@ -50,6 +50,7 @@ pub use self::storage_call_proof::*;
 pub enum ProtocolName<'a> {
     Identify,
     Ping,
+    Bitswap,
     BlockAnnounces {
         genesis_hash: [u8; 32],
         fork_id: Option<&'a str>,
@@ -105,6 +106,9 @@ pub fn encode_protocol_name(protocol: ProtocolName) -> impl Iterator<Item = impl
     let (genesis_hash, fork_id, base_protocol_name) = match protocol {
         ProtocolName::Identify => return either::Left(iter::once(Cow::Borrowed("/ipfs/id/1.0.0"))),
         ProtocolName::Ping => return either::Left(iter::once(Cow::Borrowed("/ipfs/ping/1.0.0"))),
+        ProtocolName::Bitswap => {
+            return either::Left(iter::once(Cow::Borrowed("/ipfs/bitswap/1.2.0")));
+        }
         ProtocolName::BlockAnnounces {
             genesis_hash,
             fork_id,
@@ -185,6 +189,9 @@ pub fn decode_protocol_name(name: &'_ str) -> Result<ProtocolName<'_>, ()> {
             }),
             nom::combinator::map(nom::bytes::complete::tag("/ipfs/ping/1.0.0"), |_| {
                 ProtocolName::Ping
+            }),
+            nom::combinator::map(nom::bytes::complete::tag("/ipfs/bitswap/1.2.0"), |_| {
+                ProtocolName::Bitswap
             }),
             nom::combinator::map(
                 (
