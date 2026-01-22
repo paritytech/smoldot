@@ -840,7 +840,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::transactionWatch_v1_unwatch { .. }
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
                     | methods::MethodCall::sudo_network_unstable_unwatch { .. }
-                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
+                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
+                    | methods::MethodCall::bitswap_block { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -961,6 +962,23 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         // We don't cancel the task in `background_tasks` that will
                         // generate events about this transaction. Instead, the task will stop
                         // renewing itself the next time it generates a notification.
+                    }
+
+                    methods::MethodCall::bitswap_block { cid } => {
+                        log!(
+                            &me.platform,
+                            Info,
+                            &me.log_target,
+                            format!("Bitswap request for CID {cid}")
+                        );
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::bitswap_block(None)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
 
                     methods::MethodCall::chain_getBlock { hash } => {

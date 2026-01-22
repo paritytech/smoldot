@@ -521,6 +521,9 @@ define_methods! {
     sudo_network_unstable_watch() -> Cow<'a, str>,
     sudo_network_unstable_unwatch(subscription: Cow<'a, str>) -> (),
     chainHead_unstable_finalizedDatabase(#[rename = "maxSizeBytes"] max_size_bytes: Option<u64>) -> Cow<'a, str>,
+
+    /// Request a data block by its CID from one of the connected peers that have it.
+    bitswap_block(cid: String) -> Option<HexString>,
 }
 
 define_methods! {
