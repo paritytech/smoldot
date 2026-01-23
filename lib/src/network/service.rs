@@ -296,6 +296,7 @@ struct SubstreamInfo {
 enum Protocol {
     Identify,
     Ping,
+    Bitswap,
     Notifications(NotificationsProtocol),
     Sync { chain_index: usize },
     LightUnknown { chain_index: usize },
@@ -610,7 +611,10 @@ where
                         continue;
                     }
                 }
-                Some(Protocol::Identify) | Some(Protocol::Ping) | None => continue,
+                Some(Protocol::Identify)
+                | Some(Protocol::Ping)
+                | Some(Protocol::Bitswap)
+                | None => continue,
             }
 
             substream.protocol = None;
@@ -1410,6 +1414,7 @@ where
                             request_max_size: None,
                         },
                         Protocol::Ping => collection::InboundTy::Ping,
+                        Protocol::Bitswap => collection::InboundTy::Bitswap,
                         Protocol::Notifications(NotificationsProtocol::Grandpa { chain_index })
                             if self.chains[chain_index].grandpa_protocol_config.is_none() =>
                         {
@@ -1593,7 +1598,9 @@ where
                         ),
 
                         // The protocols below aren't request-response protocols.
-                        Some(Protocol::Ping) | Some(Protocol::Notifications(_)) => unreachable!(),
+                        Some(Protocol::Ping)
+                        | Some(Protocol::Bitswap)
+                        | Some(Protocol::Notifications(_)) => unreachable!(),
                     };
 
                     return Some(Event::RequestResult {
@@ -3060,6 +3067,7 @@ where
             let protocol_name = match protocol {
                 Protocol::Identify => codec::ProtocolName::Identify,
                 Protocol::Ping => codec::ProtocolName::Ping,
+                Protocol::Bitswap => codec::ProtocolName::Bitswap,
                 Protocol::Notifications(NotificationsProtocol::BlockAnnounces { chain_index }) => {
                     let chain_info = &self.chains[chain_index];
                     codec::ProtocolName::BlockAnnounces {
@@ -3938,6 +3946,7 @@ where
         Ok(match codec::decode_protocol_name(protocol_name)? {
             codec::ProtocolName::Identify => Protocol::Identify,
             codec::ProtocolName::Ping => Protocol::Ping,
+            codec::ProtocolName::Bitswap => Protocol::Bitswap,
             codec::ProtocolName::BlockAnnounces {
                 genesis_hash,
                 fork_id,

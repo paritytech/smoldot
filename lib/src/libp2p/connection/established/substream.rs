@@ -23,8 +23,11 @@
 //! [`Substream::read_write`]. This optionally produces an event that indicates what happened on
 //! the substream as a result of the call.
 
-use crate::libp2p::{connection::multistream_select, read_write};
 use crate::util::leb128;
+use crate::{
+    libp2p::{connection::multistream_select, read_write},
+    network::codec::MAX_BITSWAP_MESSAGE_SIZE,
+};
 
 use alloc::{borrow::ToOwned as _, collections::VecDeque, string::String, vec::Vec};
 use core::{
@@ -174,6 +177,17 @@ enum SubstreamInner<TNow> {
         /// FIFO queue of pings waiting to be answered. For each ping, when the ping was queued
         /// and after how long it will time out, or `None` if the timeout has already occurred.
         queued_pings: smallvec::SmallVec<[Option<(TNow, Duration)>; 1]>,
+    },
+
+    /// Inbound Bitswap substream.
+    BitswapIn {
+        /// Message size read from the stream.
+        next_message_size: Option<usize>,
+    },
+    /// Outbound Bitswap substream.
+    BitswapOut {
+        /// Messages to write out.
+        messages: VecDeque<u8>,
     },
 }
 
@@ -399,6 +413,12 @@ where
                         InboundTy::Ping => (
                             Some(SubstreamInner::PingIn {
                                 payload_out: VecDeque::with_capacity(32),
+                            }),
+                            None,
+                        ),
+                        InboundTy::Bitswap => (
+                            Some(SubstreamInner::BitswapIn {
+                                next_message_size: None,
                             }),
                             None,
                         ),
@@ -1115,6 +1135,50 @@ where
                     None,
                 )
             }
+            SubstreamInner::BitswapIn {
+                mut next_message_size,
+            } => {
+                let mut message = None;
+
+                if let Some(sz) = next_message_size {
+                    match read_write.incoming_bytes_take(sz) {
+                        Ok(Some(msg)) => {
+                            message = Some(msg);
+                            next_message_size = None;
+                        }
+                        Ok(None) => {}
+                        Err(read_write::IncomingBytesTakeError::ReadClosed) => {
+                            return (None, None);
+                        }
+                    }
+                } else {
+                    match read_write.incoming_bytes_take_leb128(MAX_BITSWAP_MESSAGE_SIZE) {
+                        Ok(Some(sz)) => next_message_size = Some(sz),
+                        Ok(None) => {}
+                        Err(_) => {
+                            return (None, None);
+                        }
+                    }
+                }
+
+                (
+                    Some(SubstreamInner::BitswapIn { next_message_size }),
+                    message.map(|m| Event::BitswapIn { message: m }),
+                )
+            }
+            SubstreamInner::BitswapOut { mut messages } => {
+                // Bitswap substreams are unidirectional.
+                read_write.discard_all_incoming();
+
+                if read_write.expected_incoming_bytes.is_some() {
+                    read_write.write_from_vec_deque(&mut messages);
+
+                    (Some(SubstreamInner::BitswapOut { messages }), None)
+                } else {
+                    // Remote closed the writing side of the socket.
+                    (None, None)
+                }
+            }
         }
     }
 
@@ -1152,6 +1216,8 @@ where
                 NonZero::<usize>::new(queued_pings.len())
                     .map(|num_pings| Event::PingOutError { num_pings })
             }
+            SubstreamInner::BitswapIn { .. } => None,
+            SubstreamInner::BitswapOut { .. } => None,
         }
     }
 
@@ -1414,6 +1480,7 @@ impl<TNow> fmt::Debug for Substream<TNow> {
             SubstreamInner::PingIn { .. } => f.debug_tuple("ping-in").finish(),
             SubstreamInner::PingOutFailed { .. } => f.debug_tuple("ping-out-failed").finish(),
             SubstreamInner::PingOut { .. } => f.debug_tuple("ping-out").finish(),
+            SubstreamInner::BitswapIn { .. } => f.debug_tuple("bitswap-in").finish(),
         }
     }
 }
@@ -1504,11 +1571,18 @@ pub enum Event {
         /// Number of pings that the remote has failed to answer.
         num_pings: NonZero<usize>,
     },
+
+    /// Remote has sent a Bitswap message.
+    BitswapIn {
+        /// Message sent by the remote.
+        message: Vec<u8>,
+    },
 }
 
 /// Type of inbound protocol.
 pub enum InboundTy {
     Ping,
+    Bitswap,
     Request {
         /// Maximum allowed size of the request.
         /// If `None`, then no data is expected on the substream, not even the length of the
