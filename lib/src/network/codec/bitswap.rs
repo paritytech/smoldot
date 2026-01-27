@@ -120,7 +120,7 @@ pub struct BlockPresence<'a> {
 
 /// A decoded Bitswap message.
 #[derive(Debug, Clone, Default)]
-pub struct Message<'a> {
+pub struct BitswapMessageRef<'a> {
     /// Wantlist containing requested blocks.
     pub wantlist: Option<Wantlist<'a>>,
     /// Blocks sent in response (Bitswap 1.0.0 format).
@@ -261,7 +261,9 @@ pub fn build_bitswap_presence_response(
 }
 
 /// Decodes a Bitswap message.
-pub fn decode_message(bytes: &[u8]) -> Result<Message<'_>, DecodeMessageError> {
+pub fn decode_bitswap_message(
+    bytes: &[u8],
+) -> Result<BitswapMessageRef<'_>, DecodeBitswapMessageError> {
     // Parse the outer message
     let mut parser = nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
@@ -290,7 +292,7 @@ pub fn decode_message(bytes: &[u8]) -> Result<Message<'_>, DecodeMessageError> {
 
     let parsed = match nom::Finish::finish(nom::Parser::parse(&mut parser, bytes)) {
         Ok((_, out)) => out,
-        Err(_) => return Err(DecodeMessageError::ProtobufDecode),
+        Err(_) => return Err(DecodeBitswapMessageError::ProtobufDecode),
     };
 
     // Convert parsed data to Message struct
@@ -300,11 +302,11 @@ pub fn decode_message(bytes: &[u8]) -> Result<Message<'_>, DecodeMessageError> {
             .into_iter()
             .map(|e| {
                 Ok(WantlistEntry {
-                    cid: e.block.ok_or(DecodeMessageError::MissingCid)?,
+                    cid: e.block.ok_or(DecodeBitswapMessageError::MissingCid)?,
                     priority: e.priority.unwrap_or(1) as i32,
                     cancel: e.cancel.unwrap_or(false),
                     want_type: WantType::from_u64(e.want_type.unwrap_or(0))
-                        .ok_or(DecodeMessageError::InvalidWantType)?,
+                        .ok_or(DecodeBitswapMessageError::InvalidWantType)?,
                     send_dont_have: e.send_dont_have.unwrap_or(false),
                 })
             })
@@ -338,7 +340,7 @@ pub fn decode_message(bytes: &[u8]) -> Result<Message<'_>, DecodeMessageError> {
         })
         .collect();
 
-    Ok(Message {
+    Ok(BitswapMessageRef {
         wantlist,
         blocks_legacy: parsed.blocks_legacy,
         payload,
@@ -349,7 +351,7 @@ pub fn decode_message(bytes: &[u8]) -> Result<Message<'_>, DecodeMessageError> {
 
 /// Error while decoding a Bitswap message.
 #[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
-pub enum DecodeMessageError {
+pub enum DecodeBitswapMessageError {
     /// Error decoding the Protobuf encoding.
     #[display("Protobuf decode error")]
     ProtobufDecode,
@@ -373,7 +375,7 @@ mod tests {
         let cids = vec![[1u8; 32], [2u8; 32]];
         let encoded = build_want_message(cids.iter(), WantType::Block, true, false);
 
-        let decoded = decode_message(&encoded).unwrap();
+        let decoded = decode_bitswap_message(&encoded).unwrap();
         let wantlist = decoded.wantlist.unwrap();
 
         assert_eq!(wantlist.entries.len(), 2);
@@ -389,7 +391,7 @@ mod tests {
         let cids = vec![[0xABu8; 32]];
         let encoded = build_want_message(cids.iter(), WantType::Have, false, true);
 
-        let decoded = decode_message(&encoded).unwrap();
+        let decoded = decode_bitswap_message(&encoded).unwrap();
         let wantlist = decoded.wantlist.unwrap();
 
         assert_eq!(wantlist.entries.len(), 1);
@@ -406,7 +408,7 @@ mod tests {
         ];
         let encoded = build_bitswap_block_response(blocks.into_iter());
 
-        let decoded = decode_message(&encoded).unwrap();
+        let decoded = decode_bitswap_message(&encoded).unwrap();
 
         assert_eq!(decoded.payload.len(), 2);
         assert_eq!(decoded.payload[0].prefix, &[1, 2, 3, 4]);
@@ -423,7 +425,7 @@ mod tests {
         ];
         let encoded = build_bitswap_presence_response(presences.into_iter());
 
-        let decoded = decode_message(&encoded).unwrap();
+        let decoded = decode_bitswap_message(&encoded).unwrap();
 
         assert_eq!(decoded.block_presences.len(), 2);
         assert_eq!(decoded.block_presences[0].cid, &[1u8; 32]);
@@ -440,7 +442,7 @@ mod tests {
 
     #[test]
     fn decode_empty_message() {
-        let decoded = decode_message(&[]).unwrap();
+        let decoded = decode_bitswap_message(&[]).unwrap();
         assert!(decoded.wantlist.is_none());
         assert!(decoded.payload.is_empty());
         assert!(decoded.block_presences.is_empty());
