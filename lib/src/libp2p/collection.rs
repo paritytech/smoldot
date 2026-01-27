@@ -1735,6 +1735,18 @@ where
 
                     Event::PingOutFailed { id: connection_id }
                 }
+                ConnectionToCoordinatorInner::BitswapIn { message } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
+                        connection.state
+                    {
+                        debug_assert!(api_initiated);
+                        continue;
+                    }
+
+                    // TODO: should we also return the `connection_id`/`substream_id`?
+                    Event::BitswapIn { message }
+                }
             });
         }
     }
@@ -1872,6 +1884,12 @@ enum ConnectionToCoordinatorInner {
     ///
     /// Must be confirmed with a [`CoordinatorToConnectionInner::ShutdownFinishedAck`].
     ShutdownFinished,
+
+    /// Remote has sent a Bitswap message.
+    BitswapIn {
+        /// Message sent by the remote.
+        message: Vec<u8>,
+    },
 }
 
 /// Message from the coordinator destined to a connection task.
@@ -2148,6 +2166,12 @@ pub enum Event<TConn> {
     /// An outgoing ping has failed. This event is generated automatically over time for each
     /// connection in the collection.
     PingOutFailed { id: ConnectionId },
+
+    /// Remote has sent a Bitswap message.
+    BitswapIn {
+        /// Message sent by the remote.
+        message: Vec<u8>,
+    },
 }
 
 /// Reason why a connection is shutting down. See [`Event::StartShutdown`].

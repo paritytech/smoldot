@@ -1481,6 +1481,7 @@ impl<TNow> fmt::Debug for Substream<TNow> {
             SubstreamInner::PingOutFailed { .. } => f.debug_tuple("ping-out-failed").finish(),
             SubstreamInner::PingOut { .. } => f.debug_tuple("ping-out").finish(),
             SubstreamInner::BitswapIn { .. } => f.debug_tuple("bitswap-in").finish(),
+            SubstreamInner::BitswapOut { .. } => f.debug_tuple("bitswap-out").finish(),
         }
     }
 }

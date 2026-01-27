@@ -198,6 +198,12 @@ pub enum Event<TSubUd> {
     },
     /// An outgoing ping has failed. This event is generated automatically over time.
     PingOutFailed,
+
+    /// Remote has sent a Bitswap message.
+    BitswapIn {
+        /// Message sent by the remote.
+        message: Vec<u8>,
+    },
 }
 
 /// Configuration to turn a [`ConnectionPrototype`] into a [`SingleStream`] or [`MultiStream`].

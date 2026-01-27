@@ -739,6 +739,10 @@ where
                             self.pending_messages
                                 .push_back(ConnectionToCoordinatorInner::PingOutFailed);
                         }
+                        Some(established::Event::BitswapIn { message }) => {
+                            self.pending_messages
+                                .push_back(ConnectionToCoordinatorInner::BitswapIn { message });
+                        }
                         None => {}
                     }
 
