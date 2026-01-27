@@ -402,7 +402,10 @@ where
                 // guarantee, it is safe to merge multiple failed pings into one.
                 Event::PingOutFailed
             }
-            substream::Event::BitswapIn { message } => Event::BitswapIn { message },
+            substream::Event::BitswapIn { message } => Event::BitswapIn {
+                id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
+                message,
+            },
         }
     }
 

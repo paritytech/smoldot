@@ -201,6 +201,8 @@ pub enum Event<TSubUd> {
 
     /// Remote has sent a Bitswap message.
     BitswapIn {
+        /// Identifier of the substream.
+        id: SubstreamId,
         /// Message sent by the remote.
         message: Vec<u8>,
     },

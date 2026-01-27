@@ -1735,7 +1735,10 @@ where
 
                     Event::PingOutFailed { id: connection_id }
                 }
-                ConnectionToCoordinatorInner::BitswapIn { message } => {
+                ConnectionToCoordinatorInner::BitswapIn {
+                    id: inner_substream_id,
+                    message,
+                } => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
@@ -1744,8 +1747,15 @@ where
                         continue;
                     }
 
-                    // TODO: should we also return the `connection_id`/`substream_id`?
-                    Event::BitswapIn { message }
+                    let substream_id = *self
+                        .ingoing_notification_substreams_by_connection
+                        .get(&(connection_id, inner_substream_id))
+                        .unwrap();
+
+                    Event::BitswapIn {
+                        substream_id,
+                        message,
+                    }
                 }
             });
         }
@@ -1887,6 +1897,8 @@ enum ConnectionToCoordinatorInner {
 
     /// Remote has sent a Bitswap message.
     BitswapIn {
+        /// Inner substream ID.
+        id: established::SubstreamId,
         /// Message sent by the remote.
         message: Vec<u8>,
     },
@@ -2169,6 +2181,8 @@ pub enum Event<TConn> {
 
     /// Remote has sent a Bitswap message.
     BitswapIn {
+        /// Substream on which the Bitswap message has been received.
+        substream_id: SubstreamId,
         /// Message sent by the remote.
         message: Vec<u8>,
     },

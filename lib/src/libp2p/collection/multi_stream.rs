@@ -324,8 +324,8 @@ where
                     Some(established::Event::PingOutFailed) => {
                         Some(ConnectionToCoordinatorInner::PingOutFailed)
                     }
-                    Some(established::Event::BitswapIn { message }) => {
-                        Some(ConnectionToCoordinatorInner::BitswapIn { message })
+                    Some(established::Event::BitswapIn { id, message }) => {
+                        Some(ConnectionToCoordinatorInner::BitswapIn { id, message })
                     }
                     None => None,
                 };
