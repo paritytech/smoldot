@@ -236,7 +236,8 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
 
     /// All the outbound Bitswap substreams indexed by `PeerId`.
     // TODO: proper population and cleanup.
-    bitswap_substreams: hashbrown::HashMap<PeerIndex, collection::SubstreamId, fnv::FnvBuildHasher>,
+    bitswap_out_substreams:
+        hashbrown::HashMap<PeerIndex, collection::SubstreamId, fnv::FnvBuildHasher>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -403,7 +404,7 @@ where
                 config.chains_capacity,
                 Default::default(),
             ),
-            bitswap_substreams: hashbrown::HashMap::with_capacity_and_hasher(
+            bitswap_out_substreams: hashbrown::HashMap::with_capacity_and_hasher(
                 config.connections_capacity,
                 Default::default(),
             ),
@@ -1417,12 +1418,27 @@ where
                         continue;
                     };
 
+                    let peer_index = self.inner[id]
+                        .peer_index
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!());
+
                     let inbound_type = match protocol {
                         Protocol::Identify => collection::InboundTy::Request {
                             request_max_size: None,
                         },
                         Protocol::Ping => collection::InboundTy::Ping,
-                        Protocol::Bitswap => collection::InboundTy::Bitswap,
+                        Protocol::Bitswap
+                            if self.bitswap_out_substreams.contains_key(peer_index) =>
+                        {
+                            collection::InboundTy::Bitswap
+                        }
+                        Protocol::Bitswap => {
+                            // If there is no outbound Bitswap substream to this peer (what means
+                            // we didn't send the request), we should reject the inbound.
+                            self.inner.reject_inbound(substream_id);
+                            continue;
+                        }
                         Protocol::Notifications(NotificationsProtocol::Grandpa { chain_index })
                             if self.chains[chain_index].grandpa_protocol_config.is_none() =>
                         {
@@ -2833,7 +2849,7 @@ where
                     // Check whether there is an open outgoing Bitswap substream to this peer.
                     // If there is none, we haven't requested the data and the message should be
                     // discarded.
-                    if !self.bitswap_substreams.contains_key(&peer_index) {
+                    if !self.bitswap_out_substreams.contains_key(&peer_index) {
                         continue;
                     }
 
