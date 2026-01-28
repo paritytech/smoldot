@@ -233,6 +233,10 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
         NotificationsSubstreamState,
         collection::SubstreamId,
     )>,
+
+    /// All the outbound Bitswap substreams indexed by `PeerId`.
+    // TODO: proper population and cleanup.
+    bitswap_substreams: hashbrown::HashMap<PeerIndex, collection::SubstreamId, fnv::FnvBuildHasher>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -397,6 +401,10 @@ where
             chains: slab::Slab::with_capacity(config.chains_capacity),
             chains_by_protocol_info: hashbrown::HashMap::with_capacity_and_hasher(
                 config.chains_capacity,
+                Default::default(),
+            ),
+            bitswap_substreams: hashbrown::HashMap::with_capacity_and_hasher(
+                config.connections_capacity,
                 Default::default(),
             ),
         }
@@ -2808,6 +2816,39 @@ where
                         ping_time,
                     });
                 }
+
+                collection::Event::BitswapIn {
+                    substream_id,
+                    message,
+                } => {
+                    let substream_info = self
+                        .substreams
+                        .get(&substream_id)
+                        .unwrap_or_else(|| unreachable!());
+                    let peer_index = *self.inner[substream_info.connection_id]
+                        .peer_index
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!());
+
+                    // Check whether there is an open outgoing Bitswap substream to this peer.
+                    // If there is none, we haven't requested the data and the message should be
+                    // discarded.
+                    if !self.bitswap_substreams.contains_key(&peer_index) {
+                        continue;
+                    }
+
+                    if let Err(err) = codec::decode_bitswap_message(&message) {
+                        return Some(Event::ProtocolError {
+                            error: ProtocolError::BadBitswapMessage(err),
+                            peer_id: self.peers[peer_index.0].clone(),
+                        });
+                    }
+
+                    return Some(Event::BitswapMessage {
+                        peer_id: self.peers[peer_index.0].clone(),
+                        message: EncodedBitswapMessage { message },
+                    });
+                }
             }
         }
     }
@@ -4393,10 +4434,21 @@ pub enum Event<TConn> {
         /// This [`SubstreamId`] is considered dead and no longer valid.
         substream_id: SubstreamId,
     },
-    /*Transactions {
+
+    /// Received Bitswap message from a peer.
+    ///
+    /// Because we are a Bitswap client, can only happen as a response to prior Bitswap request
+    /// from us.
+    BitswapMessage {
+        /// Remote that has sent the message.
         peer_id: PeerId,
-        transactions: EncodedTransactions,
-    }*/
+        /// Encoded, but valid, Bitswap message.
+        message: EncodedBitswapMessage,
+    },
+    //Transactions {
+    //    peer_id: PeerId,
+    //    transactions: EncodedTransactions,
+    //}
 }
 
 /// See [`Event::ProtocolError`].
@@ -4420,6 +4472,9 @@ pub enum ProtocolError {
     /// Error while decoding a received blocks request.
     #[display("Error while decoding a received blocks request: {_0}")]
     BadBlocksRequest(codec::DecodeBlockRequestError),
+    /// Error while decoding a received Bitswap message.
+    #[display("Error while decoding a received Bitswap message: {_0}")]
+    BadBitswapMessage(codec::DecodeBitswapMessageError),
 }
 
 /// Error potentially returned by [`ChainNetwork::gossip_open`].
@@ -4573,6 +4628,25 @@ impl EncodedBlockAnnounce {
 }
 
 impl fmt::Debug for EncodedBlockAnnounce {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
+/// Udecoded but valid Bitswap message.
+#[derive(Clone)]
+pub struct EncodedBitswapMessage {
+    message: Vec<u8>,
+}
+
+impl EncodedBitswapMessage {
+    /// Returns the decoded version of the message.
+    pub fn decode(&'_ self) -> codec::BitswapMessageRef<'_> {
+        codec::decode_bitswap_message(&self.message).unwrap()
+    }
+}
+
+impl fmt::Debug for EncodedBitswapMessage {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.decode(), f)
     }
