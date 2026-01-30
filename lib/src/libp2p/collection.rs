@@ -207,6 +207,16 @@ pub struct Network<TConn, TNow> {
     // TODO: group with the other similar BTreeSets?
     outgoing_notification_substreams_by_connection: BTreeSet<(ConnectionId, SubstreamId)>,
 
+    /// List of all outgoing Bitswap substreams that we have opened. Can be either pending (waiting
+    /// for the connection task to say whether it has been accepted or not) or fully open.
+    outgoing_bitswap_substreams:
+        hashbrown::HashMap<SubstreamId, (ConnectionId, SubstreamState), fnv::FnvBuildHasher>,
+
+    /// Always contains the same entries as [`Network::outgoing_bitswap_substreams`] but
+    /// ordered differently.
+    // TODO: group with the other similar BTreeSets?
+    outgoing_bitswap_substreams_by_connection: BTreeSet<(ConnectionId, SubstreamId)>,
+
     /// List of all requests that have been started locally.
     outgoing_requests: BTreeSet<(ConnectionId, SubstreamId)>,
 
@@ -352,6 +362,11 @@ where
                 Default::default(),
             ),
             ingoing_negotiated_substreams_by_connection: BTreeMap::new(),
+            outgoing_bitswap_substreams: hashbrown::HashMap::with_capacity_and_hasher(
+                config.capacity,
+                Default::default(),
+            ),
+            outgoing_bitswap_substreams_by_connection: BTreeSet::new(),
             randomness_seeds: ChaCha20Rng::from_seed(config.randomness_seed),
             max_inbound_substreams: config.max_inbound_substreams,
             max_protocol_name_len: config.max_protocol_name_len,
@@ -1003,6 +1018,133 @@ where
         ));
 
         *state = SubstreamState::RequestedClosing;
+    }
+
+    /// Start opening a Bitswap substream.
+    ///
+    /// It is invalid to open a Bitswap substream on a connection before a
+    /// [`Event::HandshakeFinished`] or after a [`Event::StartShutdown`] has been generated, or
+    /// after [`Network::start_shutdown`] has been called.
+    ///
+    /// Returns a newly-allocated identifier for this substream.
+    ///
+    /// This function generates a message destined to the connection. Use
+    /// [`Network::pull_message_to_connection`] to process these messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ConnectionId`] is invalid or is a connection that hasn't finished its
+    /// handshake or is shutting down.
+    ///
+    #[track_caller]
+    pub fn open_out_bitswap(&mut self, connection_id: ConnectionId) -> SubstreamId {
+        let connection = match self.connections.get(&connection_id) {
+            Some(c) => c,
+            None => panic!(),
+        };
+        assert!(matches!(
+            connection.state,
+            InnerConnectionState::Established
+        ));
+
+        let substream_id = self.next_substream_id;
+        self.next_substream_id.0 += 1;
+
+        let _prev_value = self
+            .outgoing_bitswap_substreams
+            .insert(substream_id, (connection_id, SubstreamState::Pending));
+        debug_assert!(_prev_value.is_none());
+        let _was_inserted = self
+            .outgoing_bitswap_substreams_by_connection
+            .insert((connection_id, substream_id));
+        debug_assert!(_was_inserted);
+
+        self.messages_to_connections.push_back((
+            connection_id,
+            CoordinatorToConnectionInner::OpenOutBitswap { substream_id },
+        ));
+
+        substream_id
+    }
+
+    /// Start closing a previously-open outbound Bitswap substream, or cancels opening an
+    /// outbound Bitswap substream.
+    ///
+    /// All the messages that have been queued remain queued. The substream actually closes
+    /// only once the queue is empty.
+    ///
+    /// Calling this method does *not* emit any event. The [`SubstreamId`] is considered invalid
+    /// after this function returns.
+    ///
+    /// This function generates a message destined to the connection. Use
+    /// [`Network::pull_message_to_connection`] to process these messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`SubstreamId`] doesn't correspond to an outbound notifications substream.
+    ///
+    #[track_caller]
+    pub fn close_out_bitswap(&mut self, substream_id: SubstreamId) {
+        // Both `Pending` and `Open` states are accepted.
+        let (connection_id, _state) = match self.outgoing_bitswap_substreams.remove(&substream_id) {
+            Some(s) => s,
+            None => panic!(),
+        };
+        let _was_in = self
+            .outgoing_bitswap_substreams_by_connection
+            .remove(&(connection_id, substream_id));
+        debug_assert!(_was_in);
+
+        self.messages_to_connections.push_back((
+            connection_id,
+            CoordinatorToConnectionInner::CloseOutBitswap { substream_id },
+        ));
+    }
+
+    /// Adds a Bitswap message to the queue of messages to send to the given peer.
+    ///
+    /// It is invalid to call this on a [`SubstreamId`] before a successful
+    /// [`Event::NotificationsOutResult`] has been yielded.
+    ///
+    /// Each substream maintains a queue of messages to be sent to the remote. This method
+    /// attempts to push a message to this queue.
+    ///
+    /// An error is returned if the queue exceeds a certain size in bytes to handle the remote
+    /// back-pressure and limited transfer rate.
+    ///
+    /// Regardless of the success of this function, no guarantee exists about the successful
+    /// delivery of the message.
+    ///
+    /// This function generates a message destined to the connection. Use
+    /// [`Network::pull_message_to_connection`] to process these messages after it has returned.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`SubstreamId`] is not a fully open outbound notifications substream.
+    ///
+    #[track_caller]
+    pub fn queue_bitswap_message(
+        &mut self,
+        substream_id: SubstreamId,
+        message: impl Into<Vec<u8>>,
+    ) -> Result<(), QueueBitswapMessageError> {
+        let (connection_id, state) = match self.outgoing_bitswap_substreams.get(&substream_id) {
+            Some(s) => s,
+            None => panic!(),
+        };
+        assert!(matches!(state, SubstreamState::Open));
+
+        // TODO: add some back-pressure system and return a `QueueBitswapMessageError` if full
+
+        self.messages_to_connections.push_back((
+            *connection_id,
+            CoordinatorToConnectionInner::QueueBitswapMessage {
+                substream_id,
+                message: message.into(),
+            },
+        ));
+
+        Ok(())
     }
 
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
@@ -1976,6 +2118,26 @@ enum CoordinatorToConnectionInner {
         timeout: Duration,
     },
 
+    /// Start opening outbound Bitswap substream.
+    OpenOutBitswap {
+        /// Id of the substream assigned by the coordinator.
+        /// This is **not** the same as the actual substream used in the connection.
+        substream_id: SubstreamId,
+    },
+    /// Start closing outbound Bitswap substream.
+    CloseOutBitswap {
+        /// Id of the substream assigned by the coordinator.
+        /// This is **not** the same as the actual substream used in the connection.
+        substream_id: SubstreamId,
+    },
+    /// Push Bitswap message to the queue of messages for this substream.
+    QueueBitswapMessage {
+        /// Id of the substream assigned by the coordinator.
+        /// This is **not** the same as the actual substream used in the connection.
+        substream_id: SubstreamId,
+        message: Vec<u8>,
+    },
+
     /// Answer an incoming request.
     ///
     /// Since the API doesn't provide any feedback about whether responses have been successfully
@@ -2248,5 +2410,12 @@ pub enum NotificationsInClosedErr {
 #[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum QueueNotificationError {
     /// Queue of notifications with that peer is full.
+    QueueFull,
+}
+
+/// Error potentially returned by [`Network::queue_bitswap_message`].
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+pub enum QueueBitswapMessageError {
+    /// Queue of bitswap messages with that peer is full.
     QueueFull,
 }

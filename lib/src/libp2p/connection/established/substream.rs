@@ -23,10 +23,10 @@
 //! [`Substream::read_write`]. This optionally produces an event that indicates what happened on
 //! the substream as a result of the call.
 
-use crate::util::leb128;
 use crate::{
     libp2p::{connection::multistream_select, read_write},
-    network::codec::MAX_BITSWAP_MESSAGE_SIZE,
+    network::codec::{MAX_BITSWAP_MESSAGE_SIZE, ProtocolName, encode_protocol_name_string},
+    util::leb128,
 };
 
 use alloc::{borrow::ToOwned as _, collections::VecDeque, string::String, vec::Vec};
@@ -186,6 +186,8 @@ enum SubstreamInner<TNow> {
     },
     /// Outbound Bitswap substream.
     BitswapOut {
+        /// State of the protocol negotiation. `None` if the negotiation has finished.
+        negotiation: Option<multistream_select::InProgress<String>>,
         /// Messages to write out.
         messages: VecDeque<u8>,
     },
@@ -266,6 +268,30 @@ where
                 handshake_in_size: None,
                 handshake_in_max_size: max_handshake_size,
                 handshake_out,
+            },
+        }
+    }
+
+    /// Initialize an outgoing Bitswap substream.
+    ///
+    /// After the multistream-select negotiation completes, an [`Event::BitswapOutResult`] event
+    /// will be generated.
+    ///
+    /// If this event contains an `Ok`, then [`Substream::write_bitswap_message_unbounded`],
+    /// [`Substream::bitswap_substream_queued_bytes`] and
+    /// [`Substream::close_out_bitswap_substream`] can be used, and
+    /// [`Event::BitswapOutCloseDemanded`] and [`Event::BitswapOutReset`] can be
+    /// generated.
+    pub fn bitswap_out() -> Self {
+        let negotiation = multistream_select::InProgress::new(multistream_select::Config::Dialer {
+            requested_protocol: encode_protocol_name_string(ProtocolName::Bitswap),
+        });
+
+        // TODO: group first message with multistream-select negotiation.
+        Substream {
+            inner: SubstreamInner::BitswapOut {
+                negotiation: Some(negotiation),
+                messages: VecDeque::new(),
             },
         }
     }
@@ -1170,6 +1196,8 @@ where
                 // Bitswap substreams are unidirectional.
                 read_write.discard_all_incoming();
 
+                // TODO: handle multistream-select negotiation.
+
                 if read_write.expected_incoming_bytes.is_some() {
                     read_write.write_from_vec_deque(&mut messages);
 
@@ -1573,6 +1601,10 @@ pub enum Event {
         num_pings: NonZero<usize>,
     },
 
+    /// Remote has accepted or refused a substream opened with [`Substream::bitswap_out`].
+    ///
+    /// If `Ok`, it is now possiblr to send Bitswap messages on this substream.
+    BitswapOutResult { result: Result<(), BitswapOutErr> },
     /// Remote has sent a Bitswap message.
     BitswapIn {
         /// Message sent by the remote.
@@ -1699,4 +1731,16 @@ pub enum NotificationsInClosedErr {
     SubstreamReset,
     /// Substream has been force-closed because the graceful timeout has been reached.
     CloseDesiredTimeout,
+}
+
+/// Error that can happen when trying to open an outbound Bitswap substream.
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
+pub enum BitswapOutErr {
+    /// Remote has indicated that it doesn't support the Bitswap protocol.
+    ProtocolNotAvailable,
+    /// Error during the multistream-select handshake.
+    #[display("Protocol negotiation error: {_0}")]
+    NegotiationError(multistream_select::Error),
+    /// Substream has been reset during hte negotiation.
+    SubstreamReset,
 }

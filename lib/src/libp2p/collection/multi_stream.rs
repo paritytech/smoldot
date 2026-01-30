@@ -509,6 +509,61 @@ where
                 }
             }
             (
+                CoordinatorToConnectionInner::OpenOutBitswap {
+                    substream_id: outer_substream_id,
+                },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    outbound_substreams_map,
+                    ..
+                },
+            ) => {
+                let inner_substream_id =
+                    established.open_bitswap_substream(Some(outer_substream_id));
+
+                let _prev_value =
+                    outbound_substreams_map.insert(outer_substream_id, inner_substream_id);
+                debug_assert!(_prev_value.is_none());
+            }
+            (
+                CoordinatorToConnectionInner::CloseOutBitswap { substream_id },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    outbound_substreams_map,
+                    ..
+                },
+            ) => {
+                // It is possible that the remote has closed the outbound bitswap substream
+                // while the `CloseOutBitswap` message was being delivered, or that the API
+                // user close the substream before the message about the substream being closed
+                // was delivered to the coordinator.
+                if let Some(inner_substream_id) = outbound_substreams_map.remove(&substream_id) {
+                    established.close_out_bitswap_substream(inner_substream_id);
+                }
+            }
+            (
+                CoordinatorToConnectionInner::QueueBitswapMessage {
+                    substream_id,
+                    message,
+                },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    outbound_substreams_map,
+                    ..
+                },
+            ) => {
+                // It is possible that the remote has closed the outbound bitswap substream while
+                // a `QueueBitswapMessage` message was being delivered, or that the API user
+                // queued a Bitswap message before the message about the substream being closed was
+                // delivered to the coordinator.
+                // If that happens, we intentionally silently discard the message, causing the
+                // message to not be sent. This is consistent with the guarantees about
+                // Bitswap messages delivery that are documented in the public API.
+                if let Some(inner_substream_id) = outbound_substreams_map.get(&substream_id) {
+                    established.write_bitswap_message_unbounded(*inner_substream_id, message);
+                }
+            }
+            (
                 CoordinatorToConnectionInner::AnswerRequest {
                     substream_id,
                     response,
