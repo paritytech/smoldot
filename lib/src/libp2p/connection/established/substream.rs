@@ -445,7 +445,7 @@ where
                             Some(SubstreamInner::BitswapIn {
                                 next_message_size: None,
                             }),
-                            None,
+                            Some(Event::BitswapInOpen),
                         ),
                         InboundTy::Notifications { max_handshake_size } => (
                             Some(SubstreamInner::NotificationsInHandshake {
@@ -1687,6 +1687,9 @@ pub enum Event {
         /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
         outcome: Result<(), BitswapOutClosedErr>,
     },
+    /// Remote has opened an inbound Bitswap substream. This event can be used to limit the number
+    /// of open inbound Bitswap substreams per peer by closing old substreams.
+    BitswapInOpen,
     /// Remote has sent a Bitswap message.
     BitswapIn {
         /// Message sent by the remote.
