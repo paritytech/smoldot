@@ -533,7 +533,7 @@ where
                     ..
                 },
             ) => {
-                // It is possible that the remote has closed the outbound bitswap substream
+                // It is possible that the remote has closed the outbound Bitswap substream
                 // while the `CloseOutBitswap` message was being delivered, or that the API
                 // user close the substream before the message about the substream being closed
                 // was delivered to the coordinator.
@@ -562,6 +562,12 @@ where
                 if let Some(inner_substream_id) = outbound_substreams_map.get(&substream_id) {
                     established.write_bitswap_message_unbounded(*inner_substream_id, message);
                 }
+            }
+            (
+                CoordinatorToConnectionInner::CloseInBitswap { substream_id },
+                MultiStreamConnectionTaskInner::Established { established, .. },
+            ) => {
+                established.close_in_bitswap_substream(substream_id);
             }
             (
                 CoordinatorToConnectionInner::AnswerRequest {

@@ -549,6 +549,84 @@ where
         SubstreamId(SubstreamIdInner::SingleStream(substream))
     }
 
+    /// Opens an outgoing Bitswap substream.
+    ///
+    /// Bitswap messages can be sent ASAP and will be combined with multistream-select negotiation,
+    /// but multistream-select negotiation can still fail, most commonly meaning the remote
+    /// does not support the Bitswap protocol.
+    ///
+    /// This method only inserts the multistream-select negotioation into the connection object.
+    /// The negotiation will later be carried out through [`MultiStream::substream_read_write`].
+    ///
+    /// Assuming that the remote is using the same implementation, an [`Event::BitswapInOpen`]
+    /// will be generated on its side.
+    ///
+    /// # Panic
+    ///
+    /// Panics if an [`Event::NewOutboundSubstreamsForbidden`] event has been generated in the past.
+    ///
+    pub fn open_bitswap_substream(&mut self, user_data: TSubUd) -> SubstreamId {
+        let substream = self
+            .inner
+            .yamux
+            .open_substream(Some((substream::Substream::bitswap_out(), Some(user_data))))
+            .unwrap(); // TODO: consider not panicking
+
+        SubstreamId(SubstreamIdInner::SingleStream(substream))
+    }
+
+    /// Closes a Bitswap substream opened after a successful [`Event::BitswapOutOpenResult`].
+    ///
+    /// This can be done even when in the negotiation phase, in other words before the remote has
+    /// accepted/refused the substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to open Bitswap substream.
+    ///
+    pub fn close_out_bitswap_substream(&mut self, substream_id: SubstreamId) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+            _ => panic!(),
+        };
+
+        if !self.inner.yamux.has_substream(substream_id) {
+            panic!()
+        }
+
+        self.inner.yamux[substream_id]
+            .as_mut()
+            .unwrap()
+            .0
+            .close_out_bitswap_substream();
+        self.inner.yamux.mark_substream_write_ready(substream_id);
+    }
+
+    /// Closes (strictly speaking, resets) an inbound Bitswap susbstream reported by
+    /// [`Event::BitswapInOpen`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to open inbound Bitswap substream.
+    ///
+    pub fn close_in_bitswap_substream(&mut self, substream_id: SubstreamId) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+            _ => panic!(),
+        };
+
+        if !self.inner.yamux.has_substream(substream_id) {
+            panic!()
+        }
+
+        self.inner.yamux[substream_id]
+            .as_mut()
+            .unwrap()
+            .0
+            .close_in_bitswap_substream();
+        self.inner.yamux.reset(substream_id);
+    }
+
     /// Call after an [`Event::InboundNegotiated`] has been emitted in order to accept the protocol
     /// name and indicate the type of the protocol.
     ///

@@ -251,6 +251,23 @@ pub struct Network<TConn, TNow> {
     ingoing_notification_substreams_by_connection:
         BTreeMap<(ConnectionId, established::SubstreamId), SubstreamId>,
 
+    /// List of incoming Bitswap substreams with corresponding connections.
+    /// All substreams here are fully open as there is no negotiation phase in Bitswap.
+    ///
+    /// The substream ID of the substream is allocated by the connection task, and thus we need
+    /// to keep a mapping of inner `<->` substream IDs.
+    ingoing_bitswap_substreams: hashbrown::HashMap<
+        SubstreamId,
+        (ConnectionId, established::SubstreamId),
+        fnv::FnvBuildHasher,
+    >,
+
+    /// Always contains the same entries as [`Network::ingoing_bitswap_substreams`] but
+    /// ordered differently.
+    // TODO: group with the other similar BTreeSets?
+    ingoing_bitswap_substreams_by_connection:
+        BTreeMap<(ConnectionId, established::SubstreamId), SubstreamId>,
+
     /// List of requests that connections have received and haven't been answered by the API user
     /// yet.
     ingoing_requests: hashbrown::HashMap<
@@ -367,6 +384,11 @@ where
                 Default::default(),
             ),
             outgoing_bitswap_substreams_by_connection: BTreeSet::new(),
+            ingoing_bitswap_substreams: hashbrown::HashMap::with_capacity_and_hasher(
+                config.capacity,
+                Default::default(),
+            ),
+            ingoing_bitswap_substreams_by_connection: BTreeMap::new(),
             randomness_seeds: ChaCha20Rng::from_seed(config.randomness_seed),
             max_inbound_substreams: config.max_inbound_substreams,
             max_protocol_name_len: config.max_protocol_name_len,
@@ -1098,6 +1120,39 @@ where
         self.messages_to_connections.push_back((
             connection_id,
             CoordinatorToConnectionInner::CloseOutBitswap { substream_id },
+        ));
+    }
+
+    /// Close inbound Bitswap substream. Because Bitswap protocol doesn't specify a way to signal
+    /// remote about a desire to close an inbound substream, this in fact resets the substream.
+    ///
+    /// This is used to limit the number of inbound Bitswap substreams remote has opened with us.
+    ///
+    /// This function generates a message destined to the connection. Use
+    /// [`Network::pull_message_to_connection`] to process these messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`SubstreamId`] doesn't correspond to an outbound notifications substream.
+    ///
+    #[track_caller]
+    pub fn close_in_bitswap(&mut self, substream_id: SubstreamId) {
+        let (connection_id, inner_substream_id) =
+            match self.ingoing_bitswap_substreams.remove(&substream_id) {
+                Some(s) => s,
+                None => panic!(),
+            };
+        let _was_in = self
+            .ingoing_bitswap_substreams_by_connection
+            .remove(&(connection_id, inner_substream_id))
+            .is_some();
+        debug_assert!(_was_in);
+
+        self.messages_to_connections.push_back((
+            connection_id,
+            CoordinatorToConnectionInner::CloseInBitswap {
+                substream_id: inner_substream_id,
+            },
         ));
     }
 
@@ -2136,6 +2191,14 @@ enum CoordinatorToConnectionInner {
         /// This is **not** the same as the actual substream used in the connection.
         substream_id: SubstreamId,
         message: Vec<u8>,
+    },
+    /// Close inbound Bitswap substream. Because Bitswap spec doesn't include a mechanism for
+    /// notifying the remote about the close desire by closing the local sending end of the stream,
+    /// this actually resets the substream.
+    ///
+    /// This message is used to limit the number of inbound Bitswap substreams per peer.
+    CloseInBitswap {
+        substream_id: established::SubstreamId,
     },
 
     /// Answer an incoming request.

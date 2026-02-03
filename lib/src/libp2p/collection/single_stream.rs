@@ -410,6 +410,12 @@ where
                 }
             }
             (
+                CoordinatorToConnectionInner::CloseInBitswap { substream_id },
+                SingleStreamConnectionTaskInner::Established { established, .. },
+            ) => {
+                established.close_in_bitswap_substream(substream_id);
+            }
+            (
                 CoordinatorToConnectionInner::AnswerRequest {
                     substream_id,
                     response,

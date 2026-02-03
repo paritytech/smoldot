@@ -1447,6 +1447,46 @@ where
         };
     }
 
+    /// Closes an outgoing Bitswap substream opened after a successful
+    /// [`Event::BitswapOutOpenResult`].
+    ///
+    /// This can be done even when in the negotiation phase, in other words before the remote has
+    /// accepted/refused the substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream isn't a Bitswap substream, or if the Bitswap substream
+    /// isn't in the appropriate state.
+    ///
+    pub fn close_out_bitswap_substream(&mut self) {
+        match &mut self.inner {
+            SubstreamInner::BitswapOut { .. } => {
+                self.inner = SubstreamInner::BitswapOutClosed;
+            }
+            _ => panic!(),
+        };
+    }
+
+    /// Closes an ingoing Bitswap substream that was reported by [`Event::BitswapInOpen`].
+    ///
+    /// Because Bitswap doesn't have a mechanism of notifying the remote about the desire to close
+    /// the substream, we instantly mark the substream as closed and it should be reset on the
+    /// yamux/WebRTC level as well.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream isn't a notifications substream, or if the notifications substream
+    /// isn't in the appropriate state.
+    ///
+    pub fn close_in_bitswap_substream(&mut self, timeout: TNow) {
+        match &mut self.inner {
+            SubstreamInner::BitswapIn { .. } => {
+                self.inner = SubsteramInner::BitswapInClosed;
+            }
+            _ => panic!(),
+        };
+    }
+
     /// Queues a ping on the given substream. Must be passed a randomly-generated payload of 32
     /// bytes, the time after which this ping is considered as failed.
     ///

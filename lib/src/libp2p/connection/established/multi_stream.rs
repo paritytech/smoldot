@@ -544,6 +544,58 @@ where
         SubstreamId(SubstreamIdInner::MultiStream(substream_id))
     }
 
+    /// Opens an outgoing Bitswap substream.
+    ///
+    /// Bitswap messages can be sent ASAP and will be combined with multistream-select negotiation,
+    /// but multistream-select negotiation can still fail, most commonly meaning the remote
+    /// does not support the Bitswap protocol.
+    ///
+    /// This method only inserts the multistream-select negotioation into the connection object.
+    /// The negotiation will later be carried out through [`MultiStream::substream_read_write`].
+    ///
+    /// Assuming that the remote is using the same implementation, an [`Event::BitswapInOpen`]
+    /// will be generated on its side.
+    ///
+    pub fn open_bitswap_substream(&mut self, user_data: TSubUd) -> SubstreamId {
+        let substream_id = self.next_out_substream_id;
+        self.next_out_substream_id += 1;
+
+        self.desired_out_substreams.push_back(Substream {
+            id: substream_id,
+            inner: Some(substream::Substream::bitswap_out()),
+            user_data: Some(user_data),
+            framing: webrtc_framing::WebRtcFraming::new(),
+        });
+
+        SubstreamId(SubstreamIdInner::MultiStream(substream_id))
+    }
+
+    /// Closes a Bitswap substream opened after a successful [`Event::BitswapOutOpenResult`].
+    ///
+    /// This can be done even when in the negotiation phase, in other words before the remote has
+    /// accepted/refused the substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to opened Bitswap substream.
+    ///
+    pub fn close_out_bitswap_substream(&mut self, substream_id: SubstreamId) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get_mut(inner_substream_id)
+            .unwrap()
+            .inner
+            .as_mut()
+            .unwrap()
+            .close_out_bitswap_substream();
+    }
+
     /// Call after an [`Event::InboundNegotiated`] has been emitted in order to accept the protocol
     /// name and indicate the type of the protocol.
     ///
