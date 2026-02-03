@@ -27,8 +27,8 @@ use core::time::Duration;
 pub use multi_stream::{MultiStream, SubstreamFate};
 pub use single_stream::{ConnectionPrototype, Error, SingleStream};
 pub use substream::{
-    InboundError, InboundTy, NotificationsInClosedErr, NotificationsOutErr, RequestError,
-    RespondInRequestError,
+    BitswapInClosedErr, BitswapOutClosedErr, BitswapOutOpenErr, InboundError, InboundTy,
+    NotificationsInClosedErr, NotificationsOutErr, RequestError, RespondInRequestError,
 };
 
 /// Identifier of a request or a notifications substream.
@@ -199,12 +199,42 @@ pub enum Event<TSubUd> {
     /// An outgoing ping has failed. This event is generated automatically over time.
     PingOutFailed,
 
+    /// Remote has accepted or refused a substream opened with [`Substream::bitswap_out`].
+    ///
+    /// If `Ok`, it is now possiblr to send Bitswap messages on this substream.
+    BitswapOutOpenResult {
+        /// Identifier of the substream.
+        id: SubstreamId,
+        /// If `Ok`, the substream was successfully opened.
+        result: Result<(), BitswapOutOpenErr>,
+    },
+    /// Remote has closed a writing side of our outbound Bitswap substream or error occured.
+    /// The substream is instantly closed.
+    BitswapOutClose {
+        /// Identifier of the substream.
+        id: SubstreamId,
+        /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
+        outcome: Result<(), BitswapOutClosedErr>,
+    },
+    /// Remote has opened an inbound Bitswap substream. This event can be used to limit the number
+    /// of open inbound Bitswap substreams per peer by closing old substreams.
+    BitswapInOpen {
+        /// Identifier of the substream.
+        id: SubstreamId,
+    },
     /// Remote has sent a Bitswap message.
     BitswapIn {
         /// Identifier of the substream.
         id: SubstreamId,
         /// Message sent by the remote.
         message: Vec<u8>,
+    },
+    /// Remote has closed an inbound Bitswap substream.
+    BitswapInClose {
+        /// Identifier of the substream.
+        id: SubstreamId,
+        /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
+        outcome: Result<(), BitswapInClosedErr>,
     },
 }
 

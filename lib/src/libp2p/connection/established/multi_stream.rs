@@ -417,9 +417,24 @@ where
                 // guarantee, it is safe to merge multiple failed pings into one.
                 Event::PingOutFailed
             }
+            substream::Event::BitswapOutOpenResult { result } => Event::BitswapOutOpenResult {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+                result,
+            },
+            substream::Event::BitswapOutClose { outcome } => Event::BitswapOutClose {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+                outcome,
+            },
+            substream::Event::BitswapInOpen => Event::BitswapInOpen {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+            },
             substream::Event::BitswapIn { message } => Event::BitswapIn {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 message,
+            },
+            substream::Event::BitswapInClose { outcome } => Event::BitswapInClose {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+                outcome,
             },
         });
     }
