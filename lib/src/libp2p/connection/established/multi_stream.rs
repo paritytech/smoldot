@@ -570,6 +570,66 @@ where
         SubstreamId(SubstreamIdInner::MultiStream(substream_id))
     }
 
+    /// Queues a Bitswap message to be written out on the given substream.
+    ///
+    /// # About back-pressure
+    ///
+    /// This method unconditionally queues up data. You must be aware that the remote, however,
+    /// can decide to delay indefinitely the sending of that data, which can potentially lead to
+    /// an unbounded increase in memory.
+    ///
+    /// As such, you are encouraged to call this method only if the amount of queued data (as
+    /// determined by calling [`MultiStream::bitswap_substream_queued_bytes`]) is below a
+    /// certain threshold. If above, the notification should be silently discarded.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to an outbound Bitswap substream,
+    /// or if the Bitswap substream isn't in the appropriate state.
+    ///
+    pub fn write_bitswap_message_unbounded(&mut self, substream_id: SubstreamId, message: Vec<u8>) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get_mut(inner_substream_id)
+            .unwrap()
+            .inner
+            .as_mut()
+            .unwrap()
+            .write_bitswap_message_unbounded(message);
+    }
+
+    /// Returns the number of bytes waiting to be sent out on that substream.
+    ///
+    /// See the documentation of [`MultiStream::write_bitswap_message_unbounded`] for context.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to an outbound Bitswap substream,
+    /// or if the Bitswap substream isn't in the appropriate state.
+    ///
+    pub fn bitswap_substream_queued_bytes(&self, substream_id: SubstreamId) -> usize {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get(inner_substream_id)
+            .unwrap()
+            .inner
+            .as_ref()
+            .unwrap()
+            .bitswap_substream_queued_bytes()
+    }
+
     /// Closes a Bitswap substream opened after a successful [`Event::BitswapOutOpenResult`].
     ///
     /// This can be done even when in the negotiation phase, in other words before the remote has
@@ -594,6 +654,33 @@ where
             .as_mut()
             .unwrap()
             .close_out_bitswap_substream();
+    }
+
+    /// Closes (strictly speaking, resets) an inbound Bitswap susbstream reported by
+    /// [`Event::BitswapInOpen`].
+    ///
+    /// This is used to limit the number of inbound Bitswap substreams per peer by discarding old
+    /// substreams.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to open inbound Bitswap substream.
+    ///
+    pub fn close_in_bitswap_substream(&mut self, substream_id: SubstreamId) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_susbtream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get_mut(inner_susbtream_id)
+            .unwrap()
+            .inner
+            .as_mut()
+            .unwrap()
+            .close_in_bitswap_substream();
     }
 
     /// Call after an [`Event::InboundNegotiated`] has been emitted in order to accept the protocol

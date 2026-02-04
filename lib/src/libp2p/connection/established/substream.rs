@@ -184,6 +184,9 @@ enum SubstreamInner<TNow> {
         /// Message size read from the stream.
         next_message_size: Option<usize>,
     },
+    /// An inbound Bitswap substream was open, but then the remote closed its writing side
+    /// or we closed the substream.
+    BitswapInClosed,
     /// Outbound Bitswap substream.
     BitswapOut {
         /// State of the protocol negotiation. `None` if the negotiation has finished.
@@ -191,6 +194,8 @@ enum SubstreamInner<TNow> {
         /// Messages to write out.
         messages: VecDeque<u8>,
     },
+    /// An outbound Bitswap substream was open, but then we closed it.
+    BitswapOutClosed,
 }
 
 impl<TNow> Substream<TNow>
@@ -1174,7 +1179,7 @@ where
                         Ok(None) => {}
                         Err(read_write::IncomingBytesTakeError::ReadClosed) => {
                             return (
-                                None,
+                                Some(SubstreamInner::BitswapInClosed),
                                 Some(Event::BitswapInClose {
                                     outcome: Err(BitswapInClosedErr::SubstreamClosed),
                                 }),
@@ -1187,7 +1192,7 @@ where
                         Ok(None) => {}
                         Err(err) => {
                             return (
-                                None,
+                                Some(SubstreamInner::BitswapInClosed),
                                 Some(Event::BitswapInClose {
                                     outcome: Err(BitswapInClosedErr::ProtocolError(err)),
                                 }),
@@ -1200,6 +1205,14 @@ where
                     Some(SubstreamInner::BitswapIn { next_message_size }),
                     message.map(|m| Event::BitswapIn { message: m }),
                 )
+            }
+            SubstreamInner::BitswapInClosed => {
+                read_write.discard_all_incoming();
+                read_write.close_write();
+
+                // Bitswap doesn't specify a way to notify remote about close desire,
+                // so we just abruptly reset the substream.
+                (None, None)
             }
             SubstreamInner::BitswapOut {
                 mut negotiation,
@@ -1261,21 +1274,31 @@ where
                 } else {
                     // Remote closed the writing side of the stream.
                     (
-                        None,
+                        Some(SubstreamInner::BitswapOutClosed),
                         if nego_just_succeeded || negotiation.is_some() {
                             Some(Event::BitswapOutOpenResult {
                                 result: Err(BitswapOutOpenErr::SubstreamClosed),
                             })
                         } else {
-                            // TODO: it's not clear from Bitswap spec if remote is allowed to close
-                            // the substream and whether this should be an `outcome: Err(_)`.
-                            // In any case, we can lose the outgoing Bitswap messages if this
-                            // happens, but there is no delivery guarantee for the higher levels
-                            // anyway.
-                            Some(Event::BitswapOutClose { outcome: Ok(()) })
+                            Some(Event::BitswapOutClose {
+                                outcome: Err(BitswapOutClosedErr::SubstreamClosed),
+                            })
                         },
                     )
                 }
+            }
+            SubstreamInner::BitswapOutClosed => {
+                read_write.discard_all_incoming();
+                read_write.close_write();
+
+                (
+                    if read_write.is_dead() {
+                        None
+                    } else {
+                        Some(SubstreamInner::BitswapOutClosed)
+                    },
+                    None,
+                )
             }
         }
     }
@@ -1317,9 +1340,11 @@ where
             SubstreamInner::BitswapIn { .. } => Some(Event::BitswapInClose {
                 outcome: Err(BitswapInClosedErr::SubstreamReset),
             }),
+            SubstreamInner::BitswapInClosed => None,
             SubstreamInner::BitswapOut { .. } => Some(Event::BitswapOutClose {
                 outcome: Err(BitswapOutClosedErr::SubstreamReset),
             }),
+            SubstreamInner::BitswapOutClosed => None,
         }
     }
 
@@ -1386,6 +1411,24 @@ where
         }
     }
 
+    /// Queues a Bitswap message to be written out on the given substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream isn't a Bitswap substream, or if the Bitswap substream
+    /// isn't in the appropriate state.
+    ///
+    pub fn write_bitswap_message_unbounded(&mut self, message: Vec<u8>) {
+        match &mut self.inner {
+            SubstreamInner::BitswapOut { messages, .. } => {
+                // TODO: expensive copying?
+                messages.extend(leb128::encode_usize(message.len()));
+                messages.extend(message);
+            }
+            _ => panic!(),
+        }
+    }
+
     /// Returns the number of bytes waiting to be sent out on that substream.
     ///
     /// See the documentation of [`Substream::write_notification_unbounded`] for context.
@@ -1398,6 +1441,22 @@ where
     pub fn notification_substream_queued_bytes(&self) -> usize {
         match &self.inner {
             SubstreamInner::NotificationsOut { notifications, .. } => notifications.len(),
+            _ => panic!(),
+        }
+    }
+
+    /// Returns the number of bytes waiting to be sent out on that substream.
+    ///
+    /// See the documentation of [`Substream::write_bitswap_message_unbounded`] for context.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream isn't an outbound Bitswap substream, or if the Bitswap substream
+    /// isn't in the appropriate state.
+    ///
+    pub fn bitswap_substream_queued_bytes(&self) -> usize {
+        match &self.inner {
+            SubstreamInner::BitswapOut { messages, .. } => messages.len(),
             _ => panic!(),
         }
     }
@@ -1478,10 +1537,10 @@ where
     /// Panics if the substream isn't a notifications substream, or if the notifications substream
     /// isn't in the appropriate state.
     ///
-    pub fn close_in_bitswap_substream(&mut self, timeout: TNow) {
+    pub fn close_in_bitswap_substream(&mut self) {
         match &mut self.inner {
             SubstreamInner::BitswapIn { .. } => {
-                self.inner = SubsteramInner::BitswapInClosed;
+                self.inner = SubstreamInner::BitswapInClosed;
             }
             _ => panic!(),
         };
@@ -1623,7 +1682,9 @@ impl<TNow> fmt::Debug for Substream<TNow> {
             SubstreamInner::PingOutFailed { .. } => f.debug_tuple("ping-out-failed").finish(),
             SubstreamInner::PingOut { .. } => f.debug_tuple("ping-out").finish(),
             SubstreamInner::BitswapIn { .. } => f.debug_tuple("bitswap-in").finish(),
+            SubstreamInner::BitswapInClosed => f.debug_tuple("bitswap-in-closed").finish(),
             SubstreamInner::BitswapOut { .. } => f.debug_tuple("bitswap-out").finish(),
+            SubstreamInner::BitswapOutClosed => f.debug_tuple("bitswap-out-closed").finish(),
         }
     }
 }
