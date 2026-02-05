@@ -20,8 +20,9 @@ use super::{
         connection::{established, single_stream_handshake},
         read_write::ReadWrite,
     },
-    ConnectionToCoordinator, ConnectionToCoordinatorInner, CoordinatorToConnection,
-    CoordinatorToConnectionInner, NotificationsOutErr, ShutdownCause, SubstreamId,
+    BitswapOutOpenErr, ConnectionToCoordinator, ConnectionToCoordinatorInner,
+    CoordinatorToConnection, CoordinatorToConnectionInner, NotificationsOutErr, ShutdownCause,
+    SubstreamId,
 };
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc};
@@ -355,6 +356,12 @@ where
                 }
             }
             (
+                CoordinatorToConnectionInner::CloseInBitswap { substream_id },
+                SingleStreamConnectionTaskInner::Established { established, .. },
+            ) => {
+                established.close_in_bitswap_substream(substream_id);
+            }
+            (
                 CoordinatorToConnectionInner::OpenOutBitswap {
                     substream_id: outer_substream_id,
                 },
@@ -370,22 +377,6 @@ where
                 let _prev_value =
                     outbound_substreams_map.insert(outer_substream_id, inner_substream_id);
                 debug_assert!(_prev_value.is_none());
-            }
-            (
-                CoordinatorToConnectionInner::CloseOutBitswap { substream_id },
-                SingleStreamConnectionTaskInner::Established {
-                    established,
-                    outbound_substreams_map,
-                    ..
-                },
-            ) => {
-                // It is possible that the remote has closed the outbound Bitswap substream
-                // while the `CloseOutBitswap` message was being delivered, or that the API
-                // user closed the substream before the message about the substream being closed
-                // was delivered to the coordinator.
-                if let Some(inner_substream_id) = outbound_substreams_map.remove(&substream_id) {
-                    established.close_out_bitswap_substream(inner_substream_id);
-                }
             }
             (
                 CoordinatorToConnectionInner::QueueBitswapMessage {
@@ -406,27 +397,25 @@ where
                 // Bitswap message to not be sent. This is consistent with the guarantees about
                 // Bitswap messages deliverey that are documented in the public API.
                 if let Some(inner_substream_id) = outbound_substreams_map.get(&substream_id) {
-                    established.write_bitswap_message_unbounded(*inner_substream_id, notification);
+                    established.write_bitswap_message_unbounded(*inner_substream_id, message);
                 }
             }
             (
-                CoordinatorToConnectionInner::CloseInBitswap { substream_id },
-                SingleStreamConnectionTaskInner::Established { established, .. },
-            ) => {
-                established.close_in_bitswap_substream(substream_id);
-            }
-            (
-                CoordinatorToConnectionInner::AnswerRequest {
-                    substream_id,
-                    response,
+                CoordinatorToConnectionInner::CloseOutBitswap { substream_id },
+                SingleStreamConnectionTaskInner::Established {
+                    established,
+                    outbound_substreams_map,
+                    ..
                 },
-                SingleStreamConnectionTaskInner::Established { established, .. },
-            ) => match established.respond_in_request(substream_id, response) {
-                Ok(()) => {}
-                Err(established::RespondInRequestError::SubstreamClosed) => {
-                    // As documented, answering an obsolete request is simply ignored.
+            ) => {
+                // It is possible that the remote has closed the outbound Bitswap substream
+                // while the `CloseOutBitswap` message was being delivered, or that the API
+                // user closed the substream before the message about the substream being closed
+                // was delivered to the coordinator.
+                if let Some(inner_substream_id) = outbound_substreams_map.remove(&substream_id) {
+                    established.close_out_bitswap_substream(inner_substream_id);
                 }
-            },
+            }
             (
                 CoordinatorToConnectionInner::AnswerRequest {
                     substream_id,
@@ -527,7 +516,11 @@ where
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
-                | CoordinatorToConnectionInner::QueueNotification { .. },
+                | CoordinatorToConnectionInner::QueueNotification { .. }
+                | CoordinatorToConnectionInner::CloseInBitswap { .. }
+                | CoordinatorToConnectionInner::OpenOutBitswap { .. }
+                | CoordinatorToConnectionInner::QueueBitswapMessage { .. }
+                | CoordinatorToConnectionInner::CloseOutBitswap { .. },
                 SingleStreamConnectionTaskInner::Handshake { .. }
                 | SingleStreamConnectionTaskInner::ShutdownAcked { .. },
             ) => unreachable!(),
@@ -542,7 +535,11 @@ where
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
-                | CoordinatorToConnectionInner::QueueNotification { .. },
+                | CoordinatorToConnectionInner::QueueNotification { .. }
+                | CoordinatorToConnectionInner::CloseInBitswap { .. }
+                | CoordinatorToConnectionInner::OpenOutBitswap { .. }
+                | CoordinatorToConnectionInner::QueueBitswapMessage { .. }
+                | CoordinatorToConnectionInner::CloseOutBitswap { .. },
                 SingleStreamConnectionTaskInner::ShutdownWaitingAck { .. },
             )
             | (
@@ -803,6 +800,63 @@ where
                                 },
                             );
                         }
+                        Some(established::Event::BitswapInOpen { id }) => {
+                            self.pending_messages
+                                .push_back(ConnectionToCoordinatorInner::BitswapInOpen { id });
+                        }
+                        Some(established::Event::BitswapIn { id, message }) => {
+                            self.pending_messages
+                                .push_back(ConnectionToCoordinatorInner::BitswapIn { id, message });
+                        }
+                        Some(established::Event::BitswapInClose { id, outcome }) => {
+                            // TODO: do we need a close acqnowledgement mechanism similar to
+                            // Notifications?
+                            self.pending_messages.push_back(
+                                ConnectionToCoordinatorInner::BitswapInClose { id, outcome },
+                            );
+                        }
+                        Some(established::Event::BitswapOutOpenResult { id, result }) => {
+                            let (outer_substream_id, result) = match result {
+                                Ok(r) => {
+                                    let Some(outer_substream_id) = connection[id] else {
+                                        panic!()
+                                    };
+
+                                    (outer_substream_id, Ok(r))
+                                }
+                                Err((err, ud)) => {
+                                    let Some(outer_substream_id) = ud else {
+                                        panic!()
+                                    };
+                                    outbound_substreams_map.remove(&outer_substream_id);
+
+                                    (outer_substream_id, Err(BitswapOutOpenErr::Substream(err)))
+                                }
+                            };
+
+                            self.pending_messages.push_back(
+                                ConnectionToCoordinatorInner::BitswapOutOpenResult {
+                                    id: outer_substream_id,
+                                    result,
+                                },
+                            );
+                        }
+                        Some(established::Event::BitswapOutClose {
+                            id: _,
+                            error,
+                            user_data,
+                        }) => {
+                            let Some(outer_substream_id) = user_data else {
+                                panic!()
+                            };
+                            outbound_substreams_map.remove(&outer_substream_id);
+                            self.pending_messages.push_back(
+                                ConnectionToCoordinatorInner::BitswapOutClose {
+                                    id: outer_substream_id,
+                                    error,
+                                },
+                            );
+                        }
                         Some(established::Event::PingOutSuccess { ping_time }) => {
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::PingOutSuccess { ping_time },
@@ -811,10 +865,6 @@ where
                         Some(established::Event::PingOutFailed) => {
                             self.pending_messages
                                 .push_back(ConnectionToCoordinatorInner::PingOutFailed);
-                        }
-                        Some(established::Event::BitswapIn { id, message }) => {
-                            self.pending_messages
-                                .push_back(ConnectionToCoordinatorInner::BitswapIn { id, message });
                         }
                         None => {}
                     }

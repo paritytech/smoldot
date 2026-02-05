@@ -1103,7 +1103,7 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if [`SubstreamId`] doesn't correspond to an outbound notifications substream.
+    /// Panics if [`SubstreamId`] doesn't correspond to an outbound Bitswap substream.
     ///
     #[track_caller]
     pub fn close_out_bitswap(&mut self, substream_id: SubstreamId) {
@@ -1133,7 +1133,7 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if [`SubstreamId`] doesn't correspond to an outbound notifications substream.
+    /// Panics if [`SubstreamId`] doesn't correspond to an outbound Bitswap substream.
     ///
     #[track_caller]
     pub fn close_in_bitswap(&mut self, substream_id: SubstreamId) {
@@ -1159,7 +1159,7 @@ where
     /// Adds a Bitswap message to the queue of messages to send to the given peer.
     ///
     /// It is invalid to call this on a [`SubstreamId`] before a successful
-    /// [`Event::NotificationsOutResult`] has been yielded.
+    /// [`Event::BitswapOutOpenResult`] has been yielded.
     ///
     /// Each substream maintains a queue of messages to be sent to the remote. This method
     /// attempts to push a message to this queue.
@@ -1175,7 +1175,7 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if [`SubstreamId`] is not a fully open outbound notifications substream.
+    /// Panics if [`SubstreamId`] is not a fully open outbound Bitswap substream.
     ///
     #[track_caller]
     pub fn queue_bitswap_message(
@@ -1945,7 +1945,7 @@ where
                     }
 
                     let substream_id = *self
-                        .ingoing_notification_substreams_by_connection
+                        .ingoing_bitswap_substreams_by_connection
                         .get(&(connection_id, inner_substream_id))
                         .unwrap();
 
@@ -2072,6 +2072,45 @@ enum ConnectionToCoordinatorInner {
     NotificationsOutReset {
         id: SubstreamId,
     },
+
+    /// Remote has opened an inbound Bitswap substream. We can use this event too close other
+    /// Bitswap substreams the remote has opened before.
+    BitswapInOpen {
+        /// Inner substream ID.
+        id: established::SubstreamId,
+    },
+    /// Remote has sent a Bitswap message.
+    BitswapIn {
+        /// Inner substream ID.
+        id: established::SubstreamId,
+        /// Message sent by the remote.
+        message: Vec<u8>,
+    },
+    /// Remote has closed the inbound Bitswap substream with us, or the substream error occured.
+    /// Unlike `NotificaationsInClose`, we don't need to acknowledge this event.
+    // TODO: may be we need an acqnowledgement mechanism like Notifications?
+    BitswapInClose {
+        /// Inner substream ID.
+        id: established::SubstreamId,
+        /// `Ok(())` if the substream was gracefully closed, an `Err()` otherwise.
+        outcome: Result<(), established::BitswapInClosedErr>,
+    },
+    /// The result of opening an outbound Bitswap substream.
+    BitswapOutOpenResult {
+        /// Substream ID.
+        id: SubstreamId,
+        /// `Ok()` if the substream was successfully opened, `Err()` otherwise.
+        result: Result<(), BitswapOutOpenErr>,
+    },
+    /// The outbound Bitswap substream was closed or reset by remote.
+    BitswapOutClose {
+        /// Substream ID.
+        id: SubstreamId,
+        /// Bitswap spec doesn't contain a mechanism for closing outbound substreams by remote, so
+        /// this is always an error.
+        error: established::BitswapOutClosedErr,
+    },
+
     /// See the corresponding event in [`established::Event`].
     PingOutSuccess {
         ping_time: Duration,
@@ -2091,14 +2130,6 @@ enum ConnectionToCoordinatorInner {
     ///
     /// Must be confirmed with a [`CoordinatorToConnectionInner::ShutdownFinishedAck`].
     ShutdownFinished,
-
-    /// Remote has sent a Bitswap message.
-    BitswapIn {
-        /// Inner substream ID.
-        id: established::SubstreamId,
-        /// Message sent by the remote.
-        message: Vec<u8>,
-    },
 }
 
 /// Message from the coordinator destined to a connection task.
@@ -2474,6 +2505,28 @@ pub enum NotificationsInClosedErr {
 pub enum QueueNotificationError {
     /// Queue of notifications with that peer is full.
     QueueFull,
+}
+
+/// Error opening outbound Bitswap substream.
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+pub enum BitswapOutOpenErr {
+    /// Opening has been interrupted because the connection as a whole is being shut down.
+    ConnectionShutdown,
+
+    /// Error happened in the context of the substream.
+    #[display("{_0}")]
+    Substream(established::BitswapOutOpenErr),
+}
+
+/// Error that led to closing of inbound Bitswap substream.
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+pub enum BitswapInClosedErr {
+    /// Substream has been closed because the connection as a whole is being shut down.
+    ConnectionShutdown,
+
+    /// Error happened in the context of the substream.
+    #[display("{_0}")]
+    Substream(established::BitswapInClosedErr),
 }
 
 /// Error potentially returned by [`Network::queue_bitswap_message`].

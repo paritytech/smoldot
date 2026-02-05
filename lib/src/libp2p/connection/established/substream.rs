@@ -1281,7 +1281,7 @@ where
                             })
                         } else {
                             Some(Event::BitswapOutClose {
-                                outcome: Err(BitswapOutClosedErr::SubstreamClosed),
+                                error: BitswapOutClosedErr::SubstreamClosed,
                             })
                         },
                     )
@@ -1342,7 +1342,7 @@ where
             }),
             SubstreamInner::BitswapInClosed => None,
             SubstreamInner::BitswapOut { .. } => Some(Event::BitswapOutClose {
-                outcome: Err(BitswapOutClosedErr::SubstreamReset),
+                error: BitswapOutClosedErr::SubstreamReset,
             }),
             SubstreamInner::BitswapOutClosed => None,
         }
@@ -1785,8 +1785,9 @@ pub enum Event {
     /// Remote has closed a writing side of our outbound Bitswap substream or error occured.
     /// The substream is instantly closed.
     BitswapOutClose {
-        /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
-        outcome: Result<(), BitswapOutClosedErr>,
+        /// Bitswap spec doesn't describe a way of gracefully closing the outbound substreams,
+        /// so this is always an error.
+        error: BitswapOutClosedErr,
     },
     /// Remote has opened an inbound Bitswap substream. This event can be used to limit the number
     /// of open inbound Bitswap substreams per peer by closing old substreams.

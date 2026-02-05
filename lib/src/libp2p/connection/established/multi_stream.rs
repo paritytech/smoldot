@@ -419,11 +419,15 @@ where
             }
             substream::Event::BitswapOutOpenResult { result } => Event::BitswapOutOpenResult {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
-                result,
+                result: match result {
+                    Ok(r) => Ok(r),
+                    Err(err) => Err((err, substream_user_data.take().unwrap())),
+                },
             },
-            substream::Event::BitswapOutClose { outcome } => Event::BitswapOutClose {
+            substream::Event::BitswapOutClose { error } => Event::BitswapOutClose {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
-                outcome,
+                error,
+                user_data: substream_user_data.take().unwrap(),
             },
             substream::Event::BitswapInOpen => Event::BitswapInOpen {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
@@ -580,7 +584,7 @@ where
     ///
     /// As such, you are encouraged to call this method only if the amount of queued data (as
     /// determined by calling [`MultiStream::bitswap_substream_queued_bytes`]) is below a
-    /// certain threshold. If above, the notification should be silently discarded.
+    /// certain threshold. If above, the Bitswap message should be silently discarded.
     ///
     /// # Panic
     ///

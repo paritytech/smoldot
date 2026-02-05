@@ -404,11 +404,15 @@ where
             }
             substream::Event::BitswapOutOpenResult { result } => Event::BitswapOutOpenResult {
                 id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
-                result,
+                result: match result {
+                    Ok(r) => Ok(r),
+                    Err(err) => Err((err, substream_user_data.take().unwrap())),
+                },
             },
-            substream::Event::BitswapOutClose { outcome } => Event::BitswapOutClose {
+            substream::Event::BitswapOutClose { error } => Event::BitswapOutClose {
                 id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
-                outcome,
+                error,
+                user_data: substream_user_data.take().unwrap(),
             },
             substream::Event::BitswapInOpen => Event::BitswapInOpen {
                 id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),

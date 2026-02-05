@@ -206,15 +206,19 @@ pub enum Event<TSubUd> {
         /// Identifier of the substream.
         id: SubstreamId,
         /// If `Ok`, the substream was successfully opened.
-        result: Result<(), BitswapOutOpenErr>,
+        result: Result<(), (BitswapOutOpenErr, TSubUd)>,
     },
     /// Remote has closed a writing side of our outbound Bitswap substream or error occured.
     /// The substream is instantly closed.
     BitswapOutClose {
         /// Identifier of the substream.
         id: SubstreamId,
-        /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
-        outcome: Result<(), BitswapOutClosedErr>,
+        /// Because Bitswap doesn't define a mechanism for closing of outbound substreams by
+        /// remote, this is always an error.
+        error: BitswapOutClosedErr,
+        /// Value that was passed to [`SingleStream::open_bitswap_substream`] or
+        /// [`MultiStream::open_bitswap_substream`].
+        user_data: TSubUd,
     },
     /// Remote has opened an inbound Bitswap substream. This event can be used to limit the number
     /// of open inbound Bitswap substreams per peer by closing old substreams.
