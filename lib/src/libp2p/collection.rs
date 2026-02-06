@@ -207,16 +207,6 @@ pub struct Network<TConn, TNow> {
     // TODO: group with the other similar BTreeSets?
     outgoing_notification_substreams_by_connection: BTreeSet<(ConnectionId, SubstreamId)>,
 
-    /// List of all outgoing Bitswap substreams that we have opened. Can be either pending (waiting
-    /// for the connection task to say whether it has been accepted or not) or fully open.
-    outgoing_bitswap_substreams:
-        hashbrown::HashMap<SubstreamId, (ConnectionId, SubstreamState), fnv::FnvBuildHasher>,
-
-    /// Always contains the same entries as [`Network::outgoing_bitswap_substreams`] but
-    /// ordered differently.
-    // TODO: group with the other similar BTreeSets?
-    outgoing_bitswap_substreams_by_connection: BTreeSet<(ConnectionId, SubstreamId)>,
-
     /// List of all requests that have been started locally.
     outgoing_requests: BTreeSet<(ConnectionId, SubstreamId)>,
 
@@ -267,6 +257,16 @@ pub struct Network<TConn, TNow> {
     // TODO: group with the other similar BTreeSets?
     ingoing_bitswap_substreams_by_connection:
         BTreeMap<(ConnectionId, established::SubstreamId), SubstreamId>,
+
+    /// List of all outgoing Bitswap substreams that we have opened. Can be either pending (waiting
+    /// for the connection task to say whether it has been accepted or not) or fully open.
+    outgoing_bitswap_substreams:
+        hashbrown::HashMap<SubstreamId, (ConnectionId, SubstreamState), fnv::FnvBuildHasher>,
+
+    /// Always contains the same entries as [`Network::outgoing_bitswap_substreams`] but
+    /// ordered differently.
+    // TODO: group with the other similar BTreeSets?
+    outgoing_bitswap_substreams_by_connection: BTreeSet<(ConnectionId, SubstreamId)>,
 
     /// List of requests that connections have received and haven't been answered by the API user
     /// yet.
@@ -1372,6 +1372,54 @@ where
                     });
                 }
 
+                // Outgoing Bitswap substreams to close.
+                if let Some((_, substream_id)) = self
+                    .outgoing_bitswap_substreams_by_connection
+                    .range(
+                        (shutting_down_connection, SubstreamId::MIN)
+                            ..=(shutting_down_connection, SubstreamId::MAX),
+                    )
+                    .cloned()
+                    .next()
+                {
+                    self.outgoing_bitswap_substreams_by_connection
+                        .remove(&(shutting_down_connection, substream_id));
+                    let (_, state) = self
+                        .outgoing_bitswap_substreams
+                        .remove(&substream_id)
+                        .unwrap();
+                    return Some(match state {
+                        SubstreamState::Open => Event::BitswapOutClose {
+                            substream_id,
+                            error: BitswapOutClosedErr::ConnectionShutdown,
+                        },
+                        SubstreamState::Pending => Event::BitswapOutOpenResult {
+                            substream_id,
+                            result: Err(BitswapOutOpenErr::ConnectionShutdown),
+                        },
+                        SubstreamState::RequestedClosing => unreachable!(), // Never set for outgoing Bitswap substreams.
+                    });
+                }
+
+                // Ingoing Bitswap substreams to close.
+                if let Some((key, substream_id)) = self
+                    .ingoing_bitswap_substreams_by_connection
+                    .range(
+                        (shutting_down_connection, established::SubstreamId::MIN)
+                            ..=(shutting_down_connection, established::SubstreamId::MAX),
+                    )
+                    .map(|(k, v)| (*k, *v))
+                    .next()
+                {
+                    self.ingoing_bitswap_substreams.remove(&substream_id);
+                    self.ingoing_bitswap_substreams_by_connection.remove(&key);
+
+                    return Some(Event::BitswapInClose {
+                        substream_id,
+                        outcome: Err(BitswapInClosedErr::ConnectionShutdown),
+                    });
+                }
+
                 // Find outgoing requests to cancel.
                 if let Some((_, substream_id)) = self
                     .outgoing_requests
@@ -2424,6 +2472,42 @@ pub enum Event<TConn> {
         outcome: Result<(), NotificationsInClosedErr>,
     },
 
+    /// The remote has opened an inbound Bitswap substream.
+    BitswapInOpen {
+        /// Newly-generated identifier for the substream that has been opened.
+        substream_id: SubstreamId,
+    },
+    /// The remote has sent a Bitswap message.
+    BitswapIn {
+        /// Substream on which the Bitswap message has been received.
+        substream_id: SubstreamId,
+        /// Message sent by the remote.
+        message: Vec<u8>,
+    },
+    /// The remote has closed an incoming Bitswap substream or it has been closed due to an error.
+    BitswapInClose {
+        /// Substream that has been closed. Guaranteed to match a substream that was earlier
+        /// reported with an [`Event::BitswapInOpen`].
+        substream_id: SubstreamId,
+        /// Reason why the susbstream has been closed.
+        outcome: Result<(), BitswapInClosedErr>,
+    },
+    /// The result of opening an outbound Bitswap substream with [`Network::open_out_bitswap`].
+    BitswapOutOpenResult {
+        /// Substream identifier previously returned by [`Network::open_out_bitswap`].
+        substream_id: SubstreamId,
+        /// `Ok()` if the substream was successfully opened, `Err()` with the details otherwise.
+        result: Result<(), BitswapOutOpenErr>,
+    },
+    /// The remote has closed/reset the outbound Bitswap substream or it was reset due to an error.
+    BitswapOutClose {
+        /// Substream that has been closed.
+        substream_id: SubstreamId,
+        /// An error that has caused the substream to close. Note that Bitswap spec doesn't specify
+        /// a way of closing outbound susbstreams by the remote, so this is always an error.
+        error: BitswapOutClosedErr,
+    },
+
     /// An outgoing ping has succeeded. This event is generated automatically over time for each
     /// connection in the collection.
     PingOutSuccess {
@@ -2434,14 +2518,6 @@ pub enum Event<TConn> {
     /// An outgoing ping has failed. This event is generated automatically over time for each
     /// connection in the collection.
     PingOutFailed { id: ConnectionId },
-
-    /// Remote has sent a Bitswap message.
-    BitswapIn {
-        /// Substream on which the Bitswap message has been received.
-        substream_id: SubstreamId,
-        /// Message sent by the remote.
-        message: Vec<u8>,
-    },
 }
 
 /// Reason why a connection is shutting down. See [`Event::StartShutdown`].
@@ -2516,6 +2592,17 @@ pub enum BitswapOutOpenErr {
     /// Error happened in the context of the substream.
     #[display("{_0}")]
     Substream(established::BitswapOutOpenErr),
+}
+
+/// Error that caused closing of outbound Bitswap susbstream.
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+pub enum BitswapOutClosedErr {
+    /// Substream has been closed because the connection as a whole is being shut down.
+    ConnectionShutdown,
+
+    /// Error happened in the context of the substream.
+    #[display("{_0}")]
+    Substream(established::BitswapOutClosedErr),
 }
 
 /// Error that led to closing of inbound Bitswap substream.
