@@ -1955,6 +1955,149 @@ where
 
                     Event::NotificationsOutReset { substream_id }
                 }
+                ConnectionToCoordinatorInner::BitswapInOpen {
+                    id: inner_substream_id,
+                } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
+                        connection.state
+                    {
+                        debug_assert!(api_initiated);
+                        continue;
+                    }
+
+                    let substream_id = self
+                        .ingoing_negotiated_substreams_by_connection
+                        .remove(&(connection_id, inner_substream_id))
+                        .unwrap();
+                    let _was_in = self.ingoing_negotiated_substreams.remove(&substream_id);
+                    debug_assert!(_was_in.is_some());
+
+                    self.ingoing_bitswap_substreams
+                        .insert(substream_id, (connection_id, inner_substream_id));
+                    self.ingoing_bitswap_substreams_by_connection
+                        .insert((connection_id, inner_substream_id), substream_id);
+
+                    Event::BitswapInOpen { substream_id }
+                }
+                ConnectionToCoordinatorInner::BitswapIn {
+                    id: inner_substream_id,
+                    message,
+                } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
+                        connection.state
+                    {
+                        debug_assert!(api_initiated);
+                        continue;
+                    }
+
+                    let substream_id = *self
+                        .ingoing_bitswap_substreams_by_connection
+                        .get(&(connection_id, inner_substream_id))
+                        .unwrap();
+
+                    Event::BitswapIn {
+                        substream_id,
+                        message,
+                    }
+                }
+                ConnectionToCoordinatorInner::BitswapInClose {
+                    id: inner_substream_id,
+                    outcome,
+                } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
+                        connection.state
+                    {
+                        debug_assert!(api_initiated);
+                        continue;
+                    }
+
+                    let substream_id = self
+                        .ingoing_bitswap_substreams_by_connection
+                        .remove(&(connection_id, inner_substream_id))
+                        .unwrap();
+                    self.ingoing_bitswap_substreams
+                        .remove(&substream_id)
+                        .unwrap();
+
+                    Event::BitswapInClose {
+                        substream_id,
+                        outcome: outcome.map_err(BitswapInClosedErr::Substream),
+                    }
+                }
+                ConnectionToCoordinatorInner::BitswapOutOpenResult {
+                    id: substream_id,
+                    result,
+                } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
+                        connection.state
+                    {
+                        debug_assert!(api_initiated);
+                        continue;
+                    }
+
+                    let mut entry = match self.outgoing_bitswap_substreams.entry(substream_id) {
+                        hashbrown::hash_map::Entry::Occupied(e) => e,
+                        hashbrown::hash_map::Entry::Vacant(_) => {
+                            // This can be reached if the API user closed the substream while it
+                            // was being open.
+                            continue;
+                        }
+                    };
+
+                    debug_assert!(matches!(entry.get_mut().1, SubstreamState::Pending));
+
+                    if result.is_ok() {
+                        entry.insert((connection_id, SubstreamState::Open));
+                    } else {
+                        entry.remove();
+
+                        let _was_removed = self
+                            .outgoing_bitswap_substreams_by_connection
+                            .remove(&(connection_id, substream_id));
+                        debug_assert!(_was_removed);
+                    }
+
+                    Event::BitswapOutOpenResult {
+                        substream_id,
+                        result,
+                    }
+                }
+                ConnectionToCoordinatorInner::BitswapOutClose {
+                    id: substream_id,
+                    error,
+                } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
+                        connection.state
+                    {
+                        debug_assert!(api_initiated);
+                        continue;
+                    }
+
+                    if self
+                        .outgoing_bitswap_substreams
+                        .remove(&substream_id)
+                        .is_none()
+                    {
+                        // This can happen if the API user closed the substream at the same
+                        // time as it was closed by remote.
+                        continue;
+                    }
+
+                    let _was_removed = self
+                        .outgoing_bitswap_substreams_by_connection
+                        .remove(&(connection_id, substream_id));
+                    debug_assert!(_was_removed);
+
+                    Event::BitswapOutClose {
+                        substream_id,
+                        error: BitswapOutClosedErr::Substream(error),
+                    }
+                }
                 ConnectionToCoordinatorInner::PingOutSuccess { ping_time } => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
@@ -1979,28 +2122,6 @@ where
                     }
 
                     Event::PingOutFailed { id: connection_id }
-                }
-                ConnectionToCoordinatorInner::BitswapIn {
-                    id: inner_substream_id,
-                    message,
-                } => {
-                    // Ignore events if a shutdown has been initiated by the coordinator.
-                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
-                        connection.state
-                    {
-                        debug_assert!(api_initiated);
-                        continue;
-                    }
-
-                    let substream_id = *self
-                        .ingoing_bitswap_substreams_by_connection
-                        .get(&(connection_id, inner_substream_id))
-                        .unwrap();
-
-                    Event::BitswapIn {
-                        substream_id,
-                        message,
-                    }
                 }
             });
         }
@@ -2489,7 +2610,7 @@ pub enum Event<TConn> {
         /// Substream that has been closed. Guaranteed to match a substream that was earlier
         /// reported with an [`Event::BitswapInOpen`].
         substream_id: SubstreamId,
-        /// Reason why the susbstream has been closed.
+        /// Reason why the substream has been closed.
         outcome: Result<(), BitswapInClosedErr>,
     },
     /// The result of opening an outbound Bitswap substream with [`Network::open_out_bitswap`].
@@ -2504,7 +2625,7 @@ pub enum Event<TConn> {
         /// Substream that has been closed.
         substream_id: SubstreamId,
         /// An error that has caused the substream to close. Note that Bitswap spec doesn't specify
-        /// a way of closing outbound susbstreams by the remote, so this is always an error.
+        /// a way of closing outbound substreams by the remote, so this is always an error.
         error: BitswapOutClosedErr,
     },
 
@@ -2594,7 +2715,7 @@ pub enum BitswapOutOpenErr {
     Substream(established::BitswapOutOpenErr),
 }
 
-/// Error that caused closing of outbound Bitswap susbstream.
+/// Error that caused closing of outbound Bitswap substream.
 #[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum BitswapOutClosedErr {
     /// Substream has been closed because the connection as a whole is being shut down.
