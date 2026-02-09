@@ -4223,7 +4223,7 @@ where
     // connected on which chains. It might be the same peer is requested for Bitswap data on
     // multiple chains, and in this case we should only close Bitswap substream once it's "closed"
     // for all the chains.
-    fn bitswap_open(&mut self, target: &PeerId) -> Result<(), OpenBitswapError> {
+    pub fn bitswap_open(&mut self, target: &PeerId) -> Result<(), OpenBitswapError> {
         let Some(&peer_index) = self.peers_by_peer_id.get(target) else {
             // If the `PeerId` is unknown, then we also don't have any connection to it.
             return Err(OpenBitswapError::NoConnection);
@@ -4287,6 +4287,51 @@ where
         debug_assert!(_was_inserted);
 
         Ok(())
+    }
+
+    /// Send a Bitswap message to the given peer.
+    ///
+    /// Has no effect if there is no open outbound Bitswap substream with the given peer.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    pub fn bitswap_send_message(
+        &mut self,
+        target: &PeerId,
+        message: Vec<u8>,
+    ) -> Result<(), SendBitswapMessageError> {
+        let Some(&peer_index) = self.peers_by_peer_id.get(target) else {
+            return Err(SendBitswapMessageError::NoConnection);
+        };
+
+        let Some(substream_id) = self
+            .bitswap_substreams_by_peer_id
+            .range(
+                (
+                    peer_index,
+                    SubstreamDirection::Out,
+                    BitswapSubstreamState::Open,
+                    SubstreamId::MIN,
+                )
+                    ..=(
+                        peer_index,
+                        SubstreamDirection::Out,
+                        BitswapSubstreamState::Open,
+                        SubstreamId::MAX,
+                    ),
+            )
+            .next()
+            .map(|(_, _, _, substream_id)| *substream_id)
+        else {
+            return Err(SendBitswapMessageError::NoConnection);
+        };
+
+        match self.inner.queue_bitswap_message(substream_id, message) {
+            Ok(()) => Ok(()),
+            Err(collection::QueueBitswapMessageError::QueueFull) => {
+                Err(SendBitswapMessageError::QueueFull)
+            }
+        }
     }
 
     fn recognize_protocol(&self, protocol_name: &str) -> Result<Protocol, ()> {
@@ -4830,6 +4875,15 @@ pub enum OpenBitswapError {
     NoConnection,
     /// There already is a pending or fully opened outbound Bitswap substream with the given peer.
     AlreadyOpened,
+}
+
+/// Error potentially returned by [`ChainNetwork::bitswap_send_message`].
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
+pub enum SendBitswapMessageError {
+    /// There is no open outbound Bitswap substream with the given peer.
+    NoConnection,
+    /// Queue of Bitswap messages with that peer is full.
+    QueueFull,
 }
 
 /// Error potentially returned when starting a request.
