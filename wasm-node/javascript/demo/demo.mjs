@@ -37,7 +37,7 @@ const chainSpecsFiles = [
     '../../demo-chain-specs/rococo-canvas.json',
 ];
 
-// Check for custom chainspec passed as command line argument.
+// Check for custom chainspec passed as a command line argument.
 // Usage: npm start -- /path/to/chainspec.json
 const customChainSpecPath = process.argv[2];
 
