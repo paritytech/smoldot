@@ -4334,6 +4334,85 @@ where
         }
     }
 
+    /// Close the outbound Bitswap substream with the given peer.
+    ///
+    /// This can be used to close either a pending opening (after [`ChainNetwork::bitswap_open`]
+    /// and before [`Event::BitswapConnected`], [`Event::BitswapOpenFailed`] was generated), or a
+    /// fully open Bitswap susbstream (before [`Event::BitswapDisconnected`] event is generated).
+    ///
+    /// Also closes any inbound Bitswap substreams with that peer, since inbound substreams are
+    /// only allowed when an outbound substream is open.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    pub fn bitswap_close(&mut self, target: &PeerId) -> Result<(), CloseBitswapError> {
+        let Some(&peer_index) = self.peers_by_peer_id.get(target) else {
+            return Err(CloseBitswapError::NotOpen);
+        };
+
+        // Find and close the outbound Bitswap substream (pending or open).
+        let out_substreams = self
+            .bitswap_substreams_by_peer_id
+            .range(
+                (
+                    peer_index,
+                    SubstreamDirection::Out,
+                    BitswapSubstreamState::MIN,
+                    SubstreamId::MIN,
+                )
+                    ..=(
+                        peer_index,
+                        SubstreamDirection::Out,
+                        BitswapSubstreamState::MAX,
+                        SubstreamId::MAX,
+                    ),
+            )
+            .cloned()
+            .collect::<Vec<_>>();
+        debug_assert!(out_substreams.len() <= 1);
+
+        if out_substreams.is_empty() {
+            return Err(CloseBitswapError::NotOpen);
+        }
+
+        for substream in &out_substreams {
+            self.inner.close_out_bitswap(substream.3);
+            self.bitswap_substreams_by_peer_id.remove(substream);
+            let _was_in = self.substreams.remove(&substream.3);
+            debug_assert!(_was_in.is_some());
+        }
+
+        // Close any existing inbound Bitswap substreams with this peer.
+        let in_substreams = self
+            .bitswap_substreams_by_peer_id
+            .range(
+                (
+                    peer_index,
+                    SubstreamDirection::In,
+                    BitswapSubstreamState::MIN,
+                    collection::SubstreamId::MIN,
+                )
+                    ..=(
+                        peer_index,
+                        SubstreamDirection::In,
+                        BitswapSubstreamState::MAX,
+                        collection::SubstreamId::MAX,
+                    ),
+            )
+            .cloned()
+            .collect::<Vec<_>>();
+        debug_assert!(in_substreams.len() <= 1);
+
+        for substream in in_substreams {
+            self.inner.close_in_bitswap(substream.3);
+            self.bitswap_substreams_by_peer_id.remove(&substream);
+            let _was_in = self.substreams.remove(&substream.3);
+            debug_assert!(_was_in.is_some());
+        }
+
+        Ok(())
+    }
+
     fn recognize_protocol(&self, protocol_name: &str) -> Result<Protocol, ()> {
         Ok(match codec::decode_protocol_name(protocol_name)? {
             codec::ProtocolName::Identify => Protocol::Identify,
@@ -4875,6 +4954,13 @@ pub enum OpenBitswapError {
     NoConnection,
     /// There already is a pending or fully opened outbound Bitswap substream with the given peer.
     AlreadyOpened,
+}
+
+/// Error potentially returned by [`ChainNetwork::bitswap_close`].
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
+pub enum CloseBitswapError {
+    /// There is no outbound Bitswap substream with the given peer.
+    NotOpen,
 }
 
 /// Error potentially returned by [`ChainNetwork::bitswap_send_message`].
