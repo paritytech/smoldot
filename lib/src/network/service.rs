@@ -4213,6 +4213,82 @@ where
         }
     }
 
+    /// Open a Bitswap substream with the given peer.
+    ///
+    /// Either an [`Event::BitswapConnected`] or [`Event::BitswapOpenFailed`] is guaranteed to later
+    /// be generated, unless [`ChainNetwork::bitswap_close`] is called in the meanwhile.
+    ///
+    // TODO: when dealing with multiple chains, we need to track over which specific RPC endpoint
+    // the original request for Bitswap data came through and keep a record of what peers are
+    // connected on which chains. It might be the same peer is requested for Bitswap data on
+    // multiple chains, and in this case we should only close Bitswap substream once it's "closed"
+    // for all the chains.
+    fn bitswap_open(&mut self, target: &PeerId) -> Result<(), OpenBitswapError> {
+        let Some(&peer_index) = self.peers_by_peer_id.get(target) else {
+            // If the `PeerId` is unknown, then we also don't have any connection to it.
+            return Err(OpenBitswapError::NoConnection);
+        };
+
+        // It is forbidden to open more than one outbound Bitswap substream with any given peer.
+        if self
+            .bitswap_substreams_by_peer_id
+            .range(
+                (
+                    peer_index,
+                    SubstreamDirection::Out,
+                    BitswapSubstreamState::MIN,
+                    SubstreamId::MIN,
+                )
+                    ..=(
+                        peer_index,
+                        SubstreamDirection::Out,
+                        BitswapSubstreamState::MAX,
+                        SubstreamId::MAX,
+                    ),
+            )
+            .next()
+            .is_some()
+        {
+            return Err(OpenBitswapError::AlreadyOpened);
+        }
+
+        // Choose the connection on which to open the substream.
+        // This is done ahead of time, as we don't want to do anything before potentially
+        // returning an error.
+        let connection_id = self
+            .connections_by_peer_id
+            .range(
+                (peer_index, collection::ConnectionId::MIN)
+                    ..=(peer_index, collection::ConnectionId::MAX),
+            )
+            .map(|(_, connection_id)| *connection_id)
+            .find(|connection_id| {
+                let state = self.inner.connection_state(*connection_id);
+                state.established && !state.shutting_down
+            })
+            .ok_or(OpenBitswapError::NoConnection)?;
+
+        // Open the outbound Bitswap substream.
+        let substream_id = self.inner.open_out_bitswap(connection_id);
+        let _prev_value = self.substreams.insert(
+            substream_id,
+            SubstreamInfo {
+                connection_id,
+                protocol: Some(Protocol::Bitswap),
+            },
+        );
+        debug_assert!(_prev_value.is_none());
+        let _was_inserted = self.bitswap_substreams_by_peer_id.insert((
+            peer_index,
+            SubstreamDirection::Out,
+            BitswapSubstreamState::Pending,
+            substream_id,
+        ));
+        debug_assert!(_was_inserted);
+
+        Ok(())
+    }
+
     fn recognize_protocol(&self, protocol_name: &str) -> Result<Protocol, ()> {
         Ok(match codec::decode_protocol_name(protocol_name)? {
             codec::ProtocolName::Identify => Protocol::Identify,
@@ -4745,6 +4821,15 @@ pub enum OpenGossipError {
 pub enum CloseGossipError {
     /// There exists no outgoing nor ingoing attempt at a gossip link.
     NotOpen,
+}
+
+/// Error potentially returned by [`ChainNetwork::bitswap_open`].
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
+pub enum OpenBitswapError {
+    /// No healthy established connection is available to open the link.
+    NoConnection,
+    /// There already is a pending or fully opened outbound Bitswap substream with the given peer.
+    AlreadyOpened,
 }
 
 /// Error potentially returned when starting a request.
