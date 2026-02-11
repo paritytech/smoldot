@@ -47,6 +47,19 @@
 //! use [`BitswapPeeringStrategy::unassign_slot_and_ban`] to ban the peer, preventing it from
 //! obtaining a slot for a provided amount of time.
 
+// TODO: We might want to preserve banned peers in the struct even if the number of connections
+//       drops to 0, so the ban is not reset when the peer disconnects.
+
+// TODO: This is overly simplified strategy not acceptable for release in smoldot, because it
+//       blindly opens Bitswap substreams to all connected peers on all chains. We can do better by
+//       lazily starting allocating Bitswap slots only to peers of the chain once the first Bitswap
+//       request is received through the RPC endpoint dedicated to this chain.
+
+// TODO: There is no reason for Bitswap connections to be opened to peers that are already
+//       connected. Instead, we can initiate network connections to peers sourced from the DHT
+//       specifically for Bitswap protocol. This way we can find peers supporting Bitswap protocol
+//       even if all the already connected peers do not support Bitswap.
+
 use crate::util;
 use alloc::collections::BTreeSet;
 use core::ops;
