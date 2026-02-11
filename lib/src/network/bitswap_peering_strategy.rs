@@ -47,10 +47,19 @@
 //! use [`BitswapPeeringStrategy::unassign_slot_and_ban`] to ban the peer, preventing it from
 //! obtaining a slot for a provided amount of time.
 
+use crate::util;
+use alloc::collections::BTreeSet;
+use core::ops;
+use rand::seq::IteratorRandom as _;
+use rand_chacha::{
+    ChaCha20Rng,
+    rand_core::{RngCore as _, SeedableRng as _},
+};
+
 pub use crate::libp2p::PeerId;
 
 #[derive(Debug)]
-struct BitswapPeeringStrategy<TInstant> {
+pub struct BitswapPeeringStrategy<TInstant> {
     /// Contains all the `PeerId`s used throughout the collection.
     peer_ids: slab::Slab<PeerId>,
 
@@ -75,6 +84,15 @@ enum PeerState<TInstant> {
     Slot,
 }
 
+/// Configuration passed to [`BitswapPeeringStrategy::new`].
+pub struct Config {
+    /// Seed used for the randomness for choosing peers to connect to.
+    pub randomness_seed: [u8; 32],
+
+    /// Number of peers to initially reserve memory for.
+    pub peers_capacity: usize,
+}
+
 impl<TInstant> BitswapPeeringStrategy<TInstant>
 where
     TInstant: PartialOrd + Ord + Eq + Clone,
@@ -83,8 +101,23 @@ where
     ///
     /// Must be passed a seed for randomness used
     /// in [`BitswapPeeringStrategy::pick_assignable_peer`].
-    pub fn new(randomness_seed: [u8; 32]) -> Self {
-        todo!();
+    pub fn new(config: Config) -> Self {
+        let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
+
+        BitswapPeeringStrategy {
+            peer_ids: slab::Slab::with_capacity(config.peers_capacity),
+            peer_ids_indices: hashbrown::HashMap::with_capacity_and_hasher(
+                config.peers_capacity,
+                util::SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    randomness.fill_bytes(&mut seed);
+                    seed
+                }),
+            ),
+            peers: hashbrown::HashMap::with_hasher(fnv::FnvBuildHasher::default()),
+            peers_by_state: BTreeSet::new(),
+            randomness,
+        }
     }
 
     /// Increase the number of connections of the given peer. If the peer is not known yet it is
@@ -94,7 +127,22 @@ where
     ///
     /// Panics if the number of connections exceeds [`u32::MAX`].
     pub fn increase_peer_connections(&mut self, peer_id: &PeerId) {
-        todo!();
+        let peer_id_index = self.get_or_insert_peer_index(peer_id);
+
+        match self.peers.get_mut(&peer_id_index) {
+            Some((_, num_connections)) => {
+                *num_connections = num_connections
+                    .checked_add(1)
+                    .unwrap_or_else(|| panic!("overflow in number of connections"));
+            }
+            None => {
+                self.peers.insert(peer_id_index, (PeerState::Assignable, 1));
+                let _was_inserted = self
+                    .peers_by_state
+                    .insert((PeerState::Assignable, peer_id_index));
+                debug_assert!(_was_inserted);
+            }
+        }
     }
 
     /// Decrease the number of connections of the given peer. If the number of connections drops to
@@ -106,14 +154,73 @@ where
         &mut self,
         peer_id: &PeerId,
     ) -> Result<(), DecreasePeerConnectionsError> {
-        todo!();
+        let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
+            return Err(DecreasePeerConnectionsError::UnknownPeer);
+        };
+
+        let (state, num_connections) = self
+            .peers
+            .get_mut(&peer_id_index)
+            .unwrap_or_else(|| unreachable!());
+
+        *num_connections -= 1;
+
+        if *num_connections == 0 {
+            let state = state.clone();
+            self.peers.remove(&peer_id_index);
+            let _was_removed = self.peers_by_state.remove(&(state, peer_id_index));
+            debug_assert!(_was_removed);
+
+            let peer_id = self.peer_ids.remove(peer_id_index);
+            let _was_in = self.peer_ids_indices.remove(&peer_id);
+            debug_assert_eq!(_was_in, Some(peer_id_index));
+        }
+
+        Ok(())
     }
 
     /// Randomly select a peer that is not banned and doesn't have a slot assigned to it.
     ///
     /// A `TInstant` must be provider in order to determine if the past bans have expired.
     pub fn pick_assignable_peer(&mut self, now: &TInstant) -> AssignablePeer<'_, TInstant> {
-        todo!();
+        if let Some((_, peer_id_index)) = self
+            .peers_by_state
+            .range(
+                (PeerState::Assignable, usize::MIN)
+                    ..=(
+                        PeerState::Banned {
+                            expires: now.clone(),
+                        },
+                        usize::MAX,
+                    ),
+            )
+            .choose(&mut self.randomness)
+        {
+            return AssignablePeer::Assignable(&self.peer_ids[*peer_id_index]);
+        }
+
+        if let Some((state, _)) = self
+            .peers_by_state
+            .range((
+                ops::Bound::Excluded((
+                    PeerState::Banned {
+                        expires: now.clone(),
+                    },
+                    usize::MAX,
+                )),
+                ops::Bound::Excluded((PeerState::Slot, usize::MIN)),
+            ))
+            .next()
+        {
+            let PeerState::Banned { expires } = state else {
+                unreachable!()
+            };
+            AssignablePeer::AllPeersBanned {
+                next_unban: expires,
+            }
+        } else {
+            AssignablePeer::NoPeer
+        }
     }
 
     /// Assign a slot to the peer.
@@ -123,7 +230,24 @@ where
     ///
     /// Returns an error if the peer is not known to the data structure.
     pub fn assign_slot(&mut self, peer_id: &PeerId) -> Result<(), AssignSlotError> {
-        todo!();
+        let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
+            return Err(AssignSlotError::UnknownPeer);
+        };
+
+        let (state, _) = self
+            .peers
+            .get_mut(&peer_id_index)
+            .unwrap_or_else(|| unreachable!());
+
+        let _was_removed = self.peers_by_state.remove(&(state.clone(), peer_id_index));
+        debug_assert!(_was_removed);
+
+        *state = PeerState::Slot;
+
+        let _was_inserted = self.peers_by_state.insert((PeerState::Slot, peer_id_index));
+        debug_assert!(_was_inserted);
+
+        Ok(())
     }
 
     /// Unassign slot and ban the peer until the given instant.
@@ -136,6 +260,88 @@ where
         peer_id: &PeerId,
         when_unban: TInstant,
     ) -> UnassignSlotAndBan {
-        todo!();
+        let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
+            return UnassignSlotAndBan::UnknownPeer;
+        };
+
+        let (state, _) = self
+            .peers
+            .get_mut(&peer_id_index)
+            .unwrap_or_else(|| unreachable!());
+
+        let return_value = match state {
+            PeerState::Banned { expires } if *expires >= when_unban => {
+                // Ban is already long enough. Nothing to do.
+                return UnassignSlotAndBan::Banned { had_slot: false };
+            }
+            PeerState::Banned { .. } => UnassignSlotAndBan::Banned { had_slot: false },
+            PeerState::Assignable => UnassignSlotAndBan::Banned { had_slot: false },
+            PeerState::Slot => UnassignSlotAndBan::Banned { had_slot: true },
+        };
+
+        let _was_in = self.peers_by_state.remove(&(state.clone(), peer_id_index));
+        debug_assert!(_was_in);
+
+        *state = PeerState::Banned {
+            expires: when_unban,
+        };
+
+        let _was_inserted = self.peers_by_state.insert((state.clone(), peer_id_index));
+        debug_assert!(_was_inserted);
+
+        return_value
     }
+
+    /// Finds the index of the given [`PeerId`] in [`BitswapPeeringStrategy::peer_ids`], or inserts
+    /// one if there is none.
+    fn get_or_insert_peer_index(&mut self, peer_id: &PeerId) -> usize {
+        debug_assert_eq!(self.peer_ids.len(), self.peer_ids_indices.len());
+
+        match self.peer_ids_indices.raw_entry_mut().from_key(peer_id) {
+            hashbrown::hash_map::RawEntryMut::Occupied(occupied_entry) => *occupied_entry.get(),
+            hashbrown::hash_map::RawEntryMut::Vacant(vacant_entry) => {
+                let idx = self.peer_ids.insert(peer_id.clone());
+                vacant_entry.insert(peer_id.clone(), idx);
+                idx
+            }
+        }
+    }
+}
+
+/// See [`BitswapPeeringStrategy::decrease_peer_connections`].
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+pub enum DecreasePeerConnectionsError {
+    /// Peer isn't known to the collection.
+    UnknownPeer,
+}
+
+/// See [`BitswapPeeringStrategy::pick_assignable_peer`].
+pub enum AssignablePeer<'a, TInstant> {
+    /// An assignable peer was found. Note that the peer wasn't assigned yet.
+    Assignable(&'a PeerId),
+    /// No peer was found as all known un-assigned peers are currently in the "banned" state.
+    AllPeersBanned {
+        /// Instant when the first peer will be unbanned.
+        next_unban: &'a TInstant,
+    },
+    /// No un-assigned peer was found.
+    NoPeer,
+}
+
+/// See [`BitswapPeeringStrategy::assign_slot`].
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+pub enum AssignSlotError {
+    /// Peer isn't known to the collection.
+    UnknownPeer,
+}
+
+/// See [`BitswapPeeringStrategy::unassign_slot_and_ban`].
+pub enum UnassignSlotAndBan {
+    /// Peer isn't known to the collection.
+    UnknownPeer,
+    /// Peer has been banned (or ban was extended).
+    Banned {
+        /// `true` if the peer had a slot before this call.
+        had_slot: bool,
+    },
 }
