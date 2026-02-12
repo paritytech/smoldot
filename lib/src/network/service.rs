@@ -238,6 +238,24 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
         collection::SubstreamId,
     )>,
 
+    /// List of peers that have been marked as desired for Bitswap connections. Can include peers
+    /// not connected to the local node yet, even though the current implementation of
+    /// `BitswapPeeringStrategy` only allocates Bitswap slots to connected peers. This is because
+    /// connection in `BitswapPeeringStrategy` is considered established once it started opening,
+    /// while in [`ChainNetwork`] it is considered established once the handshake finishes.
+    // TODO: we should ultimately merge this with [`ChainNetwork::gossip_desired_peers`] with
+    // `GossipKind::Bitswap` once the [`ChainId`] is taken into account for Bitswap connections.
+    bitswap_desired_peers: hashbrown::HashSet<PeerIndex, fnv::FnvBuildHasher>,
+
+    /// List of peers that have been marked as desired for Bitswap connection, and for which a
+    /// healthy connection exists, but for which no substream connection (attempt or established)
+    /// exists.
+    connected_unopened_bitswap_desired: hashbrown::HashSet<PeerIndex, fnv::FnvBuildHasher>,
+
+    /// List of [`PeerId`]s for which a Bitswap substream connection (attempt or established)
+    /// exists, but that are not marked as desired.
+    opened_bitswap_undesired: hashbrown::HashSet<PeerIndex, fnv::FnvBuildHasher>,
+
     /// All the Bitswap protocols, indexed by `PeerId`, direction, and state.
     /// TODO: as with Notifications protocol, unclear whether PeerId should come before or after
     /// the state, same for direction/state.
@@ -419,6 +437,18 @@ where
                 Default::default(),
             ),
             opened_gossip_undesired: hashbrown::HashSet::with_capacity_and_hasher(
+                config.connections_capacity,
+                Default::default(),
+            ),
+            bitswap_desired_peers: hashbrown::HashSet::with_capacity_and_hasher(
+                config.connections_capacity,
+                Default::default(),
+            ),
+            connected_unopened_bitswap_desired: hashbrown::HashSet::with_capacity_and_hasher(
+                config.connections_capacity,
+                Default::default(),
+            ),
+            opened_bitswap_undesired: hashbrown::HashSet::with_capacity_and_hasher(
                 config.connections_capacity,
                 Default::default(),
             ),
@@ -1004,6 +1034,117 @@ where
             .map(move |(_, peer_index, gossip_kind)| (&self.peers[peer_index.0], *gossip_kind))
     }
 
+    /// Marks the given peer as desired for Bitswap connections.
+    ///
+    /// Has no effect if it was already marked as desired.
+    ///
+    /// Returns `true` if the peer has been marked as desired, and `false` if it was already
+    /// marked as desired.
+    pub fn bitswap_insert_desired(&mut self, peer_id: PeerId) -> bool {
+        let peer_index = self.peer_index_or_insert(peer_id);
+
+        if !self.bitswap_desired_peers.insert(peer_index) {
+            return false;
+        }
+
+        self.opened_bitswap_undesired.remove(&peer_index);
+
+        // If the peer has a healthy connection and no outbound Bitswap substream, add to
+        // `connected_unopened_bitswap_desired`.
+        if self
+            .connections_by_peer_id
+            .range((peer_index, ConnectionId::MIN)..=(peer_index, ConnectionId::MAX))
+            .any(|(_, connection_id)| {
+                let state = self.inner.connection_state(*connection_id);
+                state.established && !state.shutting_down
+            })
+            && self
+                .bitswap_substreams_by_peer_id
+                .range(
+                    (
+                        peer_index,
+                        SubstreamDirection::Out,
+                        BitswapSubstreamState::MIN,
+                        SubstreamId::MIN,
+                    )
+                        ..=(
+                            peer_index,
+                            SubstreamDirection::Out,
+                            BitswapSubstreamState::MAX,
+                            SubstreamId::MAX,
+                        ),
+                )
+                .next()
+                .is_none()
+        {
+            self.connected_unopened_bitswap_desired.insert(peer_index);
+        }
+
+        true
+    }
+
+    /// Removes the given peer from the list of Bitswap-desired peers.
+    ///
+    /// Has no effect if it was not marked as desired.
+    ///
+    /// Returns `true` if the peer was previously marked as desired.
+    pub fn bitswap_remove_desired(&mut self, peer_id: &PeerId) -> bool {
+        let Some(&peer_index) = self.peers_by_peer_id.get(peer_id) else {
+            return false;
+        };
+
+        if !self.bitswap_desired_peers.remove(&peer_index) {
+            return false;
+        }
+
+        self.connected_unopened_bitswap_desired.remove(&peer_index);
+
+        // If an outbound Bitswap substream exists, it is now undesired.
+        if self
+            .bitswap_substreams_by_peer_id
+            .range(
+                (
+                    peer_index,
+                    SubstreamDirection::Out,
+                    BitswapSubstreamState::MIN,
+                    SubstreamId::MIN,
+                )
+                    ..=(
+                        peer_index,
+                        SubstreamDirection::Out,
+                        BitswapSubstreamState::MAX,
+                        SubstreamId::MAX,
+                    ),
+            )
+            .next()
+            .is_some()
+        {
+            self.opened_bitswap_undesired.insert(peer_index);
+        }
+
+        self.try_clean_up_peer(peer_index);
+
+        true
+    }
+
+    /// Returns the list of [`PeerId`]s that are marked as Bitswap-desired, and for which a
+    /// healthy connection exists, but for which no Bitswap substream connection attempt exists.
+    pub fn connected_unopened_bitswap_desired(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &PeerId> + Clone {
+        self.connected_unopened_bitswap_desired
+            .iter()
+            .map(|peer_index| &self.peers[peer_index.0])
+    }
+
+    /// Returns the list of [`PeerId`]s for which an outbound Bitswap substream connection or
+    /// connection attempt exists but that are not marked as desired.
+    pub fn opened_bitswap_undesired(&self) -> impl ExactSizeIterator<Item = &PeerId> + Clone {
+        self.opened_bitswap_undesired
+            .iter()
+            .map(|peer_index| &self.peers[peer_index.0])
+    }
+
     /// Adds a single-stream connection to the state machine.
     ///
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
@@ -1293,6 +1434,32 @@ where
                         }
                     }
 
+                    // Insert the new connection in
+                    // `self.connected_unopened_bitswap_desired` if relevant.
+                    if self.bitswap_desired_peers.contains(&actual_peer_index)
+                        && self
+                            .bitswap_substreams_by_peer_id
+                            .range(
+                                (
+                                    actual_peer_index,
+                                    SubstreamDirection::Out,
+                                    BitswapSubstreamState::MIN,
+                                    SubstreamId::MIN,
+                                )
+                                    ..=(
+                                        actual_peer_index,
+                                        SubstreamDirection::Out,
+                                        BitswapSubstreamState::MAX,
+                                        SubstreamId::MAX,
+                                    ),
+                            )
+                            .next()
+                            .is_none()
+                    {
+                        self.connected_unopened_bitswap_desired
+                            .insert(actual_peer_index);
+                    }
+
                     // Try to clean up the expected peer index.
                     // This is done at the very end so that `self` is in a coherent state.
                     let expected_peer_id = expected_peer_index.map(|idx| self.peers[idx.0].clone());
@@ -1376,6 +1543,22 @@ where
                                 ));
                             }
                         }
+                    }
+
+                    // If peer is desired for Bitswap, and we have no coonnection or only shutting
+                    // down connections, remove peer from `connected_unopened_bitswap_desired`.
+                    if self.bitswap_desired_peers.contains(&peer_index)
+                        && !self
+                            .connections_by_peer_id
+                            .range(
+                                (peer_index, ConnectionId::MIN)..=(peer_index, ConnectionId::MAX),
+                            )
+                            .any(|(_, connection_id)| {
+                                let state = self.inner.connection_state(*connection_id);
+                                state.established && !state.shutting_down
+                            })
+                    {
+                        self.connected_unopened_bitswap_desired.remove(&peer_index);
                     }
                 }
 
@@ -3011,12 +3194,35 @@ where
                             ));
                             debug_assert!(_was_inserted);
 
+                            if !self.bitswap_desired_peers.contains(&peer_index) {
+                                self.opened_bitswap_undesired.insert(peer_index);
+                            }
+
                             return Some(Event::BitswapConnected {
                                 peer_id: self.peers[peer_index.0].clone(),
                             });
                         }
                         Err(error) => {
                             self.substreams.remove(&substream_id);
+
+                            self.opened_bitswap_undesired.remove(&peer_index);
+
+                            // Re-insert into `connected_unopened_bitswap_desired`
+                            // if still desired and has a healthy connection.
+                            if self.bitswap_desired_peers.contains(&peer_index)
+                                && self
+                                    .connections_by_peer_id
+                                    .range(
+                                        (peer_index, ConnectionId::MIN)
+                                            ..=(peer_index, ConnectionId::MAX),
+                                    )
+                                    .any(|(_, c)| {
+                                        let state = self.inner.connection_state(*c);
+                                        state.established && !state.shutting_down
+                                    })
+                            {
+                                self.connected_unopened_bitswap_desired.insert(peer_index);
+                            }
 
                             return Some(Event::BitswapOpenFailed {
                                 peer_id: self.peers[peer_index.0].clone(),
@@ -3073,6 +3279,24 @@ where
                         self.inner.close_in_bitswap(substream.3);
                         let _old_substream = self.substreams.remove(&substream.3);
                         debug_assert!(_old_substream.is_some());
+                    }
+
+                    self.opened_bitswap_undesired.remove(&peer_index);
+
+                    // Re-insert into `connected_unopened_bitswap_desired` if
+                    // still desired and has a healthy connection.
+                    if self.bitswap_desired_peers.contains(&peer_index)
+                        && self
+                            .connections_by_peer_id
+                            .range(
+                                (peer_index, ConnectionId::MIN)..=(peer_index, ConnectionId::MAX),
+                            )
+                            .any(|(_, c)| {
+                                let state = self.inner.connection_state(*c);
+                                state.established && !state.shutting_down
+                            })
+                    {
+                        self.connected_unopened_bitswap_desired.insert(peer_index);
                     }
 
                     return Some(Event::BitswapDisconnected {
@@ -4286,6 +4510,12 @@ where
         ));
         debug_assert!(_was_inserted);
 
+        // Update the desired peers tracking.
+        if !self.bitswap_desired_peers.contains(&peer_index) {
+            self.opened_bitswap_undesired.insert(peer_index);
+        }
+        self.connected_unopened_bitswap_desired.remove(&peer_index);
+
         Ok(())
     }
 
@@ -4410,6 +4640,24 @@ where
             debug_assert!(_was_in.is_some());
         }
 
+        self.opened_bitswap_undesired.remove(&peer_index);
+
+        // Re-insert into `connected_unopened_bitswap_desired` if still desired
+        // and has a healthy connection.
+        // TODO: it is not clear if `bitswap_close` should carry the intent to not desire the peer
+        // anymore.
+        if self.bitswap_desired_peers.contains(&peer_index)
+            && self
+                .connections_by_peer_id
+                .range((peer_index, ConnectionId::MIN)..=(peer_index, ConnectionId::MAX))
+                .any(|(_, c)| {
+                    let state = self.inner.connection_state(*c);
+                    state.established && !state.shutting_down
+                })
+        {
+            self.connected_unopened_bitswap_desired.insert(peer_index);
+        }
+
         Ok(())
     }
 
@@ -4530,6 +4778,10 @@ where
             .next()
             .is_some()
         {
+            return;
+        }
+
+        if self.bitswap_desired_peers.contains(&peer_index) {
             return;
         }
 
