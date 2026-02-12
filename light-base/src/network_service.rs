@@ -69,7 +69,7 @@ use smoldot::{
         multiaddr::{self, Multiaddr},
         peer_id,
     },
-    network::{basic_peering_strategy, codec, service},
+    network::{basic_peering_strategy, bitswap_peering_strategy, codec, service},
 };
 
 pub use codec::{CallProofRequestConfig, Role};
@@ -180,6 +180,16 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     },
                     peers_capacity: 50, // TODO: ?
                     chains_capacity: config.chains_capacity,
+                },
+            ),
+            bitswap_peering_strategy: bitswap_peering_strategy::BitswapPeeringStrategy::new(
+                bitswap_peering_strategy::Config {
+                    randomness_seed: {
+                        let mut seed = [0; 32];
+                        config.platform.fill_random_bytes(&mut seed);
+                        seed
+                    },
+                    peers_capacity: 50, // TODO: hardcoded to the same value as `peering_strategy`.
                 },
             ),
             network,
@@ -766,6 +776,9 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// All known peers and their addresses.
     peering_strategy: basic_peering_strategy::BasicPeeringStrategy<ChainId, TPlat::Instant>,
 
+    /// Bitswap slot assignment strategy.
+    bitswap_peering_strategy: bitswap_peering_strategy::BitswapPeeringStrategy<TPlat::Instant>,
+
     /// See [`Config::connections_open_pool_size`].
     connections_open_pool_size: u32,
 
@@ -879,9 +892,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             MessageForChain(ChainId, ToBackgroundChain),
             NetworkEvent(service::Event<async_channel::Sender<service::CoordinatorToConnection>>),
             CanAssignSlot(PeerId, ChainId),
+            CanAssignBitswapSlot(PeerId),
             NextRecentConnectionRestore,
             CanStartConnect(PeerId),
             CanOpenGossip(PeerId, ChainId),
+            CanOpenBitswap(PeerId),
             MessageFromConnection {
                 connection_id: service::ConnectionId,
                 message: service::ConnectionToCoordinator,
@@ -946,6 +961,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     x
                 } {
                     WakeUpReason::CanOpenGossip(peer_id, chain_id)
+                } else if let Some(peer_id) = {
+                    let x = task
+                        .network
+                        .connected_unopened_bitswap_desired()
+                        .choose(&mut task.randomness)
+                        .cloned();
+                    x
+                } {
+                    WakeUpReason::CanOpenBitswap(peer_id)
                 } else if let Some((connection_id, message)) =
                     task.network.pull_message_to_connection()
                 {
@@ -985,6 +1009,23 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 }
                                 basic_peering_strategy::AssignablePeer::NoPeer => continue,
                             }
+                        }
+
+                        match task
+                            .bitswap_peering_strategy
+                            .pick_assignable_peer(&task.platform.now())
+                        {
+                            bitswap_peering_strategy::AssignablePeer::Assignable(peer_id) => {
+                                break 'search WakeUpReason::CanAssignBitswapSlot(peer_id.clone());
+                            }
+                            bitswap_peering_strategy::AssignablePeer::AllPeersBanned {
+                                next_unban,
+                            } => {
+                                if earlier_unban.as_ref().map_or(true, |b| b > next_unban) {
+                                    earlier_unban = Some(next_unban.clone());
+                                }
+                            }
+                            bitswap_peering_strategy::AssignablePeer::NoPeer => {}
                         }
 
                         if let Some(earlier_unban) = earlier_unban {
@@ -1731,6 +1772,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         peer_id
                     );
                 }
+
+                task.bitswap_peering_strategy
+                    .increase_peer_connections(&peer_id);
             }
             WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
                 expected_peer_id: Some(_),
@@ -1796,6 +1840,17 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             reason = "pre-handshake-disconnect"
                         );
                     }
+                }
+
+                if handshake_finished {
+                    task.network.bitswap_remove_desired(&peer_id);
+                    let _ = task.bitswap_peering_strategy.unassign_slot_and_ban(
+                        &peer_id,
+                        task.platform.now() + Duration::from_secs(5),
+                    );
+                    let _ = task
+                        .bitswap_peering_strategy
+                        .decrease_peer_connections(&peer_id);
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
@@ -2004,6 +2059,77 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
+            }
+            WakeUpReason::NetworkEvent(service::Event::BitswapConnected { peer_id }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-open-success",
+                    peer_id
+                );
+            }
+            WakeUpReason::NetworkEvent(service::Event::BitswapOpenFailed { peer_id, error }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-open-error",
+                    peer_id,
+                    ?error
+                );
+                let ban_duration = if error.is_protocol_not_available() {
+                    Duration::from_secs(600)
+                } else {
+                    Duration::from_secs(15)
+                };
+                if matches!(
+                    task.bitswap_peering_strategy
+                        .unassign_slot_and_ban(&peer_id, task.platform.now() + ban_duration,),
+                    bitswap_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true }
+                ) {
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "bitswap-slot-unassigned",
+                        peer_id,
+                        ?ban_duration,
+                        reason = "bitswap-open-failed"
+                    );
+                    task.network.bitswap_remove_desired(&peer_id);
+                }
+            }
+            WakeUpReason::NetworkEvent(service::Event::BitswapMessage { peer_id, message }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-message-received",
+                    peer_id
+                );
+                // TODO: Forward the Bitswap message to the appropriate consumer.
+                let _ = message;
+            }
+            WakeUpReason::NetworkEvent(service::Event::BitswapDisconnected { peer_id }) => {
+                log!(&task.platform, Debug, "network", "bitswap-closed", peer_id);
+                let ban_duration = Duration::from_secs(10);
+                if matches!(
+                    task.bitswap_peering_strategy
+                        .unassign_slot_and_ban(&peer_id, task.platform.now() + ban_duration,),
+                    bitswap_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true }
+                ) {
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "bitswap-slot-unassigned",
+                        peer_id,
+                        ?ban_duration,
+                        reason = "bitswap-closed"
+                    );
+                    task.network.bitswap_remove_desired(&peer_id);
+                }
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -2501,6 +2627,19 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     service::GossipKind::ConsensusTransactions,
                 );
             }
+            WakeUpReason::CanAssignBitswapSlot(peer_id) => {
+                task.bitswap_peering_strategy.assign_slot(&peer_id).unwrap();
+
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-slot-assigned",
+                    peer_id
+                );
+
+                task.network.bitswap_insert_desired(peer_id);
+            }
             WakeUpReason::NextRecentConnectionRestore => {
                 task.num_recent_connection_opening =
                     task.num_recent_connection_opening.saturating_sub(1);
@@ -2712,6 +2851,17 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "gossip-open-start",
                     chain = &task.network[chain_id].log_name,
                     peer_id,
+                );
+            }
+            WakeUpReason::CanOpenBitswap(peer_id) => {
+                task.network.bitswap_open(&peer_id).unwrap();
+
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-open-start",
+                    peer_id
                 );
             }
             WakeUpReason::MessageToConnection {
