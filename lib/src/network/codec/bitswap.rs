@@ -140,7 +140,7 @@ pub struct BitswapMessageRef<'a> {
 /// * `want_type` - Whether to request full blocks or just presence info
 /// * `send_dont_have` - Whether to request DontHave responses
 /// * `full` - Whether this is the full wantlist
-pub fn build_want_message(
+pub fn build_bitswap_message(
     cids: impl Iterator<Item = impl AsRef<[u8]>>,
     want_type: WantType,
     send_dont_have: bool,
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn encode_decode_want_message() {
         let cids = vec![[1u8; 32], [2u8; 32]];
-        let encoded = build_want_message(cids.iter(), WantType::Block, true, false);
+        let encoded = build_bitswap_message(cids.iter(), WantType::Block, true, false);
 
         let decoded = decode_bitswap_message(&encoded).unwrap();
         let wantlist = decoded.wantlist.unwrap();
@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn encode_decode_want_have() {
         let cids = vec![[0xABu8; 32]];
-        let encoded = build_want_message(cids.iter(), WantType::Have, false, true);
+        let encoded = build_bitswap_message(cids.iter(), WantType::Have, false, true);
 
         let decoded = decode_bitswap_message(&encoded).unwrap();
         let wantlist = decoded.wantlist.unwrap();
