@@ -73,7 +73,9 @@ use smoldot::{
 };
 
 pub use codec::{CallProofRequestConfig, Role};
-pub use service::{ChainId, EncodedMerkleProof, PeerId, QueueNotificationError};
+pub use service::{
+    ChainId, EncodedMerkleProof, PeerId, QueueNotificationError, SendBitswapMessageError,
+};
 
 mod tasks;
 
@@ -552,6 +554,47 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
+    /// Send Bitswap message to the given peer.
+    pub async fn send_bitswap_message(
+        &self,
+        target: PeerId,
+        message: Vec<u8>,
+    ) -> Result<(), SendBitswapMessageError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackgroundChain::SendBitswapMessage {
+                target,
+                message,
+                result: tx,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Broadcast Bitswap message to all [`service::ChainNetwork::established_bitswap_desired`]
+    /// peers.
+    ///
+    /// Returns an error if the message cannot be sent to at least one peer.
+    pub async fn broadcast_bitswap_message(
+        &self,
+        message: Vec<u8>,
+    ) -> Result<(), SendBitswapMessageError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackgroundChain::BroadcastBitswapMessage {
+                message,
+                result: tx,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
     /// Marks the given peers as belonging to the given chain, and adds some addresses to these
     /// peers to the address book.
     ///
@@ -771,6 +814,15 @@ enum ToBackgroundChain {
         scale_encoded_header: Vec<u8>,
         is_best: bool,
         result: oneshot::Sender<Result<(), QueueNotificationError>>,
+    },
+    SendBitswapMessage {
+        target: PeerId,
+        message: Vec<u8>,
+        result: oneshot::Sender<Result<(), SendBitswapMessageError>>,
+    },
+    BroadcastBitswapMessage {
+        message: Vec<u8>,
+        result: oneshot::Sender<Result<(), SendBitswapMessageError>>,
     },
     Discover {
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
@@ -1724,6 +1776,46 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &scale_encoded_header,
                     is_best,
                 ));
+            }
+            WakeUpReason::MessageForChain(
+                _chain_id,
+                ToBackgroundChain::SendBitswapMessage {
+                    target,
+                    message,
+                    result,
+                },
+            ) => {
+                let _ = result.send(task.network.bitswap_send_message(&target, message));
+            }
+            WakeUpReason::MessageForChain(
+                _chain_id,
+                ToBackgroundChain::BroadcastBitswapMessage { message, result },
+            ) => {
+                let peers = task
+                    .network
+                    .established_bitswap_desired()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let results = peers
+                    .iter()
+                    .map(|peer| task.network.bitswap_send_message(peer, message.clone()))
+                    .collect::<Vec<_>>(); // we must collect first to send all messages
+
+                // TODO: introspecting a third-party error type below doesn't seem good.
+                let r = if results.iter().any(|r| r.is_ok()) {
+                    Ok(())
+                } else if results
+                    .iter()
+                    .any(|r| matches!(r, Err(SendBitswapMessageError::QueueFull)))
+                {
+                    // `QueueFull` has higher priority than `NoConnection` for possible
+                    // back-pressure in higher level code.
+                    Err(SendBitswapMessageError::QueueFull)
+                } else {
+                    Err(SendBitswapMessageError::NoConnection)
+                };
+
+                let _ = result.send(r);
             }
             WakeUpReason::MessageForChain(
                 chain_id,
