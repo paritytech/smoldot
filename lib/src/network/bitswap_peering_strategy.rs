@@ -56,7 +56,7 @@
 //       request is received through the RPC endpoint dedicated to this chain.
 
 // TODO: There is no reason for Bitswap connections to be opened to peers that are already
-//       connected. Instead, we can initiate network connections to peers sourced from the DHT
+//       connected. Instead, we should initiate network connections to peers sourced from the DHT
 //       specifically for Bitswap protocol. This way we can find peers supporting Bitswap protocol
 //       even if all the already connected peers do not support Bitswap.
 
