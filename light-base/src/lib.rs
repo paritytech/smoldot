@@ -96,6 +96,7 @@ use smoldot::{
     libp2p::{multiaddr, peer_id},
 };
 
+mod bitswap_service;
 mod database;
 mod json_rpc_service;
 mod runtime_service;
