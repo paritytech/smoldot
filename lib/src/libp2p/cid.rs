@@ -120,6 +120,15 @@ impl CidPrefix {
             .expect("CidPrefix is always valid; qed")
             .mh_type
     }
+
+    /// Build full CID from this prefix and hash digest.
+    pub fn with_digest(self, digest: &[u8; 32]) -> Cid {
+        // We don't need to check the `mh_len` is correct because it was checked upon construction.
+        let mut bytes = self.0;
+        bytes.extend_from_slice(digest);
+
+        Cid(bytes)
+    }
 }
 
 /// Multihash algorithm types supported.
@@ -228,7 +237,7 @@ fn decode_cid<'a>(bytes: &'a [u8]) -> Result<DecodedCid<'a>, ParseError> {
 struct DecodedCidPrefix {
     codec: u64,
     mh_type: MultihashType,
-    mh_len: usize,
+    // We only support 32-byte hash digests.
 }
 
 fn decode_cid_prefix(bytes: &[u8]) -> Result<DecodedCidPrefix, ParseError> {
@@ -250,11 +259,7 @@ fn decode_cid_prefix(bytes: &[u8]) -> Result<DecodedCidPrefix, ParseError> {
                 return Err(ParseError::InvalidDigestSize(mh_len));
             }
 
-            Ok(DecodedCidPrefix {
-                codec,
-                mh_type,
-                mh_len,
-            })
+            Ok(DecodedCidPrefix { codec, mh_type })
         }
         Err(_) => Err(ParseError::DecodeError),
     }
@@ -405,6 +410,7 @@ mod tests {
         let prefix = cid.prefix();
         assert_eq!(prefix.0, sample_prefix_bytes());
         assert_eq!(prefix.multihash_type(), MultihashType::Sha2_256);
+        assert_eq!(prefix.with_digest(&[0; 32]), cid);
     }
 
     #[test]
