@@ -40,10 +40,11 @@
 //! the request (request and response messages are sent asynchronously in Bitswap through
 //! independent substreams).
 
+use alloc::vec::Vec;
 use base32::Alphabet;
 use core::{fmt, str::FromStr};
 
-/// IPFS Content Identifier.
+/// CID: IPFS Content Identifier.
 ///
 /// We don't need to access individual fields of CID so keep it in the binary form, yet check that
 /// it is valid upon construction.
@@ -62,6 +63,14 @@ impl Cid {
         let _ = decode_cid(&bytes)?;
 
         Ok(Cid(bytes))
+    }
+
+    /// Extract CID prefix.
+    pub fn prefix(&self) -> CidPrefix {
+        let decoded = decode_cid(&self.0).expect("Cid is always valid; qed");
+        let prefix_len = self.0.len() - decoded.digest.len();
+
+        CidPrefix(self.0[..prefix_len].to_vec())
     }
 }
 
@@ -84,6 +93,32 @@ impl fmt::Display for Cid {
 impl fmt::Debug for Cid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
+    }
+}
+
+/// CID prefix: everything in a CID except the hash digest.
+///
+/// Binary representation: `<leb128(cid_version)><leb128(codec)><leb128(mh_type)><leb128(mh_len)>`
+///
+/// In Bitswap block responses, only the CID prefix is sent alongside the data block. The receiver
+/// must compute the hash digest to recover the full CID and match the response to a request.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CidPrefix(Vec<u8>);
+
+impl CidPrefix {
+    /// Create new CID prefix from the binary representation, checking the representation is valid.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParseError> {
+        let _ = decode_cid_prefix(&bytes)?;
+
+        Ok(CidPrefix(bytes))
+    }
+
+    /// Return the multihash algorithm type used in this prefix.
+    pub fn multihash_type(&self) -> MultihashType {
+        // Prefix was validated at construction time, so this cannot fail.
+        decode_cid_prefix(&self.0)
+            .expect("CidPrefix is always valid; qed")
+            .mh_type
     }
 }
 
@@ -188,6 +223,43 @@ fn decode_cid<'a>(bytes: &'a [u8]) -> Result<DecodedCid<'a>, ParseError> {
     }
 }
 
+#[derive(Debug)]
+#[allow(unused)]
+struct DecodedCidPrefix {
+    codec: u64,
+    mh_type: MultihashType,
+    mh_len: usize,
+}
+
+fn decode_cid_prefix(bytes: &[u8]) -> Result<DecodedCidPrefix, ParseError> {
+    match nom::Parser::parse(
+        &mut nom::combinator::all_consuming(parse_cid_prefix::<nom::error::Error<&[u8]>>),
+        bytes,
+    ) {
+        Ok((_rest, (version, codec, mh_type, mh_len))) => {
+            debug_assert!(_rest.is_empty());
+
+            if version != 1 {
+                return Err(ParseError::UnsupportedCidVersion);
+            }
+
+            let mh_type =
+                MultihashType::from_code(mh_type).ok_or(ParseError::UnsupportedMultihash)?;
+
+            if mh_len != 32 {
+                return Err(ParseError::InvalidDigestSize(mh_len));
+            }
+
+            Ok(DecodedCidPrefix {
+                codec,
+                mh_type,
+                mh_len,
+            })
+        }
+        Err(_) => Err(ParseError::DecodeError),
+    }
+}
+
 fn parse_cid<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], (u64, u64, u64, &'a [u8]), E> {
@@ -197,6 +269,20 @@ fn parse_cid<'a, E: nom::error::ParseError<&'a [u8]>>(
             crate::util::leb128::nom_leb128_u64,
             crate::util::leb128::nom_leb128_u64,
             nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+        ),
+        bytes,
+    )
+}
+
+fn parse_cid_prefix<'a, E: nom::error::ParseError<&'a [u8]>>(
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], (u64, u64, u64, usize), E> {
+    nom::Parser::parse(
+        &mut (
+            crate::util::leb128::nom_leb128_u64,
+            crate::util::leb128::nom_leb128_u64,
+            crate::util::leb128::nom_leb128_u64,
+            crate::util::leb128::nom_leb128_usize,
         ),
         bytes,
     )
