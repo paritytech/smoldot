@@ -45,9 +45,13 @@
 // TODO: do we need a "reputation system" to prefer peers that respond faster then others?
 
 use crate::{log, network_service, platform::PlatformRef, util};
+use core::str::FromStr;
 use futures_channel::oneshot;
-use hashbrown::{HashMap, HashSet};
+use smoldot::libp2p::cid::{self, Cid};
 use std::{collections::BTreeSet, sync::Arc};
+
+// TODO: how many parallel requests to expect?
+const PARALLEL_REQUESTS: usize = 32;
 
 /// Configuration for a [`BitswapService`].
 pub struct Config<TPlat: PlatformRef> {
@@ -56,10 +60,8 @@ pub struct Config<TPlat: PlatformRef> {
     /// > **Note**: This name will be directly printed out. Any special character should already
     /// >           have been filtered out from this name.
     pub log_name: String,
-
     /// Access to the platform's capabilities.
     pub platform: TPlat,
-
     /// Access to the network.
     pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 }
@@ -72,12 +74,53 @@ pub struct BitswapService {
 
 impl BitswapService {
     /// Initializes the Bitswap service with the given configuration.
-    pub fn new<TPlat: PlatformRef>(config: Config<TPlat>) -> Self {
-        todo!()
+    pub fn new<TPlat: PlatformRef>(
+        Config {
+            log_name,
+            platform,
+            network_service,
+        }: Config<TPlat>,
+    ) -> Self {
+        let (messages_tx, messages_rx) = async_channel::bounded(32);
+
+        let log_target = format!("bitswap-service-{}", log_name);
+
+        let task = Box::pin(background_task(BackgroundTask {
+            log_target: log_target.clone(),
+            messages_rx,
+            network_service,
+            next_request_id: RequestId(0),
+            requests: hashbrown::HashMap::with_capacity_and_hasher(
+                PARALLEL_REQUESTS,
+                fnv::FnvBuildHasher::default(),
+            ),
+            requests_by_timeout: BTreeSet::new(),
+            requests_by_cid: hashbrown::HashMap::with_capacity_and_hasher(
+                PARALLEL_REQUESTS,
+                util::SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    platform.fill_random_bytes(&mut seed);
+                    seed
+                }),
+            ),
+        }));
+
+        platform.spawn_task(log_target.clone().into(), {
+            let platform = platform.clone();
+            async move {
+                task.await;
+                log!(&platform, Debug, &log_target, "shutdown");
+            }
+        });
+
+        BitswapService { messages_tx }
     }
 
     /// Request a Bitswap block.
     pub async fn bitswap_block(&self, cid: String) -> Result<Vec<u8>, BitswapBlockError> {
+        // Decoding CID is fast, so we can fail early on the API user side.
+        let cid = Cid::from_str(&cid).map_err(BitswapBlockError::CidParsingError)?;
+
         let (result_tx, result_rx) = oneshot::channel();
 
         self.messages_tx
@@ -92,6 +135,8 @@ impl BitswapService {
 /// Error by [`BitswapService::bitswap_block`].
 #[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 enum BitswapBlockError {
+    /// Invalid/unsupported CID.
+    CidParsingError(cid::ParseError),
     /// No Bitswap peers connected.
     NoPeers,
     // TODO: other errors.
@@ -99,7 +144,7 @@ enum BitswapBlockError {
 
 enum ToBackground {
     BitswapBlock {
-        cid: String,
+        cid: Cid,
         result_tx: oneshot::Sender<Result<Vec<u8>, BitswapBlockError>>,
     },
 }
@@ -112,11 +157,26 @@ impl RequestId {
     const MAX: u64 = u64::MAX;
 }
 
-// TODO: replace with a binary CID representation.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct Cid(String);
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum RequestStage {
+    /// We are waiting for peers to respond to our "have" request.
+    Have,
+    /// At least one peer has responded to a "have" request and we requested the actual data from
+    /// one of the peers.
+    Block,
+}
+
+#[derive(Debug)]
+struct Request<TPlat: PlatformRef> {
+    result_tx: oneshot::Sender<Result<Vec<u8>, BitswapBlockError>>,
+    timeout: TPlat::Instant,
+    stage: RequestStage,
+    cid: Cid,
+}
 
 struct BackgroundTask<TPlat: PlatformRef> {
+    /// Log target.
+    log_target: String,
     /// Messages from [`BitswapService`].
     messages_rx: async_channel::Receiver<ToBackground>,
     /// Underlying network to send/receive Bitswap messages.
@@ -124,26 +184,15 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Next request ID to use.
     next_request_id: RequestId,
     /// All active requests. The values are (result_tx, timeout).
-    requests: HashMap<
-        RequestId,
-        (
-            oneshot::Sender<Result<Vec<u8>, BitswapBlockError>>,
-            TPlat::Instant,
-        ),
-        fnv::FnvBuildHasher,
-    >,
-    /// Request timeouts ordered by time.
-    timeouts_by_time: BTreeSet<(TPlat::Instant, RequestId)>,
-    /// Requests in a "have" stage.
-    have_requests: HashMap<RequestId, Cid, fnv::FnvBuildHasher>,
-    /// Requests in a "have" stage ordered by CID.
-    have_requests_by_cid: HashMap<Cid, Vec<RequestId>, util::SipHasherBuild>,
-    /// Requests in a "block" stage.
-    block_requests: HashMap<RequestId, Cid, fnv::FnvBuildHasher>,
-    /// Requests in a "block" stage ordered by CID.
-    block_requests_by_cid: HashMap<Cid, Vec<RequestId>, util::SipHasherBuild>,
+    requests: hashbrown::HashMap<RequestId, Request<TPlat>, fnv::FnvBuildHasher>,
+    /// Requests ordered by timeout.
+    requests_by_timeout: BTreeSet<(TPlat::Instant, RequestId)>,
+    /// Requests ordered by CID.
+    requests_by_cid: hashbrown::HashMap<Cid, Vec<RequestId>, util::SipHasherBuild>,
 }
 
-fn background_task<TPlat: PlatformRef>(task: BackgroundTask<TPlat>) {
+impl<TPlat: PlatformRef> BackgroundTask<TPlat> {}
+
+async fn background_task<TPlat: PlatformRef>(task: BackgroundTask<TPlat>) {
     todo!()
 }
