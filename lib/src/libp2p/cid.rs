@@ -292,24 +292,69 @@ fn parse_cid_prefix<'a, E: nom::error::ParseError<&'a [u8]>>(
 mod tests {
     use super::*;
 
-    /// Build valid CIDv1 bytes: version=1, codec=0x55 (raw), sha2-256, 32-byte zero digest.
-    fn sample_cid_bytes() -> Vec<u8> {
-        let mut bytes = vec![0x01, 0x55, 0x12, 0x20];
-        bytes.extend_from_slice(&[0u8; 32]);
-        bytes
-    }
-
-    /// The prefix portion of `sample_cid_bytes()`.
+    /// Build valid CIDv1 prefix: version=1, codec=0x55 (raw), sha2-256.
     fn sample_prefix_bytes() -> Vec<u8> {
         vec![0x01, 0x55, 0x12, 0x20]
     }
 
+    /// Full CIDv1 built from `sample_prefix_bytes` with zero hash digest.
+    fn sample_cid_bytes() -> Vec<u8> {
+        let mut bytes = sample_prefix_bytes();
+        bytes.extend_from_slice(&[0u8; 32]);
+        bytes
+    }
+
     #[test]
-    fn cid_prefix_from_cid_roundtrip() {
-        let cid = Cid::from_bytes(sample_cid_bytes()).unwrap();
-        let prefix = cid.prefix();
-        assert_eq!(prefix.0, sample_prefix_bytes());
-        assert_eq!(prefix.multihash_type(), MultihashType::Sha2_256);
+    fn cid_from_bytes_valid() {
+        assert!(Cid::from_bytes(sample_cid_bytes()).is_ok());
+    }
+
+    #[test]
+    fn cid_from_bytes_rejects_prefix_only() {
+        // A prefix without the digest is not a valid CID.
+        assert!(Cid::from_bytes(sample_prefix_bytes()).is_err());
+    }
+
+    #[test]
+    fn cid_from_bytes_rejects_empty() {
+        assert!(Cid::from_bytes(vec![]).is_err());
+    }
+
+    #[test]
+    fn cid_from_bytes_rejects_truncated() {
+        // Only version and codec, missing mh_type, mh_len, and digest.
+        assert!(Cid::from_bytes(vec![0x01, 0x55]).is_err());
+    }
+
+    #[test]
+    fn cid_from_bytes_rejects_unsupported_version() {
+        let mut bytes = vec![0x02, 0x55, 0x12, 0x20];
+        bytes.extend_from_slice(&[0u8; 32]);
+        assert!(Cid::from_bytes(bytes).is_err());
+    }
+
+    #[test]
+    fn cid_from_bytes_rejects_unsupported_multihash() {
+        // mh_type = 0x00, which is not sha2-256 or blake2b-256.
+        let mut bytes = vec![0x01, 0x55, 0x00, 0x20];
+        bytes.extend_from_slice(&[0u8; 32]);
+        assert!(Cid::from_bytes(bytes).is_err());
+    }
+
+    #[test]
+    fn cid_from_bytes_rejects_wrong_digest_size() {
+        // mh_len = 16 with only 16 bytes of digest.
+        let mut bytes = vec![0x01, 0x55, 0x12, 0x10];
+        bytes.extend_from_slice(&[0u8; 16]);
+        assert!(Cid::from_bytes(bytes).is_err());
+    }
+
+    #[test]
+    fn cid_from_bytes_rejects_trailing_bytes() {
+        // Valid CID followed by an extra byte.
+        let mut bytes = sample_cid_bytes();
+        bytes.push(0xff);
+        assert!(Cid::from_bytes(bytes).is_err());
     }
 
     #[test]
@@ -352,6 +397,14 @@ mod tests {
     fn cid_prefix_from_bytes_rejects_wrong_digest_size() {
         // mh_len = 16 instead of 32.
         assert!(CidPrefix::from_bytes(vec![0x01, 0x55, 0x12, 0x10]).is_err());
+    }
+
+    #[test]
+    fn cid_prefix_from_cid_roundtrip() {
+        let cid = Cid::from_bytes(sample_cid_bytes()).unwrap();
+        let prefix = cid.prefix();
+        assert_eq!(prefix.0, sample_prefix_bytes());
+        assert_eq!(prefix.multihash_type(), MultihashType::Sha2_256);
     }
 
     #[test]
