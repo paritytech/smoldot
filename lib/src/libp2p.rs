@@ -86,6 +86,7 @@
 //! See also the documentation of [`collection`] for more information.
 //!
 
+pub mod cid;
 pub mod collection;
 pub mod connection;
 pub mod multiaddr;

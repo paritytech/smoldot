@@ -38,6 +38,7 @@ wasmtime = [
 arrayvec = { version = "0.7.6", default-features = false }
 async-lock = { version = "3.0.0", default-features = false }
 atomic-take = { version = "1.1.0" }
+base32 = { version = "0.5.1" }
 base64 = { version = "0.22.0", default-features = false, features = ["alloc"] }
 bip39 = { version = "2.0.0", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
