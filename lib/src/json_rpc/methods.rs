@@ -523,7 +523,7 @@ define_methods! {
     chainHead_unstable_finalizedDatabase(#[rename = "maxSizeBytes"] max_size_bytes: Option<u64>) -> Cow<'a, str>,
 
     /// Request a data block by its CID from one of the connected peers that have it.
-    bitswap_block(cid: String) -> Option<HexString>,
+    bitswap_block(cid: String) -> HexString,
 }
 
 define_methods! {

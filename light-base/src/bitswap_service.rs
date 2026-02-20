@@ -56,7 +56,7 @@ use futures_lite::FutureExt as _;
 use futures_util::{StreamExt as _, future, stream::FuturesUnordered};
 use itertools::Itertools;
 use smoldot::{
-    libp2p::cid::{self, Cid, CidPrefix, MultihashType},
+    libp2p::cid::{self, Cid, CidPrefix},
     network::codec::{Block, BlockPresence, BlockPresenceType, WantType, build_bitswap_message},
 };
 use std::{
@@ -65,7 +65,7 @@ use std::{
 };
 
 // TODO: how many parallel requests to expect?
-const PARALLEL_REQUESTS: usize = 32;
+const PARALLEL_REQUESTS: usize = 50; // 100 MiB of 2 MiB chunks.
 
 /// Configuration for a [`BitswapService`].
 pub struct Config<TPlat: PlatformRef> {
@@ -154,6 +154,7 @@ impl BitswapService {
 #[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum BitswapBlockError {
     /// Invalid/unsupported CID.
+    #[display("Invalid/unsupported CID: {_0}")]
     CidParsingError(cid::ParseError),
     /// No Bitswap peers connected, can't issue "have" request.
     NoPeers,
@@ -185,7 +186,7 @@ enum ToBackground {
 struct RequestId(u64);
 
 impl RequestId {
-    const MIN: RequestId = RequestId(u64::MIN);
+    const _MIN: RequestId = RequestId(u64::MIN);
     const MAX: RequestId = RequestId(u64::MAX);
 }
 
@@ -206,6 +207,12 @@ struct Request<TPlat: PlatformRef> {
     cid: Cid,
 }
 
+type HaveBroadcastResult = (
+    Result<(), SendBitswapMessageError>,
+    Cid,
+    oneshot::Sender<Result<Vec<u8>, BitswapBlockError>>,
+);
+
 struct BackgroundTask<TPlat: PlatformRef> {
     /// Log target.
     log_target: String,
@@ -216,20 +223,8 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Events coming from the network service. `None` if not subscribed yet.
     from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::BitswapEvent>>>>,
     /// Initiated Bitswap "have" broadcast.
-    pending_have_broadcast: Option<
-        Pin<
-            Box<
-                dyn Future<
-                        Output = (
-                            Result<(), SendBitswapMessageError>,
-                            Cid,
-                            oneshot::Sender<Result<Vec<u8>, BitswapBlockError>>,
-                        ),
-                    > + Send
-                    + Sync,
-            >,
-        >,
-    >,
+    pending_have_broadcast:
+        Option<Pin<Box<dyn Future<Output = HaveBroadcastResult> + Send + Sync>>>,
     /// Initiated Bitswap "block" requests.
     pending_block_requests: FuturesUnordered<
         Pin<Box<dyn Future<Output = (Result<(), SendBitswapMessageError>, Cid)> + Send + Sync>>,
@@ -238,7 +233,12 @@ struct BackgroundTask<TPlat: PlatformRef> {
     platform: TPlat,
     /// Next request ID to use.
     next_request_id_inner: u64,
-    /// All active requests. The values are (result_tx, timeout).
+
+    // The fields below are populated if the broadcast of the "have" message was successfully
+    // forwarded to the network. Request is tracked from this moment until the requested data is
+    // received or the request time-outs.
+    //
+    /// All tracked requests.
     requests: hashbrown::HashMap<RequestId, Request<TPlat>, fnv::FnvBuildHasher>,
     /// Requests ordered by timeout.
     requests_by_timeout: BTreeSet<(TPlat::Instant, RequestId)>,
@@ -267,23 +267,17 @@ fn bitswap_block_message(cid: &Cid) -> Vec<u8> {
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
-        // Yield at every loop to provide better tasks granularity.
+        // Make sure to yield at every loop to provide better tasks granularity.
         futures_lite::future::yield_now().await;
 
         enum WakeUpReason {
             MustSubscribeNetworkEvents,
             NetworkEvent(network_service::BitswapEvent),
             Message(ToBackground),
-            HaveBroadcastResult(
-                (
-                    Result<(), SendBitswapMessageError>,
-                    Cid,
-                    oneshot::Sender<Result<Vec<u8>, BitswapBlockError>>,
-                ),
-            ),
+            HaveBroadcastResult(HaveBroadcastResult),
             BlockRequestResult((Result<(), SendBitswapMessageError>, Cid)),
-            ForegroundClosed,
             RequestTimeout,
+            ForegroundClosed,
         }
 
         let wake_up_reason = {
@@ -348,6 +342,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             .await
         };
 
+        // The handlers below are mostly in the order of a typical flow.
         match wake_up_reason {
             WakeUpReason::MustSubscribeNetworkEvents => {
                 debug_assert!(task.from_network_service.is_none());
@@ -363,9 +358,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let network_service = task.network_service.clone();
 
                 // TODO: does it make sense to group the new request with the existing ones for the
-                //       same CID?
+                //       same CID and don't actually broadcast the "have" request?
 
-                // Network service can be back-pressuring, so we run this as background future.
+                // Network service can be back-pressuring, so we run this in the background.
                 task.pending_have_broadcast = Some(Box::pin(async move {
                     let result = network_service.broadcast_bitswap_message(message).await;
                     (result, cid, result_tx)
@@ -375,13 +370,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // We either succeeded or failed in broadcasting the "have" request.
 
                 if let Err(err) = result {
+                    // The request is not tracked yet, so we just report the failure.
                     let _ = result_tx.send(Err(err.into()));
                     continue;
                 }
 
+                // Start tracking the request.
                 let request_id = task.allocate_request_id();
                 let timeout = task.platform.now() + Duration::from_secs(10); // TODO: 5? 20?
-                // TODO: should we count the timeout since receiving the foreground message?
 
                 task.requests.insert(
                     request_id,
@@ -403,7 +399,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 for BlockPresence { cid, presence_type } in message.block_presences {
                     // TODO: we might want to track what peers we sent the "have" request to and
-                    // fail the request as soon as everyone responded `DontHave`, not waiting for
+                    // fail the request as soon as everyone responds `DontHave`, not waiting for
                     // timeout to kick in. Currently we are only interested in `Have` responses.
                     let BlockPresenceType::Have = presence_type else {
                         break;
@@ -445,6 +441,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             request.stage = RequestStage::Block;
                             needs_block_request = true;
                         }
+                        // TODO: if at least one request above is in the `Block` stage already,
+                        //       does this mean we can skip sending another "block" request?
                     }
 
                     if needs_block_request {

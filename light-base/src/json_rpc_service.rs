@@ -40,7 +40,7 @@
 mod background;
 
 use crate::{
-    log, network_service, platform::PlatformRef, runtime_service, sync_service,
+    bitswap_service, log, network_service, platform::PlatformRef, runtime_service, sync_service,
     transactions_service,
 };
 
@@ -96,6 +96,9 @@ pub struct Config<TPlat: PlatformRef> {
     /// Service that provides a ready-to-be-called runtime for the current best block.
     pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
+    /// Service that fulfills IPFS CID requests.
+    pub bitswap_service: Arc<bitswap_service::BitswapService>,
+
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
     /// Type of chain, as found in the chain specification.
@@ -146,6 +149,7 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
                 sync_service: config.sync_service,
                 transactions_service: config.transactions_service,
                 runtime_service: config.runtime_service,
+                bitswap_service: config.bitswap_service,
                 chain_name: config.chain_name,
                 chain_ty: config.chain_ty,
                 chain_properties_json: config.chain_properties_json,
