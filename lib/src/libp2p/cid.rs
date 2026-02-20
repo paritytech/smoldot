@@ -42,7 +42,9 @@
 
 use alloc::vec::Vec;
 use base32::Alphabet;
+use blake2_rfc::blake2b::blake2b;
 use core::{fmt, str::FromStr};
+use sha2::{Digest as _, Sha256};
 
 /// CID: IPFS Content Identifier.
 ///
@@ -81,6 +83,12 @@ impl FromStr for Cid {
         let bytes = multibase_base32_decode(s)?;
 
         Self::from_bytes(bytes)
+    }
+}
+
+impl AsRef<[u8]> for Cid {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -129,6 +137,13 @@ impl CidPrefix {
 
         Cid(bytes)
     }
+
+    /// Build full CID from thhi prefix, calculating the missing digest.
+    pub fn with_digest_of(self, bytes: &[u8]) -> Cid {
+        let digest = self.multihash_type().digest(bytes);
+
+        self.with_digest(&digest)
+    }
 }
 
 /// Multihash algorithm types supported.
@@ -143,6 +158,17 @@ pub enum MultihashType {
 }
 
 impl MultihashType {
+    pub fn digest(&self, bytes: &[u8]) -> [u8; 32] {
+        match self {
+            MultihashType::Sha2_256 => Sha256::digest(bytes).into(),
+            MultihashType::Blake2b256 => blake2b(32, &[], bytes)
+                .as_bytes()
+                .to_owned()
+                .try_into()
+                .expect("correct size passed to constructor; qed"),
+        }
+    }
+
     fn from_code(code: u64) -> Option<Self> {
         match code {
             0x12 => Some(MultihashType::Sha2_256),
