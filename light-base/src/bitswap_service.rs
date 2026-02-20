@@ -44,11 +44,22 @@
 //
 // TODO: do we need a "reputation system" to prefer peers that respond faster then others?
 
-use crate::{log, network_service, platform::PlatformRef, util};
-use core::str::FromStr;
+use crate::{
+    log,
+    network_service::{self, BitswapEvent},
+    platform::PlatformRef,
+    util,
+};
+use core::{ops::Bound, pin::Pin, str::FromStr};
 use futures_channel::oneshot;
+use futures_lite::FutureExt as _;
+use futures_util::{StreamExt as _, future};
+use itertools::Itertools;
 use smoldot::libp2p::cid::{self, Cid};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    sync::Arc,
+};
 
 // TODO: how many parallel requests to expect?
 const PARALLEL_REQUESTS: usize = 32;
@@ -87,8 +98,10 @@ impl BitswapService {
 
         let task = Box::pin(background_task(BackgroundTask {
             log_target: log_target.clone(),
-            messages_rx,
+            messages_rx: Box::pin(messages_rx),
             network_service,
+            from_network_service: None,
+            platform: platform.clone(),
             next_request_id: RequestId(0),
             requests: hashbrown::HashMap::with_capacity_and_hasher(
                 PARALLEL_REQUESTS,
@@ -134,12 +147,13 @@ impl BitswapService {
 
 /// Error by [`BitswapService::bitswap_block`].
 #[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
-enum BitswapBlockError {
+pub enum BitswapBlockError {
     /// Invalid/unsupported CID.
     CidParsingError(cid::ParseError),
     /// No Bitswap peers connected.
     NoPeers,
-    // TODO: other errors.
+    /// Request timeout.
+    Timeout,
 }
 
 enum ToBackground {
@@ -153,8 +167,8 @@ enum ToBackground {
 struct RequestId(u64);
 
 impl RequestId {
-    const MIN: u64 = u64::MIN;
-    const MAX: u64 = u64::MAX;
+    const MIN: RequestId = RequestId(u64::MIN);
+    const MAX: RequestId = RequestId(u64::MAX);
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -178,21 +192,132 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Log target.
     log_target: String,
     /// Messages from [`BitswapService`].
-    messages_rx: async_channel::Receiver<ToBackground>,
+    messages_rx: Pin<Box<async_channel::Receiver<ToBackground>>>,
     /// Underlying network to send/receive Bitswap messages.
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+    /// Events coming from the network service. `None` if not subscribed yet.
+    from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::BitswapEvent>>>>,
+    /// Platform access.
+    platform: TPlat,
     /// Next request ID to use.
     next_request_id: RequestId,
     /// All active requests. The values are (result_tx, timeout).
     requests: hashbrown::HashMap<RequestId, Request<TPlat>, fnv::FnvBuildHasher>,
     /// Requests ordered by timeout.
     requests_by_timeout: BTreeSet<(TPlat::Instant, RequestId)>,
-    /// Requests ordered by CID.
-    requests_by_cid: hashbrown::HashMap<Cid, Vec<RequestId>, util::SipHasherBuild>,
+    /// Requests ordered by CID. The request IDs in the `VecDeque` are ordered by their timeout if
+    /// the platform implementation of `now` is monothonic (true for
+    /// [`crate::platform::DefaultPlatform`]).
+    requests_by_cid: hashbrown::HashMap<Cid, VecDeque<RequestId>, util::SipHasherBuild>,
 }
 
 impl<TPlat: PlatformRef> BackgroundTask<TPlat> {}
 
-async fn background_task<TPlat: PlatformRef>(task: BackgroundTask<TPlat>) {
-    todo!()
+async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
+    loop {
+        // Yield at every loop to provide better tasks granularity.
+        futures_lite::future::yield_now().await;
+
+        enum WakeUpReason {
+            MustSubscribeNetworkEvents,
+            NetworkEvent(network_service::BitswapEvent),
+            Message(ToBackground),
+            ForegroundClosed,
+            RequestTimeout,
+        }
+
+        let wake_up_reason = {
+            async {
+                if let Some(from_network_service) = task.from_network_service.as_mut() {
+                    match from_network_service.next().await {
+                        Some(ev) => WakeUpReason::NetworkEvent(ev),
+                        None => {
+                            task.from_network_service = None;
+                            WakeUpReason::MustSubscribeNetworkEvents
+                        }
+                    }
+                } else {
+                    WakeUpReason::MustSubscribeNetworkEvents
+                }
+            }
+            .or(async {
+                task.messages_rx
+                    .next()
+                    .await
+                    .map_or(WakeUpReason::ForegroundClosed, WakeUpReason::Message)
+            })
+            .or(async {
+                if let Some((first_timeout, _request_id)) = task.requests_by_timeout.first() {
+                    let now = task.platform.now();
+
+                    if now < *first_timeout {
+                        task.platform.sleep(first_timeout.clone() - now).await;
+                    }
+
+                    WakeUpReason::RequestTimeout
+                } else {
+                    future::pending().await
+                }
+            })
+            .await
+        };
+
+        match wake_up_reason {
+            WakeUpReason::MustSubscribeNetworkEvents => {
+                debug_assert!(task.from_network_service.is_none());
+                task.from_network_service = Some(Box::pin(
+                    // As documented, `subscribe().await` is expected to return quickly.
+                    task.network_service.subscribe_bitswap().await,
+                ));
+            }
+            WakeUpReason::NetworkEvent(BitswapEvent::BitswapMessage { peer_id, message }) => {
+                todo!()
+            }
+            WakeUpReason::Message(ToBackground::BitswapBlock { cid, result_tx }) => {
+                todo!()
+            }
+            WakeUpReason::RequestTimeout => {
+                let now = task.platform.now();
+
+                let requests = task
+                    .requests_by_timeout
+                    .range(..=(now, RequestId::MAX))
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                for (timeout, request_id) in requests {
+                    task.requests_by_timeout.remove(&(timeout, request_id));
+
+                    let request = task.requests.remove(&request_id).unwrap();
+
+                    match task.requests_by_cid.entry(request.cid) {
+                        hashbrown::hash_map::Entry::Occupied(mut entry) => {
+                            // The next request to timeout should be always at the front of the
+                            // queue, but in order to be resistant to platform bugs where `now` is
+                            // not monothonic (and requests are ordered incorrectly), we use find &
+                            // remove. It should be almost as fast as `pop_front` if the element is
+                            // indeed at the front.
+                            let (index, _) = entry
+                                .get()
+                                .iter()
+                                .find_position(|id| **id == request_id)
+                                .unwrap();
+                            entry.get_mut().remove(index);
+
+                            if entry.get().is_empty() {
+                                entry.remove();
+                            }
+                        }
+                        hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
+                    }
+
+                    let _ = request.result_tx.send(Err(BitswapBlockError::Timeout));
+                }
+            }
+            WakeUpReason::ForegroundClosed => {
+                // Foreground closed the control channel, end the task.
+                return;
+            }
+        }
+    }
 }

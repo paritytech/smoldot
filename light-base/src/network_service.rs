@@ -345,6 +345,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     /// If `None` is yielded and the [`NetworkService`] is still alive, you should call
     /// [`NetworkServiceChain::subscribe`] again to obtain a new `Receiver`.
     ///
+    // TODO: the last section of the doc seem to contradict itself.
     pub async fn subscribe_bitswap(&self) -> async_channel::Receiver<BitswapEvent> {
         let (tx, rx) = async_channel::bounded(128);
 
