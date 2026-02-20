@@ -162,12 +162,16 @@ pub enum BitswapBlockError {
     #[display("Invalid/unsupported CID: {_0}")]
     CidParsingError(cid::ParseError),
     /// No Bitswap peers connected, can't issue "have" request.
+    #[display("No Bitswap peers connected, can't issue \"have\" request.")]
     NoPeers,
     /// "Block" request to selected peer failed after successful "have" request.
+    #[display("\"Block\" request to selected peer failed after successful \"have\" request.")]
     BlockRequestFailed,
     /// Network sending queue is full.
+    #[display("Network sending queue is full.")]
     QueueFull,
     /// Request timeout.
+    #[display("Request timeout.")]
     Timeout,
 }
 
@@ -314,6 +318,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             .or(async {
                 if let Some(pending_have_broadcast) = &mut task.pending_have_broadcast {
                     let result = pending_have_broadcast.await;
+                    task.pending_have_broadcast = None;
                     WakeUpReason::HaveBroadcastResult(result)
                 } else {
                     future::pending().await

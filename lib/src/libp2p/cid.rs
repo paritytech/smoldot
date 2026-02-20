@@ -40,7 +40,7 @@
 //! the request (request and response messages are sent asynchronously in Bitswap through
 //! independent substreams).
 
-use alloc::{format, borrow::ToOwned, string::String, vec::Vec};
+use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
 use base32::Alphabet;
 use blake2_rfc::blake2b::blake2b;
 use core::{fmt, str::FromStr};
@@ -182,16 +182,24 @@ impl MultihashType {
 #[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum ParseError {
     /// The CID binary representation is invalid.
+    #[display("The CID binary representation is invalid.")]
     DecodeError,
     /// Unsupported multibase codec. Only base32 is supported.
+    #[display("Unsupported multibase codec. Only base32 is supported.")]
     UnsupportedMultibase,
     /// Invalid characters in base32 string.
+    #[display("Invalid characters in base32 string.")]
     InvalidMultibase,
     /// Unsupported CID version. Only CIDv1 is supported.
+    #[display("Unsupported CID version. Only CIDv1 is supported.")]
     UnsupportedCidVersion,
     /// Unsupported multihash code. Only sha2-256 & blake2b-256 are supported.
+    #[display("Unsupported multihash code. Only sha2-256 & blake2b-256 are supported.")]
     UnsupportedMultihash,
-    /// Invalid multihash digest size of {_0} bytes. Must be 32 bytes for sha2-256 / blake2b-256.
+    /// Invalid multihash digest size. Must be 32 bytes for sha2-256 / blake2b-256.
+    #[display(
+        "Invalid multihash digest size of {_0} bytes. Must be 32 bytes for sha2-256 / blake2b-256."
+    )]
     InvalidDigestSize(#[error(not(source))] usize),
 }
 
