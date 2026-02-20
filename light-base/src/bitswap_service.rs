@@ -46,16 +46,19 @@
 
 use crate::{
     log,
-    network_service::{self, BitswapEvent},
+    network_service::{self, BitswapEvent, SendBitswapMessageError},
     platform::PlatformRef,
     util,
 };
-use core::{ops::Bound, pin::Pin, str::FromStr};
+use core::{iter, pin::Pin, str::FromStr, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
-use futures_util::{StreamExt as _, future};
+use futures_util::{StreamExt as _, future, stream::FuturesUnordered};
 use itertools::Itertools;
-use smoldot::libp2p::cid::{self, Cid};
+use smoldot::{
+    libp2p::cid::{self, Cid, CidPrefix, MultihashType},
+    network::codec::{Block, BlockPresence, BlockPresenceType, WantType, build_bitswap_message},
+};
 use std::{
     collections::{BTreeSet, VecDeque},
     sync::Arc,
@@ -101,8 +104,10 @@ impl BitswapService {
             messages_rx: Box::pin(messages_rx),
             network_service,
             from_network_service: None,
+            pending_have_broadcast: None,
+            pending_block_requests: FuturesUnordered::new(),
             platform: platform.clone(),
-            next_request_id: RequestId(0),
+            next_request_id_inner: 0,
             requests: hashbrown::HashMap::with_capacity_and_hasher(
                 PARALLEL_REQUESTS,
                 fnv::FnvBuildHasher::default(),
@@ -150,10 +155,23 @@ impl BitswapService {
 pub enum BitswapBlockError {
     /// Invalid/unsupported CID.
     CidParsingError(cid::ParseError),
-    /// No Bitswap peers connected.
+    /// No Bitswap peers connected, can't issue "have" request.
     NoPeers,
+    /// "Block" request to selected peer failed after successful "have" request.
+    BlockRequestFailed,
+    /// Network sending queue is full.
+    QueueFull,
     /// Request timeout.
     Timeout,
+}
+
+impl From<SendBitswapMessageError> for BitswapBlockError {
+    fn from(error: SendBitswapMessageError) -> BitswapBlockError {
+        match error {
+            SendBitswapMessageError::NoConnection => BitswapBlockError::NoPeers,
+            SendBitswapMessageError::QueueFull => BitswapBlockError::QueueFull,
+        }
+    }
 }
 
 enum ToBackground {
@@ -197,10 +215,29 @@ struct BackgroundTask<TPlat: PlatformRef> {
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     /// Events coming from the network service. `None` if not subscribed yet.
     from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::BitswapEvent>>>>,
+    /// Initiated Bitswap "have" broadcast.
+    pending_have_broadcast: Option<
+        Pin<
+            Box<
+                dyn Future<
+                        Output = (
+                            Result<(), SendBitswapMessageError>,
+                            Cid,
+                            oneshot::Sender<Result<Vec<u8>, BitswapBlockError>>,
+                        ),
+                    > + Send
+                    + Sync,
+            >,
+        >,
+    >,
+    /// Initiated Bitswap "block" requests.
+    pending_block_requests: FuturesUnordered<
+        Pin<Box<dyn Future<Output = (Result<(), SendBitswapMessageError>, Cid)> + Send + Sync>>,
+    >,
     /// Platform access.
     platform: TPlat,
     /// Next request ID to use.
-    next_request_id: RequestId,
+    next_request_id_inner: u64,
     /// All active requests. The values are (result_tx, timeout).
     requests: hashbrown::HashMap<RequestId, Request<TPlat>, fnv::FnvBuildHasher>,
     /// Requests ordered by timeout.
@@ -211,7 +248,22 @@ struct BackgroundTask<TPlat: PlatformRef> {
     requests_by_cid: hashbrown::HashMap<Cid, VecDeque<RequestId>, util::SipHasherBuild>,
 }
 
-impl<TPlat: PlatformRef> BackgroundTask<TPlat> {}
+impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
+    fn allocate_request_id(&mut self) -> RequestId {
+        let request_id = RequestId(self.next_request_id_inner);
+        self.next_request_id_inner += 1;
+
+        request_id
+    }
+}
+
+fn bitswap_have_message(cid: &Cid) -> Vec<u8> {
+    build_bitswap_message(iter::once(cid), WantType::Have, false, true)
+}
+
+fn bitswap_block_message(cid: &Cid) -> Vec<u8> {
+    build_bitswap_message(iter::once(cid), WantType::Block, false, true)
+}
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
@@ -222,11 +274,21 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             MustSubscribeNetworkEvents,
             NetworkEvent(network_service::BitswapEvent),
             Message(ToBackground),
+            HaveBroadcastResult(
+                (
+                    Result<(), SendBitswapMessageError>,
+                    Cid,
+                    oneshot::Sender<Result<Vec<u8>, BitswapBlockError>>,
+                ),
+            ),
+            BlockRequestResult((Result<(), SendBitswapMessageError>, Cid)),
             ForegroundClosed,
             RequestTimeout,
         }
 
         let wake_up_reason = {
+            let backpressure_messages = task.pending_have_broadcast.is_some();
+
             async {
                 if let Some(from_network_service) = task.from_network_service.as_mut() {
                     match from_network_service.next().await {
@@ -241,10 +303,34 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
             }
             .or(async {
-                task.messages_rx
-                    .next()
-                    .await
-                    .map_or(WakeUpReason::ForegroundClosed, WakeUpReason::Message)
+                if !backpressure_messages {
+                    task.messages_rx
+                        .next()
+                        .await
+                        .map_or(WakeUpReason::ForegroundClosed, WakeUpReason::Message)
+                } else {
+                    future::pending().await
+                }
+            })
+            .or(async {
+                if let Some(pending_have_broadcast) = &mut task.pending_have_broadcast {
+                    let result = pending_have_broadcast.await;
+                    WakeUpReason::HaveBroadcastResult(result)
+                } else {
+                    future::pending().await
+                }
+            })
+            .or(async {
+                if !task.pending_block_requests.is_empty() {
+                    let result = task
+                        .pending_block_requests
+                        .next()
+                        .await
+                        .expect("non-empty; qed");
+                    WakeUpReason::BlockRequestResult(result)
+                } else {
+                    future::pending().await
+                }
             })
             .or(async {
                 if let Some((first_timeout, _request_id)) = task.requests_by_timeout.first() {
@@ -270,11 +356,169 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     task.network_service.subscribe_bitswap().await,
                 ));
             }
-            WakeUpReason::NetworkEvent(BitswapEvent::BitswapMessage { peer_id, message }) => {
-                todo!()
-            }
             WakeUpReason::Message(ToBackground::BitswapBlock { cid, result_tx }) => {
-                todo!()
+                debug_assert!(task.pending_have_broadcast.is_none());
+
+                let message = bitswap_have_message(&cid);
+                let network_service = task.network_service.clone();
+
+                // TODO: does it make sense to group the new request with the existing ones for the
+                //       same CID?
+
+                // Network service can be back-pressuring, so we run this as background future.
+                task.pending_have_broadcast = Some(Box::pin(async move {
+                    let result = network_service.broadcast_bitswap_message(message).await;
+                    (result, cid, result_tx)
+                }));
+            }
+            WakeUpReason::HaveBroadcastResult((result, cid, result_tx)) => {
+                // We either succeeded or failed in broadcasting the "have" request.
+
+                if let Err(err) = result {
+                    let _ = result_tx.send(Err(err.into()));
+                    continue;
+                }
+
+                let request_id = task.allocate_request_id();
+                let timeout = task.platform.now() + Duration::from_secs(10); // TODO: 5? 20?
+                // TODO: should we count the timeout since receiving the foreground message?
+
+                task.requests.insert(
+                    request_id,
+                    Request {
+                        result_tx,
+                        timeout: timeout.clone(),
+                        stage: RequestStage::Have,
+                        cid: cid.clone(),
+                    },
+                );
+                task.requests_by_timeout.insert((timeout, request_id));
+                task.requests_by_cid
+                    .entry(cid)
+                    .or_default()
+                    .push_back(request_id);
+            }
+            WakeUpReason::NetworkEvent(BitswapEvent::BitswapMessage { peer_id, message }) => {
+                let message = message.decode();
+
+                for BlockPresence { cid, presence_type } in message.block_presences {
+                    // TODO: we might want to track what peers we sent the "have" request to and
+                    // fail the request as soon as everyone responded `DontHave`, not waiting for
+                    // timeout to kick in. Currently we are only interested in `Have` responses.
+                    let BlockPresenceType::Have = presence_type else {
+                        break;
+                    };
+
+                    let cid = match Cid::from_bytes(cid.to_owned()) {
+                        Ok(cid) => cid,
+                        Err(error) => {
+                            log!(
+                                &task.platform,
+                                Debug,
+                                &task.log_target,
+                                "error decoding CID",
+                                peer_id,
+                                error,
+                            );
+                            // TODO: ban peer? On what errors?
+                            break;
+                        }
+                    };
+
+                    let Some(request_ids) = task.requests_by_cid.get(&cid) else {
+                        log!(
+                            &task.platform,
+                            Trace,
+                            &task.log_target,
+                            "stale/unsolicited have response",
+                            peer_id
+                        );
+                        break;
+                    };
+
+                    let mut needs_block_request = false;
+
+                    for request_id in request_ids {
+                        let request = task.requests.get_mut(request_id).unwrap();
+
+                        if request.stage == RequestStage::Have {
+                            request.stage = RequestStage::Block;
+                            needs_block_request = true;
+                        }
+                    }
+
+                    if needs_block_request {
+                        let message = bitswap_block_message(&cid);
+                        let network_service = task.network_service.clone();
+                        let peer_id = peer_id.clone();
+
+                        task.pending_block_requests.push(Box::pin(async move {
+                            let result =
+                                network_service.send_bitswap_message(peer_id, message).await;
+                            (result, cid)
+                        }));
+                    }
+                }
+
+                for Block { prefix, data } in message.payload {
+                    let prefix = match CidPrefix::from_bytes(prefix.to_owned()) {
+                        Ok(prefix) => prefix,
+                        Err(error) => {
+                            log!(
+                                &task.platform,
+                                Debug,
+                                &task.log_target,
+                                "error decoding CID prefix",
+                                peer_id,
+                                error,
+                            );
+                            // TODO: ban peer? On what errors?
+                            continue;
+                        }
+                    };
+
+                    let cid = prefix.with_digest_of(data);
+
+                    // Respond to requests asking for this CID regardless of the request stage and
+                    // remove these requests from internal structures.
+                    if let Some(request_ids) = task.requests_by_cid.remove(&cid) {
+                        for request_id in request_ids {
+                            let request = task.requests.remove(&request_id).unwrap();
+                            let _was_in = task
+                                .requests_by_timeout
+                                .remove(&(request.timeout, request_id));
+                            debug_assert!(_was_in);
+
+                            let _ = request.result_tx.send(Ok(data.to_owned()));
+                        }
+                    }
+                }
+            }
+            WakeUpReason::BlockRequestResult((result, cid)) => {
+                // We either succeeded or failed in sending the "block" request.
+                // Nothing to do on success, but we must respond to requests & cleanup on failure.
+                if let Err(err) = result {
+                    // Requests might have timed out while we were waiting for a response from
+                    // network service.
+                    if let Some(request_ids) = task.requests_by_cid.remove(&cid) {
+                        let err = match err {
+                            SendBitswapMessageError::QueueFull => BitswapBlockError::QueueFull,
+                            SendBitswapMessageError::NoConnection => {
+                                BitswapBlockError::BlockRequestFailed
+                            }
+                        };
+
+                        for request_id in request_ids {
+                            let request = task.requests.remove(&request_id).unwrap();
+                            let _was_in = task
+                                .requests_by_timeout
+                                .remove(&(request.timeout, request_id));
+                            debug_assert!(_was_in);
+
+                            let _ = request.result_tx.send(Err(err.clone()));
+                        }
+                    }
+                }
             }
             WakeUpReason::RequestTimeout => {
                 let now = task.platform.now();
