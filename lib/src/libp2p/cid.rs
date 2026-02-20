@@ -40,7 +40,7 @@
 //! the request (request and response messages are sent asynchronously in Bitswap through
 //! independent substreams).
 
-use alloc::vec::Vec;
+use alloc::{format, borrow::ToOwned, string::String, vec::Vec};
 use base32::Alphabet;
 use blake2_rfc::blake2b::blake2b;
 use core::{fmt, str::FromStr};

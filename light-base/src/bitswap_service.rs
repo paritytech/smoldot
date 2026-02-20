@@ -50,6 +50,15 @@ use crate::{
     platform::PlatformRef,
     util,
 };
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    collections::{BTreeSet, VecDeque},
+    format,
+    string::String,
+    sync::Arc,
+    vec::Vec,
+};
 use core::{iter, pin::Pin, str::FromStr, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
@@ -58,10 +67,6 @@ use itertools::Itertools;
 use smoldot::{
     libp2p::cid::{self, Cid, CidPrefix},
     network::codec::{Block, BlockPresence, BlockPresenceType, WantType, build_bitswap_message},
-};
-use std::{
-    collections::{BTreeSet, VecDeque},
-    sync::Arc,
 };
 
 // TODO: how many parallel requests to expect?
