@@ -2036,6 +2036,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             chain = &task.network[chain_id].log_name,
                             peer_id,
                             ?ban_duration,
+                            // TODO: `reason` might be wrong, `handshake_finished` is not checked.
                             reason = "pre-handshake-disconnect"
                         );
                     }
@@ -2043,10 +2044,23 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 if handshake_finished {
                     task.network.bitswap_remove_desired(&peer_id);
-                    let _ = task.bitswap_peering_strategy.unassign_slot_and_ban(
+                    let what_happened = task.bitswap_peering_strategy.unassign_slot_and_ban(
                         &peer_id,
                         task.platform.now() + Duration::from_secs(5),
                     );
+                    if matches!(
+                        what_happened,
+                        bitswap_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true },
+                    ) {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            "network",
+                            "bitswap-slot-unassigned",
+                            peer_id,
+                            ?ban_duration,
+                        );
+                    }
                     let _ = task
                         .bitswap_peering_strategy
                         .decrease_peer_connections(&peer_id);
