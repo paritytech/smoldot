@@ -1218,9 +1218,6 @@ where
                 mut negotiation,
                 mut messages,
             } => {
-                // Bitswap substreams are unidirectional.
-                read_write.discard_all_incoming();
-
                 let nego_just_succeeded = if let Some(extracted_nego) = negotiation.take() {
                     match extracted_nego.read_write(read_write) {
                         Ok(multistream_select::Negotiation::InProgress(nego)) => {
@@ -1251,6 +1248,10 @@ where
                         }
                     }
                 } else {
+                    // Bitswap substreams are unidirectional, discard incoming data if negotiation
+                    // has finished.
+                    read_write.discard_all_incoming();
+
                     false
                 };
 
