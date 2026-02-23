@@ -2044,10 +2044,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 if handshake_finished {
                     task.network.bitswap_remove_desired(&peer_id);
-                    let what_happened = task.bitswap_peering_strategy.unassign_slot_and_ban(
-                        &peer_id,
-                        task.platform.now() + Duration::from_secs(5),
-                    );
+                    let what_happened = task
+                        .bitswap_peering_strategy
+                        .unassign_slot_and_ban(&peer_id, task.platform.now() + ban_duration);
                     if matches!(
                         what_happened,
                         bitswap_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true },
