@@ -460,6 +460,49 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.chain.finalized_block_hash()
     }
 
+    /// Updates the finalized block to the given `block_hash`.
+    ///
+    /// This should be used when the finality is outsourced.
+    pub fn set_finalized_block(
+        &mut self,
+        block_hash: &[u8; 32],
+    ) -> Result<SetFinalizedBlockResult<TBl>, blocks_tree::SetFinalizedError> {
+        let iter = self.chain.set_finalized_block(block_hash)?;
+        let updates_best_block = iter.updates_best_block();
+        let mut finalized_blocks = Vec::new();
+        let mut pruned_blocks = Vec::new();
+        for block in iter {
+            match block.ty {
+                blocks_tree::RemovedBlockType::Finalized => finalized_blocks.push(RemovedBlock {
+                    block_hash: block.block_hash,
+                    block_number: block.block_number,
+                    user_data: block.user_data,
+                    scale_encoded_header: block.scale_encoded_header,
+                }),
+                blocks_tree::RemovedBlockType::Pruned => pruned_blocks.push(RemovedBlock {
+                    block_hash: block.block_hash,
+                    block_number: block.block_number,
+                    user_data: block.user_data,
+                    scale_encoded_header: block.scale_encoded_header,
+                }),
+            }
+        }
+
+        if let Some(last) = finalized_blocks.last() {
+            let _ = self
+                .inner
+                .blocks
+                .set_finalized_block_height(last.block_number)
+                .count();
+        }
+
+        Ok(SetFinalizedBlockResult {
+            finalized_blocks,
+            pruned_blocks,
+            updates_best_block,
+        })
+    }
+
     /// Returns the header of the best block.
     ///
     /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
@@ -2384,4 +2427,14 @@ pub struct RemovedBlock<TBl> {
     pub user_data: TBl,
     /// SCALE-encoded header of the block.
     pub scale_encoded_header: Vec<u8>,
+}
+
+/// Result of [`AllForkSync::set_finalized_block`].
+pub struct SetFinalizedBlockResult<TBl> {
+    /// The blocks that got finalized.
+    pub finalized_blocks: Vec<RemovedBlock<TBl>>,
+    /// The blocks that got pruned in the process of finalizing.
+    pub pruned_blocks: Vec<RemovedBlock<TBl>>,
+    /// Is set to `true`, if the best block changed.
+    pub updates_best_block: bool,
 }

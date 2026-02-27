@@ -694,25 +694,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     );
 
                     let config = match (&relay_chain, &chain_information) {
-                        (Some((relay_chain, para_id, _)), Some(chain_information)) => {
-                            StartServicesChainTy::Parachain {
-                                relay_chain,
-                                finalized_block_header: chain_information
-                                    .as_ref()
-                                    .finalized_block_header
-                                    .scale_encoding_vec(usize::from(
-                                        chain_spec.block_number_bytes(),
-                                    )),
-                                para_id: *para_id,
-                            }
-                        }
-                        (Some((relay_chain, para_id, _)), None) => {
-                            StartServicesChainTy::Parachain {
-                                relay_chain,
-                                finalized_block_header: genesis_block_header.clone(),
-                                para_id: *para_id,
-                            }
-                        }
+                        (Some((relay_chain, para_id, _)), _) => StartServicesChainTy::Parachain {
+                            relay_chain,
+                            para_id: *para_id,
+                        },
                         (None, Some(chain_information)) => {
                             StartServicesChainTy::SubstrateCompatible { chain_information }
                         }
@@ -1115,7 +1100,6 @@ enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
     },
     Parachain {
         relay_chain: &'a ChainServices<TPlat>,
-        finalized_block_header: Vec<u8>,
         para_id: u32,
     },
 }
@@ -1148,20 +1132,17 @@ fn start_services<TPlat: platform::PlatformRef>(
     let network_service_chain = network_service.add_chain(network_service::ConfigChain {
         log_name: log_name.clone(),
         num_out_slots: 4,
-        grandpa_protocol_finalized_block_height:
-            if let StartServicesChainTy::SubstrateCompatible { chain_information } = &config {
+        grandpa_protocol_finalized_block_height: match &config {
+            StartServicesChainTy::SubstrateCompatible { chain_information }
                 if matches!(
                     chain_information.as_ref().finality,
                     chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-                ) {
-                    Some(chain_information.as_ref().finalized_block_header.number)
-                } else {
-                    None
-                }
-            } else {
-                // Parachains never use GrandPa.
-                None
-            },
+                ) =>
+            {
+                Some(chain_information.as_ref().finalized_block_header.number)
+            }
+            _ => None,
+        },
         genesis_block_hash: header::hash_from_scale_encoded_header(
             &genesis_block_scale_encoded_header,
         ),
@@ -1173,22 +1154,10 @@ fn start_services<TPlat: platform::PlatformRef>(
                     .finalized_block_header
                     .hash(block_number_bytes),
             ),
-            StartServicesChainTy::Parachain {
-                finalized_block_header,
-                ..
-            } => {
-                if let Ok(decoded) = header::decode(finalized_block_header, block_number_bytes) {
-                    (
-                        decoded.number,
-                        header::hash_from_scale_encoded_header(finalized_block_header),
-                    )
-                } else {
-                    (
-                        0,
-                        header::hash_from_scale_encoded_header(&genesis_block_scale_encoded_header),
-                    )
-                }
-            }
+            _ => (
+                0,
+                header::hash_from_scale_encoded_header(&genesis_block_scale_encoded_header),
+            ),
         },
         fork_id,
         block_number_bytes,
@@ -1197,9 +1166,7 @@ fn start_services<TPlat: platform::PlatformRef>(
     let (sync_service, runtime_service) = match config {
         StartServicesChainTy::Parachain {
             relay_chain,
-            finalized_block_header,
             para_id,
-            ..
         } => {
             // Chain is a parachain.
 
@@ -1213,7 +1180,6 @@ fn start_services<TPlat: platform::PlatformRef>(
                 network_service: network_service_chain.clone(),
                 chain_type: sync_service::ConfigChainType::Parachain(
                     sync_service::ConfigParachain {
-                        finalized_block_header,
                         relay_chain: sync_service::ConfigRelayChain {
                             para_id,
                             relay_chain_sync: relay_chain.runtime_service.clone(),

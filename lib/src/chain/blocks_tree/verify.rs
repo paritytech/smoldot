@@ -136,70 +136,78 @@ impl<T> NonFinalizedTree<T> {
             &self.finalized_block_header
         };
 
-        let header_verify_result = {
-            let consensus_config = match (&self.finalized_consensus, &parent_consensus) {
-                (
-                    FinalizedConsensus::Aura { slot_duration, .. },
-                    Some(BlockConsensus::Aura { authorities_list }),
-                ) => verify::header_only::ConfigConsensus::Aura {
-                    current_authorities: header::AuraAuthoritiesIter::from_slice(authorities_list),
-                    now_from_unix_epoch,
-                    slot_duration: *slot_duration,
-                },
-                (
-                    FinalizedConsensus::Babe {
-                        slots_per_epoch, ..
+        let (best_score_num_primary_slots, best_score_num_secondary_slots, consensus_update) = {
+            let header_verify_result = {
+                let consensus_config = match (&self.finalized_consensus, &parent_consensus) {
+                    (
+                        FinalizedConsensus::Aura { slot_duration, .. },
+                        Some(BlockConsensus::Aura { authorities_list }),
+                    ) => verify::header_only::ConfigConsensus::Aura {
+                        current_authorities: header::AuraAuthoritiesIter::from_slice(
+                            authorities_list,
+                        ),
+                        now_from_unix_epoch,
+                        slot_duration: *slot_duration,
+                        // Parachains with async backing can produce multiple blocks per
+                        // Aura slot. Outsourced finality indicates a parachain.
+                        allow_equal_slot_number: matches!(self.finality, Finality::Outsourced),
                     },
-                    Some(BlockConsensus::Babe {
-                        current_epoch,
-                        next_epoch,
-                    }),
-                ) => verify::header_only::ConfigConsensus::Babe {
-                    parent_block_epoch: current_epoch.as_ref().map(|v| (&**v).into()),
-                    parent_block_next_epoch: (&**next_epoch).into(),
-                    slots_per_epoch: *slots_per_epoch,
-                    now_from_unix_epoch,
-                },
-                (FinalizedConsensus::Unknown, None) => {
-                    return Err(HeaderVerifyError::UnknownConsensusEngine);
-                }
-                _ => {
-                    return Err(HeaderVerifyError::ConsensusMismatch);
+                    (
+                        FinalizedConsensus::Babe {
+                            slots_per_epoch, ..
+                        },
+                        Some(BlockConsensus::Babe {
+                            current_epoch,
+                            next_epoch,
+                        }),
+                    ) => verify::header_only::ConfigConsensus::Babe {
+                        parent_block_epoch: current_epoch.as_ref().map(|v| (&**v).into()),
+                        parent_block_next_epoch: (&**next_epoch).into(),
+                        slots_per_epoch: *slots_per_epoch,
+                        now_from_unix_epoch,
+                    },
+                    (FinalizedConsensus::Unknown, None) => {
+                        return Err(HeaderVerifyError::UnknownConsensusEngine);
+                    }
+                    _ => {
+                        return Err(HeaderVerifyError::ConsensusMismatch);
+                    }
+                };
+
+                match verify::header_only::verify(verify::header_only::Config {
+                    consensus: consensus_config,
+                    finality: match &parent_finality {
+                        BlockFinality::Outsourced => {
+                            verify::header_only::ConfigFinality::Outsourced
+                        }
+                        BlockFinality::Grandpa { .. } => {
+                            verify::header_only::ConfigFinality::Grandpa
+                        }
+                    },
+                    allow_unknown_consensus_engines: self.allow_unknown_consensus_engines,
+                    block_header: decoded_header.clone(),
+                    block_number_bytes: self.block_number_bytes,
+                    parent_block_header: {
+                        // All headers inserted in `self` are necessarily valid, and thus this
+                        // `unwrap()` can't panic.
+                        header::decode(parent_block_header, self.block_number_bytes)
+                            .unwrap_or_else(|_| unreachable!())
+                    },
+                }) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        // The code in this module is meant to ensure that the chain is in an
+                        // appropriate state, therefore `is_invalid_chain_configuration` being `true`
+                        // would indicate a bug in the code somewhere.
+                        // We use a `debug_assert` rather than `assert` in order to avoid crashing,
+                        // as treating the header as invalid is an appropriate way to handle a bug
+                        // here.
+                        debug_assert!(!err.is_invalid_chain_configuration());
+                        return Err(HeaderVerifyError::VerificationFailed(err));
+                    }
                 }
             };
 
-            match verify::header_only::verify(verify::header_only::Config {
-                consensus: consensus_config,
-                finality: match &parent_finality {
-                    BlockFinality::Outsourced => verify::header_only::ConfigFinality::Outsourced,
-                    BlockFinality::Grandpa { .. } => verify::header_only::ConfigFinality::Grandpa,
-                },
-                allow_unknown_consensus_engines: self.allow_unknown_consensus_engines,
-                block_header: decoded_header.clone(),
-                block_number_bytes: self.block_number_bytes,
-                parent_block_header: {
-                    // All headers inserted in `self` are necessarily valid, and thus this
-                    // `unwrap()` can't panic.
-                    header::decode(parent_block_header, self.block_number_bytes)
-                        .unwrap_or_else(|_| unreachable!())
-                },
-            }) {
-                Ok(s) => s,
-                Err(err) => {
-                    // The code in this module is meant to ensure that the chain is in an
-                    // appropriate state, therefore `is_invalid_chain_configuration` being `true`
-                    // would indicate a bug in the code somewhere.
-                    // We use a `debug_assert` rather than `assert` in order to avoid crashing,
-                    // as treating the header as invalid is an appropriate way to handle a bug
-                    // here.
-                    debug_assert!(!err.is_invalid_chain_configuration());
-                    return Err(HeaderVerifyError::VerificationFailed(err));
-                }
-            }
-        };
-
-        // Updated consensus information for the block being verified.
-        let (best_score_num_primary_slots, best_score_num_secondary_slots, consensus_update) =
             match (
                 header_verify_result,
                 &parent_consensus,
@@ -358,10 +366,11 @@ impl<T> NonFinalizedTree<T> {
                     )
                 }
 
-                // Any mismatch between consensus algorithms should have been detected by the
-                // block verification.
+                // Any mismatch between consensus algorithms should have been detected by
+                // the block verification.
                 _ => unreachable!(),
-            };
+            }
+        };
 
         // Updated finality information for the block being verified.
         let finality_update = match &parent_finality {
