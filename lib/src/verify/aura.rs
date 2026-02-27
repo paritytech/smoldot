@@ -78,6 +78,11 @@ pub struct VerifyConfig<'a, TAuthList> {
     /// Duration of a slot in milliseconds.
     /// Can be found by calling the `AuraApi_slot_duration` runtime function.
     pub slot_duration: NonZero<u64>,
+
+    /// If `true`, allow the slot number to be equal to the parent's slot number.
+    ///
+    /// This is required for parachains which can produce multiple blocks per slot.
+    pub allow_equal_slot_number: bool,
 }
 
 /// Information yielded back after successfully verifying a block.
@@ -132,7 +137,11 @@ pub fn verify_header<'a>(
             None => return Err(VerifyError::ParentIsntAuraConsensus),
         };
 
-        if slot_number <= parent_slot_number {
+        if config.allow_equal_slot_number {
+            if slot_number < parent_slot_number {
+                return Err(VerifyError::SlotNumberNotIncreasing);
+            }
+        } else if slot_number <= parent_slot_number {
             return Err(VerifyError::SlotNumberNotIncreasing);
         }
     }
@@ -171,18 +180,13 @@ pub fn verify_header<'a>(
 
     // The signature in the seal applies to the header from where the signature isn't present.
     // Extract the signature and build the hash that is expected to be signed.
-    let (seal_signature, pre_seal_hash) = {
+    let (seal_bytes, pre_seal_hash) = {
         let mut unsealed_header = config.header;
-        let seal_signature = match unsealed_header.digest.pop_seal() {
-            Some(header::Seal::Aura(seal)) => {
-                schnorrkel::Signature::from_bytes(seal).map_err(|_| VerifyError::BadSignature)?
-            }
+        let seal_bytes: [u8; 64] = match unsealed_header.digest.pop_seal() {
+            Some(header::Seal::Aura(seal)) => *seal,
             _ => return Err(VerifyError::MissingSeal),
         };
-        (
-            seal_signature,
-            unsealed_header.hash(config.block_number_bytes),
-        )
+        (seal_bytes, unsealed_header.hash(config.block_number_bytes))
     };
 
     // Fetch the authority that has supposedly signed the block.
@@ -200,21 +204,29 @@ pub fn verify_header<'a>(
     )
     .unwrap_or_else(|_| unreachable!());
 
-    // This `unwrap()` can only panic if `public_key` is the wrong length, which we know can't
-    // happen as it's of type `[u8; 32]`.
-    let authority_public_key = schnorrkel::PublicKey::from_bytes(
-        config
-            .current_authorities
-            .nth(signing_authority)
-            .unwrap()
-            .public_key,
-    )
-    .unwrap();
+    let authority_public_key = config
+        .current_authorities
+        .nth(signing_authority)
+        .unwrap()
+        .public_key;
 
-    // Now verifying the signature in the seal.
-    authority_public_key
-        .verify_simple(b"substrate", &pre_seal_hash, &seal_signature)
-        .map_err(|_| VerifyError::BadSignature)?;
+    // Try sr25519 verification first, then fall back to ed25519.
+    let sr25519_ok = schnorrkel::PublicKey::from_bytes(authority_public_key)
+        .and_then(|pk| {
+            pk.verify_simple(
+                b"substrate",
+                &pre_seal_hash,
+                &schnorrkel::Signature::from_bytes(&seal_bytes)?,
+            )
+        })
+        .is_ok();
+
+    if !sr25519_ok {
+        ed25519_zebra::VerificationKey::try_from(*authority_public_key)
+            .map_err(|_| VerifyError::BadSignature)?
+            .verify(&ed25519_zebra::Signature::from(seal_bytes), &pre_seal_hash)
+            .map_err(|_| VerifyError::BadSignature)?;
+    }
 
     // Success! 🚀
     Ok(VerifySuccess { authorities_change })

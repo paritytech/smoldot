@@ -112,11 +112,6 @@ pub struct ConfigSubstrateCompatibleRuntimeCodeHint {
 pub struct ConfigParachain<TPlat: PlatformRef> {
     /// Parameters of the relay chain.
     pub relay_chain: ConfigRelayChain<TPlat>,
-
-    /// SCALE-encoded header of a known finalized block of the parachain. Used in the situation
-    /// where the API user subscribes using [`SyncService::subscribe_all`] before any parachain
-    /// block can be gathered.
-    pub finalized_block_header: Vec<u8>,
 }
 
 /// See [`ConfigSubstrateCompatible::relay_chain`] and [`ConfigParachain::relay_chain`].
@@ -158,7 +153,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             ConfigChainType::Parachain(config_parachain) => Box::pin(parachain::start_parachain(
                 log_target.clone(),
                 config.platform.clone(),
-                config_parachain.finalized_block_header,
                 config.block_number_bytes,
                 config_parachain.relay_chain.relay_chain_sync.clone(),
                 config_parachain.relay_chain.para_id,
