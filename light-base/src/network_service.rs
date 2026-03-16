@@ -575,9 +575,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
                 result: tx,
             })
             .await
-            .unwrap();
+            .expect("background task alive; qed");
 
-        rx.await.unwrap()
+        rx.await.expect("background task responded; qed")
     }
 
     /// Marks the given peers as belonging to the given chain, and adds some addresses to these

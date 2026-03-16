@@ -20,6 +20,8 @@
 use core::{iter, num::NonZero};
 use std::env;
 
+use smoldot::sync::para;
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -63,13 +65,13 @@ fn main() {
             })
             .unwrap();
 
-        log::info!("Relay chain added with statement protocol enabled");
+        log::info!("Relay chain added");
 
         // Add parachain if chain spec provided
         if let Some(para_spec) = para_chain_spec {
             let smoldot_light::AddChainSuccess {
-                chain_id: _,
-                json_rpc_responses: _,
+                chain_id: parachain_id,
+                json_rpc_responses,
             } = client
                 .add_chain(smoldot_light::AddChainConfig {
                     specification: &para_spec,
@@ -89,13 +91,19 @@ fn main() {
             log::info!("Parachain added with statement protocol enabled");
         }
 
-        log::info!("Client running. Statement notifications will appear when received.");
-        log::info!("To test: submit a statement via RPC to the parachain node.");
+        client
+        .json_rpc_request(
+            r#"{"id":1,"jsonrpc":"2.0","method":"statement_subscribe","params":[{"type":"any"}]}"#,
+            parachain_id,
+        )
+        .unwrap();
+        log::info!("Listening for statements via JSON-RPC subscription...");
 
         // Keep the client running
+        let mut responses = json_rpc_responses.unwrap();
         loop {
-            smol::Timer::after(std::time::Duration::from_secs(30)).await;
-            log::info!("Client still running, waiting for statements...");
+            let response = responses.next().await.unwrap();
+            log::info!("Statement JSON-RPC response: {response}");
         }
     });
 }

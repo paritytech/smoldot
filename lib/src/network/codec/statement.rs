@@ -37,6 +37,14 @@ pub const MAX_ANY_TOPICS: usize = 128;
 /// Maximum number of statements allowed in a single notification.
 const MAX_STATEMENTS_PER_NOTIFICATION: usize = 10_000;
 
+const FIELD_PROOF: u8 = 0;
+const FIELD_DECRYPTION_KEY: u8 = 1;
+const FIELD_EXPIRY: u8 = 2;
+const FIELD_CHANNEL: u8 = 3;
+const FIELD_TOPIC_START: u8 = 4;
+const FIELD_TOPIC_END: u8 = FIELD_TOPIC_START + MAX_TOPICS as u8 - 1;
+const FIELD_DATA: u8 = 8;
+
 /// Statement topic (32 bytes).
 pub type Topic = [u8; 32];
 
@@ -78,6 +86,17 @@ impl serde::Serialize for TopicFilter {
     {
         use serde::ser::SerializeMap;
 
+        fn serialize_topics<S: serde::ser::SerializeMap>(
+            map: &mut S,
+            topics: &[Topic],
+        ) -> Result<(), S::Error> {
+            let hex_topics: Vec<String> = topics
+                .iter()
+                .map(|t| format!("0x{}", hex::encode(t)))
+                .collect();
+            map.serialize_entry("topics", &hex_topics)
+        }
+
         match self {
             TopicFilter::Any => {
                 let mut map = serializer.serialize_map(Some(1))?;
@@ -87,21 +106,13 @@ impl serde::Serialize for TopicFilter {
             TopicFilter::MatchAll(topics) => {
                 let mut map = serializer.serialize_map(Some(2))?;
                 map.serialize_entry("type", "match_all")?;
-                let hex_topics: Vec<String> = topics
-                    .iter()
-                    .map(|t| format!("0x{}", hex::encode(t)))
-                    .collect();
-                map.serialize_entry("topics", &hex_topics)?;
+                serialize_topics(&mut map, topics)?;
                 map.end()
             }
             TopicFilter::MatchAny(topics) => {
                 let mut map = serializer.serialize_map(Some(2))?;
                 map.serialize_entry("type", "match_any")?;
-                let hex_topics: Vec<String> = topics
-                    .iter()
-                    .map(|t| format!("0x{}", hex::encode(t)))
-                    .collect();
-                map.serialize_entry("topics", &hex_topics)?;
+                serialize_topics(&mut map, topics)?;
                 map.end()
             }
         }
@@ -194,12 +205,6 @@ impl TopicFilter {
                 .iter()
                 .all(|t| statement_topics.iter().any(|st| *st == t)),
         }
-    }
-}
-
-impl Default for TopicFilter {
-    fn default() -> Self {
-        TopicFilter::MatchAny(Vec::new())
     }
 }
 
@@ -377,37 +382,31 @@ fn encode_statement_into(
 
     out.extend_from_slice(crate::util::encode_scale_compact_usize(num_fields).as_ref());
 
-    // Field 0: Proof
     if let Some(proof) = &statement.proof {
-        out.push(0);
+        out.push(FIELD_PROOF);
         encode_proof_into(proof, out);
     }
 
-    // Field 1: DecryptionKey
     if let Some(key) = statement.decryption_key {
-        out.push(1);
+        out.push(FIELD_DECRYPTION_KEY);
         out.extend_from_slice(key);
     }
 
-    // Field 2: Expiry (always present)
-    out.push(2);
+    out.push(FIELD_EXPIRY);
     out.extend_from_slice(&statement.expiry.to_le_bytes());
 
-    // Field 3: Channel
     if let Some(channel) = statement.channel {
-        out.push(3);
+        out.push(FIELD_CHANNEL);
         out.extend_from_slice(channel);
     }
 
-    // Fields 4-7: Topics
     for (i, topic) in statement.topics.iter().enumerate() {
-        out.push(4 + i as u8);
+        out.push(FIELD_TOPIC_START + i as u8);
         out.extend_from_slice(*topic);
     }
 
-    // Field 8: Data
     if let Some(data) = statement.data {
-        out.push(8);
+        out.push(FIELD_DATA);
         out.extend_from_slice(crate::util::encode_scale_compact_usize(data.len()).as_ref());
         out.extend_from_slice(data);
     }
@@ -493,28 +492,28 @@ fn fields_parser(num_fields: usize) -> impl FnMut(&[u8]) -> nom::IResult<&[u8], 
             last_tag = Some(tag);
 
             let rest = match tag {
-                0 => {
+                FIELD_PROOF => {
                     let (rest, p) = proof_parser(rest)?;
                     proof = Some(p);
                     rest
                 }
-                1 => {
+                FIELD_DECRYPTION_KEY => {
                     let (rest, key) = nom::bytes::streaming::take(32u32)(rest)?;
                     decryption_key = Some(<&[u8; 32]>::try_from(key).unwrap());
                     rest
                 }
-                2 => {
+                FIELD_EXPIRY => {
                     let (rest, exp) = nom::number::streaming::le_u64(rest)?;
                     expiry = Some(exp);
                     rest
                 }
-                3 => {
+                FIELD_CHANNEL => {
                     let (rest, ch) = nom::bytes::streaming::take(32u32)(rest)?;
                     channel = Some(<&[u8; 32]>::try_from(ch).unwrap());
                     rest
                 }
-                4..=7 => {
-                    let topic_index = (tag - 4) as usize;
+                FIELD_TOPIC_START..=FIELD_TOPIC_END => {
+                    let topic_index = (tag - FIELD_TOPIC_START) as usize;
                     if topic_index != topics.len() {
                         return Err(nom::Err::Failure(nom::error::make_error(
                             input,
@@ -525,7 +524,7 @@ fn fields_parser(num_fields: usize) -> impl FnMut(&[u8]) -> nom::IResult<&[u8], 
                     topics.push(<&[u8; 32]>::try_from(topic).unwrap());
                     rest
                 }
-                8 => {
+                FIELD_DATA => {
                     let (rest, len) = crate::util::nom_scale_compact_usize(rest)?;
                     let (rest, d) = nom::bytes::streaming::take(len)(rest)?;
                     data = Some(d);
@@ -694,9 +693,9 @@ mod tests {
     #[test]
     fn reject_out_of_order_fields() {
         let mut encoded = vec![8u8]; // Compact(2)
-        encoded.push(2); // Field discriminant for Expiry
+        encoded.push(FIELD_EXPIRY);
         encoded.extend_from_slice(&42u64.to_le_bytes());
-        encoded.push(1); // Field discriminant for DecryptionKey (should come before Expiry)
+        encoded.push(FIELD_DECRYPTION_KEY);
         encoded.extend_from_slice(&[0u8; 32]);
 
         assert!(statement_parser(&encoded).is_err());

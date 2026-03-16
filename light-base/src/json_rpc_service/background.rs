@@ -754,6 +754,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 match codec::decode_statement_notification(&notification_data) {
                     Ok(statements) => {
                         for statement in statements {
+                            // TODO: re-encoding every statement is inneficient
                             let Ok(encoded) = codec::encode_statement(&statement) else {
                                 continue;
                             };

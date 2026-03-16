@@ -181,7 +181,7 @@ impl StatementProtocolConfig {
 impl Default for StatementProtocolConfig {
     fn default() -> Self {
         StatementProtocolConfig {
-            max_seen_statements: NonZeroUsize::new(8192).unwrap(),
+            max_seen_statements: NonZeroUsize::new(65536).expect("65536 is not zero; qed"),
         }
     }
 }
@@ -2609,8 +2609,11 @@ where
                         .next()
                         .is_some()
                     {
-                        let connection_id =
-                            self.substreams.get(&substream_id).unwrap().connection_id;
+                        let connection_id = self
+                            .substreams
+                            .get(&substream_id)
+                            .expect("substream was just inserted above; qed")
+                            .connection_id;
 
                         let _was_inserted = self.notification_substreams_by_peer_id.insert((
                             substream_protocol,
@@ -4119,9 +4122,8 @@ where
         chain_id: ChainId,
         statement: Vec<u8>,
     ) -> Result<(), QueueNotificationError> {
-        // Protocol expects Vec<Statement>, encode with SCALE compact length prefix
         let mut notification = Vec::with_capacity(1 + statement.len());
-        notification.push(0x04); // SCALE compact encoding of count 1
+        notification.extend_from_slice(util::encode_scale_compact_usize(1).as_ref());
         notification.extend_from_slice(&statement);
 
         let chain = &mut self.chains[chain_id.0];
