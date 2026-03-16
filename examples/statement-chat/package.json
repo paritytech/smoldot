@@ -7,7 +7,8 @@
     "dev": "npm run build && node server.js"
   },
   "dependencies": {
-    "@noble/ed25519": "^3.0.0",
+    "@polkadot/keyring": "^14.0.1",
+    "@polkadot/util-crypto": "^14.0.1",
     "smoldot": "file:../../wasm-node/javascript"
   },
   "devDependencies": {

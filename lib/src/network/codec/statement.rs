@@ -37,6 +37,15 @@ pub const MAX_ANY_TOPICS: usize = 128;
 /// Maximum number of statements allowed in a single notification.
 const MAX_STATEMENTS_PER_NOTIFICATION: usize = 10_000;
 
+/// V2 protocol message envelope.
+#[derive(Debug, Clone)]
+pub enum StatementMessage<'a> {
+    Statements(Vec<&'a [u8]>),
+    ExplicitTopicAffinity(AffinityFilter),
+}
+
+pub use super::affinity::{AffinityFilter, DecodeAffinityFilterError};
+
 /// Statement topic (32 bytes).
 pub type Topic = [u8; 32];
 
@@ -445,6 +454,65 @@ fn encode_proof_into(proof: &ProofRef<'_>, out: &mut Vec<u8>) {
     }
 }
 
+pub fn decode_statement_message(
+    bytes: &[u8],
+) -> Result<StatementMessage<'_>, DecodeStatementMessageError> {
+    if bytes.is_empty() {
+        return Err(DecodeStatementMessageError::Empty);
+    }
+
+    match bytes[0] {
+        0 => {
+            let statements = extract_statement_bytes(&bytes[1..])
+                .map_err(DecodeStatementMessageError::InvalidStatements)?;
+            Ok(StatementMessage::Statements(statements))
+        }
+        1 => {
+            let filter = AffinityFilter::decode(&bytes[1..])
+                .map_err(|_| DecodeStatementMessageError::InvalidBloomFilter)?;
+            Ok(StatementMessage::ExplicitTopicAffinity(filter))
+        }
+        other => Err(DecodeStatementMessageError::UnknownVariant(other)),
+    }
+}
+
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+pub enum DecodeStatementMessageError {
+    #[display("Empty message")]
+    Empty,
+    #[display("Unknown variant: {_0}")]
+    UnknownVariant(#[error(not(source))] u8),
+    #[display("Invalid bloom filter encoding")]
+    InvalidBloomFilter,
+    #[display("Invalid statements: {_0}")]
+    InvalidStatements(DecodeStatementNotificationError),
+}
+
+// TODO: don't use magic numbers
+pub fn encode_statements_message(statements: &[&[u8]]) -> Vec<u8> {
+    let total_len: usize = statements.iter().map(|s| s.len()).sum();
+    // 1 byte for variant + up to 5 bytes for compact length + statement bytes
+    let mut out = Vec::with_capacity(1 + 5 + total_len);
+
+    out.push(0);
+    out.extend_from_slice(crate::util::encode_scale_compact_usize(statements.len()).as_ref());
+
+    for statement in statements {
+        out.extend_from_slice(statement);
+    }
+
+    out
+}
+
+// TODO: don't use magic numbers
+pub fn encode_topic_affinity_message(filter: &AffinityFilter) -> Vec<u8> {
+    let encoded = filter.encode_to_vec();
+    let mut out = Vec::with_capacity(1 + encoded.len());
+    out.push(1);
+    out.extend_from_slice(&encoded);
+    out
+}
+
 // Nom parsers
 
 fn statement_notification_parser(input: &[u8]) -> nom::IResult<&[u8], Vec<StatementRef<'_>>> {
@@ -622,6 +690,9 @@ fn proof_parser(input: &[u8]) -> nom::IResult<&[u8], ProofRef<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::codec::affinity::MAX_NUM_HASHES;
+
+    const TEST_SEED: u128 = 0x5EED_5EED_5EED_5EED;
 
     #[test]
     fn encode_decode_notification_multiple_statements() {
@@ -753,5 +824,64 @@ mod tests {
         encoded.extend_from_slice(&[0u8; 32]);
 
         assert!(statement_parser(&encoded).is_err());
+    }
+
+    #[test]
+    fn v2_statements_roundtrip() {
+        let statement1 = StatementRef {
+            proof: None,
+            decryption_key: None,
+            expiry: 100,
+            channel: None,
+            topics: Vec::new(),
+            data: Some(b"test1"),
+        };
+        let statement2 = StatementRef {
+            proof: None,
+            decryption_key: None,
+            expiry: 200,
+            channel: None,
+            topics: Vec::new(),
+            data: Some(b"test2"),
+        };
+
+        let encoded1 = encode_statement(&statement1).unwrap();
+        let encoded2 = encode_statement(&statement2).unwrap();
+
+        let statements: Vec<&[u8]> = vec![&encoded1, &encoded2];
+        let v2_encoded = encode_statements_message(&statements);
+
+        let decoded = decode_statement_message(&v2_encoded).unwrap();
+
+        match decoded {
+            StatementMessage::Statements(stmts) => {
+                assert_eq!(stmts.len(), 2);
+                assert_eq!(stmts[0], encoded1.as_slice());
+                assert_eq!(stmts[1], encoded2.as_slice());
+            }
+            _ => panic!("Expected Statements variant"),
+        }
+    }
+
+    #[test]
+    fn v2_affinity_roundtrip() {
+        let topic1 = [0x01u8; 32];
+        let topic2 = [0x02u8; 32];
+        let topic3 = [0x03u8; 32];
+
+        let mut filter = AffinityFilter::new(TEST_SEED, 0.01, 2);
+        filter.insert(&topic1);
+        filter.insert(&topic2);
+
+        let encoded = encode_topic_affinity_message(&filter);
+        let decoded = decode_statement_message(&encoded).unwrap();
+
+        let StatementMessage::ExplicitTopicAffinity(af) = decoded else {
+            panic!("Expected ExplicitTopicAffinity variant");
+        };
+
+        assert!(af.contains(&topic1));
+        assert!(af.contains(&topic2));
+        assert!(!af.contains(&topic3));
     }
 }

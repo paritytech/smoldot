@@ -224,6 +224,9 @@ struct Background<TPlat: PlatformRef> {
     statement_subscriptions:
         hashbrown::HashMap<String, network_service::TopicFilter, fnv::FnvBuildHasher>,
 
+    /// Set of peers connected via Statement Protocol V2.
+    v2_statement_peers: hashbrown::HashSet<PeerId, fnv::FnvBuildHasher>,
+
     /// Receiver for network events (statements from peers).
     network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
 }
@@ -460,6 +463,7 @@ enum Event<TPlat: PlatformRef> {
         block_hash: [u8; 32],
         result: Result<Vec<sync_service::StorageResultItem>, sync_service::StorageQueryError>,
     },
+    TopicAffinitySent,
 }
 
 struct TransactionWatch {
@@ -573,6 +577,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             2,
             Default::default(),
         ),
+        v2_statement_peers: hashbrown::HashSet::with_capacity_and_hasher(8, Default::default()),
         network_events_rx: None,
         platform: config.platform,
     };
@@ -611,6 +616,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
             NetworkStatementReceived(Vec<u8>),
+            StatementPeerConnected {
+                peer_id: PeerId,
+                version: network_service::StatementProtocolVersion,
+            },
+            StatementPeerDisconnected {
+                peer_id: PeerId,
+            },
         }
 
         // Wait until there is something to do.
@@ -703,7 +715,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 WakeUpReason::GarbageCollection
             })
             .or(async {
-                // Poll for network events (incoming statements)
+                // Poll for network events (incoming statements and peer connections)
                 let Some(rx) = &me.network_events_rx else {
                     return future::pending().await;
                 };
@@ -711,13 +723,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     let Ok(event) = rx.recv().await else {
                         return future::pending().await;
                     };
-                    if let network_service::Event::StatementNotification { statements, .. } = event
-                    {
-                        return WakeUpReason::NetworkStatementReceived(
-                            statements.as_encoded().to_vec(),
-                        );
+                    match event {
+                        network_service::Event::StatementNotification { statements, .. } => {
+                            return WakeUpReason::NetworkStatementReceived(
+                                statements.as_encoded().to_vec(),
+                            );
+                        }
+                        network_service::Event::StatementProtocolConnected { peer_id, version } => {
+                            return WakeUpReason::StatementPeerConnected { peer_id, version };
+                        }
+                        network_service::Event::Disconnected { peer_id } => {
+                            return WakeUpReason::StatementPeerDisconnected { peer_id };
+                        }
+                        _ => {}
                     }
-                    // Ignore other events and continue polling
                 }
             })
             .await
@@ -787,6 +806,26 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         );
                     }
                 }
+            }
+
+            WakeUpReason::StatementPeerConnected { peer_id, version } => {
+                if version == network_service::StatementProtocolVersion::V2 {
+                    me.v2_statement_peers.insert(peer_id.clone());
+
+                    if !me.statement_subscriptions.is_empty() {
+                        let filter = build_combined_affinity_filter(&me.statement_subscriptions);
+
+                        let network = me.network_service.clone();
+                        me.background_tasks.push(Box::pin(async move {
+                            let _ = network.send_topic_affinity(&peer_id, filter).await;
+                            Event::TopicAffinitySent
+                        }));
+                    }
+                }
+            }
+
+            WakeUpReason::StatementPeerDisconnected { peer_id } => {
+                me.v2_statement_peers.remove(&peer_id);
             }
 
             WakeUpReason::IncomingJsonRpcRequest(request_json) => {
@@ -2939,6 +2978,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         me.statement_subscriptions
                             .insert(subscription_id.clone(), filter);
 
+                        let combined_filter =
+                            build_combined_affinity_filter(&me.statement_subscriptions);
+
+                        for peer_id in me.v2_statement_peers.iter().cloned() {
+                            let network = me.network_service.clone();
+                            let filter = combined_filter.clone();
+                            me.background_tasks.push(Box::pin(async move {
+                                let _ = network.send_topic_affinity(&peer_id, filter).await;
+                                Event::TopicAffinitySent
+                            }));
+                        }
+
                         if me
                             .responses_tx
                             .send(
@@ -2959,6 +3010,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                     methods::MethodCall::statement_unsubscribe { subscription } => {
                         let existed = me.statement_subscriptions.remove(&subscription).is_some();
+
+                        if existed && !me.v2_statement_peers.is_empty() {
+                            let combined_filter =
+                                build_combined_affinity_filter(&me.statement_subscriptions);
+                            for peer_id in me.v2_statement_peers.iter().cloned() {
+                                let network = me.network_service.clone();
+                                let filter = combined_filter.clone();
+                                me.background_tasks.push(Box::pin(async move {
+                                    let _ = network.send_topic_affinity(&peer_id, filter).await;
+                                    Event::TopicAffinitySent
+                                }));
+                            }
+                        }
+
                         if me
                             .responses_tx
                             .send(
@@ -5918,6 +5983,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // TODO: add a delay or something?
             }
 
+            WakeUpReason::Event(Event::TopicAffinitySent) => {}
+
             WakeUpReason::NotifyFinalizedHeads => {
                 // All `chain_subscribeFinalizedHeads` subscriptions must be notified of the
                 // latest finalized block.
@@ -6099,4 +6166,31 @@ fn convert_runtime_version(
             .map(|api| (methods::HexString(api.name_hash.to_vec()), api.version))
             .collect(),
     }
+}
+
+fn build_combined_affinity_filter(
+    subscriptions: &hashbrown::HashMap<String, network_service::TopicFilter, fnv::FnvBuildHasher>,
+) -> network_service::AffinityFilter {
+    let seed: u128 = 0x5EED_5EED_5EED_5EED;
+    let mut all_topics: Vec<[u8; 32]> = Vec::new();
+    for filter in subscriptions.values() {
+        match filter {
+            network_service::TopicFilter::Any => {
+                return network_service::AffinityFilter::from_topic_filter(
+                    seed,
+                    &network_service::TopicFilter::Any,
+                );
+            }
+            network_service::TopicFilter::MatchAll(topics)
+            | network_service::TopicFilter::MatchAny(topics) => {
+                all_topics.extend_from_slice(topics);
+            }
+        }
+    }
+    let count = all_topics.len().max(1);
+    let mut combined = network_service::AffinityFilter::new(seed, 0.01, count);
+    for topic in &all_topics {
+        combined.insert(topic);
+    }
+    combined
 }

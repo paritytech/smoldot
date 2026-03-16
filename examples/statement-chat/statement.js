@@ -1,4 +1,5 @@
-import * as ed from "@noble/ed25519";
+import { Keyring } from "@polkadot/keyring";
+import { cryptoWaitReady } from "@polkadot/util-crypto";
 
 export function toHex(bytes) {
   return (
@@ -90,34 +91,46 @@ function encodeStatement(proof, topic, data) {
   return concat(...parts);
 }
 
+let keyring = null;
+let keypair = null;
+
+function getClientIndex() {
+  const stored = localStorage.getItem("statement-chat-client-idx");
+  if (stored !== null) {
+    return parseInt(stored, 10);
+  }
+  const idx = Math.floor(Math.random() * 100);
+  localStorage.setItem("statement-chat-client-idx", idx.toString());
+  return idx;
+}
+
 async function getOrCreateKeypair() {
-  const stored = localStorage.getItem("statement-chat-keypair");
-  if (stored) {
-    const { privateKey, publicKey } = JSON.parse(stored);
-    return {
-      privateKey: new Uint8Array(privateKey),
-      publicKey: new Uint8Array(publicKey),
-    };
+  if (keypair) {
+    return keypair;
   }
 
-  const privateKey = ed.utils.randomSecretKey();
-  const publicKey = await ed.getPublicKeyAsync(privateKey);
+  await cryptoWaitReady();
 
-  localStorage.setItem(
-    "statement-chat-keypair",
-    JSON.stringify({
-      privateKey: Array.from(privateKey),
-      publicKey: Array.from(publicKey),
-    }),
-  );
+  if (!keyring) {
+    keyring = new Keyring({ type: "ed25519" });
+  }
 
-  return { privateKey, publicKey };
+  const idx = getClientIndex();
+  const uri = `//StatementStoreClient//${idx}`;
+  const pair = keyring.addFromUri(uri);
+
+  keypair = {
+    publicKey: pair.publicKey,
+    sign: (message) => pair.sign(message),
+  };
+
+  return keypair;
 }
 
 export async function createSignedStatement(topic, data) {
-  const { privateKey, publicKey } = await getOrCreateKeypair();
+  const { publicKey, sign } = await getOrCreateKeypair();
   const signatureMaterial = buildSignatureMaterial(topic, data);
-  const signature = await ed.signAsync(signatureMaterial, privateKey);
+  const signature = sign(signatureMaterial);
   const proof = encodeEd25519Proof(signature, publicKey);
   const statement = encodeStatement(proof, topic, data);
   return toHex(statement);

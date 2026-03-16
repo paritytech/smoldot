@@ -814,6 +814,12 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 // The standalone sync service doesn't need to react to them.
             }
 
+            WakeUpReason::NetworkEvent(
+                network_service::Event::StatementProtocolConnected { .. },
+            ) => {
+                // Statement store protocol events are handled by the JSON-RPC service.
+            }
+
             WakeUpReason::MustSubscribeNetworkEvents => {
                 debug_assert!(task.from_network_service.is_none());
                 for (_, sync_source_id) in task.peers_source_id_map.drain() {

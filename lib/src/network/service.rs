@@ -338,10 +338,19 @@ enum Protocol {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum NotificationsProtocol {
-    BlockAnnounces { chain_index: usize },
-    Transactions { chain_index: usize },
-    Grandpa { chain_index: usize },
-    Statement { chain_index: usize },
+    BlockAnnounces {
+        chain_index: usize,
+    },
+    Transactions {
+        chain_index: usize,
+    },
+    Grandpa {
+        chain_index: usize,
+    },
+    Statement {
+        chain_index: usize,
+        version: codec::StatementProtocolVersion,
+    },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -563,6 +572,11 @@ where
             },
             NotificationsProtocol::Statement {
                 chain_index: chain_id.0,
+                version: codec::StatementProtocolVersion::V1,
+            },
+            NotificationsProtocol::Statement {
+                chain_index: chain_id.0,
+                version: codec::StatementProtocolVersion::V2,
             },
         ] {
             for (protocol, peer_index, direction, state, substream_id) in self
@@ -639,7 +653,10 @@ where
                     chain_index,
                 }))
                 | Some(Protocol::Notifications(NotificationsProtocol::Grandpa { chain_index }))
-                | Some(Protocol::Notifications(NotificationsProtocol::Statement { chain_index }))
+                | Some(Protocol::Notifications(NotificationsProtocol::Statement {
+                    chain_index,
+                    ..
+                }))
                 | Some(Protocol::Sync { chain_index })
                 | Some(Protocol::LightUnknown { chain_index })
                 | Some(Protocol::LightStorage { chain_index })
@@ -1459,6 +1476,7 @@ where
                         }
                         Protocol::Notifications(NotificationsProtocol::Statement {
                             chain_index,
+                            ..
                         }) if self.chains[chain_index].statement_protocol_config.is_none() => {
                             self.inner.reject_inbound(substream_id);
                             continue;
@@ -1865,12 +1883,14 @@ where
                                                     },
                                                     NotificationsProtocol::Statement {
                                                         chain_index,
+                                                        version,
                                                     } => codec::ProtocolName::Statement {
                                                         genesis_hash: self.chains[chain_index]
                                                             .genesis_hash,
                                                         fork_id: self.chains[chain_index]
                                                             .fork_id
                                                             .as_deref(),
+                                                        version,
                                                     },
                                                     _ => unreachable!(),
                                                 },
@@ -1980,7 +2000,14 @@ where
                                         NotificationsProtocol::BlockAnnounces { chain_index },
                                         NotificationsProtocol::Transactions { chain_index },
                                         NotificationsProtocol::Grandpa { chain_index },
-                                        NotificationsProtocol::Statement { chain_index },
+                                        NotificationsProtocol::Statement {
+                                            chain_index,
+                                            version: codec::StatementProtocolVersion::V1,
+                                        },
+                                        NotificationsProtocol::Statement {
+                                            chain_index,
+                                            version: codec::StatementProtocolVersion::V2,
+                                        },
                                     ] {
                                         for (substream_id, direction, state) in self
                                             .notification_substreams_by_peer_id
@@ -2103,7 +2130,7 @@ where
 
                         NotificationsProtocol::Transactions { chain_index }
                         | NotificationsProtocol::Grandpa { chain_index }
-                        | NotificationsProtocol::Statement { chain_index } => {
+                        | NotificationsProtocol::Statement { chain_index, .. } => {
                             // TODO: doesn't check the handshakes
 
                             // This can only happen if we have a block announces substream with
@@ -2164,12 +2191,13 @@ where
                                                     .as_deref(),
                                             }
                                         }
-                                        NotificationsProtocol::Statement { .. } => {
+                                        NotificationsProtocol::Statement { version, .. } => {
                                             codec::ProtocolName::Statement {
                                                 genesis_hash: self.chains[chain_index].genesis_hash,
                                                 fork_id: self.chains[chain_index]
                                                     .fork_id
                                                     .as_deref(),
+                                                version,
                                             }
                                         }
                                         _ => unreachable!(),
@@ -2355,7 +2383,14 @@ where
                             for proto in [
                                 NotificationsProtocol::Transactions { chain_index },
                                 NotificationsProtocol::Grandpa { chain_index },
-                                NotificationsProtocol::Statement { chain_index },
+                                NotificationsProtocol::Statement {
+                                    chain_index,
+                                    version: codec::StatementProtocolVersion::V1,
+                                },
+                                NotificationsProtocol::Statement {
+                                    chain_index,
+                                    version: codec::StatementProtocolVersion::V2,
+                                },
                             ] {
                                 for (substream_direction, substream_state, substream_id) in self
                                     .notification_substreams_by_peer_id
@@ -2482,12 +2517,14 @@ where
                                             fork_id: self.chains[chain_index].fork_id.as_deref(),
                                         }
                                     }
-                                    NotificationsProtocol::Statement { chain_index } => {
-                                        codec::ProtocolName::Statement {
-                                            genesis_hash: self.chains[chain_index].genesis_hash,
-                                            fork_id: self.chains[chain_index].fork_id.as_deref(),
-                                        }
-                                    }
+                                    NotificationsProtocol::Statement {
+                                        chain_index,
+                                        version,
+                                    } => codec::ProtocolName::Statement {
+                                        genesis_hash: self.chains[chain_index].genesis_hash,
+                                        fork_id: self.chains[chain_index].fork_id.as_deref(),
+                                        version,
+                                    },
                                     _ => unreachable!(),
                                 }),
                                 self.notifications_protocol_handshake_timeout(substream_protocol),
@@ -2551,7 +2588,7 @@ where
                     let (NotificationsProtocol::BlockAnnounces { chain_index }
                     | NotificationsProtocol::Transactions { chain_index }
                     | NotificationsProtocol::Grandpa { chain_index }
-                    | NotificationsProtocol::Statement { chain_index }) = substream_protocol;
+                    | NotificationsProtocol::Statement { chain_index, .. }) = substream_protocol;
 
                     // Check whether a substream with the same protocol already exists with that
                     // peer, and if so deny the request.
@@ -2628,8 +2665,12 @@ where
                             self.notifications_protocol_max_notification_size(substream_protocol),
                         );
 
-                        if matches!(substream_protocol, NotificationsProtocol::Statement { .. })
-                            && self
+                        if let NotificationsProtocol::Statement {
+                            chain_index: _,
+                            version,
+                        } = substream_protocol
+                        {
+                            if self
                                 .notification_substreams_by_peer_id
                                 .range(
                                     (
@@ -2649,41 +2690,51 @@ where
                                 )
                                 .next()
                                 .is_none()
-                            && !self.inner.connection_state(connection_id).shutting_down
-                        {
-                            let new_substream_id = self.inner.open_out_notifications(
-                                connection_id,
-                                codec::encode_protocol_name_string(
-                                    codec::ProtocolName::Statement {
-                                        genesis_hash: self.chains[chain_index].genesis_hash,
-                                        fork_id: self.chains[chain_index].fork_id.as_deref(),
-                                    },
-                                ),
-                                self.notifications_protocol_handshake_timeout(substream_protocol),
-                                self.notifications_protocol_handshake(substream_protocol),
-                                self.notifications_protocol_max_handshake_size(substream_protocol),
-                            );
-                            self.substreams.insert(
-                                new_substream_id,
-                                SubstreamInfo {
+                                && !self.inner.connection_state(connection_id).shutting_down
+                            {
+                                let new_substream_id = self.inner.open_out_notifications(
                                     connection_id,
-                                    protocol: Some(Protocol::Notifications(substream_protocol)),
-                                },
-                            );
-                            self.notification_substreams_by_peer_id.insert((
-                                substream_protocol,
-                                peer_index,
-                                SubstreamDirection::Out,
-                                NotificationsSubstreamState::Pending,
-                                new_substream_id,
-                            ));
+                                    codec::encode_protocol_name_string(
+                                        codec::ProtocolName::Statement {
+                                            genesis_hash: self.chains[chain_index].genesis_hash,
+                                            fork_id: self.chains[chain_index].fork_id.as_deref(),
+                                            version,
+                                        },
+                                    ),
+                                    self.notifications_protocol_handshake_timeout(
+                                        substream_protocol,
+                                    ),
+                                    self.notifications_protocol_handshake(substream_protocol),
+                                    self.notifications_protocol_max_handshake_size(
+                                        substream_protocol,
+                                    ),
+                                );
+                                self.substreams.insert(
+                                    new_substream_id,
+                                    SubstreamInfo {
+                                        connection_id,
+                                        protocol: Some(Protocol::Notifications(substream_protocol)),
+                                    },
+                                );
+                                self.notification_substreams_by_peer_id.insert((
+                                    substream_protocol,
+                                    peer_index,
+                                    SubstreamDirection::Out,
+                                    NotificationsSubstreamState::Pending,
+                                    new_substream_id,
+                                ));
+                            }
                         }
 
-                        if let NotificationsProtocol::Statement { chain_index } = substream_protocol
+                        if let NotificationsProtocol::Statement {
+                            chain_index,
+                            version,
+                        } = substream_protocol
                         {
                             return Some(Event::StatementProtocolConnected {
                                 peer_id: self.peers[peer_index.0].clone(),
                                 chain_id: ChainId(chain_index),
+                                version,
                             });
                         }
 
@@ -2783,7 +2834,7 @@ where
                     let (NotificationsProtocol::BlockAnnounces { chain_index }
                     | NotificationsProtocol::Transactions { chain_index }
                     | NotificationsProtocol::Grandpa { chain_index }
-                    | NotificationsProtocol::Statement { chain_index }) = substream_protocol;
+                    | NotificationsProtocol::Statement { chain_index, .. }) = substream_protocol;
                     let peer_index = *self.inner[substream_info.connection_id]
                         .peer_index
                         .as_ref()
@@ -2884,17 +2935,40 @@ where
                                 }
                             }
                         }
-                        NotificationsProtocol::Statement { .. } => {
-                            let statement_bytes =
-                                match codec::extract_statement_bytes(&notification) {
-                                    Ok(s) => s,
-                                    Err(err) => {
-                                        return Some(Event::ProtocolError {
-                                            error: ProtocolError::BadStatementNotification(err),
-                                            peer_id: self.peers[peer_index.0].clone(),
-                                        });
+                        NotificationsProtocol::Statement { version, .. } => {
+                            let statement_bytes = match version {
+                                codec::StatementProtocolVersion::V1 => {
+                                    match codec::extract_statement_bytes(&notification) {
+                                        Ok(s) => s,
+                                        Err(err) => {
+                                            return Some(Event::ProtocolError {
+                                                error: ProtocolError::BadStatementNotification(err),
+                                                peer_id: self.peers[peer_index.0].clone(),
+                                            });
+                                        }
                                     }
-                                };
+                                }
+                                codec::StatementProtocolVersion::V2 => {
+                                    match codec::decode_statement_message(&notification) {
+                                        Ok(codec::StatementMessage::Statements(stmts)) => stmts,
+                                        Ok(codec::StatementMessage::ExplicitTopicAffinity(
+                                            filter,
+                                        )) => {
+                                            return Some(Event::StatementTopicAffinityReceived {
+                                                chain_id: ChainId(chain_index),
+                                                peer_id: self.peers[peer_index.0].clone(),
+                                                filter,
+                                            });
+                                        }
+                                        Err(err) => {
+                                            return Some(Event::ProtocolError {
+                                                error: ProtocolError::BadStatementMessage(err),
+                                                peer_id: self.peers[peer_index.0].clone(),
+                                            });
+                                        }
+                                    }
+                                }
+                            };
 
                             let chain = &mut self.chains[chain_index];
                             let non_duplicate_statement_bytes: Vec<&[u8]> = statement_bytes
@@ -3309,11 +3383,15 @@ where
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
-                Protocol::Notifications(NotificationsProtocol::Statement { chain_index }) => {
+                Protocol::Notifications(NotificationsProtocol::Statement {
+                    chain_index,
+                    version,
+                }) => {
                     let chain_info = &self.chains[chain_index];
                     codec::ProtocolName::Statement {
                         genesis_hash: chain_info.genesis_hash,
                         fork_id: chain_info.fork_id.as_deref(),
+                        version,
                     }
                 }
                 Protocol::Sync { chain_index } => {
@@ -3443,11 +3521,20 @@ where
                         chain
                             .statement_protocol_config
                             .is_some()
-                            .then_some(codec::ProtocolName::Statement {
-                                genesis_hash: chain.genesis_hash,
-                                fork_id: chain.fork_id.as_deref(),
-                            })
-                            .into_iter(),
+                            .then_some([
+                                codec::ProtocolName::Statement {
+                                    genesis_hash: chain.genesis_hash,
+                                    fork_id: chain.fork_id.as_deref(),
+                                    version: codec::StatementProtocolVersion::V2,
+                                },
+                                codec::ProtocolName::Statement {
+                                    genesis_hash: chain.genesis_hash,
+                                    fork_id: chain.fork_id.as_deref(),
+                                    version: codec::StatementProtocolVersion::V1,
+                                },
+                            ])
+                            .into_iter()
+                            .flatten(),
                     )
                     .chain(
                         chain
@@ -3695,6 +3782,11 @@ where
             },
             NotificationsProtocol::Statement {
                 chain_index: chain_id.0,
+                version: codec::StatementProtocolVersion::V1,
+            },
+            NotificationsProtocol::Statement {
+                chain_index: chain_id.0,
+                version: codec::StatementProtocolVersion::V2,
             },
         ]
         .into_iter()
@@ -4100,7 +4192,7 @@ where
     /// Sends a statement notification to the given peer.
     ///
     /// The `statement` parameter is a single encoded statement. This function wraps it in the
-    /// proper `Vec<Statement>` format expected by the protocol.
+    /// proper format expected by the protocol (V1 or V2 depending on negotiated version).
     ///
     /// If no [`Event::GossipConnected`] event of kind [`GossipKind::ConsensusTransactions`] has
     /// been emitted for the given peer, then a [`QueueNotificationError::NoConnection`] will be
@@ -4119,10 +4211,35 @@ where
         chain_id: ChainId,
         statement: Vec<u8>,
     ) -> Result<(), QueueNotificationError> {
-        // Protocol expects Vec<Statement>, encode with SCALE compact length prefix
-        let mut notification = Vec::with_capacity(1 + statement.len());
-        notification.push(0x04); // SCALE compact encoding of count 1
-        notification.extend_from_slice(&statement);
+        let Some(&peer_index) = self.peers_by_peer_id.get(target) else {
+            return Err(QueueNotificationError::NoConnection);
+        };
+
+        let chain_index = chain_id.0;
+
+        let (protocol, notification) = self
+            .find_statement_protocol_for_peer(peer_index, chain_index)
+            .map(|version| {
+                let notification = match version {
+                    codec::StatementProtocolVersion::V1 => {
+                        let mut notification = Vec::with_capacity(1 + statement.len());
+                        notification.push(0x04); // SCALE compact encoding of count 1
+                        notification.extend_from_slice(&statement);
+                        notification
+                    }
+                    codec::StatementProtocolVersion::V2 => {
+                        codec::encode_statements_message(&[&statement])
+                    }
+                };
+                (
+                    NotificationsProtocol::Statement {
+                        chain_index,
+                        version,
+                    },
+                    notification,
+                )
+            })
+            .ok_or(QueueNotificationError::NoConnection)?;
 
         let chain = &mut self.chains[chain_id.0];
         if let Some(cache) = &mut chain.seen_statements {
@@ -4130,13 +4247,91 @@ where
             cache.push(hash, ());
         }
 
-        self.queue_notification(
-            target,
-            NotificationsProtocol::Statement {
-                chain_index: chain_id.0,
-            },
-            notification,
-        )
+        self.queue_notification(target, protocol, notification)
+    }
+
+    /// Sends a topic affinity message to the given peer.
+    ///
+    /// This is only valid for V2 statement protocol connections. If the peer is connected
+    /// via V1, this function returns an error.
+    ///
+    /// The filter indicates which statement topics the local node is interested in receiving.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn send_topic_affinity(
+        &mut self,
+        target: &PeerId,
+        chain_id: ChainId,
+        filter: &codec::AffinityFilter,
+    ) -> Result<(), SendTopicAffinityError> {
+        let Some(&peer_index) = self.peers_by_peer_id.get(target) else {
+            return Err(SendTopicAffinityError::NoConnection);
+        };
+
+        let chain_index = chain_id.0;
+
+        let version = self
+            .find_statement_protocol_for_peer(peer_index, chain_index)
+            .ok_or(SendTopicAffinityError::NoConnection)?;
+
+        if version != codec::StatementProtocolVersion::V2 {
+            return Err(SendTopicAffinityError::ProtocolV1);
+        }
+
+        let notification = codec::encode_topic_affinity_message(filter);
+        let protocol = NotificationsProtocol::Statement {
+            chain_index,
+            version,
+        };
+
+        self.queue_notification(target, protocol, notification)
+            .map_err(|err| match err {
+                QueueNotificationError::NoConnection => SendTopicAffinityError::NoConnection,
+                QueueNotificationError::QueueFull => SendTopicAffinityError::QueueFull,
+            })
+    }
+
+    fn find_statement_protocol_for_peer(
+        &self,
+        peer_index: PeerIndex,
+        chain_index: usize,
+    ) -> Option<codec::StatementProtocolVersion> {
+        for version in [
+            codec::StatementProtocolVersion::V2,
+            codec::StatementProtocolVersion::V1,
+        ] {
+            let protocol = NotificationsProtocol::Statement {
+                chain_index,
+                version,
+            };
+            let has_substream = self
+                .notification_substreams_by_peer_id
+                .range(
+                    (
+                        protocol,
+                        peer_index,
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::OPEN_MIN_VALUE,
+                        SubstreamId::MIN,
+                    )
+                        ..=(
+                            protocol,
+                            peer_index,
+                            SubstreamDirection::Out,
+                            NotificationsSubstreamState::OPEN_MAX_VALUE,
+                            SubstreamId::MAX,
+                        ),
+                )
+                .next()
+                .is_some();
+            if has_substream {
+                return Some(version);
+            }
+        }
+        None
     }
 
     /// Inner implementation for all the notifications sends.
@@ -4155,7 +4350,7 @@ where
             NotificationsProtocol::BlockAnnounces { chain_index } => chain_index,
             NotificationsProtocol::Transactions { chain_index } => chain_index,
             NotificationsProtocol::Grandpa { chain_index } => chain_index,
-            NotificationsProtocol::Statement { chain_index } => chain_index,
+            NotificationsProtocol::Statement { chain_index, .. } => chain_index,
         };
 
         assert!(self.chains.contains(chain_index));
@@ -4304,11 +4499,13 @@ where
             codec::ProtocolName::Statement {
                 genesis_hash,
                 fork_id,
+                version,
             } => Protocol::Notifications(NotificationsProtocol::Statement {
                 chain_index: *self
                     .chains_by_protocol_info
                     .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
                     .ok_or(())?,
+                version,
             }),
         })
     }
@@ -4407,7 +4604,7 @@ where
             }
             NotificationsProtocol::Transactions { chain_index, .. }
             | NotificationsProtocol::Grandpa { chain_index }
-            | NotificationsProtocol::Statement { chain_index } => {
+            | NotificationsProtocol::Statement { chain_index, .. } => {
                 self.chains[chain_index].role.scale_encoding().to_vec()
             }
         };
@@ -4657,6 +4854,21 @@ pub enum Event<TConn> {
         peer_id: PeerId,
         /// Index of the chain.
         chain_id: ChainId,
+        /// Protocol version negotiated with the peer.
+        version: codec::StatementProtocolVersion,
+    },
+
+    /// A peer sent explicit topic affinity via the V2 statement protocol.
+    ///
+    /// This is only emitted when connected via Statement Protocol V2.
+    /// The affinity filter indicates which topics the peer is interested in.
+    StatementTopicAffinityReceived {
+        /// Identity of the peer.
+        peer_id: PeerId,
+        /// Index of the chain.
+        chain_id: ChainId,
+        /// The affinity filter sent by the peer.
+        filter: codec::AffinityFilter,
     },
 
     /// Error in the protocol in a connection, such as failure to decode a message. This event
@@ -4731,6 +4943,9 @@ pub enum ProtocolError {
     /// Error while decoding a received statement notification.
     #[display("Error while decoding a received statement notification: {_0}")]
     BadStatementNotification(codec::DecodeStatementNotificationError),
+    /// Error while decoding a received V2 statement message.
+    #[display("Error while decoding a received V2 statement message: {_0}")]
+    BadStatementMessage(codec::DecodeStatementMessageError),
     /// Received an invalid identify request.
     BadIdentifyRequest,
     /// Error while decoding a received blocks request.
@@ -4759,6 +4974,20 @@ pub enum CloseGossipError {
 pub enum StartRequestError {
     /// There is no valid connection to the given peer on which the request can be started.
     NoConnection,
+}
+
+/// Error potentially returned by [`ChainNetwork::send_topic_affinity`].
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
+pub enum SendTopicAffinityError {
+    /// No valid connection to the given peer.
+    #[display("No connection to the peer")]
+    NoConnection,
+    /// Peer is connected via V1 protocol which doesn't support topic affinity.
+    #[display("Topic affinity is not supported by V1 protocol")]
+    ProtocolV1,
+    /// The notification queue is full.
+    #[display("Notification queue is full")]
+    QueueFull,
 }
 
 /// Error potentially returned when starting a request that might be too large.
