@@ -31,7 +31,7 @@ hex = { version = "0.4.3", default-features = false }
 humantime = { version = "2.1.0", default-features = false }
 lru = { version = "0.16.3", default-features = false, features = ["hashbrown"] }
 mick-jaeger = "0.1.8"
-rand = "0.8.5"
+rand = "0.10.0"
 serde = { version = "1.0.183", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.104", default-features = false, features = ["std"] }
 siphasher = { version = "1.0.1", default-features = false }
