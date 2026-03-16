@@ -1,0 +1,70 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Transactions handling."><title>smoldot::transactions - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="smoldot" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module transactions</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../smoldot/index.html">smoldot</a><span class="version">0.21.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module transactions</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#overview" title="Overview">Overview</a><ul><li><a href="#about-duplicate-transactions" title="About duplicate transactions">About duplicate transactions</a></li></ul></li></ul><h3><a href="#modules">Module Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate smoldot</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">smoldot</a></div><h1>Module <span>transactions</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/smoldot/transactions.rs.html#18-90">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Transactions handling.</p>
+<p>This module contains everything related to the handling of transactions.</p>
+<h2 id="overview"><a class="doc-anchor" href="#overview">§</a>Overview</h2>
+<p>From a thousand miles perspective, the process of including a transaction in the chain is as
+follows:</p>
+<ul>
+<li>
+<p>The transaction gets built, in other words the bytes that encode the transaction are
+generated. This can be done for example through a UI, through an off-chain worker, or other. A
+transaction can be either signed (i.e. have a signature attached to it) or unsigned, depending
+on the action to be performed. A balance transfer, for example, generally always requires a
+signature.</p>
+</li>
+<li>
+<p>The transaction is then processed by a node, generally the node that belongs to the author
+of the transaction, where it is <em>validated</em> by passing it as parameter to a runtime entry
+point. See the <a href="validate/index.html" title="mod smoldot::transactions::validate"><code>validate</code></a> module for more info. The <a href="pool/index.html" title="mod smoldot::transactions::pool"><code>pool</code></a> module contains a data
+structure that manages the list of pending transactions.</p>
+</li>
+<li>
+<p>If the validation process indicates that the transaction can be propagated, it is then sent
+over the peer-to-peer network to other peers. Each node that receives the transaction
+similarly validates it and relays it to its own peers.</p>
+</li>
+<li>
+<p>When a block is authored, the node that authors it picks from its pool of validated
+transactions the ones to include in the block. The logic under which transactions are picked
+and their ordering depends on the output of the validation. The <em>body</em> of the newly-authored
+block is made of (but not exclusively) the transactions that have been included in said block.</p>
+</li>
+<li>
+<p>When a node receives a new block, the transactions in the pool are re-validated against
+this block. The validation function found in the runtime is expected to return an error if
+the transaction in question is already present in the chain and should not be included again.</p>
+</li>
+</ul>
+<h3 id="about-duplicate-transactions"><a class="doc-anchor" href="#about-duplicate-transactions">§</a>About duplicate transactions</h3>
+<p>In practice, the vast majority of the time, a given transaction can only ever be inserted
+once in a chain, as the vast majority of transactions include some sort of nonce in their
+encoding. In other words, once a transaction has been included in a block, trying to
+re-validate that same transaction against that same block or any of its descendants will
+return an error.</p>
+<p>Once a transaction has been included in a block, it becomes known to everyone. If the runtime
+<em>always</em> considered a certain transaction as valid, then this transaction could be repeatedly
+included in the chain over and over again (and by anyone, since the transaction is public).
+On a higher level, the logic of such a transaction couldn’t possibly make sense, as the reason
+why transactions exist in the first place is to modify the state of the chain. In other words,
+a runtime that always considers a certain transaction to be valid doesn’t make sense on a
+higher level.</p>
+<p>With that in mind, a Substrate/Polkadot client implementation is allowed to make two
+assumptions:</p>
+<ul>
+<li>After a transaction has been included in a block, trying to re-validate it against that
+same block or any of its descendants always yields an error.</li>
+<li>The same transaction can’t possibly be included twice in the same block.</li>
+</ul>
+<blockquote>
+<p><strong>Note</strong>: The official Substrate client, in particular, tracks transactions by their hash,
+and removes from the pool any transaction from the pool after it has been included
+in the best chain, without even attempting to re-validate it (but re-inserts
+transactions in the pool if a block gets reverted).</p>
+</blockquote>
+<p>However, this is in theory not the correct behavior. A legitimate (but in practice very
+uncommon) use-case for runtimes is to consider a transaction as invalid right after it has
+been included, but then valid again some time in the future.</p>
+<p>The specific use case is considered to be uncommon enough to not explicitly be taken into
+account. The client considers that once a transaction has been considered invalid against a
+certain block B, it will forever remain considered as invalid on any descendant of B, but a
+client also attempts to not cache that information for <em>too long</em> through heuristics.</p>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="light_pool/index.html" title="mod smoldot::transactions::light_pool">light_<wbr>pool</a></dt><dd>Transactions pool specialized for light clients usage.</dd><dt><a class="mod" href="pool/index.html" title="mod smoldot::transactions::pool">pool</a></dt><dd>General-purpose transactions pool.</dd><dt><a class="mod" href="validate/index.html" title="mod smoldot::transactions::validate">validate</a></dt><dd>Runtime call to obtain the transactions validity status.</dd></dl></section></div></main></body></html>

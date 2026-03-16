@@ -1,0 +1,52 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Module containing everything related to the processing of a single libp2p connection."><title>smoldot::libp2p::connection - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="smoldot" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module connection</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../smoldot/index.html">smoldot</a><span class="version">0.21.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module connection</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#overview" title="Overview">Overview</a></li><li><a href="#usage" title="Usage">Usage</a></li></ul><h3><a href="#reexports">Module Items</a></h3><ul class="block"><li><a href="#reexports" title="Re-exports">Re-exports</a></li><li><a href="#modules" title="Modules">Modules</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In smoldot::<wbr>libp2p</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">libp2p</a></div><h1>Module <span>connection</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/smoldot/libp2p/connection.rs.html#18-87">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Module containing everything related to the processing of a single libp2p connection.</p>
+<h2 id="overview"><a class="doc-anchor" href="#overview">§</a>Overview</h2>
+<p>Libp2p connections use TCP sockets provided by the operating system.</p>
+<blockquote>
+<p><strong>Note</strong>: Explaining the TCP/IP protocol is out of scope of this documentation. See for
+example <a href="https://en.wikipedia.org/wiki/Transmission_Control_Protocol">the Wikipedia page</a>
+for more information.</p>
+</blockquote>
+<p>Once a TCP connection has been established, the <em>handshake</em> phase starts. This handshake
+is described in details in the documentation <a href="single_stream_handshake/index.html" title="mod smoldot::libp2p::connection::single_stream_handshake"><code>single_stream_handshake</code></a> module.</p>
+<p>The handshake consists in negotiating with the remote an encryption layer, thanks to which all
+communications are encrypted, and a multiplexing layer, thanks to which the stream of data can
+be split into a multitude of <strong>substreams</strong>.</p>
+<p>After the handshake is over, the connection is now in the <em>established</em> phase. See the
+documentation of the <a href="established/index.html" title="mod smoldot::libp2p::connection::established"><code>established</code></a> module for more details.</p>
+<p>Once in the established phase, substreams can be opened either by the local endpoint or by the
+remote endpoint. When a substream is opened, a protocol is first negotiated in order to
+determine the purpose of this substream. Two kinds of protocols, and therefore two kinds of
+substreams, are supported:</p>
+<ul>
+<li>So-called “request-response” substreams. After the protocol is negotiated, the opening side
+sends a single message containing a request, and the other endpoint sends back a single
+message containing a response. The substream is then closed.</li>
+<li>So-called “notifications” substreams. After the protocol is negotiated, the opening side
+sends a single handshake message. The other endpoint must then either immediately close the
+substream to reject the handshake, or send back a handshake in order to accept it. After the
+handshake is accepted, the opening side can send an unbounded number of individual messages.
+Only the opening side is allowed to send messages on any given notifications substream.</li>
+</ul>
+<p>These two kinds of substreams serve as a base framework. The exact nature of these
+request-responses and of these notifications is out of scope of this module.</p>
+<h2 id="usage"><a class="doc-anchor" href="#usage">§</a>Usage</h2>
+<p>To connect to a libp2p node, start by establishing a TCP connection with the target. This can
+be done either through an outgoing connection or connection incoming from a TCP listening
+socket.</p>
+<blockquote>
+<p><strong>Note</strong>: This module only contains <em>no_std</em>-friendly code, and creating TCP connections
+isn’t handled by it.</p>
+</blockquote>
+<p>After a TCP connection is established, use
+<a href="single_stream_handshake/struct.HealthyHandshake.html#method.noise_yamux" title="associated function smoldot::libp2p::connection::single_stream_handshake::HealthyHandshake::noise_yamux"><code>single_stream_handshake::HealthyHandshake::noise_yamux</code></a> to initialize the state machine that
+needs to be maintained in parallel of the connection. The data sent and received over the
+socket must respectively be obtained or injected using
+<a href="single_stream_handshake/struct.HealthyHandshake.html#method.read_write" title="method smoldot::libp2p::connection::single_stream_handshake::HealthyHandshake::read_write"><code>single_stream_handshake::HealthyHandshake::read_write</code></a>. See the <a href="single_stream_handshake/index.html" title="mod smoldot::libp2p::connection::single_stream_handshake"><code>single_stream_handshake</code></a>
+module documentation for more details.</p>
+<p>Keep in mind that the <a href="single_stream_handshake/index.html" title="mod smoldot::libp2p::connection::single_stream_handshake"><code>single_stream_handshake</code></a> module doesn’t provide any timeout. Users
+are strongly encouraged to add one, in order to detect situations where the remote is,
+intentionally or not, unresponsive.</p>
+<p>After the handshake is successful, use <a href="established/struct.ConnectionPrototype.html#method.into_connection" title="method smoldot::libp2p::connection::established::ConnectionPrototype::into_connection"><code>established::ConnectionPrototype::into_connection</code></a>
+to obtain an <a href="established/struct.SingleStream.html" title="struct smoldot::libp2p::connection::established::SingleStream"><code>established::SingleStream</code></a>. Similar to the handshake, use
+<a href="established/struct.SingleStream.html#method.read_write" title="method smoldot::libp2p::connection::established::SingleStream::read_write"><code>established::SingleStream::read_write</code></a> to update the state machine.</p>
+</div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt id="reexport.NoiseKey"><code>pub use noise::<a class="struct" href="noise/struct.NoiseKey.html" title="struct smoldot::libp2p::connection::noise::NoiseKey">NoiseKey</a>;</code></dt><dt id="reexport.UnsignedNoiseKey"><code>pub use noise::<a class="struct" href="noise/struct.UnsignedNoiseKey.html" title="struct smoldot::libp2p::connection::noise::UnsignedNoiseKey">UnsignedNoiseKey</a>;</code></dt></dl><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="established/index.html" title="mod smoldot::libp2p::connection::established">established</a></dt><dt><a class="mod" href="multistream_select/index.html" title="mod smoldot::libp2p::connection::multistream_select">multistream_<wbr>select</a></dt><dd>Multistream-select is a protocol whose purpose is to negotiate protocols.</dd><dt><a class="mod" href="noise/index.html" title="mod smoldot::libp2p::connection::noise">noise</a></dt><dd>Noise protocol libp2p layer.</dd><dt><a class="mod" href="single_stream_handshake/index.html" title="mod smoldot::libp2p::connection::single_stream_handshake">single_<wbr>stream_<wbr>handshake</a></dt><dd>State machine handling the handshake with a TCP or WebSocket libp2p connection.</dd><dt><a class="mod" href="webrtc_framing/index.html" title="mod smoldot::libp2p::connection::webrtc_framing">webrtc_<wbr>framing</a></dt><dd>See <a href="https://github.com/libp2p/specs/blob/master/webrtc/README.md#multiplexing">https://github.com/libp2p/specs/blob/master/webrtc/README.md#multiplexing</a>.</dd><dt><a class="mod" href="yamux/index.html" title="mod smoldot::libp2p::connection::yamux">yamux</a></dt><dd>Yamux multiplexing protocol.</dd></dl></section></div></main></body></html>

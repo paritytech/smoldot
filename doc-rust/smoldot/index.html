@@ -1,0 +1,145 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Client for Polkadot and Substrate-compatible chains."><title>smoldot - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="smoldot" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../static.files/storage-e2aeef58.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate smoldot</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../smoldot/index.html">smoldot</a><span class="version">0.21.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#overview-of-a-blockchain" title="Overview of a blockchain">Overview of a blockchain</a><ul><li><a href="#blocks" title="Blocks">Blocks</a></li><li><a href="#trie" title="Trie">Trie</a></li><li><a href="#block-headers" title="Block headers">Block headers</a></li><li><a href="#runtime" title="Runtime">Runtime</a></li><li><a href="#forks-and-finalization" title="Forks and finalization">Forks and finalization</a></li></ul></li><li><a href="#usage" title="Usage">Usage</a></li></ul><h3><a href="#modules">Crate Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#macros" title="Macros">Macros</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><h1>Crate <span>smoldot</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/smoldot/lib.rs.html#18-216">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Client for Polkadot and Substrate-compatible chains.</p>
+<h2 id="overview-of-a-blockchain"><a class="doc-anchor" href="#overview-of-a-blockchain">§</a>Overview of a blockchain</h2>
+<p>A blockchain is, in its essence, a distributed and decentralized key-value database. The
+principle of a blockchain is to make it possible for any participant to perform modifications
+to this database, and for all participants to eventually agree on the current state of said
+database.</p>
+<p>In Polkadot and Substrate-compatible chains, the state of this database is referred to as
+“the storage”. The storage can be seen more or less as a very large <code>HashMap</code>.</p>
+<p>A blockchain therefore consists in three main things:</p>
+<ul>
+<li>The initial state of the storage at the moment when the blockchain starts.</li>
+<li>A list of blocks, where each block represents a group of modifications performed to the
+storage.</li>
+<li>A peer-to-peer network of clients connected to each other and exchanging information such
+as newly-produced blocks.</li>
+</ul>
+<p>Blocks are built on top of each other, forming a sequential list of modifications to the
+storage on top of its initial state.</p>
+<h3 id="blocks"><a class="doc-anchor" href="#blocks">§</a>Blocks</h3>
+<p>A block primarily consists in three properties:</p>
+<ul>
+<li>A parent block, referred to by its hash.</li>
+<li>An ordered list of <strong>extrinsics</strong>, representing a state change about the storage. An
+extrinsic can be either a <strong>transaction</strong> or an <strong>intrinsic</strong>.</li>
+<li>A list of <strong>digest log items</strong>, which include information necessary to verify the
+authenticity of the block, such as a cryptographic signature of the block made by its author.</li>
+</ul>
+<p>In order to make abstractions easier, there also exists what is called the <strong>genesis block</strong>,
+or block number 0. It doesn’t have any parent, extrinsic, or digest item.</p>
+<p>From these three block properties, the following other properties can be derived:</p>
+<ul>
+<li>The <strong>hash</strong> of the block. This is a unique 32 bytes identifier obtained by hashing all the
+block’s information together in a specific way.</li>
+<li>The <strong>block number</strong>. It is equal to the parent’s block number plus one, or equal to zero
+for the genesis block</li>
+<li>The state of the storage. It consists in the state of the storage of the parent block, on
+top of which the block’s extrinsics have been applied. The state of the storage of the genesis
+block is the initial state.</li>
+</ul>
+<blockquote>
+<p><strong>Note</strong>: Not all these properties are held in memory or even on disk. For instance, the
+state of the storage is quite large and holding a full version of the storage of
+every single block in the chain would be unrealistic.</p>
+</blockquote>
+<h3 id="trie"><a class="doc-anchor" href="#trie">§</a>Trie</h3>
+<p>The <strong>trie</strong> is a data structure that plays an important role in the way a blockchain
+functions.</p>
+<p>It consists in a tree of nodes associated with a key, some of these nodes containing a value.
+Each node is associated with a hash called the <strong>Merkle value</strong> that encompasses the Merkle
+values of the node’s children. The Merkle value of the root node of the tree is designated
+as “the Merkle trie root” or “the trie root”.</p>
+<p>See the <a href="trie/index.html" title="mod smoldot::trie"><code>trie</code></a> module for more details.</p>
+<h3 id="block-headers"><a class="doc-anchor" href="#block-headers">§</a>Block headers</h3>
+<p>In practical terms, when a block needs to be stored or transferred between machines, it
+is split in two parts: a <strong>header</strong> and a <strong>body</strong>. The body of a block simply consists in its
+list of extrinsics.</p>
+<blockquote>
+<p><strong>Note</strong>: The body of a block and the list of extrinsics of a block are the exact same
+thing, and these two designations can be used interchangeably.</p>
+</blockquote>
+<p>A block’s header contains the following:</p>
+<ul>
+<li>The hash of the parent of the block.</li>
+<li>The block number.</li>
+<li>The <strong>state trie root</strong>, which consists in the trie root of all the keys and values of the
+storage of this block.</li>
+<li>The <strong>extrinsics trie root</strong>, which consists in the Merkle root of a trie containing the
+extrinsics of the block.</li>
+<li>The list of digest log items.</li>
+</ul>
+<p>The hash of a block consists in the <code>blake2</code> hash of its header.</p>
+<p>See the <a href="header/index.html" title="mod smoldot::header"><code>header</code></a> module for more information.</p>
+<h3 id="runtime"><a class="doc-anchor" href="#runtime">§</a>Runtime</h3>
+<p>The state of the storage of each block is mostly opaque from the client’s perspective. There
+exists, however, a few hard coded keys, the most important one being
+<code>[0x3a, 0x63, 0x6f, 0x64, 0x65]</code> (which is the ASCII encoding of the string <code>:code</code>). The
+value associated with this key must always be a <a href="https://webassembly.org/">WebAssembly</a> binary
+code called the <strong>runtime</strong>.</p>
+<p>This WebAssembly binary code must obey a certain ABI and is responsible for the following
+actions:</p>
+<ul>
+<li>Verifying whether a block has been correctly created by its author.</li>
+<li>Providing the list of modifications to the storage performed by a block, given its header
+and body.</li>
+<li>Generating the header of newly-created blocks.</li>
+<li>Validating transactions received from third-parties, in order to later be potentially
+included in a block.</li>
+<li>Providing the tools necessary to create transactions.</li>
+</ul>
+<p>In other words, the runtime is responsible for all the actual <em>logic</em> behind the chain being
+run. For instance, when performing a transfer of tokens between one account and another, it is
+the runtime WebAssembly code that verifies that the balances are correct and updates them.</p>
+<p>Since applying an extrinsic modifies the state of the storage, it is possible for an
+extrinsic to modify this WebAssembly binary code. This is called a <strong>runtime upgrade</strong>. In
+other words, any block can potentially modify the logic of the chain.</p>
+<p>See also the <a href="executor/index.html" title="mod smoldot::executor"><code>executor</code></a> module for more information.</p>
+<h3 id="forks-and-finalization"><a class="doc-anchor" href="#forks-and-finalization">§</a>Forks and finalization</h3>
+<p>While blocks are built on top of each other, they don’t necessarily form one single chain. It
+is possible for multiple different blocks to have the same parent, thereby forming multiple
+chains. This is called a <strong>fork</strong>.</p>
+<p>When multiple chains fly around in the network, each node select one chain they consider as
+the “best”. However, because of latency, disconnects, or similar reasons, it is possible for
+a node to not be immediately aware of the existence of a chain that it would consider as a
+better chain than its current best. Later, when this node learns about this better chain, it
+will need to perform a <strong>reorg</strong> (short for <em>reorganization</em>), where blocks that were part of
+the best chain no longer are.</p>
+<p>In order to avoid troublesome situations arising from reorgs, Substrate/Polkadot provides the
+concept of <strong>finality</strong>. Once a block has been finalized, it is guaranteed to always be part
+of the best chain. By extension, the parent of a finalized block is always finalized as well.
+The genesis block of a chain is by definition is always finalized.</p>
+<p>As such, a chain of blocks is composed of two parts: one <strong>finalized</strong> part (usually the
+longest), and one non-finalized part. While the finalized part is a single linear list of
+blocks, the non-finalized part consists in a <em>directed rooted tree</em>.</p>
+<p>In order to finalize a block, Substrate/Polkadot nodes use the <strong>GrandPa</strong> algorithm. Nodes
+that are authorized to do so by the runtime emit votes on the peer-to-peer network. When two
+thirds or more of the authorized nodes have voted for a specific block to be finalized, it
+effectively becomes finalized.</p>
+<p>After these votes have been collected, they are collected in what is called a
+<strong>justification</strong>. This justification can later be requested by nodes who might not have
+received all the votes, or for example if they were offline.</p>
+<p>See the <a href="chain/index.html" title="mod smoldot::chain"><code>chain</code></a> and <a href="finality/index.html" title="mod smoldot::finality"><code>finality</code></a> modules for more information.</p>
+<h2 id="usage"><a class="doc-anchor" href="#usage">§</a>Usage</h2>
+<p>This library intentionally doesn’t provide any ready-to-use blockchain client. Instead, it
+provides tools that can be combined together in order to create a client.</p>
+<p>Components that are most certainly needed are:</p>
+<ul>
+<li>Connectivity to a peer-to-peer network. See the <a href="network/index.html" title="mod smoldot::network"><code>network</code></a> module.</li>
+<li>A persistent storage for the blocks. See the <a href="database/index.html" title="mod smoldot::database"><code>database</code></a> module.</li>
+<li>A state machine that holds information about the state of the chain and verifies the
+authenticity and/or correctness of blocks received from the network. See the <a href="sync/index.html" title="mod smoldot::sync"><code>sync</code></a>
+module.</li>
+</ul>
+<p>Optionally:</p>
+<ul>
+<li>The capacity to author new blocks. This isn’t implemented as of the writing of this
+documentation.</li>
+<li>A JSON-RPC client, in order to put a convenient-to-use UI on top of the client. See the
+<a href="json_rpc/index.html" title="mod smoldot::json_rpc"><code>json_rpc</code></a> module.</li>
+<li>TODO: telemetry</li>
+</ul>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="author/index.html" title="mod smoldot::author">author</a></dt><dt><a class="mod" href="chain/index.html" title="mod smoldot::chain">chain</a></dt><dd>Data structures describing a chain of blocks.</dd><dt><a class="mod" href="chain_spec/index.html" title="mod smoldot::chain_spec">chain_<wbr>spec</a></dt><dd>Substrate chain configuration.</dd><dt><a class="mod" href="database/index.html" title="mod smoldot::database">database</a></dt><dd>Persistent data storage.</dd><dt><a class="mod" href="executor/index.html" title="mod smoldot::executor">executor</a></dt><dd>WebAssembly runtime code execution.</dd><dt><a class="mod" href="finality/index.html" title="mod smoldot::finality">finality</a></dt><dd>Finality consists is declaring a block as irreversible. It is now forever part of the chain.</dd><dt><a class="mod" href="header/index.html" title="mod smoldot::header">header</a></dt><dd>Parsing SCALE-encoded header.</dd><dt><a class="mod" href="identity/index.html" title="mod smoldot::identity">identity</a></dt><dd>Substrate-based chains make frequent use of asymmetric cryptography. The identity of a user,
+be it an account address, a validator, or else, consists of a public key (also sometimes known
+as a verification key). A user can prove their identity by generating a signature using the
+private key (also sometimes known as a signing key) corresponding to that public key.</dd><dt><a class="mod" href="informant/index.html" title="mod smoldot::informant">informant</a></dt><dd>Information string printed out.</dd><dt><a class="mod" href="json_rpc/index.html" title="mod smoldot::json_rpc">json_<wbr>rpc</a></dt><dd>JSON-RPC servers. Trusted access to the blockchain.</dd><dt><a class="mod" href="libp2p/index.html" title="mod smoldot::libp2p">libp2p</a></dt><dd>Low-level peer-to-peer networking.</dd><dt><a class="mod" href="network/index.html" title="mod smoldot::network">network</a></dt><dd>High-level Polkadot/Substrate-specific networking.</dd><dt><a class="mod" href="sync/index.html" title="mod smoldot::sync">sync</a></dt><dd>Syncing, short for synchronizing, consists in synchronizing the state of a local chain with
+the state of the chain contained in other machines, called <em>remotes</em> or <em>sources</em>.</dd><dt><a class="mod" href="transactions/index.html" title="mod smoldot::transactions">transactions</a></dt><dd>Transactions handling.</dd><dt><a class="mod" href="trie/index.html" title="mod smoldot::trie">trie</a></dt><dd>Radix-16 Merkle-Patricia trie.</dd><dt><a class="mod" href="verify/index.html" title="mod smoldot::verify">verify</a></dt><dd>Methods that verify whether a block is correct.</dd></dl><h2 id="macros" class="section-header">Macros<a href="#macros" class="anchor">§</a></h2><dl class="item-table"><dt><a class="macro" href="macro.signature.html" title="macro smoldot::signature">signature</a></dt></dl></section></div></main></body></html>

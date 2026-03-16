@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["deliver_channel"],"struct":["DeliverReceiver","DeliverSender"]};

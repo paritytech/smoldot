@@ -1,0 +1,80 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Performing asynchronous operations on blocks."><title>smoldot::chain::async_tree - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="smoldot" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module async_tree</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../smoldot/index.html">smoldot</a><span class="version">0.21.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module async_<wbr>tree</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#summary" title="Summary">Summary</a></li><li><a href="#details" title="Details">Details</a></li><li><a href="#example" title="Example">Example</a></li></ul><h3><a href="#reexports">Module Items</a></h3><ul class="block"><li><a href="#reexports" title="Re-exports">Re-exports</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In smoldot::<wbr>chain</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">chain</a></div><h1>Module <span>async_<wbr>tree</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/smoldot/chain/async_tree.rs.html#18-1289">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Performing asynchronous operations on blocks.</p>
+<h2 id="summary"><a class="doc-anchor" href="#summary">§</a>Summary</h2>
+<p>This module contains the <a href="struct.AsyncTree.html" title="struct smoldot::chain::async_tree::AsyncTree"><code>AsyncTree</code></a> data structure.</p>
+<p>When a block is inserted in the data structure, it is added to the so-called “input tree” and
+its status is marked as pending. The data structure then starts, for each block marked as
+pending, an asynchronous operation (what this operation consists of is decided by the API
+user). Once an asynchronous operation is successful, the status of the block is switched to
+“finished”. The data structure then puts the blocks in the so-called “output tree”.</p>
+<p>The output tree is consistent, meaning that if the asynchronous operation of a child finishes
+before the one of its parent, the child will be added to the output tree only after its
+parent has finished its operation.
+Similarly, if a block is finalized in the input tree, it only gets finalized in the output
+tree after all of its ancestors have all finished their asynchronous operations.</p>
+<p>An example use case is: you insert block headers, then for each block you download its body,
+and thus obtain as output a tree of block headers and bodies.</p>
+<h2 id="details"><a class="doc-anchor" href="#details">§</a>Details</h2>
+<p>The <a href="struct.AsyncTree.html" title="struct smoldot::chain::async_tree::AsyncTree"><code>AsyncTree</code></a> data structure contains two trees of blocks: one input tree and one output
+tree. The output tree is a subset of the input tree.</p>
+<p>Each of the two trees (input and output) has the following properties:</p>
+<ul>
+<li>A finalized block.</li>
+<li>A tree of non-finalized blocks that all descend from the finalized block.</li>
+<li>A best block that can be either the finalized block or one of the non-finalized blocks.</li>
+</ul>
+<p>Furthermore, each block has the following properties:</p>
+<ul>
+<li>An opaque user data.</li>
+<li>A status: pending, in progress, or finished. Once finished, an “asynchronous user data” is
+also attached to the block. All the blocks of the output tree are always in the “finished”
+state.</li>
+</ul>
+<p>At initialization, both the input and output trees are initialized to the same finalized
+block (that is also the best block), and don’t have any non-finalized block.</p>
+<h2 id="example"><a class="doc-anchor" href="#example">§</a>Example</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>smoldot::chain::async_tree;
+<span class="kw">use </span>std::time::{Instant, Duration};
+
+<span class="kw">let </span><span class="kw-2">mut </span>tree = async_tree::AsyncTree::new(async_tree::Config {
+    finalized_async_user_data: <span class="string">"hello"</span>,
+    retry_after_failed: Duration::from_secs(<span class="number">5</span>),
+    blocks_capacity: <span class="number">32</span>,
+});
+
+<span class="comment">// Insert a new best block, child of the finalized block.
+// When doing so, we insert a "user data", a value opaque to the tree and that can be
+// retreived later. Here we pass "my block".
+</span><span class="kw">let </span>_my_block_index = tree.input_insert_block(<span class="string">"my block"</span>, <span class="prelude-val">None</span>, <span class="bool-val">false</span>, <span class="bool-val">true</span>);
+
+<span class="comment">// When calling `next_necessary_async_op`, the tree now generates a new asynchronous
+// operation id.
+</span><span class="kw">let </span>async_op_id = <span class="kw">match </span>tree.next_necessary_async_op(<span class="kw-2">&amp;</span>Instant::now()) {
+    async_tree::NextNecessaryAsyncOp::Ready(params) =&gt; {
+        <span class="macro">assert_eq!</span>(params.block_index, _my_block_index);
+        <span class="macro">assert_eq!</span>(tree[params.block_index], <span class="string">"my block"</span>);
+        params.id
+    }
+    async_tree::NextNecessaryAsyncOp::NotReady { when: <span class="kw">_ </span>} =&gt; {
+        <span class="comment">// In this example, this variant can't be returned. In practice, however, you need
+        // to call `next_necessary_async_op` again after `when`.
+        </span><span class="macro">panic!</span>();
+    }
+};
+
+<span class="comment">// The user is now responsible for performing this asynchronous operation.
+// When it is finished, call `async_op_finished`.
+// Just like when inserting a new block, we insert another "user data" in all the blocks that
+// have this asynchronous operation associated to them.
+</span>tree.async_op_finished(async_op_id, <span class="string">"world"</span>);
+
+<span class="comment">// You can now advance the best and finalized block of the tree. Calling this function tries
+// to update the tree to match the best and finalized block of the input, except that only
+// blocks whose asynchronous operation is finished are considered.
+</span><span class="kw">match </span>tree.try_advance_output() {
+    <span class="prelude-val">Some</span>(async_tree::OutputUpdate::Block(block)) =&gt; {
+        <span class="macro">assert_eq!</span>(block.index, _my_block_index);
+        <span class="macro">assert!</span>(block.is_new_best);
+    }
+    <span class="kw">_ </span>=&gt; <span class="macro">unreachable!</span>() <span class="comment">// Unreachable in this example.
+</span>}</code></pre></div></div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt id="reexport.NodeIndex"><code>pub use fork_tree::<a class="struct" href="../fork_tree/struct.NodeIndex.html" title="struct smoldot::chain::fork_tree::NodeIndex">NodeIndex</a>;</code></dt></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AsyncOpId.html" title="struct smoldot::chain::async_tree::AsyncOpId">Async<wbr>OpId</a></dt><dd>Identifier for an asynchronous operation in the <a href="struct.AsyncTree.html" title="struct smoldot::chain::async_tree::AsyncTree"><code>AsyncTree</code></a>.</dd><dt><a class="struct" href="struct.AsyncOpParams.html" title="struct smoldot::chain::async_tree::AsyncOpParams">Async<wbr>OpParams</a></dt><dd>Information about an operation that must be started.</dd><dt><a class="struct" href="struct.AsyncTree.html" title="struct smoldot::chain::async_tree::AsyncTree">Async<wbr>Tree</a></dt><dd>See <a href="..">the module-level documentation</a>.</dd><dt><a class="struct" href="struct.Config.html" title="struct smoldot::chain::async_tree::Config">Config</a></dt><dd>Configuration for <a href="struct.AsyncTree.html#method.new" title="associated function smoldot::chain::async_tree::AsyncTree::new"><code>AsyncTree::new</code></a>.</dd><dt><a class="struct" href="struct.InputIterItem.html" title="struct smoldot::chain::async_tree::InputIterItem">Input<wbr>Iter<wbr>Item</a></dt><dd>See <a href="struct.AsyncTree.html#method.input_output_iter_unordered" title="method smoldot::chain::async_tree::AsyncTree::input_output_iter_unordered"><code>AsyncTree::input_output_iter_unordered</code></a> and
+<a href="struct.AsyncTree.html#method.input_output_iter_ancestry_order" title="method smoldot::chain::async_tree::AsyncTree::input_output_iter_ancestry_order"><code>AsyncTree::input_output_iter_ancestry_order</code></a>.</dd><dt><a class="struct" href="struct.OutputUpdateBlock.html" title="struct smoldot::chain::async_tree::OutputUpdateBlock">Output<wbr>Update<wbr>Block</a></dt><dd>See <a href="enum.OutputUpdate.html" title="enum smoldot::chain::async_tree::OutputUpdate"><code>OutputUpdate</code></a>.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.NextNecessaryAsyncOp.html" title="enum smoldot::chain::async_tree::NextNecessaryAsyncOp">Next<wbr>Necessary<wbr>Async<wbr>Op</a></dt><dt><a class="enum" href="enum.OutputUpdate.html" title="enum smoldot::chain::async_tree::OutputUpdate">Output<wbr>Update</a></dt><dd>See <a href="struct.AsyncTree.html#method.try_advance_output" title="method smoldot::chain::async_tree::AsyncTree::try_advance_output"><code>AsyncTree::try_advance_output</code></a>.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,43 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Methods that verify whether a block is correct."><title>smoldot::verify - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="smoldot" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module verify</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../smoldot/index.html">smoldot</a><span class="version">0.21.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module verify</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#description" title="Description">Description</a></li><li><a href="#trust" title="Trust">Trust</a></li></ul><h3><a href="#modules">Module Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate smoldot</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">smoldot</a></div><h1>Module <span>verify</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/smoldot/verify.rs.html#18-73">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Methods that verify whether a block is correct.</p>
+<h2 id="description"><a class="doc-anchor" href="#description">§</a>Description</h2>
+<p>When a block is received from the network (or any other untrusted source), this block should
+first be verified.</p>
+<p>Two possibilities are offered:</p>
+<ul>
+<li>Verifying the authenticity of the block, using only its header and the ancestor blocks’
+headers.</li>
+<li>Verifying both the validity and authenticity of the block, using.the block’s header and
+body, the headers of the ancestors, and storage of its parent.</li>
+</ul>
+<blockquote>
+<p><strong>Note</strong>: The body of a block consists in the list of its extrinsics. An extrinsic is
+either an intrinsic (added by the block’s author) or a transaction.</p>
+</blockquote>
+<blockquote>
+<p><strong>Note</strong>: The option of verifying only the authenticity of a block, and not its validity,
+is normally for situations where a block’s body or the parent block’s storage is
+not known. If the parent storage and the block’s body are known, it is encouraged
+that the block’s validity be checked as well.</p>
+</blockquote>
+<p>Verifying the authenticity of a block consists in verifying the consensus digest logs found
+in its header in order to make sure that the author of the block was authorized to produce it.
+Whether the block has been correctly crafted isn’t and cannot be verified with only the
+header.</p>
+<p>Verifying the block’s validity consists, in addition to verifying its header, in <em>executing</em>
+the block. This involves calling the <code>BlockBuilder_check_inherents</code> and <code>Core_execute_block</code>
+runtime functions, passing as parameter the header and body of the block, and providing access
+to the storage of the parent block. The runtime verifies that the header and body are correct.</p>
+<h2 id="trust"><a class="doc-anchor" href="#trust">§</a>Trust</h2>
+<p>Verifying only the authenticity of a block, and not its validity, means that the author of
+the block is trusted to have generated a correct block.</p>
+<p>Situations where the block author had the right to generate a block but created an invalid
+block would result in a loss of money for this author, and are therefore most likely the
+consequence of a bug (either on the side of the block author or on the side of the local
+verification code).</p>
+<p>However, if the blocks’ validity isn’t verified, it is possible for a block author to target
+a weak implementation by directly connecting to it and announcing invalid blocks directly
+to it. Consequently, if blocks are for example used to verify whether a payment has gone
+through, it is preferable to wait for blocks to have been finalized.</p>
+<p>No matter the validity of a block, keep in mind that a reorg (a “reorganization”) might
+happen, and many valid blocks don’t get finalized.</p>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="aura/index.html" title="mod smoldot::verify::aura">aura</a></dt><dd>AURA consensus.</dd><dt><a class="mod" href="babe/index.html" title="mod smoldot::verify::babe">babe</a></dt><dd>BABE consensus.</dd><dt><a class="mod" href="body_only/index.html" title="mod smoldot::verify::body_only">body_<wbr>only</a></dt><dd>Verifying a block body. This operation is also called executing a block.</dd><dt><a class="mod" href="header_only/index.html" title="mod smoldot::verify::header_only">header_<wbr>only</a></dt><dt><a class="mod" href="inherents/index.html" title="mod smoldot::verify::inherents">inherents</a></dt><dd>Inherents, together with transactions, form the body of a block.</dd></dl></section></div></main></body></html>

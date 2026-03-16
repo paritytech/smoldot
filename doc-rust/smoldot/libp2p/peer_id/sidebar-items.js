@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FromBytesError","FromProtobufEncodingError","ParseError","PublicKey"],"struct":["Bs58DecodeError","PeerId","SignatureVerifyFailed"]};

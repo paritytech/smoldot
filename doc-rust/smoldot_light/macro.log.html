@@ -1,0 +1,24 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Helper macro for using the `crate::platform::PlatformRef::log` function."><title>log in smoldot_light - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="smoldot_light" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../static.files/storage-e2aeef58.js"></script><script defer src="sidebar-items.js"></script><script defer src="../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc macro"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">log</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../smoldot_light/index.html">smoldot_<wbr>light</a><span class="version">0.19.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="index.html">smoldot_light</a></div><h1>Macro <span class="macro">log</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/smoldot_light/platform.rs.html#529-542">Source</a> </span></div><pre class="rust item-decl"><code>macro_rules! log {
+    ($plat:expr, $level:ident, $target:expr, $message:expr) =&gt; { ... };
+    ($plat:expr, $level:ident, $target:expr, $message:expr, $($params:tt)*) =&gt; { ... };
+}</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Helper macro for using the <a href="platform/trait.PlatformRef.html#tymethod.log" title="method smoldot_light::platform::PlatformRef::log"><code>crate::platform::PlatformRef::log</code></a> function.</p>
+<p>This macro takes at least 4 parameters:</p>
+<ul>
+<li>A reference to an implementation of the <a href="platform/trait.PlatformRef.html" title="trait smoldot_light::platform::PlatformRef"><code>crate::platform::PlatformRef</code></a> trait.</li>
+<li>A log level: <code>Error</code>, <code>Warn</code>, <code>Info</code>, <code>Debug</code>, or <code>Trace</code>. See <a href="platform/enum.LogLevel.html" title="enum smoldot_light::platform::LogLevel"><code>crate::platform::LogLevel</code></a>.</li>
+<li>A <code>&amp;str</code> representing the target of the logging. This can be used in order to filter log
+entries belonging to a specific target.</li>
+<li>An object that implements of <code>AsRef&lt;str&gt;</code> and that contains the log message itself.</li>
+</ul>
+<p>In addition to these parameters, the macro accepts an unlimited number of extra
+(comma-separated) parameters.</p>
+<p>Each parameter has one of these four syntaxes:</p>
+<ul>
+<li><code>key = value</code>, where <code>key</code> is an identifier and <code>value</code> an expression that implements the
+<code>Display</code> trait.</li>
+<li><code>key = ?value</code>, where <code>key</code> is an identifier and <code>value</code> an expression that implements
+the <code>Debug</code> trait.</li>
+<li><code>key</code>, which is syntax sugar for <code>key = key</code>.</li>
+<li><code>?key</code>, which is syntax sugar for <code>key = ?key</code>.</li>
+</ul>
+</div></details></section></div></main></body></html>

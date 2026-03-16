@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["smoldot",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"smoldot/network/kademlia/struct.Kademlia.html\" title=\"struct smoldot::network::kademlia::Kademlia\">Kademlia</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"smoldot/trie/proof_encode/struct.ProofBuilder.html\" title=\"struct smoldot::trie::proof_encode::ProofBuilder\">ProofBuilder</a>"],["impl&lt;T&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"smoldot/chain/fork_tree/struct.ForkTree.html\" title=\"struct smoldot::chain::fork_tree::ForkTree\">ForkTree</a>&lt;T&gt;"],["impl&lt;T&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"smoldot/executor/storage_diff/struct.TrieDiff.html\" title=\"struct smoldot::executor::storage_diff::TrieDiff\">TrieDiff</a>&lt;T&gt;"],["impl&lt;TUd&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/default/trait.Default.html\" title=\"trait core::default::Default\">Default</a> for <a class=\"struct\" href=\"smoldot/trie/trie_structure/struct.TrieStructure.html\" title=\"struct smoldot::trie::trie_structure::TrieStructure\">TrieStructure</a>&lt;TUd&gt;"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[1609]}

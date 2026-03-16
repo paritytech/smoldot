@@ -1,0 +1,40 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Syncing, short for synchronizing, consists in synchronizing the state of a local chain with the state of the chain contained in other machines, called remotes or sources."><title>smoldot::sync - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="smoldot" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module sync</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../smoldot/index.html">smoldot</a><span class="version">0.21.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module sync</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#security-considerations" title="Security considerations">Security considerations</a><ul><li><a href="#eclipse-attacks" title="Eclipse attacks">Eclipse attacks</a></li><li><a href="#malicious-runtimes" title="Malicious runtimes">Malicious runtimes</a></li></ul></li></ul><h3><a href="#modules">Module Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate smoldot</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">smoldot</a></div><h1>Module <span>sync</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/smoldot/sync.rs.html#18-71">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Syncing, short for synchronizing, consists in synchronizing the state of a local chain with
+the state of the chain contained in other machines, called <em>remotes</em> or <em>sources</em>.</p>
+<blockquote>
+<p><strong>Note</strong>: While the above summary is a bit abstract, in practice it is almost always
+done by exchanging messages through a peer-to-peer network.</p>
+</blockquote>
+<p>There exists multiple syncing strategies, depending on the amount of information that is.
+desired and the distance between the highest block of the local chain and the highest block
+available from the syncing sources.
+The <a href="all/index.html" title="mod smoldot::sync::all"><code>all</code></a> module provides a state machine that combines several syncing strategies into one.</p>
+<h2 id="security-considerations"><a class="doc-anchor" href="#security-considerations">§</a>Security considerations</h2><h3 id="eclipse-attacks"><a class="doc-anchor" href="#eclipse-attacks">§</a>Eclipse attacks</h3>
+<p>While there exists various trade-offs between syncing strategies, safety is never part of
+these trade-offs. All syncing strategies are safe, in the sense that malicious remotes cannot
+corrupt the state of the local chain.</p>
+<p>It is possible, however, for a malicious remote to omit some information, such as the
+existence of a specific block. If all the remotes that are being synchronized from are
+malicious and collude to omit the same information, there is no way for the local node to
+learn this information or even to be aware that it is missing an information. This is called
+an <strong>eclipse attack</strong>.</p>
+<p>For this reason, it is important to ensure a large number and a good distribution of the
+sources. In the context of a peer-to-peer network where machines are picked randomly, a
+minimum threshold of around 7 peers is generally considered acceptable. Similarly, in the
+context of a peer-to-peer network, it is important to establish outgoing connections to other
+nodes and not only rely on incoming connections, as there is otherwise the possibility of a
+single actor controlling all said incoming connections.</p>
+<h3 id="malicious-runtimes"><a class="doc-anchor" href="#malicious-runtimes">§</a>Malicious runtimes</h3>
+<p>Synchronizing the chain requires executing a piece of WebAssembly code known as the runtime.
+Each chain has a different runtime, stored on chain, and this runtime can be modified as part
+of a the transactions in a block.</p>
+<p>There are two safety considerations concerning executing runtime code:</p>
+<ul>
+<li>The execution could take a lot of time, or possibly be stuck in an infinite loop.</li>
+<li>The execution could modify a lot of storage items. Smoldot needs to store every single
+storage item change, and a lot of modification could make the memory usage of smoldot explode.</li>
+</ul>
+<p>The Substrate model, and thus the smoldot implementation, intentionally do not do anything to
+address these two safety issues. In other words, the runtime of a chain is considered to never
+be malicious. After all, a chain whose runtime is intentionally trying to crash a client is
+borked and there is no reason to connect to it.</p>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="all/index.html" title="mod smoldot::sync::all">all</a></dt><dd>All syncing strategies grouped together.</dd><dt><a class="mod" href="all_forks/index.html" title="mod smoldot::sync::all_forks">all_<wbr>forks</a></dt><dd><em>All-forks</em> header and body syncing.</dd><dt><a class="mod" href="para/index.html" title="mod smoldot::sync::para">para</a></dt><dd>Parachains and parathreads syncing.</dd><dt><a class="mod" href="warp_sync/index.html" title="mod smoldot::sync::warp_sync">warp_<wbr>sync</a></dt><dd>Warp syncing.</dd></dl></section></div></main></body></html>

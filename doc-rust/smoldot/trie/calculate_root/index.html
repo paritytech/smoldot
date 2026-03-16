@@ -1,0 +1,56 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Freestanding function that calculates the root of a radix-16 Merkle-Patricia trie."><title>smoldot::trie::calculate_root - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="smoldot" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module calculate_root</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../smoldot/index.html">smoldot</a><span class="version">0.21.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module calculate_<wbr>root</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#usage" title="Usage">Usage</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In smoldot::<wbr>trie</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">trie</a></div><h1>Module <span>calculate_<wbr>root</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/smoldot/trie/calculate_root.rs.html#18-482">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Freestanding function that calculates the root of a radix-16 Merkle-Patricia trie.</p>
+<p>See the parent module documentation for an explanation of what the trie is.</p>
+<p>This module is meant to be used in situations where all the nodes of the trie that have a
+storage value associated to them are known and easily accessible, and that no cache is
+available.</p>
+<h2 id="usage"><a class="doc-anchor" href="#usage">§</a>Usage</h2>
+<p>Calling the <a href="fn.root_merkle_value.html" title="fn smoldot::trie::calculate_root::root_merkle_value"><code>root_merkle_value</code></a> function creates a <a href="enum.RootMerkleValueCalculation.html" title="enum smoldot::trie::calculate_root::RootMerkleValueCalculation"><code>RootMerkleValueCalculation</code></a> object
+which you have to drive to completion.</p>
+<p>Example:</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>std::{collections::BTreeMap, ops::Bound};
+<span class="kw">use </span>smoldot::trie::{HashFunction, TrieEntryVersion, calculate_root};
+
+<span class="comment">// In this example, the storage consists in a binary tree map.
+</span><span class="kw">let </span><span class="kw-2">mut </span>storage = BTreeMap::&lt;Vec&lt;u8&gt;, (Vec&lt;u8&gt;, TrieEntryVersion)&gt;::new();
+storage.insert(<span class="string">b"foo"</span>.to_vec(), (<span class="string">b"bar"</span>.to_vec(), TrieEntryVersion::V1));
+
+<span class="kw">let </span>trie_root = {
+    <span class="kw">let </span><span class="kw-2">mut </span>calculation = calculate_root::root_merkle_value(HashFunction::Blake2);
+    <span class="kw">loop </span>{
+        <span class="kw">match </span>calculation {
+            calculate_root::RootMerkleValueCalculation::Finished { hash, .. } =&gt; <span class="kw">break </span>hash,
+            calculate_root::RootMerkleValueCalculation::NextKey(next_key) =&gt; {
+                <span class="kw">let </span>key_before = next_key.key_before().collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+                <span class="kw">let </span>lower_bound = <span class="kw">if </span>next_key.or_equal() {
+                    Bound::Included(key_before)
+                } <span class="kw">else </span>{
+                    Bound::Excluded(key_before)
+                };
+                <span class="kw">let </span>outcome = storage
+                    .range((lower_bound, Bound::Unbounded))
+                    .next()
+                    .filter(|(k, <span class="kw">_</span>)| {
+                        k.iter()
+                            .copied()
+                            .zip(next_key.prefix())
+                            .all(|(a, b)| a == b)
+                    })
+                    .map(|(k, <span class="kw">_</span>)| k);
+                calculation = next_key.inject_key(outcome.map(|k| k.iter().copied()));
+            }
+            calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =&gt; {
+                <span class="kw">let </span>key = value_request.key().collect::&lt;Vec&lt;u8&gt;&gt;();
+                calculation = value_request.inject(storage.get(<span class="kw-2">&amp;</span>key).map(|(val, v)| (val, <span class="kw-2">*</span>v)));
+            }
+        }
+    }
+};
+
+<span class="macro">assert_eq!</span>(
+    trie_root,
+    [<span class="number">204</span>, <span class="number">86</span>, <span class="number">28</span>, <span class="number">213</span>, <span class="number">155</span>, <span class="number">206</span>, <span class="number">247</span>, <span class="number">145</span>, <span class="number">28</span>, <span class="number">169</span>, <span class="number">212</span>, <span class="number">146</span>, <span class="number">182</span>, <span class="number">159</span>, <span class="number">224</span>, <span class="number">82</span>,
+     <span class="number">116</span>, <span class="number">162</span>, <span class="number">143</span>, <span class="number">156</span>, <span class="number">19</span>, <span class="number">43</span>, <span class="number">183</span>, <span class="number">8</span>, <span class="number">41</span>, <span class="number">178</span>, <span class="number">204</span>, <span class="number">69</span>, <span class="number">41</span>, <span class="number">37</span>, <span class="number">224</span>, <span class="number">91</span>]
+);</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.NextKey.html" title="struct smoldot::trie::calculate_root::NextKey">NextKey</a></dt><dd>Request to return the key that follows (in lexicographic order) a given one in the storage.
+Call <a href="struct.NextKey.html#method.inject_key" title="method smoldot::trie::calculate_root::NextKey::inject_key"><code>NextKey::inject_key</code></a> to indicate this list.</dd><dt><a class="struct" href="struct.StorageValue.html" title="struct smoldot::trie::calculate_root::StorageValue">Storage<wbr>Value</a></dt><dd>Request the value of the node with a specific key. Call <a href="struct.StorageValue.html#method.inject" title="method smoldot::trie::calculate_root::StorageValue::inject"><code>StorageValue::inject</code></a> to indicate
+the value.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.RootMerkleValueCalculation.html" title="enum smoldot::trie::calculate_root::RootMerkleValueCalculation">Root<wbr>Merkle<wbr>Value<wbr>Calculation</a></dt><dd>Current state of the <a href="enum.RootMerkleValueCalculation.html" title="enum smoldot::trie::calculate_root::RootMerkleValueCalculation"><code>RootMerkleValueCalculation</code></a> and how to continue.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.root_merkle_value.html" title="fn smoldot::trie::calculate_root::root_merkle_value">root_<wbr>merkle_<wbr>value</a></dt><dd>Start calculating the Merkle value of the root node.</dd></dl></section></div></main></body></html>

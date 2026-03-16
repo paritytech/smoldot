@@ -1,0 +1,62 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Substrate-based chains make frequent use of asymmetric cryptography. The identity of a user, be it an account address, a validator, or else, consists of a public key (also sometimes known as a verification key). A user can prove their identity by generating a signature using the private key (also sometimes known as a signing key) corresponding to that public key."><title>smoldot::identity - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="smoldot" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module identity</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../smoldot/index.html">smoldot</a><span class="version">0.21.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module identity</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#public-keys-ss58" title="Public keys (SS58)">Public keys (SS58)</a></li><li><a href="#private-keys" title="Private keys">Private keys</a></li></ul><h3><a href="#modules">Module Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate smoldot</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">smoldot</a></div><h1>Module <span>identity</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/smoldot/identity.rs.html#18-87">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Substrate-based chains make frequent use of asymmetric cryptography. The identity of a user,
+be it an account address, a validator, or else, consists of a public key (also sometimes known
+as a verification key). A user can prove their identity by generating a signature using the
+private key (also sometimes known as a signing key) corresponding to that public key.</p>
+<p>A private key and a public key consist of 32 bytes of data. This poses a problem when it comes
+to end user experience. It is common for (human) users to have to manually copy a private or
+public key (using a pencil or their keyboard), and making a mistake could have catastrophic
+outcomes. It would be unwise to display keys and ask users to input keys as, for example,
+hexadecimal, because it is easy to make a copying mistake.</p>
+<p>For this reason, Substrate-defines two human-readable formats:</p>
+<ul>
+<li>A human-readable format for public keys, named SS58.</li>
+<li>A human-readable format for private keys.</li>
+</ul>
+<p>These formats do not mention which asymmetric cryptographic algorithm (e.g. ed25519 or sr25519)
+is used for the public and private keys. This must be deduced from the context.</p>
+<h3 id="public-keys-ss58"><a class="doc-anchor" href="#public-keys-ss58">§</a>Public keys (SS58)</h3>
+<p>Examples:</p>
+<ul>
+<li><code>5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY</code></li>
+<li><code>12bzRJfh7arnnfPPUZHeJUaE62QLEwhK48QnH9LXeK2m1iZU</code></li>
+</ul>
+<p>The format for public keys consists in:</p>
+<blockquote>
+<p><code>base58(concat(prefix, 32-bytes-public-key, checksum))</code></p>
+</blockquote>
+<p>The prefix, also known as network identifier, also known as an address type is one or more
+bytes identifying which blockchain network the address corresponds to. This is used for
+UX-related purposes in order to prevent end users from using an address on a different
+blockchain than the one the address was generated for.</p>
+<p>A registry of existing network identifiers can be found
+<a href="https://wiki.polkadot.network/docs/build-ss58-registry">here</a>.</p>
+<p>The checksum is verified when the human-readable format is turned into a public key. Its
+presence guarantees that simple copying mistakes will be caught.</p>
+<h3 id="private-keys"><a class="doc-anchor" href="#private-keys">§</a>Private keys</h3>
+<p>Examples:</p>
+<ul>
+<li><code>cry opinion donkey dolphin tobacco version pilot sponsor canal page vote main</code></li>
+<li><code>canoe gravity deputy pottery glass cousin era cube double rather clutch crazy//Foo//Bar</code></li>
+<li><code>//Alice</code></li>
+</ul>
+<p>The human-readable format for private keys is also called a secret string.</p>
+<p>The format for private keys consists in:</p>
+<ul>
+<li>
+<p>An optional <a href="https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki">BIP39</a> seed
+phrase. If it is missing, then the <a href="seed_phrase/constant.DEFAULT_SEED_PHRASE.html" title="constant smoldot::identity::seed_phrase::DEFAULT_SEED_PHRASE"><code>seed_phrase::DEFAULT_SEED_PHRASE</code></a> is automatically used
+instead.</p>
+</li>
+<li>
+<p>An optional derivation path. When using one <code>/</code>, this is called a <em>soft</em> derivation. When
+using two <code>/</code>, this is called a <em>hard</em> derivation. Soft derivations are reversible and can
+only be performed on public keys. Hard derivations are not reversible and can only be
+performed on private keys.</p>
+</li>
+<li>
+<p>An optional password. The private key format can contain a <code>///password</code> suffix, in which
+case <code>password</code> will be used when decoding the BIP39 phrase. See the BIP39 specification. If
+no password is provided, then the empty string (<code>""</code>) is used.</p>
+</li>
+</ul>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="keystore/index.html" title="mod smoldot::identity::keystore">keystore</a></dt><dd>Data structure containing cryptographic key pairs.</dd><dt><a class="mod" href="seed_phrase/index.html" title="mod smoldot::identity::seed_phrase">seed_<wbr>phrase</a></dt><dt><a class="mod" href="ss58/index.html" title="mod smoldot::identity::ss58">ss58</a></dt></dl></section></div></main></body></html>
