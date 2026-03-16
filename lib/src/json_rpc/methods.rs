@@ -462,6 +462,13 @@ define_methods! {
     /// Returns, as an opaque string, the version of the client serving these JSON-RPC requests.
     system_version() -> Cow<'a, str>,
 
+    /// Submit a new statement to the store and broadcast to peers.
+    statement_submit(encoded: HexString) -> StatementSubmitResult,
+    /// Subscribe to statements matching the given filter. Returns subscription ID.
+    statement_subscribe(filter: crate::network::codec::TopicFilter) -> Cow<'a, str>,
+    /// Unsubscribe from statement notifications.
+    statement_unsubscribe(subscription: String) -> bool,
+
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_v1_body(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
@@ -540,6 +547,9 @@ define_methods! {
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
     // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
     sudo_networkState_event(subscription: Cow<'a, str>, result: NetworkEvent) -> (),
+
+    // Statement notification sent when a statement matching subscribed topics is received.
+    statement_notification(subscription: Cow<'a, str>, statement: HexString) -> (),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1076,6 +1086,25 @@ pub enum SystemPeerRole {
     Light,
 }
 
+/// Result of submitting a statement to the statement store.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum StatementSubmitResult {
+    /// Statement was accepted and broadcasted to peers.
+    #[serde(rename = "ok_broadcast")]
+    OkBroadcast {
+        /// Number of peers the statement was successfully sent to.
+        sent: usize,
+        /// Total number of peers attempted.
+        total: usize,
+    },
+    /// Statement was accepted but will not be broadcast (e.g., duplicate).
+    #[serde(rename = "ok_ignore")]
+    OkIgnore,
+    /// Statement was invalid or rejected.
+    #[serde(rename = "error")]
+    Error(String),
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TransactionStatus {
     #[serde(rename = "future")]
@@ -1293,6 +1322,92 @@ mod tests {
                     rpc_method: "chainHead_v1_follow"
                 }
             })
+        ));
+    }
+
+    #[test]
+    fn statement_submit_parse_valid() {
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":1,"method":"statement_submit","params":["0x1234"]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(id, "1");
+        assert!(matches!(call, super::MethodCall::statement_submit { .. }));
+    }
+
+    #[test]
+    fn statement_submit_result_ok_broadcast_serialization() {
+        let result = super::StatementSubmitResult::OkBroadcast { sent: 5, total: 10 };
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert_eq!(serialized, r#"{"ok_broadcast":{"sent":5,"total":10}}"#);
+
+        let deserialized: super::StatementSubmitResult = serde_json::from_str(&serialized).unwrap();
+        assert!(matches!(
+            deserialized,
+            super::StatementSubmitResult::OkBroadcast { sent: 5, total: 10 }
+        ));
+    }
+
+    #[test]
+    fn statement_subscribe_parse_any() {
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":2,"method":"statement_subscribe","params":[{"type":"any"}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(id, "2");
+        assert!(matches!(
+            call,
+            super::MethodCall::statement_subscribe {
+                filter: crate::network::codec::TopicFilter::Any
+            }
+        ));
+    }
+
+    #[test]
+    fn statement_subscribe_parse_match_any() {
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":2,"method":"statement_subscribe","params":[{"type":"match_any","topics":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(id, "2");
+        assert!(matches!(
+            call,
+            super::MethodCall::statement_subscribe {
+                filter: crate::network::codec::TopicFilter::MatchAny(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn statement_subscribe_parse_match_all() {
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":2,"method":"statement_subscribe","params":[{"type":"match_all","topics":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(id, "2");
+        assert!(matches!(
+            call,
+            super::MethodCall::statement_subscribe {
+                filter: crate::network::codec::TopicFilter::MatchAll(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn statement_unsubscribe_parse_valid() {
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":4,"method":"statement_unsubscribe","params":["sub123"]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(id, "4");
+        assert!(matches!(
+            call,
+            super::MethodCall::statement_unsubscribe { .. }
         ));
     }
 }

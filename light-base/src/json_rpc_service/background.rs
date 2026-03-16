@@ -219,6 +219,13 @@ struct Background<TPlat: PlatformRef> {
     /// The values are list of keys.
     state_get_keys_paged_cache:
         lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
+
+    /// Active statement subscriptions. Maps subscription ID to topic filter.
+    statement_subscriptions:
+        hashbrown::HashMap<String, network_service::TopicFilter, fnv::FnvBuildHasher>,
+
+    /// Receiver for network events (statements from peers).
+    network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
 }
 
 /// State of the subscription towards the runtime service.
@@ -562,8 +569,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
         ),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: false,
+        statement_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+            2,
+            Default::default(),
+        ),
+        network_events_rx: None,
         platform: config.platform,
     };
+
+    // Subscribe to network events for receiving statements
+    me.network_events_rx = Some(me.network_service.subscribe().await);
 
     loop {
         // Yield at every loop in order to provide better tasks granularity.
@@ -595,6 +610,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             StartStorageSubscriptionsUpdates,
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
+            NetworkStatementReceived(Vec<u8>),
         }
 
         // Wait until there is something to do.
@@ -686,6 +702,24 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.next_garbage_collection = Box::pin(me.platform.sleep(Duration::from_secs(10)));
                 WakeUpReason::GarbageCollection
             })
+            .or(async {
+                // Poll for network events (incoming statements)
+                let Some(rx) = &me.network_events_rx else {
+                    return future::pending().await;
+                };
+                loop {
+                    let Ok(event) = rx.recv().await else {
+                        return future::pending().await;
+                    };
+                    if let network_service::Event::StatementNotification { statements, .. } = event
+                    {
+                        return WakeUpReason::NetworkStatementReceived(
+                            statements.as_encoded().to_vec(),
+                        );
+                    }
+                    // Ignore other events and continue polling
+                }
+            })
             .await
         };
 
@@ -704,10 +738,55 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.finalized_heads_subscriptions.shrink_to_fit();
                 me.runtime_version_subscriptions.shrink_to_fit();
                 me.transactions_subscriptions.shrink_to_fit();
+                me.statement_subscriptions.shrink_to_fit();
                 me.legacy_api_stale_storage_subscriptions.shrink_to_fit();
                 me.multistage_requests_to_advance.shrink_to_fit();
                 me.block_headers_pending.shrink_to_fit();
                 me.block_runtimes_pending.shrink_to_fit();
+            }
+
+            WakeUpReason::NetworkStatementReceived(notification_data) => {
+                // If there is no statement subscription, we can skip decoding the notification entirely.
+                if me.statement_subscriptions.is_empty() {
+                    continue;
+                }
+
+                match codec::decode_statement_notification(&notification_data) {
+                    Ok(statements) => {
+                        for statement in statements {
+                            let Ok(encoded) = codec::encode_statement(&statement) else {
+                                continue;
+                            };
+
+                            for (sub_id, topic_filter) in &me.statement_subscriptions {
+                                if topic_filter.matches(&statement.topics) {
+                                    let notification =
+                                        methods::ServerToClient::statement_notification {
+                                            subscription: Cow::Borrowed(sub_id),
+                                            statement: methods::HexString(encoded.clone()),
+                                        }
+                                        .to_json_request_object_parameters(None);
+                                    if me.responses_tx.send(notification).await.is_err() {
+                                        log!(
+                                            &me.platform,
+                                            Debug,
+                                            &me.log_target,
+                                            "Failed to send statement notification: response channel closed"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        log!(
+                            &me.platform,
+                            Warn,
+                            &me.log_target,
+                            format!("Failed to decode statement notification: {:?}", err)
+                        );
+                    }
+                }
             }
 
             WakeUpReason::IncomingJsonRpcRequest(request_json) => {
@@ -840,7 +919,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::transactionWatch_v1_unwatch { .. }
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
                     | methods::MethodCall::sudo_network_unstable_unwatch { .. }
-                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
+                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
+                    | methods::MethodCall::statement_submit { .. }
+                    | methods::MethodCall::statement_subscribe { .. }
+                    | methods::MethodCall::statement_unsubscribe { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -2749,6 +2831,150 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .to_json_response(request_id_json),
                             )
                             .await;
+                    }
+
+                    methods::MethodCall::statement_submit { encoded } => {
+                        let network = me.network_service.clone();
+                        let peers: Vec<_> = network.peers_list().await.collect();
+                        let total_peers = peers.len();
+
+                        log!(
+                            &me.platform,
+                            Debug,
+                            &me.log_target,
+                            format!(
+                                "statement_submit: attempting broadcast to {} peers",
+                                total_peers
+                            )
+                        );
+
+                        if total_peers == 0 {
+                            if me
+                                .responses_tx
+                                .send(
+                                    methods::Response::statement_submit(
+                                        methods::StatementSubmitResult::Error(
+                                            "No connected peers".to_string(),
+                                        ),
+                                    )
+                                    .to_json_response(request_id_json),
+                                )
+                                .await
+                                .is_err()
+                            {
+                                log!(
+                                    &me.platform,
+                                    Debug,
+                                    &me.log_target,
+                                    "Failed to send response for statement_submit: response channel closed"
+                                );
+                            }
+                            continue;
+                        }
+
+                        let mut sent_count = 0;
+                        for peer in &peers {
+                            match network
+                                .clone()
+                                .send_statements(peer, encoded.0.clone())
+                                .await
+                            {
+                                Ok(_) => {
+                                    log!(
+                                        &me.platform,
+                                        Debug,
+                                        &me.log_target,
+                                        format!("statement_submit: successfully sent to {}", peer)
+                                    );
+                                    sent_count += 1;
+                                }
+                                Err(e) => log!(
+                                    &me.platform,
+                                    Warn,
+                                    &me.log_target,
+                                    format!(
+                                        "statement_submit: failed to send to {}: {:?}",
+                                        peer, e
+                                    )
+                                ),
+                            }
+                        }
+
+                        let result = if sent_count == 0 {
+                            methods::StatementSubmitResult::Error(
+                                "Failed to send to any peers".to_string(),
+                            )
+                        } else {
+                            methods::StatementSubmitResult::OkBroadcast {
+                                sent: sent_count,
+                                total: total_peers,
+                            }
+                        };
+
+                        if me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_submit(result)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            log!(
+                                &me.platform,
+                                Debug,
+                                &me.log_target,
+                                "Failed to send response for statement_submit: response channel closed"
+                            );
+                        }
+                    }
+
+                    methods::MethodCall::statement_subscribe { filter } => {
+                        let subscription_id: String = {
+                            let mut id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut id);
+                            hex::encode(id)
+                        };
+
+                        me.statement_subscriptions
+                            .insert(subscription_id.clone(), filter);
+
+                        if me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_subscribe(Cow::Owned(subscription_id))
+                                    .to_json_response(request_id_json),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            log!(
+                                &me.platform,
+                                Debug,
+                                &me.log_target,
+                                "Failed to send response for statement_subscribe: response channel closed"
+                            );
+                        }
+                    }
+
+                    methods::MethodCall::statement_unsubscribe { subscription } => {
+                        let existed = me.statement_subscriptions.remove(&subscription).is_some();
+                        if me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_unsubscribe(existed)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            log!(
+                                &me.platform,
+                                Debug,
+                                &me.log_target,
+                                "Failed to send response for statement_unsubscribe: response channel closed"
+                            );
+                        }
                     }
 
                     _method @ (methods::MethodCall::account_nextIndex { .. }

@@ -32,6 +32,7 @@ mod grandpa_warp_sync;
 mod identify;
 mod kademlia;
 mod state_request;
+mod statement;
 mod storage_call_proof;
 
 pub use self::block_announces::*;
@@ -41,6 +42,7 @@ pub use self::grandpa_warp_sync::*;
 pub use self::identify::*;
 pub use self::kademlia::*;
 pub use self::state_request::*;
+pub use self::statement::*;
 pub use self::storage_call_proof::*;
 
 /// Name of a protocol that is part of the Substrate/Polkadot networking.
@@ -77,6 +79,10 @@ pub enum ProtocolName<'a> {
         fork_id: Option<&'a str>,
     },
     State {
+        genesis_hash: [u8; 32],
+        fork_id: Option<&'a str>,
+    },
+    Statement {
         genesis_hash: [u8; 32],
         fork_id: Option<&'a str>,
     },
@@ -135,6 +141,10 @@ pub fn encode_protocol_name(protocol: ProtocolName) -> impl Iterator<Item = impl
             genesis_hash,
             fork_id,
         } => (genesis_hash, fork_id, "state/2"),
+        ProtocolName::Statement {
+            genesis_hash,
+            fork_id,
+        } => (genesis_hash, fork_id, "statement/1"),
     };
 
     let genesis_hash = hex::encode(genesis_hash);
@@ -235,6 +245,7 @@ enum ProtocolTy {
     Kad,
     SyncWarp,
     State,
+    Statement,
 }
 
 fn protocol_ty(name: &str) -> nom::IResult<&str, ProtocolTy> {
@@ -256,6 +267,9 @@ fn protocol_ty(name: &str) -> nom::IResult<&str, ProtocolTy> {
                 ProtocolTy::SyncWarp
             }),
             nom::combinator::map(nom::bytes::complete::tag("state/2"), |_| ProtocolTy::State),
+            nom::combinator::map(nom::bytes::complete::tag("statement/1"), |_| {
+                ProtocolTy::Statement
+            }),
         )),
         name,
     )
@@ -299,7 +313,57 @@ fn protocol_ty_to_real_protocol(
             genesis_hash,
             fork_id,
         },
+        ProtocolTy::Statement => ProtocolName::Statement {
+            genesis_hash,
+            fork_id,
+        },
     }
 }
 
-// TODO: tests for the protocol names
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_to_string(protocol: ProtocolName) -> String {
+        encode_protocol_name(protocol)
+            .map(|s| s.as_ref().to_owned())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[test]
+    fn statement_protocol_name_roundtrip() {
+        let genesis_hash = [0xab; 32];
+        let protocol = ProtocolName::Statement {
+            genesis_hash,
+            fork_id: None,
+        };
+
+        let encoded = encode_to_string(protocol);
+        let decoded = decode_protocol_name(&encoded).unwrap();
+
+        assert!(matches!(
+            decoded,
+            ProtocolName::Statement { genesis_hash: gh, fork_id: None }
+            if gh == genesis_hash
+        ));
+    }
+
+    #[test]
+    fn statement_protocol_name_roundtrip_with_fork() {
+        let genesis_hash = [0xab; 32];
+        let protocol = ProtocolName::Statement {
+            genesis_hash,
+            fork_id: Some("polkadot"),
+        };
+
+        let encoded = encode_to_string(protocol);
+        let decoded = decode_protocol_name(&encoded).unwrap();
+
+        assert!(matches!(
+            decoded,
+            ProtocolName::Statement { genesis_hash: gh, fork_id: Some("polkadot") }
+            if gh == genesis_hash
+        ));
+    }
+}

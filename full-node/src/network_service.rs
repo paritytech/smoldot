@@ -408,6 +408,7 @@ impl NetworkService {
                         max_in_peers: chain.max_in_peers,
                         max_slots: chain.max_slots,
                     },
+                    statement_protocol_config: None,
                 })
                 .unwrap(); // TODO: don't unwrap?
 
@@ -2254,6 +2255,35 @@ async fn background_task(mut inner: Inner) {
                     format!(
                         "gossip-open; peer_id={}; chain={}",
                         peer_id, &inner.network[chain_id].log_name
+                    ),
+                );
+            }
+
+            WakeUpReason::NetworkEvent(service::Event::ConnectionShutdownStarted { .. }) => {}
+
+            WakeUpReason::NetworkEvent(service::Event::StatementProtocolConnected {
+                peer_id,
+                chain_id,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "statement-protocol-connected; peer_id={}; chain={}",
+                        peer_id, inner.network[chain_id].log_name
+                    ),
+                );
+            }
+
+            WakeUpReason::NetworkEvent(service::Event::StatementNotification {
+                peer_id,
+                chain_id,
+                ..
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "statement-notification; peer_id={}; chain={}",
+                        peer_id, inner.network[chain_id].log_name
                     ),
                 );
             }

@@ -135,6 +135,9 @@ fn add_chain(
                         smoldot_light::AddChainConfigJsonRpc::Disabled
                     },
                     potential_relay_chains: potential_relay_chains.into_iter(),
+                    statement_protocol_config: Some(
+                        smoldot_light::network_service::StatementProtocolConfig::default(),
+                    ),
                 }) {
                 Ok(c) => c,
                 Err(error) => {

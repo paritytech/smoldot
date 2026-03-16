@@ -2509,6 +2509,7 @@ dependencies = [
  "itertools 0.14.0",
  "libm",
  "libsecp256k1",
+ "lru",
  "merlin",
  "nom",
  "num-bigint",
