@@ -98,7 +98,7 @@ soketto = { version = "0.8.0", optional = true }
 wasmtime = { version = "36.0.3", default-features = false, features = ["async", "cranelift", "gc", "gc-null", "component-model", "threads"], optional = true }
 
 [dev-dependencies]
-criterion = "0.5.1"
+criterion = "0.8.2"
 futures-executor = { version = "0.3.28", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
 tempfile = "3.10.0"
