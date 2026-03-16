@@ -1,0 +1,16 @@
+{
+  "name": "statement-chat",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild main.js --bundle --outdir=dist --splitting --format=esm",
+    "dev": "npm run build && node server.js"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^3.0.0",
+    "smoldot": "file:../../wasm-node/javascript"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.3"
+  }
+}
