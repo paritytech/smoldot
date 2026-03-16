@@ -64,7 +64,7 @@ num-rational = { version = "0.4.1", default-features = false, features = ["num-b
 num-traits = { version = "0.2.19", default-features = false }
 pbkdf2 = { version = "0.12.1", default-features = false }
 poly1305 = { version = "0.8.0", default-features = false }
-rand = { version = "0.8.5", default-features = false, features = ["alloc"] }
+rand = { version = "0.10.0", default-features = false, features = ["alloc"] }
 rand_chacha = { version = "0.3.1", default-features = false }
 ruzstd = { version = "0.8.0", default-features = false }
 schnorrkel = { version = "0.11.2", default-features = false, features = ["preaudit_deprecated", "alloc"] }
@@ -100,7 +100,7 @@ wasmtime = { version = "36.0.3", default-features = false, features = ["async", 
 [dev-dependencies]
 criterion = "0.5.1"
 futures-executor = { version = "0.3.28", default-features = false }
-rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
+rand = { version = "0.10.0", default-features = false, features = ["std", "std_rng"] }
 tempfile = "3.10.0"
 wat = "1.216.0"
 
