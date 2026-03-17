@@ -178,9 +178,6 @@ async function sendStatement() {
         TARGET,
         `Statement broadcast to ${result.ok_broadcast.sent}/${result.ok_broadcast.total} peers`,
       );
-    } else if (result?.ok_ignore) {
-      messageInput.value = "";
-      log(LOG.DEBUG, TARGET, "Statement accepted but not broadcast (duplicate or ignored)");
     } else if (result?.error) {
       log(LOG.ERROR, TARGET, `Failed to send: ${result.error}`);
     } else {

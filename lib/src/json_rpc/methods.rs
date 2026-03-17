@@ -1097,9 +1097,6 @@ pub enum StatementSubmitResult {
         /// Total number of peers attempted.
         total: usize,
     },
-    /// Statement was accepted but will not be broadcast (e.g., duplicate).
-    #[serde(rename = "ok_ignore")]
-    OkIgnore,
     /// Statement was invalid or rejected.
     #[serde(rename = "error")]
     Error(String),
