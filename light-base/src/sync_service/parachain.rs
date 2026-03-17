@@ -426,7 +426,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     .unwrap_or_else(|| unreachable!())
                     .block_announce(
                         sync_source_id,
-                        decoded.scale_encoded_header.to_owned(),
+                        decoded.scale_encoded_header.to_vec(),
                         decoded.is_best,
                     ) {
                     all::BlockAnnounceOutcome::TooOld {
@@ -582,7 +582,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 };
 
                 let _ = send_back.send(SubscribeAll {
-                    finalized_block_scale_encoded_header: sync.finalized_block_header().to_owned(),
+                    finalized_block_scale_encoded_header: sync.finalized_block_header().to_vec(),
                     finalized_block_runtime: if runtime_interest {
                         task.known_finalized_runtime.take()
                     } else {
@@ -719,7 +719,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 task.sync
                     .as_mut()
                     .unwrap_or_else(|| unreachable!())
-                    .call_proof_response(request_id, r.decode().to_owned());
+                    .call_proof_response(request_id, r.decode().to_vec());
             }
 
             WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::CallProof(Err(_)))) => {
@@ -1163,7 +1163,7 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
                 finalized_hash,
                 block_number,
                 block_state_trie_root,
-                para::PERSISTED_VALIDATION_FUNCTION_NAME.to_owned(),
+                String::from(para::PERSISTED_VALIDATION_FUNCTION_NAME),
                 None,
                 para::persisted_validation_data_parameters(
                     para_id,
@@ -1288,14 +1288,14 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
 
     let code = decoded_proof
         .storage_value(&state_root, b":code")
-        .map_err(|_| "Proof doesn't contain :code".to_owned())?
-        .ok_or_else(|| "Runtime :code not found in storage".to_owned())?
+        .map_err(|_| String::from("Proof doesn't contain :code"))?
+        .ok_or_else(|| String::from("Runtime :code not found in storage"))?
         .0
         .to_vec();
 
     let heap_pages_raw = decoded_proof
         .storage_value(&state_root, b":heappages")
-        .map_err(|_| "Proof doesn't contain :heappages".to_owned())?;
+        .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
 
     let heap_pages = executor::storage_heap_pages_to_value(heap_pages_raw.map(|(v, _)| v))
         .map_err(|e| format!("Invalid :heappages value: {e}"))?;
@@ -1359,7 +1359,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         <[u8; 8]>::try_from(output.as_slice())
             .ok()
             .and_then(|b| NonZero::<u64>::new(u64::from_le_bytes(b)))
-            .ok_or_else(|| "Failed to decode AuraApi_slot_duration output".to_owned())?
+            .ok_or_else(|| String::from("Failed to decode AuraApi_slot_duration output"))?
     };
 
     // AuraApi_authorities
@@ -1388,7 +1388,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
             run_single_runtime_call(vm, "AuraApi_authorities", &decoded_call_proof, &state_root)?;
 
         header::AuraAuthoritiesIter::decode(&output)
-            .map_err(|_| "Failed to decode AuraApi_authorities output".to_owned())?
+            .map_err(|_| String::from("Failed to decode AuraApi_authorities output"))?
             .map(header::AuraAuthority::from)
             .collect::<Vec<_>>()
     };
@@ -1446,7 +1446,7 @@ fn run_single_runtime_call(
                 return Err(format!("{function_name} execution error: {}", err.detail));
             }
             executor::runtime_call::RuntimeCall::StorageGet(get) => {
-                let child_trie = get.child_trie().map(|c| c.as_ref().to_owned());
+                let child_trie = get.child_trie().map(|c| c.as_ref().to_vec());
                 let trie_root = if let Some(child_trie) = &child_trie {
                     const PREFIX: &[u8] = b":child_storage:default:";
                     let mut key = Vec::with_capacity(PREFIX.len() + child_trie.len());
