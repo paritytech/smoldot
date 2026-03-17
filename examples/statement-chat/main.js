@@ -93,6 +93,7 @@ async function initialize() {
     chain = await smoldot.addChain({
       chainSpec: parachainSpec,
       potentialRelayChains: [relayChain],
+      statementStore: {},
     });
 
     log(LOG.DEBUG, TARGET, "Setting up JSON-RPC handler...");

@@ -390,6 +390,7 @@ pub extern "C" fn add_chain(
     json_rpc_max_pending_requests: u32,
     json_rpc_max_subscriptions: u32,
     potential_relay_chains_buffer_index: u32,
+    statement_store_max_seen_statements: u32,
 ) -> u32 {
     super::add_chain(
         get_buffer(chain_spec_buffer_index),
@@ -397,6 +398,7 @@ pub extern "C" fn add_chain(
         json_rpc_max_pending_requests,
         json_rpc_max_subscriptions,
         get_buffer(potential_relay_chains_buffer_index),
+        statement_store_max_seen_statements,
     )
 }
 

@@ -172,7 +172,10 @@ pub struct StatementProtocolConfig {
 }
 
 impl StatementProtocolConfig {
-    /// Returns the maximum number of seen statements to cache.
+    pub fn new(max_seen_statements: NonZeroUsize) -> Self {
+        StatementProtocolConfig { max_seen_statements }
+    }
+
     pub fn max_seen_statements(&self) -> NonZeroUsize {
         self.max_seen_statements
     }
