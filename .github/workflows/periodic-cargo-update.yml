@@ -11,7 +11,7 @@ jobs:
     container:
       image: rust:1.92
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     # Note: `cargo update --workspace` doesn't seem to have any effect.
     - run: cargo update
       working-directory: wasm-node/rust

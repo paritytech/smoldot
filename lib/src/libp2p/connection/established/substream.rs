@@ -917,7 +917,7 @@ where
 
                 if close_desired_timeout
                     .as_ref()
-                    .map_or(false, |timeout| *timeout >= read_write.now)
+                    .map_or(false, |timeout| *timeout <= read_write.now)
                 {
                     read_write.wake_up_asap();
                     return (

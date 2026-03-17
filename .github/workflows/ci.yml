@@ -32,7 +32,7 @@ jobs:
     container:
       image: rust:1.92
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - uses: Swatinem/rust-cache@v2
     - run: RUSTFLAGS=-Dwarnings cargo test --locked --workspace --all-features
 
@@ -42,7 +42,7 @@ jobs:
       image: rust:1.92
     steps:
     - run: apt-get update && apt install -y libc6-dev-i386
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - uses: Swatinem/rust-cache@v2
     - run: rustup target add i686-unknown-linux-gnu
     - run: RUSTFLAGS=-Dwarnings cargo test --target i686-unknown-linux-gnu --locked --workspace --all-features
@@ -52,7 +52,7 @@ jobs:
     container:
       image: rust:1.92
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - run: rustup target add wasm32-unknown-unknown
     - uses: Swatinem/rust-cache@v2
     - uses: actions/setup-node@v6.1.0
@@ -69,7 +69,7 @@ jobs:
     container:
       image: rust:1.92
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - uses: Swatinem/rust-cache@v2
     - run: apt-get update && apt install -y libc6-dev-i386
     - run: rustup target add i686-unknown-linux-gnu
@@ -103,7 +103,7 @@ jobs:
     container:
       image: rust:1.92
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - run: rustup target add thumbv7m-none-eabi
     - uses: Swatinem/rust-cache@v2
     # We use `thumbv7m-none-eabi` as this target seems to generally work fine and doesn't support `std`. Many targets unfortunately have Rust/LLVM bugs preventing compilation.
@@ -115,7 +115,7 @@ jobs:
     container:
       image: rust:1.92
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - uses: Swatinem/rust-cache@v2
     - run: RUSTDOCFLAGS=-Dwarnings cargo doc --verbose --workspace --all-features --no-deps --document-private-items
 
@@ -125,7 +125,7 @@ jobs:
       image: rust:1.92
     steps:
       # Checks `rustfmt` formatting
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: rustup component add rustfmt
       - uses: actions-rs/cargo@v1
         with:
@@ -138,7 +138,7 @@ jobs:
     container:
       image: rust:1.92
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         # Since build artifacts are specific to a nightly version, we pin the specific nightly
         # version to use in order to not invalidate the build cache every day. The exact version
         # is completely arbitrary.
@@ -157,7 +157,7 @@ jobs:
         checks:
           - bans licenses sources
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - uses: EmbarkStudios/cargo-deny-action@v2
       with:
         command: check --config .github/cargo-deny.toml ${{ matrix.checks }}
@@ -166,7 +166,7 @@ jobs:
   cargo-spellcheck:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - run: sudo apt-get update && sudo apt install -y libclang-dev  # Required by cargo-spellcheck
     - uses: baptiste0928/cargo-install@v3  # This action ensures that the compilation is cached.
       with:
@@ -179,7 +179,7 @@ jobs:
     container:
       image: rust:1.92
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: apt-get update && apt install -y jq
       # Compares whether the version in `package.json` matches the version in `Cargo.toml`.
       - id: js-version
