@@ -143,8 +143,7 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// Configuration for the JSON-RPC endpoint.
     pub json_rpc: AddChainConfigJsonRpc,
 
-    /// If `Some`, enables the statement store networking protocol. Contains the topics that we
-    /// are interested in receiving statements for.
+    /// If `Some`, enables the statement store networking protocol.
     pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
 }
 
@@ -697,7 +696,9 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         self.platform.client_version()
                     );
 
-                    let chain_type_config = match (&relay_chain, &chain_information) {
+                    let statement_protocol_config = config.statement_protocol_config;
+
+                    let config = match (&relay_chain, &chain_information) {
                         (Some((relay_chain, para_id, _)), Some(chain_information)) => {
                             StartServicesChainTy::Parachain {
                                 relay_chain,
@@ -734,9 +735,9 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         genesis_block_header,
                         usize::from(chain_spec.block_number_bytes()),
                         chain_spec.fork_id().map(|f| f.to_owned()),
-                        chain_type_config,
+                        config,
                         network_identify_agent_version,
-                        config.statement_protocol_config,
+                        statement_protocol_config,
                     )
                 };
 

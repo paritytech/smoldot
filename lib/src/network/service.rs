@@ -4100,17 +4100,13 @@ where
         )
     }
 
-    /// Sends a statement notification to the given peer.
+    /// Sends a statement notification to the given peer, wrapping the single encoded
+    /// `statement` in the `Vec<Statement>` format expected by the protocol.
     ///
-    /// The `statement` parameter is a single encoded statement. This function wraps it in the
-    /// proper `Vec<Statement>` format expected by the protocol.
-    ///
-    /// If no [`Event::GossipConnected`] event of kind [`GossipKind::ConsensusTransactions`] has
-    /// been emitted for the given peer, then a [`QueueNotificationError::NoConnection`] will be
-    /// returned.
-    ///
-    /// This function might generate a message destined connections. Use
-    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    /// Returns [`QueueNotificationError::NoConnection`] if no
+    /// [`Event::GossipConnected`] of kind [`GossipKind::ConsensusTransactions`] has been
+    /// emitted for the peer. May generate messages to process via
+    /// [`ChainNetwork::pull_message_to_connection`].
     ///
     /// # Panic
     ///

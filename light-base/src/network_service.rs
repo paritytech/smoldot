@@ -138,8 +138,7 @@ pub struct ConfigChain {
     /// number of the finalized block at the time of the initialization.
     pub grandpa_protocol_finalized_block_height: Option<u64>,
 
-    /// If `Some`, enables the statement store protocol. Contains the topics that we are
-    /// interested in receiving statements for.
+    /// If `Some`, enables the statement store protocol.
     pub statement_protocol_config: Option<service::StatementProtocolConfig>,
 }
 
@@ -2721,26 +2720,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     task.num_recent_connection_opening.saturating_sub(1);
             }
             WakeUpReason::CanStartConnect(expected_peer_id) => {
-                log!(
-                    &task.platform,
-                    Warn,
-                    "network",
-                    "can-start-connect-attempting",
-                    peer_id = &expected_peer_id
-                );
-
                 let Some(multiaddr) = task
                     .peering_strategy
                     .pick_address_and_add_connection(&expected_peer_id)
                 else {
                     // There is no address for that peer in the address book.
-                    log!(
-                        &task.platform,
-                        Warn,
-                        "network",
-                        "no-address-available",
-                        peer_id = &expected_peer_id
-                    );
                     task.network.gossip_remove_desired_all(
                         &expected_peer_id,
                         service::GossipKind::ConsensusTransactions,
@@ -2760,7 +2744,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 "network",
                                 "slot-unassigned",
                                 chain = &task.network[chain_id].log_name,
-                                peer_id = &expected_peer_id,
+                                peer_id = expected_peer_id,
                                 ?ban_duration,
                                 reason = "no-address"
                             );

@@ -2259,8 +2259,6 @@ async fn background_task(mut inner: Inner) {
                 );
             }
 
-            WakeUpReason::NetworkEvent(service::Event::ConnectionShutdownStarted { .. }) => {}
-
             WakeUpReason::NetworkEvent(service::Event::StatementProtocolConnected {
                 peer_id,
                 chain_id,
