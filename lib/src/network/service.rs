@@ -173,7 +173,9 @@ pub struct StatementProtocolConfig {
 
 impl StatementProtocolConfig {
     pub fn new(max_seen_statements: NonZeroUsize) -> Self {
-        StatementProtocolConfig { max_seen_statements }
+        StatementProtocolConfig {
+            max_seen_statements,
+        }
     }
 
     pub fn max_seen_statements(&self) -> NonZeroUsize {
