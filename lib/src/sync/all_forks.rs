@@ -2429,7 +2429,7 @@ pub struct RemovedBlock<TBl> {
     pub scale_encoded_header: Vec<u8>,
 }
 
-/// Result of [`AllForkSync::set_finalized_block`].
+/// Result of [`AllForksSync::set_finalized_block`].
 pub struct SetFinalizedBlockResult<TBl> {
     /// The blocks that got finalized.
     pub finalized_blocks: Vec<RemovedBlock<TBl>>,

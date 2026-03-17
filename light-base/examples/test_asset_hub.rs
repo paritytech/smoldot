@@ -116,7 +116,9 @@ fn main() {
             // subscription IDs. The first subscription (id=1) is allHeads.
             // We use a simple heuristic: finalizedHeads numbers lag behind allHeads.
             if let Some(last_fin) = last_fin_number {
-                if number <= last_fin || (last_all_number.is_some() && number < last_all_number.unwrap()) {
+                if number <= last_fin
+                    || (last_all_number.is_some() && number < last_all_number.unwrap())
+                {
                     // Finalized head.
                     let jumped = number - last_fin;
                     println!("[FIN] #{number} +{elapsed:.1}s (jumped {jumped} blocks)");
@@ -139,9 +141,7 @@ fn main() {
             last_all_time = now;
             all_count += 1;
 
-            println!(
-                "[ALL] #{number} +{elapsed:.1}s (interval: {interval:.2}s) total={all_count}"
-            );
+            println!("[ALL] #{number} +{elapsed:.1}s (interval: {interval:.2}s) total={all_count}");
 
             if let Some(last) = last_all_number {
                 if number != last + 1 {
