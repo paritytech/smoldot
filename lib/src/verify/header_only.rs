@@ -78,6 +78,10 @@ pub enum ConfigConsensus<'a> {
         /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
         /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
         now_from_unix_epoch: Duration,
+
+        /// If `true`, allow the slot number to be equal to the parent's slot number.
+        /// Needed for parachains with async backing.
+        allow_equal_slot_number: bool,
     },
 
     /// Chain is using the Babe consensus engine.
@@ -232,6 +236,7 @@ pub fn verify(config: Config) -> Result<Success, Error> {
             current_authorities,
             slot_duration,
             now_from_unix_epoch,
+            allow_equal_slot_number,
         } => {
             if config.block_header.digest.has_any_babe() {
                 return Err(Error::MultipleConsensusEngines);
@@ -244,6 +249,7 @@ pub fn verify(config: Config) -> Result<Success, Error> {
                 now_from_unix_epoch,
                 current_authorities,
                 slot_duration,
+                allow_equal_slot_number,
             });
 
             match result {

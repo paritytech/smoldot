@@ -45,7 +45,8 @@ use smoldot::{
 };
 
 mod parachain;
-mod standalone;
+mod paraheads;
+mod substrate_compat;
 
 pub use network_service::Role;
 
@@ -66,20 +67,20 @@ pub struct Config<TPlat: PlatformRef> {
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
     pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
-    /// Extra fields depending on whether the chain is a relay chain or a parachain.
+    /// Extra fields depending on whether the chain is a parachain.
     pub chain_type: ConfigChainType<TPlat>,
 }
 
 /// See [`Config::chain_type`].
 pub enum ConfigChainType<TPlat: PlatformRef> {
-    /// Chain is a relay chain.
-    RelayChain(ConfigRelayChain),
+    /// Chain is a Substrate-compatible non-parachain.
+    SubstrateCompatible(ConfigSubstrateCompatible<TPlat>),
     /// Chain is a parachain.
     Parachain(ConfigParachain<TPlat>),
 }
 
-/// See [`ConfigChainType::RelayChain`].
-pub struct ConfigRelayChain {
+/// See [`ConfigChainType::SubstrateCompatible`].
+pub struct ConfigSubstrateCompatible<TPlat: PlatformRef> {
     /// State of the finalized chain.
     pub chain_information: chain::chain_information::ValidChainInformation,
 
@@ -89,13 +90,17 @@ pub struct ConfigRelayChain {
     /// if it matches the Merkle value provided in the hint, use the storage value in the hint
     /// instead of downloading it. If the hint doesn't match, an extra round-trip will be needed,
     /// but if the hint matches it saves a big download.
-    pub runtime_code_hint: Option<ConfigRelayChainRuntimeCodeHint>,
+    pub runtime_code_hint: Option<ConfigSubstrateCompatibleRuntimeCodeHint>,
+
+    /// If this chain is a parachain, contains the information of the relay chain.
+    /// `None` if this chain isn't a parachain.
+    pub relay_chain: Option<ConfigRelayChain<TPlat>>,
 }
 
-/// See [`ConfigRelayChain::runtime_code_hint`].
-pub struct ConfigRelayChainRuntimeCodeHint {
+/// See [`ConfigSubstrateCompatible::runtime_code_hint`].
+pub struct ConfigSubstrateCompatibleRuntimeCodeHint {
     /// Storage value of the `:code` trie node corresponding to
-    /// [`ConfigRelayChainRuntimeCodeHint::merkle_value`].
+    /// [`ConfigSubstrateCompatibleRuntimeCodeHint::merkle_value`].
     pub storage_value: Vec<u8>,
     /// Merkle value of the `:code` trie node in the storage main trie.
     pub merkle_value: Vec<u8>,
@@ -105,13 +110,14 @@ pub struct ConfigRelayChainRuntimeCodeHint {
 
 /// See [`ConfigChainType::Parachain`].
 pub struct ConfigParachain<TPlat: PlatformRef> {
+    /// Parameters of the relay chain.
+    pub relay_chain: ConfigRelayChain<TPlat>,
+}
+
+/// See [`ConfigSubstrateCompatible::relay_chain`] and [`ConfigParachain::relay_chain`].
+pub struct ConfigRelayChain<TPlat: PlatformRef> {
     /// Runtime service that synchronizes the relay chain of this parachain.
     pub relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
-
-    /// SCALE-encoded header of a known finalized block of the parachain. Used in the situation
-    /// where the API user subscribes using [`SyncService::subscribe_all`] before any parachain
-    /// block can be gathered.
-    pub finalized_block_header: Vec<u8>,
 
     /// Id of the parachain within the relay chain.
     ///
@@ -147,20 +153,22 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             ConfigChainType::Parachain(config_parachain) => Box::pin(parachain::start_parachain(
                 log_target.clone(),
                 config.platform.clone(),
-                config_parachain.finalized_block_header,
                 config.block_number_bytes,
-                config_parachain.relay_chain_sync.clone(),
-                config_parachain.para_id,
+                config_parachain.relay_chain.relay_chain_sync.clone(),
+                config_parachain.relay_chain.para_id,
                 from_foreground,
                 config.network_service.clone(),
             )),
-            ConfigChainType::RelayChain(config_relay_chain) => {
-                Box::pin(standalone::start_standalone_chain(
+            ConfigChainType::SubstrateCompatible(config_substrate_compat) => {
+                Box::pin(substrate_compat::start_substrate_compatible_chain(
                     log_target.clone(),
                     config.platform.clone(),
-                    config_relay_chain.chain_information,
+                    config_substrate_compat.chain_information,
                     config.block_number_bytes,
-                    config_relay_chain.runtime_code_hint,
+                    config_substrate_compat
+                        .relay_chain
+                        .map(|rc| (rc.relay_chain_sync, rc.para_id)),
+                    config_substrate_compat.runtime_code_hint,
                     from_foreground,
                     config.network_service.clone(),
                 ))

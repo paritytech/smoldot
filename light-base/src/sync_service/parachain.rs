@@ -15,39 +15,166 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::ToBackground;
+use super::{
+    BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground, paraheads,
+};
 use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 
-use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use core::{mem, num::NonZero, pin::Pin, time::Duration};
+use alloc::{borrow::Cow, boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use core::{cmp, iter, num::NonZero, pin::Pin, time::Duration};
+use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{StreamExt as _, future, stream};
 use hashbrown::HashMap;
-use itertools::Itertools as _;
 use smoldot::{
-    chain::async_tree, header, informant::HashDisplay, libp2p::PeerId, network::codec, sync::para,
+    chain, executor, header,
+    informant::HashDisplay,
+    libp2p,
+    network::{self, codec},
+    sync::{all, para},
+    trie,
 };
 
 /// Starts a sync service background task to synchronize a parachain.
+///
+/// This implementation uses AllSync for block sync with Aura consensus verification,
+/// and the paraheads service for relay-chain-based finalization.
 pub(super) async fn start_parachain<TPlat: PlatformRef>(
     log_target: String,
     platform: TPlat,
-    finalized_block_header: Vec<u8>,
     block_number_bytes: usize,
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
     parachain_id: u32,
-    from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
+    mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 ) {
-    ParachainBackgroundTask {
-        log_target,
-        from_foreground,
-        block_number_bytes,
+    // Phase 1: Fetch the current finalized parachain head from the relay chain.
+    let effective_chain_info = fetch_parachain_head_from_relay(
+        &log_target,
+        &platform,
+        &relay_chain_sync,
         parachain_id,
+        block_number_bytes,
+    )
+    .await;
+
+    log!(
+        &platform,
+        Info,
+        &log_target,
+        format!(
+            "Fetched parachain finalized head from relay chain at block #{}",
+            effective_chain_info.as_ref().finalized_block_header.number
+        )
+    );
+
+    // Phase 2: Download the parachain runtime from a P2P peer and determine Aura
+    // consensus parameters. Retries indefinitely until successful.
+    let effective_chain_info = loop {
+        match bootstrap_parachain_consensus(
+            &log_target,
+            &platform,
+            &network_service,
+            &effective_chain_info,
+            block_number_bytes,
+        )
+        .await
+        {
+            Ok(ci) => break ci,
+            Err(err) => {
+                log!(
+                    &platform,
+                    Warn,
+                    &log_target,
+                    format!("Failed to bootstrap parachain consensus: {err}. Retrying in 5s...")
+                );
+                platform.sleep(Duration::from_secs(5)).await;
+            }
+        }
+    };
+
+    // Phase 3: Spawn the paraheads background service that tracks relay chain
+    // finalization and reports finalized parachain blocks.
+    let (to_paraheads, from_paraheads) = async_channel::bounded(16);
+    let from_paraheads = Box::pin(from_paraheads);
+
+    let paraheads_log_target = format!("{log_target}-paraheads");
+    platform.spawn_task(paraheads_log_target.clone().into(), {
+        let platform = platform.clone();
+        let relay_chain_sync = relay_chain_sync.clone();
+        let finalized_header = effective_chain_info
+            .as_ref()
+            .finalized_block_header
+            .scale_encoding_vec(block_number_bytes);
+        let task = paraheads::start_paraheads(
+            paraheads_log_target.clone(),
+            platform.clone(),
+            finalized_header,
+            relay_chain_sync,
+            parachain_id,
+            from_paraheads,
+        );
+
+        async move {
+            task.await;
+            log!(
+                &platform,
+                Debug,
+                &paraheads_log_target,
+                "paraheads-shutdown"
+            );
+        }
+    });
+
+    // Set up the initial paraheads subscription future.
+    let paraheads_subscribe_future: Option<future::BoxFuture<'static, super::SubscribeAll>> = {
+        let to_paraheads = to_paraheads.clone();
+        Some(Box::pin(async move {
+            let (send_back, sub_rx) = oneshot::channel();
+            let _ = to_paraheads
+                .send(super::ToBackground::SubscribeAll {
+                    send_back,
+                    buffer_size: 32,
+                    runtime_interest: false,
+                })
+                .await;
+            sub_rx.await.unwrap()
+        })
+            as future::BoxFuture<'static, super::SubscribeAll>)
+    };
+
+    // Phase 4: Create AllSync with Aura consensus from the bootstrapped chain information.
+    let mut task = Task {
+        sync: Some(all::AllSync::new(all::Config {
+            chain_information: effective_chain_info,
+            block_number_bytes,
+            // Parachain blocks include cumulus-specific seals that are
+            // not known to smoldot's consensus verification.
+            allow_unknown_consensus_engines: true,
+            sources_capacity: 32,
+            blocks_capacity: {
+                // Maximum number of blocks between two finalizations.
+                1024
+            },
+            max_disjoint_headers: 1024,
+            max_requests_per_block: NonZero::<u32>::new(3).unwrap(),
+            download_ahead_blocks: { NonZero::<u32>::new(5000).unwrap() },
+            download_bodies: false,
+            download_all_chain_information_storage_proofs: false,
+            code_trie_node_hint: None,
+        })),
+        paraheads: to_paraheads,
+        paraheads_subscribe_future,
+        paraheads_notifications: None,
+        pending_parachain_finalization: None,
+        network_up_to_date_best: true,
+        known_finalized_runtime: None,
+        pending_requests: stream::FuturesUnordered::new(),
+        all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
+        log_target,
         from_network_service: None,
         network_service,
-        obsolete_finalized_parahead: finalized_block_header,
-        sync_sources: HashMap::with_capacity_and_hasher(
+        peers_source_id_map: HashMap::with_capacity_and_hasher(
             0,
             util::SipHasherBuild::new({
                 let mut seed = [0; 16];
@@ -55,1326 +182,1334 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 seed
             }),
         ),
-        subscription_state: ParachainBackgroundState::NotSubscribed {
-            all_subscriptions: Vec::new(),
-            subscribe_future: {
-                let relay_chain_sync = relay_chain_sync.clone();
-                Box::pin(async move {
-                    relay_chain_sync
-                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
-                        .await
-                })
-            },
-        },
-        relay_chain_sync,
         platform,
-    }
-    .run()
-    .await;
-}
+    };
 
-/// Task that is running in the background.
-struct ParachainBackgroundTask<TPlat: PlatformRef> {
-    /// Target to use for all logs.
-    log_target: String,
+    // Phase 5: Main sync loop.
+    loop {
+        // Yield at every loop in order to provide better tasks granularity.
+        futures_lite::future::yield_now().await;
 
-    /// Access to the platform's capabilities.
-    platform: TPlat,
+        enum WakeUpReason {
+            SyncProcess(all::ProcessOne<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>),
+            MustUpdateNetworkWithBestBlock,
+            MustSubscribeNetworkEvents,
+            NetworkEvent(network_service::Event),
+            ForegroundMessage(ToBackground),
+            ForegroundClosed,
+            StartRequest(all::SourceId, all::DesiredRequest),
+            ObsoleteRequest(all::RequestId),
+            RequestFinished(all::RequestId, Result<RequestOutcome, future::Aborted>),
+            ParaheadSubscribed(super::SubscribeAll),
+            ParaheadNotification(super::Notification),
+            ParaheadSubscriptionDead,
+        }
 
-    /// Channel receiving message from the sync service frontend.
-    from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
-
-    /// Number of bytes to use to encode the parachain block numbers in headers.
-    block_number_bytes: usize,
-
-    /// Id of the parachain registered within the relay chain. Chosen by the user.
-    parachain_id: u32,
-
-    /// Networking service connected to the peer-to-peer network of the parachain.
-    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
-
-    /// Events coming from the networking service. `None` if not subscribed yet.
-    from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::Event>>>>,
-
-    /// Runtime service of the relay chain.
-    relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
-
-    /// Last-known finalized parachain header. Can be very old and obsolete.
-    /// Updated after we successfully fetch the parachain head of a relay chain finalized block,
-    /// and left untouched if the fetch fails.
-    /// Initialized to the parachain genesis block header.
-    obsolete_finalized_parahead: Vec<u8>,
-
-    /// List of parachain network sources.
-    ///
-    /// Values are their role, and self-reported best block when we connected to them. This best
-    /// block is never updated.
-    ///
-    /// > **Note**: In the past, smoldot used to track exactly which peer knows which block
-    /// >           based on block announces. This, however, caused issues due to the fact that
-    /// >           there's a disconnect between the parachain best block on the relay chain
-    /// >           and the parachain best block on the network. We currently simply assume that
-    /// >           all parachain nodes know about all parachain blocks from the relay chain.
-    sync_sources: HashMap<PeerId, (codec::Role, u64, [u8; 32]), util::SipHasherBuild>,
-
-    /// Extra fields that are set after the subscription to the runtime service events has
-    /// succeeded.
-    subscription_state: ParachainBackgroundState<TPlat>,
-}
-
-enum ParachainBackgroundState<TPlat: PlatformRef> {
-    /// Currently subscribing to the relay chain runtime service.
-    NotSubscribed {
-        /// List of senders that will get notified when the tree of blocks is modified.
-        ///
-        /// These subscriptions are pending and no notification should be sent to them until the
-        /// subscription to the relay chain runtime service is finished.
-        all_subscriptions: Vec<async_channel::Sender<super::Notification>>,
-
-        /// Future when the subscription has finished.
-        subscribe_future: future::BoxFuture<'static, runtime_service::SubscribeAll<TPlat>>,
-    },
-
-    /// Subscribed to the relay chain runtime service.
-    Subscribed(ParachainBackgroundTaskAfterSubscription<TPlat>),
-}
-
-struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
-    /// List of senders that get notified when the tree of blocks is modified.
-    all_subscriptions: Vec<async_channel::Sender<super::Notification>>,
-
-    /// Stream of blocks of the relay chain this parachain is registered on.
-    /// The buffer size should be large enough so that, if the CPU is busy, it doesn't become full
-    /// before the execution of the sync service resumes.
-    /// The maximum number of pinned block is ignored, as this maximum is a way to avoid malicious
-    /// behaviors. This code is by definition not considered malicious.
-    relay_chain_subscribe_all: runtime_service::Subscription<TPlat>,
-
-    /// Hash of the best parachain that has been reported to the subscriptions.
-    /// `None` if and only if no finalized parachain head is known yet.
-    reported_best_parahead_hash: Option<[u8; 32]>,
-
-    /// Tree of relay chain blocks. Blocks are inserted when received from the relay chain
-    /// sync service. Once inside, their corresponding parachain head is fetched. Once the
-    /// parachain head is fetched, this parachain head is reported to our subscriptions.
-    ///
-    /// The root of the tree is a "virtual" block. It can be thought as the parent of the relay
-    /// chain finalized block, but is there even if the relay chain finalized block is block 0.
-    ///
-    /// All block in the tree has an associated parachain head behind an `Option`. This `Option`
-    /// always contains `Some`, except for the "virtual" root block for which it is `None`.
-    ///
-    /// If the output finalized block has a parachain head equal to `None`, it therefore means
-    /// that no finalized parachain head is known yet.
-    /// Note that, when it is the case, `SubscribeAll` messages from the frontend are still
-    /// answered with a single finalized block set to `obsolete_finalized_parahead`. Once a
-    /// finalized parachain head is known, it is important to reset all subscriptions.
-    ///
-    /// The set of blocks in this tree whose parachain block hasn't been fetched yet is the same
-    /// as the set of blocks that is maintained pinned on the runtime service. Blocks are unpinned
-    /// when their parachain head fetching succeeds or when they are removed from the tree.
-    async_tree: async_tree::AsyncTree<TPlat::Instant, [u8; 32], Option<Vec<u8>>>,
-
-    /// If `true`, [`ParachainBackgroundTaskAfterSubscription::async_tree`] might need to
-    /// be advanced.
-    must_process_sync_tree: bool,
-
-    /// List of in-progress parachain head fetching operations.
-    ///
-    /// The operations require some blocks to be pinned within the relay chain runtime service,
-    /// which is guaranteed by the fact that `relay_chain_subscribe_all.new_blocks` stays
-    /// alive for longer than this container, and by the fact that we unpin block after a
-    /// fetching operation has finished and that we never fetch twice for the same block.
-    in_progress_paraheads: stream::FuturesUnordered<
-        future::BoxFuture<'static, (async_tree::AsyncOpId, Result<Vec<u8>, ParaheadError>)>,
-    >,
-
-    /// Future that is ready when we need to start a new parachain head fetch operation.
-    next_start_parahead_fetch: Pin<Box<dyn Future<Output = ()> + Send>>,
-}
-
-impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
-    async fn run(mut self) {
-        loop {
-            // Yield at every loop in order to provide better tasks granularity.
-            futures_lite::future::yield_now().await;
-
-            // Wait until something interesting happens.
-            enum WakeUpReason<TPlat: PlatformRef> {
-                ForegroundClosed,
-                ForegroundMessage(ToBackground),
-                NewSubscription(runtime_service::SubscribeAll<TPlat>),
-                StartParaheadFetch,
-                ParaheadFetchFinished {
-                    async_op_id: async_tree::AsyncOpId,
-                    parahead_result: Result<Vec<u8>, ParaheadError>,
-                },
-                Notification(runtime_service::Notification),
-                SubscriptionDead,
-                MustSubscribeNetworkEvents,
-                NetworkEvent(network_service::Event),
-                AdvanceSyncTree,
-            }
-
-            let wake_up_reason: WakeUpReason<_> = {
-                let (
-                    subscribe_future,
-                    next_start_parahead_fetch,
-                    relay_chain_subscribe_all,
-                    in_progress_paraheads,
-                    must_process_sync_tree,
-                    is_relaychain_subscribed,
-                ) = match &mut self.subscription_state {
-                    ParachainBackgroundState::NotSubscribed {
-                        subscribe_future, ..
-                    } => (Some(subscribe_future), None, None, None, None, false),
-                    ParachainBackgroundState::Subscribed(runtime_subscription) => (
-                        None,
-                        Some(&mut runtime_subscription.next_start_parahead_fetch),
-                        Some(&mut runtime_subscription.relay_chain_subscribe_all),
-                        Some(&mut runtime_subscription.in_progress_paraheads),
-                        Some(&mut runtime_subscription.must_process_sync_tree),
-                        true,
-                    ),
-                };
-
-                async {
-                    if let Some(subscribe_future) = subscribe_future {
-                        WakeUpReason::NewSubscription(subscribe_future.await)
-                    } else {
-                        future::pending().await
-                    }
-                }
-                .or(async {
-                    match self.from_foreground.next().await {
-                        Some(msg) => WakeUpReason::ForegroundMessage(msg),
-                        None => WakeUpReason::ForegroundClosed,
-                    }
-                })
-                .or(async {
-                    if let Some(relay_chain_subscribe_all) = relay_chain_subscribe_all {
-                        match relay_chain_subscribe_all.next().await {
-                            Some(notif) => WakeUpReason::Notification(notif),
-                            None => WakeUpReason::SubscriptionDead,
-                        }
-                    } else {
-                        future::pending().await
-                    }
-                })
-                .or(async {
-                    if is_relaychain_subscribed {
-                        if let Some(from_network_service) = self.from_network_service.as_mut() {
-                            match from_network_service.next().await {
-                                Some(ev) => WakeUpReason::NetworkEvent(ev),
-                                None => {
-                                    self.from_network_service = None;
-                                    WakeUpReason::MustSubscribeNetworkEvents
-                                }
-                            }
-                        } else {
+        let wake_up_reason = {
+            async {
+                if let Some(from_network_service) = task.from_network_service.as_mut() {
+                    match from_network_service.next().await {
+                        Some(ev) => WakeUpReason::NetworkEvent(ev),
+                        None => {
+                            task.from_network_service = None;
                             WakeUpReason::MustSubscribeNetworkEvents
                         }
-                    } else {
-                        future::pending().await
                     }
-                })
-                .or(async {
-                    if let Some(next_start_parahead_fetch) = next_start_parahead_fetch {
-                        next_start_parahead_fetch.as_mut().await;
-                        *next_start_parahead_fetch = Box::pin(future::pending());
-                        WakeUpReason::StartParaheadFetch
-                    } else {
-                        future::pending().await
+                } else {
+                    WakeUpReason::MustSubscribeNetworkEvents
+                }
+            }
+            .or(async {
+                from_foreground.next().await.map_or(
+                    WakeUpReason::ForegroundClosed,
+                    WakeUpReason::ForegroundMessage,
+                )
+            })
+            .or(async {
+                if task.pending_requests.is_empty() {
+                    future::pending::<()>().await
+                }
+                let (request_id, result) = task.pending_requests.select_next_some().await;
+                WakeUpReason::RequestFinished(request_id, result)
+            })
+            .or(async { future::pending().await })
+            .or(async {
+                if !task.network_up_to_date_best {
+                    WakeUpReason::MustUpdateNetworkWithBestBlock
+                } else {
+                    future::pending().await
+                }
+            })
+            .or(async {
+                if let Some(subscribe_future) = task.paraheads_subscribe_future.as_mut() {
+                    WakeUpReason::ParaheadSubscribed(subscribe_future.await)
+                } else {
+                    future::pending().await
+                }
+            })
+            .or(async {
+                if let Some(notifications) = task.paraheads_notifications.as_mut() {
+                    match notifications.recv().await {
+                        Ok(notif) => WakeUpReason::ParaheadNotification(notif),
+                        Err(_) => WakeUpReason::ParaheadSubscriptionDead,
                     }
-                })
-                .or(async {
-                    if let Some(in_progress_paraheads) = in_progress_paraheads {
-                        if !in_progress_paraheads.is_empty() {
-                            let (async_op_id, parahead_result) =
-                                in_progress_paraheads.next().await.unwrap();
-                            WakeUpReason::ParaheadFetchFinished {
-                                async_op_id,
-                                parahead_result,
-                            }
-                        } else {
+                } else {
+                    future::pending().await
+                }
+            })
+            .or({
+                let sync = &mut task.sync;
+                async move {
+                    let Some(s) = &sync else { unreachable!() };
+                    if let Some((source_id, _, request_detail)) = s
+                        .desired_requests()
+                        .find(|(source_id, _, _)| s.source_num_ongoing_requests(*source_id) == 0)
+                    {
+                        return WakeUpReason::StartRequest(source_id, request_detail);
+                    }
+
+                    if let Some(request_id) = s.obsolete_requests().next() {
+                        return WakeUpReason::ObsoleteRequest(request_id);
+                    }
+
+                    // TODO: eventually, process_one() shouldn't take ownership of the AllForks
+                    match sync.take().unwrap_or_else(|| unreachable!()).process_one() {
+                        all::ProcessOne::AllSync(idle) => {
+                            *sync = Some(idle);
                             future::pending().await
                         }
-                    } else {
-                        future::pending().await
-                    }
-                })
-                .or(async {
-                    if let Some(must_process_sync_tree) = must_process_sync_tree {
-                        if *must_process_sync_tree {
-                            *must_process_sync_tree = false;
-                            WakeUpReason::AdvanceSyncTree
-                        } else {
-                            future::pending().await
-                        }
-                    } else {
-                        future::pending().await
-                    }
-                })
-                .await
-            };
-
-            match (wake_up_reason, &mut self.subscription_state) {
-                (WakeUpReason::ForegroundClosed, _) => {
-                    // Terminate the background task.
-                    return;
-                }
-
-                (WakeUpReason::NewSubscription(relay_chain_subscribe_all), _) => {
-                    // Subscription to the relay chain has finished.
-                    log!(
-                        &self.platform,
-                        Debug,
-                        &self.log_target,
-                        "relay-chain-new-subscription",
-                        finalized_hash = HashDisplay(&header::hash_from_scale_encoded_header(
-                            &relay_chain_subscribe_all.finalized_block_scale_encoded_header
-                        )),
-                        subscription_id = ?relay_chain_subscribe_all.new_blocks.id(),
-                    );
-                    log!(
-                        &self.platform,
-                        Debug,
-                        &self.log_target,
-                        "parahead-fetch-operations-cleared"
-                    );
-
-                    let async_tree = {
-                        let mut async_tree =
-                            async_tree::AsyncTree::<TPlat::Instant, [u8; 32], _>::new(
-                                async_tree::Config {
-                                    finalized_async_user_data: None,
-                                    retry_after_failed: Duration::from_secs(5),
-                                    blocks_capacity: 32,
-                                },
-                            );
-                        let finalized_hash = header::hash_from_scale_encoded_header(
-                            &relay_chain_subscribe_all.finalized_block_scale_encoded_header,
-                        );
-                        let finalized_index =
-                            async_tree.input_insert_block(finalized_hash, None, false, true);
-                        async_tree.input_finalize(finalized_index);
-                        for block in relay_chain_subscribe_all.non_finalized_blocks_ancestry_order {
-                            let hash =
-                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                            let parent = async_tree
-                                .input_output_iter_unordered()
-                                .find(|b| *b.user_data == block.parent_hash)
-                                .map(|b| b.id)
-                                .unwrap_or(finalized_index);
-                            async_tree.input_insert_block(
-                                hash,
-                                Some(parent),
-                                false,
-                                block.is_new_best,
-                            );
-                        }
-                        async_tree
-                    };
-
-                    self.subscription_state = ParachainBackgroundState::Subscribed(
-                        ParachainBackgroundTaskAfterSubscription {
-                            all_subscriptions: match &mut self.subscription_state {
-                                ParachainBackgroundState::NotSubscribed {
-                                    all_subscriptions,
-                                    ..
-                                } => mem::take(all_subscriptions),
-                                _ => unreachable!(),
-                            },
-                            relay_chain_subscribe_all: relay_chain_subscribe_all.new_blocks,
-                            reported_best_parahead_hash: None,
-                            async_tree,
-                            must_process_sync_tree: false,
-                            in_progress_paraheads: stream::FuturesUnordered::new(),
-                            next_start_parahead_fetch: Box::pin(future::ready(())),
-                        },
-                    );
-                }
-
-                (
-                    WakeUpReason::AdvanceSyncTree,
-                    ParachainBackgroundState::Subscribed(runtime_subscription),
-                ) => {
-                    if let Some(update) = runtime_subscription.async_tree.try_advance_output() {
-                        // Make sure to process any notification that comes after.
-                        runtime_subscription.must_process_sync_tree = true;
-
-                        match update {
-                            async_tree::OutputUpdate::Finalized {
-                                former_finalized_async_op_user_data: former_finalized_parahead,
-                                pruned_blocks,
-                                best_output_block_updated,
-                                ..
-                            } if *runtime_subscription
-                                .async_tree
-                                .output_finalized_async_user_data()
-                                != former_finalized_parahead =>
-                            {
-                                let new_finalized_parahead = runtime_subscription
-                                    .async_tree
-                                    .output_finalized_async_user_data();
-                                debug_assert!(new_finalized_parahead.is_some());
-
-                                // If this is the first time a finalized parahead is known, any
-                                // `SubscribeAll` message that has been answered beforehand was
-                                // answered in a dummy way with a potentially obsolete finalized
-                                // header.
-                                // For this reason, we reset all subscriptions to force all
-                                // subscribers to re-subscribe.
-                                if former_finalized_parahead.is_none() {
-                                    runtime_subscription.all_subscriptions.clear();
-                                }
-
-                                let hash = header::hash_from_scale_encoded_header(
-                                    new_finalized_parahead.as_ref().unwrap(),
-                                );
-
-                                self.obsolete_finalized_parahead =
-                                    new_finalized_parahead.clone().unwrap();
-
-                                // Must unpin the pruned blocks if they haven't already been unpinned.
-                                let mut pruned_blocks_hashes =
-                                    Vec::with_capacity(pruned_blocks.len());
-                                for (_, hash, pruned_block_parahead) in pruned_blocks {
-                                    if pruned_block_parahead.is_none() {
-                                        runtime_subscription
-                                            .relay_chain_subscribe_all
-                                            .unpin_block(hash)
-                                            .await;
-                                    }
-                                    pruned_blocks_hashes.push(hash);
-                                }
-
-                                log!(
-                                    &self.platform,
-                                    Debug,
-                                    &self.log_target,
-                                    "subscriptions-notify-parablock-finalized",
-                                    hash = HashDisplay(&hash)
-                                );
-
-                                let best_block_hash = runtime_subscription
-                                    .async_tree
-                                    .output_best_block_index()
-                                    .map(|(_, parahead)| {
-                                        header::hash_from_scale_encoded_header(
-                                            parahead.as_ref().unwrap(),
-                                        )
-                                    })
-                                    .unwrap_or(hash);
-                                runtime_subscription.reported_best_parahead_hash =
-                                    Some(best_block_hash);
-
-                                // Elements in `all_subscriptions` are removed one by one and
-                                // inserted back if the channel is still open.
-                                for index in (0..runtime_subscription.all_subscriptions.len()).rev()
-                                {
-                                    let sender =
-                                        runtime_subscription.all_subscriptions.swap_remove(index);
-                                    let notif = super::Notification::Finalized {
-                                        hash,
-                                        best_block_hash_if_changed: if best_output_block_updated {
-                                            Some(best_block_hash)
-                                        } else {
-                                            None
-                                        },
-                                        pruned_blocks: pruned_blocks_hashes.clone(),
-                                    };
-                                    if sender.try_send(notif).is_ok() {
-                                        runtime_subscription.all_subscriptions.push(sender);
-                                    }
-                                }
-                            }
-
-                            async_tree::OutputUpdate::Finalized { .. }
-                            | async_tree::OutputUpdate::BestBlockChanged { .. } => {
-                                // Do not report anything to subscriptions if no finalized parahead is
-                                // known yet.
-                                let finalized_parahead = match runtime_subscription
-                                    .async_tree
-                                    .output_finalized_async_user_data()
-                                {
-                                    Some(p) => p,
-                                    None => continue,
-                                };
-
-                                // Calculate hash of the parablock corresponding to the new best relay
-                                // chain block.
-                                let parahash = header::hash_from_scale_encoded_header(
-                                    runtime_subscription
-                                        .async_tree
-                                        .output_best_block_index()
-                                        .map(|(_, b)| b.as_ref().unwrap())
-                                        .unwrap_or(finalized_parahead),
-                                );
-
-                                if runtime_subscription.reported_best_parahead_hash.as_ref()
-                                    != Some(&parahash)
-                                {
-                                    runtime_subscription.reported_best_parahead_hash =
-                                        Some(parahash);
-
-                                    // The networking service needs to be kept up to date with what the local
-                                    // node considers as the best block.
-                                    if let Ok(header) =
-                                        header::decode(finalized_parahead, self.block_number_bytes)
-                                    {
-                                        self.network_service
-                                            .set_local_best_block(parahash, header.number)
-                                            .await;
-                                    }
-
-                                    log!(
-                                        &self.platform,
-                                        Debug,
-                                        &self.log_target,
-                                        "subscriptions-notify-best-block-changed",
-                                        hash = HashDisplay(&parahash)
-                                    );
-
-                                    // Elements in `all_subscriptions` are removed one by one and
-                                    // inserted back if the channel is still open.
-                                    for index in
-                                        (0..runtime_subscription.all_subscriptions.len()).rev()
-                                    {
-                                        let sender = runtime_subscription
-                                            .all_subscriptions
-                                            .swap_remove(index);
-                                        let notif = super::Notification::BestBlockChanged {
-                                            hash: parahash,
-                                        };
-                                        if sender.try_send(notif).is_ok() {
-                                            runtime_subscription.all_subscriptions.push(sender);
-                                        }
-                                    }
-                                }
-                            }
-
-                            async_tree::OutputUpdate::Block(block) => {
-                                // `block` borrows `async_tree`. We need to mutably access `async_tree`
-                                // below, so deconstruct `block` beforehand.
-                                let is_new_best = block.is_new_best;
-                                let block_index = block.index;
-                                let scale_encoded_header: Vec<u8> = runtime_subscription
-                                    .async_tree
-                                    .block_async_user_data(block.index)
-                                    .unwrap()
-                                    .clone()
-                                    .unwrap();
-                                let parahash =
-                                    header::hash_from_scale_encoded_header(&scale_encoded_header);
-
-                                // Do not report anything to subscriptions if no finalized parahead is
-                                // known yet.
-                                let finalized_parahead = match runtime_subscription
-                                    .async_tree
-                                    .output_finalized_async_user_data()
-                                {
-                                    Some(p) => p,
-                                    None => continue,
-                                };
-
-                                // Do not report the new block if it has already been reported in the
-                                // past. This covers situations where the parahead is identical to the
-                                // relay chain's parent's parahead, but also situations where multiple
-                                // sibling relay chain blocks have the same parahead.
-                                if *finalized_parahead == scale_encoded_header
-                                    || runtime_subscription
-                                        .async_tree
-                                        .input_output_iter_unordered()
-                                        .filter(|item| item.id != block_index)
-                                        .filter_map(|item| item.async_op_user_data)
-                                        .any(|item| item.as_ref() == Some(&scale_encoded_header))
-                                {
-                                    // While the parablock has already been reported, it is possible that
-                                    // it becomes the new best block while it wasn't before, in which
-                                    // case we should send a notification.
-                                    if is_new_best
-                                        && runtime_subscription.reported_best_parahead_hash.as_ref()
-                                            != Some(&parahash)
-                                    {
-                                        runtime_subscription.reported_best_parahead_hash =
-                                            Some(parahash);
-
-                                        // The networking service needs to be kept up to date with what the
-                                        // local node considers as the best block.
-                                        if let Ok(header) = header::decode(
-                                            finalized_parahead,
-                                            self.block_number_bytes,
-                                        ) {
-                                            self.network_service
-                                                .set_local_best_block(parahash, header.number)
-                                                .await;
-                                        }
-
-                                        log!(
-                                            &self.platform,
-                                            Debug,
-                                            &self.log_target,
-                                            "subscriptions-notify-best-block-changed",
-                                            hash = HashDisplay(&parahash)
-                                        );
-
-                                        // Elements in `all_subscriptions` are removed one by one and
-                                        // inserted back if the channel is still open.
-                                        for index in
-                                            (0..runtime_subscription.all_subscriptions.len()).rev()
-                                        {
-                                            let sender = runtime_subscription
-                                                .all_subscriptions
-                                                .swap_remove(index);
-                                            let notif = super::Notification::BestBlockChanged {
-                                                hash: parahash,
-                                            };
-                                            if sender.try_send(notif).is_ok() {
-                                                runtime_subscription.all_subscriptions.push(sender);
-                                            }
-                                        }
-                                    }
-
-                                    continue;
-                                }
-
-                                if is_new_best {
-                                    runtime_subscription.reported_best_parahead_hash =
-                                        Some(parahash);
-                                }
-
-                                let parent_hash = header::hash_from_scale_encoded_header(
-                                    runtime_subscription
-                                        .async_tree
-                                        .parent(block_index)
-                                        .map(|idx| {
-                                            runtime_subscription
-                                                .async_tree
-                                                .block_async_user_data(idx)
-                                                .unwrap()
-                                                .as_ref()
-                                                .unwrap()
-                                        })
-                                        .unwrap_or(finalized_parahead),
-                                );
-
-                                log!(
-                                    &self.platform,
-                                    Debug,
-                                    &self.log_target,
-                                    "subscriptions-notify-new-parablock",
-                                    hash = HashDisplay(&parahash),
-                                    parent_hash = HashDisplay(&parent_hash),
-                                    ?is_new_best
-                                );
-
-                                // Elements in `all_subscriptions` are removed one by one and
-                                // inserted back if the channel is still open.
-                                for index in (0..runtime_subscription.all_subscriptions.len()).rev()
-                                {
-                                    let sender =
-                                        runtime_subscription.all_subscriptions.swap_remove(index);
-                                    let notif =
-                                        super::Notification::Block(super::BlockNotification {
-                                            is_new_best,
-                                            parent_hash,
-                                            scale_encoded_header: scale_encoded_header.clone(),
-                                        });
-                                    if sender.try_send(notif).is_ok() {
-                                        runtime_subscription.all_subscriptions.push(sender);
-                                    }
-                                }
-                            }
-                        }
+                        other => WakeUpReason::SyncProcess(other),
                     }
                 }
+            })
+            .await
+        };
 
-                (
-                    WakeUpReason::StartParaheadFetch,
-                    ParachainBackgroundState::Subscribed(runtime_subscription),
-                ) => {
-                    // Must start downloading a parahead.
-
-                    // Internal state check.
-                    debug_assert_eq!(
-                        runtime_subscription.reported_best_parahead_hash.is_some(),
-                        runtime_subscription
-                            .async_tree
-                            .output_finalized_async_user_data()
-                            .is_some()
-                    );
-
-                    // Limit the maximum number of simultaneous downloads.
-                    if runtime_subscription.in_progress_paraheads.len() >= 4 {
-                        continue;
-                    }
-
-                    match runtime_subscription
-                        .async_tree
-                        .next_necessary_async_op(&self.platform.now())
-                    {
-                        async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
-                            runtime_subscription.next_start_parahead_fetch =
-                                Box::pin(self.platform.sleep_until(when));
-                        }
-                        async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
-                            runtime_subscription.next_start_parahead_fetch =
-                                Box::pin(future::pending());
-                        }
-                        async_tree::NextNecessaryAsyncOp::Ready(op) => {
-                            log!(
-                                &self.platform,
-                                Debug,
-                                &self.log_target,
-                                "parahead-fetch-operation-started",
-                                relay_block_hash =
-                                    HashDisplay(&runtime_subscription.async_tree[op.block_index]),
-                            );
-
-                            runtime_subscription.in_progress_paraheads.push({
-                                let relay_chain_sync = self.relay_chain_sync.clone();
-                                let subscription_id =
-                                    runtime_subscription.relay_chain_subscribe_all.id();
-                                let block_hash = runtime_subscription.async_tree[op.block_index];
-                                let async_op_id = op.id;
-                                let parachain_id = self.parachain_id;
-                                Box::pin(async move {
-                                    (
-                                        async_op_id,
-                                        fetch_parahead(
-                                            &relay_chain_sync,
-                                            subscription_id,
-                                            parachain_id,
-                                            &block_hash,
-                                        )
-                                        .await,
-                                    )
-                                })
-                            });
-
-                            // There might be more downloads to start.
-                            runtime_subscription.next_start_parahead_fetch =
-                                Box::pin(future::ready(()));
-                        }
-                    }
-                }
-
-                (
-                    WakeUpReason::Notification(runtime_service::Notification::Finalized {
-                        hash,
-                        best_block_hash_if_changed,
+        match wake_up_reason {
+            WakeUpReason::SyncProcess(all::ProcessOne::VerifyBlock(verify)) => {
+                let verified_hash = verify.hash();
+                match verify.verify_header(task.platform.now_from_unix_epoch()) {
+                    all::HeaderVerifyOutcome::Success {
+                        success,
+                        is_new_best,
                         ..
-                    }),
-                    ParachainBackgroundState::Subscribed(runtime_subscription),
-                ) => {
-                    // Relay chain has a new finalized block.
-                    log!(
-                        &self.platform,
-                        Debug,
-                        &self.log_target,
-                        "relay-chain-block-finalized",
-                        hash = HashDisplay(&hash)
-                    );
+                    } => {
+                        let sync = task.sync.insert(success.finish(()));
 
-                    if let Some(best_block_hash_if_changed) = best_block_hash_if_changed {
-                        let best = runtime_subscription
-                            .async_tree
-                            .input_output_iter_unordered()
-                            .find(|b| *b.user_data == best_block_hash_if_changed)
-                            .unwrap()
-                            .id;
-                        runtime_subscription
-                            .async_tree
-                            .input_set_best_block(Some(best));
-                    }
-
-                    let finalized = runtime_subscription
-                        .async_tree
-                        .input_output_iter_unordered()
-                        .find(|b| *b.user_data == hash)
-                        .unwrap()
-                        .id;
-                    runtime_subscription.async_tree.input_finalize(finalized);
-                    runtime_subscription.must_process_sync_tree = true;
-                }
-
-                (
-                    WakeUpReason::Notification(runtime_service::Notification::Block(block)),
-                    ParachainBackgroundState::Subscribed(runtime_subscription),
-                ) => {
-                    // Relay chain has a new block.
-                    let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-
-                    log!(
-                        &self.platform,
-                        Debug,
-                        &self.log_target,
-                        "relay-chain-new-block",
-                        hash = HashDisplay(&hash),
-                        parent_hash = HashDisplay(&block.parent_hash)
-                    );
-
-                    let parent = runtime_subscription
-                        .async_tree
-                        .input_output_iter_unordered()
-                        .find(|b| *b.user_data == block.parent_hash)
-                        .map(|b| b.id); // TODO: check if finalized
-                    runtime_subscription.async_tree.input_insert_block(
-                        hash,
-                        parent,
-                        false,
-                        block.is_new_best,
-                    );
-                    runtime_subscription.must_process_sync_tree = true;
-
-                    runtime_subscription.next_start_parahead_fetch = Box::pin(future::ready(()));
-                }
-
-                (
-                    WakeUpReason::Notification(runtime_service::Notification::BestBlockChanged {
-                        hash,
-                    }),
-                    ParachainBackgroundState::Subscribed(runtime_subscription),
-                ) => {
-                    // Relay chain has a new best block.
-                    log!(
-                        &self.platform,
-                        Debug,
-                        &self.log_target,
-                        "relay-chain-best-block-changed",
-                        hash = HashDisplay(&hash)
-                    );
-
-                    // If the block isn't found in `async_tree`, assume that it is equal to the
-                    // finalized block (that has left the tree already).
-                    let node_idx = runtime_subscription
-                        .async_tree
-                        .input_output_iter_unordered()
-                        .find(|b| *b.user_data == hash)
-                        .map(|b| b.id);
-                    runtime_subscription
-                        .async_tree
-                        .input_set_best_block(node_idx);
-
-                    runtime_subscription.must_process_sync_tree = true;
-                }
-
-                (WakeUpReason::SubscriptionDead, _) => {
-                    // Recreate the channel.
-                    log!(
-                        &self.platform,
-                        Debug,
-                        &self.log_target,
-                        "relay-chain-subscription-reset"
-                    );
-                    self.subscription_state = ParachainBackgroundState::NotSubscribed {
-                        all_subscriptions: Vec::new(),
-                        subscribe_future: {
-                            let relay_chain_sync = self.relay_chain_sync.clone();
-                            Box::pin(async move {
-                                relay_chain_sync
-                                    .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
-                                    .await
-                            })
-                        },
-                    };
-                }
-
-                (
-                    WakeUpReason::ParaheadFetchFinished {
-                        async_op_id,
-                        parahead_result: Ok(parahead),
-                    },
-                    ParachainBackgroundState::Subscribed(runtime_subscription),
-                ) => {
-                    // A parahead fetching operation is successful.
-                    log!(
-                        &self.platform,
-                        Debug,
-                        &self.log_target,
-                        "parahead-fetch-operation-success",
-                        parahead_hash = HashDisplay(
-                            blake2_rfc::blake2b::blake2b(32, b"", &parahead).as_bytes()
-                        ),
-                        relay_blocks = runtime_subscription
-                            .async_tree
-                            .async_op_blocks(async_op_id)
-                            .map(|b| HashDisplay(b))
-                            .join(",")
-                    );
-
-                    // Unpin the relay blocks whose parahead is now known.
-                    for block in runtime_subscription
-                        .async_tree
-                        .async_op_finished(async_op_id, Some(parahead))
-                    {
-                        let hash = &runtime_subscription.async_tree[block];
-                        runtime_subscription
-                            .relay_chain_subscribe_all
-                            .unpin_block(*hash)
-                            .await;
-                    }
-
-                    runtime_subscription.must_process_sync_tree = true;
-
-                    runtime_subscription.next_start_parahead_fetch = Box::pin(future::ready(()));
-                }
-
-                (
-                    WakeUpReason::ParaheadFetchFinished {
-                        parahead_result:
-                            Err(ParaheadError::PinRuntimeError(
-                                runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription,
-                            )),
-                        ..
-                    },
-                    _,
-                ) => {
-                    // The relay chain runtime service has some kind of gap or issue and has
-                    // discarded the runtime.
-                    // Destroy the subscription and recreate the channels.
-                    log!(
-                        &self.platform,
-                        Debug,
-                        &self.log_target,
-                        "relay-chain-subscription-reset"
-                    );
-                    self.subscription_state = ParachainBackgroundState::NotSubscribed {
-                        all_subscriptions: Vec::new(),
-                        subscribe_future: {
-                            let relay_chain_sync = self.relay_chain_sync.clone();
-                            Box::pin(async move {
-                                relay_chain_sync
-                                    .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
-                                    .await
-                            })
-                        },
-                    };
-                }
-
-                (
-                    WakeUpReason::ParaheadFetchFinished {
-                        async_op_id,
-                        parahead_result: Err(error),
-                    },
-                    ParachainBackgroundState::Subscribed(runtime_subscription),
-                ) => {
-                    // Failed fetching a parahead.
-
-                    // Several relay chains initially didn't support parachains, and have later
-                    // been upgraded to support them. Similarly, the parachain might not have had a
-                    // core on the relay chain until recently. For these reasons, errors when the
-                    // relay chain is not near head of the chain are most likely normal and do
-                    // not warrant logging an error.
-                    // Note that `is_near_head_of_chain_heuristic` is normally not acceptable to
-                    // use due to being too vague, but since this is just about whether to print a
-                    // log message, it's completely fine.
-                    if self
-                        .relay_chain_sync
-                        .is_near_head_of_chain_heuristic()
-                        .await
-                        && !error.is_network_problem()
-                    {
                         log!(
-                            &self.platform,
-                            Error,
-                            &self.log_target,
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "header-verify-success",
+                            hash = HashDisplay(&verified_hash),
+                            is_new_best = if is_new_best { "yes" } else { "no" }
+                        );
+
+                        if is_new_best {
+                            task.network_up_to_date_best = false;
+                        }
+
+                        let (parent_hash, scale_encoded_header) = {
+                            // TODO: the code below is `O(n)` complexity
+                            let header = sync
+                                .non_finalized_blocks_unordered()
+                                .find(|h| h.hash(sync.block_number_bytes()) == verified_hash)
+                                .unwrap();
+                            (
+                                *header.parent_hash,
+                                header.scale_encoding_vec(sync.block_number_bytes()),
+                            )
+                        };
+
+                        task.dispatch_all_subscribers({
+                            Notification::Block(BlockNotification {
+                                is_new_best,
+                                scale_encoded_header,
+                                parent_hash,
+                            })
+                        });
+
+                        // After verifying a new block, try to apply any pending
+                        // parachain finalization from the relay chain.
+                        if let Some(pending_hash) = task.pending_parachain_finalization {
+                            let sync = task.sync.as_mut().unwrap();
+                            if let Ok(result) = sync.set_finalized_block(&pending_hash) {
+                                task.pending_parachain_finalization = None;
+                                if result.updates_best_block {
+                                    task.network_up_to_date_best = false;
+                                }
+                                if result.finalized_blocks.iter().any(|b| {
+                                    header::decode(&b.header, sync.block_number_bytes())
+                                        .map(|h| h.digest.has_runtime_environment_updated())
+                                        .unwrap_or(false)
+                                }) {
+                                    task.known_finalized_runtime = None;
+                                }
+                                task.dispatch_all_subscribers(Notification::Finalized {
+                                    hash: pending_hash,
+                                    best_block_hash_if_changed: if result.updates_best_block {
+                                        Some(*task.sync.as_ref().unwrap().best_block_hash())
+                                    } else {
+                                        None
+                                    },
+                                    pruned_blocks: result.pruned_blocks,
+                                });
+                            }
+                        }
+                    }
+
+                    all::HeaderVerifyOutcome::Error { sync, error, .. } => {
+                        task.sync = Some(sync);
+
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "header-verify-error",
+                            hash = HashDisplay(&verified_hash),
+                            ?error
+                        );
+
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
                             format!(
-                                "Failed to fetch the parachain head from relay chain blocks {}: {}",
-                                runtime_subscription
-                                    .async_tree
-                                    .async_op_blocks(async_op_id)
-                                    .map(|b| HashDisplay(b))
-                                    .join(", "),
+                                "Error while verifying header {}: {}",
+                                HashDisplay(&verified_hash),
                                 error
                             )
                         );
                     }
-
-                    log!(
-                        &self.platform,
-                        Debug,
-                        &self.log_target,
-                        "parahead-fetch-operation-error",
-                        relay_blocks = runtime_subscription
-                            .async_tree
-                            .async_op_blocks(async_op_id)
-                            .map(|b| HashDisplay(b))
-                            .join(","),
-                        ?error
-                    );
-
-                    runtime_subscription
-                        .async_tree
-                        .async_op_failure(async_op_id, &self.platform.now());
-
-                    runtime_subscription.next_start_parahead_fetch = Box::pin(future::ready(()));
                 }
+            }
 
-                (
-                    WakeUpReason::ForegroundMessage(ToBackground::IsNearHeadOfChainHeuristic {
-                        send_back,
-                    }),
-                    ParachainBackgroundState::Subscribed(sub),
-                ) if sub.async_tree.output_finalized_async_user_data().is_some() => {
-                    // Since there is a mapping between relay chain blocks and parachain blocks,
-                    // whether a parachain is at the head of the chain is the same thing as whether
-                    // its relay chain is at the head of the chain.
-                    // Note that there is no ordering guarantee of any kind w.r.t. block
-                    // subscriptions notifications.
-                    let val = self
-                        .relay_chain_sync
-                        .is_near_head_of_chain_heuristic()
-                        .await;
-                    let _ = send_back.send(val);
+            WakeUpReason::NetworkEvent(network_service::Event::Connected {
+                peer_id,
+                role,
+                best_block_number,
+                best_block_hash,
+            }) => {
+                task.peers_source_id_map.insert(
+                    peer_id.clone(),
+                    task.sync
+                        .as_mut()
+                        .unwrap_or_else(|| unreachable!())
+                        .prepare_add_source(best_block_number, best_block_hash)
+                        .add_source((peer_id, role), ()),
+                );
+            }
+
+            WakeUpReason::NetworkEvent(network_service::Event::Disconnected { peer_id }) => {
+                let sync_source_id = task.peers_source_id_map.remove(&peer_id).unwrap();
+                let (_, requests) = task
+                    .sync
+                    .as_mut()
+                    .unwrap_or_else(|| unreachable!())
+                    .remove_source(sync_source_id);
+
+                for (_, abort) in requests {
+                    abort.abort();
                 }
+            }
 
-                (
-                    WakeUpReason::ForegroundMessage(ToBackground::IsNearHeadOfChainHeuristic {
-                        send_back,
-                    }),
-                    _,
-                ) => {
-                    // If no finalized parahead is known yet, we might be very close to the head
-                    // but also maybe very very far away. We lean on the cautious side and always
-                    // return `false`.
-                    let _ = send_back.send(false);
-                }
+            WakeUpReason::NetworkEvent(network_service::Event::BlockAnnounce {
+                peer_id,
+                announce,
+            }) => {
+                let sync_source_id = *task.peers_source_id_map.get(&peer_id).unwrap();
+                let decoded = announce.decode();
 
-                (
-                    WakeUpReason::ForegroundMessage(ToBackground::SubscribeAll {
-                        send_back,
-                        buffer_size,
+                match task
+                    .sync
+                    .as_mut()
+                    .unwrap_or_else(|| unreachable!())
+                    .block_announce(
+                        sync_source_id,
+                        decoded.scale_encoded_header.to_vec(),
+                        decoded.is_best,
+                    ) {
+                    all::BlockAnnounceOutcome::TooOld {
+                        announce_block_height,
                         ..
-                    }),
-                    ParachainBackgroundState::NotSubscribed {
-                        all_subscriptions, ..
-                    },
-                ) => {
-                    let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
-
-                    // No known finalized parahead.
-                    let _ = send_back.send(super::SubscribeAll {
-                        finalized_block_scale_encoded_header: self
-                            .obsolete_finalized_parahead
-                            .clone(),
-                        finalized_block_runtime: None,
-                        non_finalized_blocks_ancestry_order: Vec::new(),
-                        new_blocks,
-                    });
-
-                    all_subscriptions.push(tx);
+                    } => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "block-announce",
+                            sender = peer_id,
+                            hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                                decoded.scale_encoded_header
+                            )),
+                            height = announce_block_height,
+                            is_best = decoded.is_best,
+                            outcome = "older-than-finalized-block",
+                        );
+                    }
+                    all::BlockAnnounceOutcome::AlreadyVerified(known) => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "block-announce",
+                            sender = peer_id,
+                            hash = HashDisplay(known.hash()),
+                            height = known.height(),
+                            parent_hash = HashDisplay(known.parent_hash()),
+                            is_best = decoded.is_best,
+                            outcome = "already-verified",
+                        );
+                        known.update_source_and_block();
+                    }
+                    all::BlockAnnounceOutcome::AlreadyPending(known) => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "block-announce",
+                            sender = peer_id,
+                            hash = HashDisplay(known.hash()),
+                            height = known.height(),
+                            parent_hash = HashDisplay(known.parent_hash()),
+                            is_best = decoded.is_best,
+                            outcome = "already-pending",
+                        );
+                        known.update_source_and_block();
+                    }
+                    all::BlockAnnounceOutcome::Unknown(unknown) => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "block-announce",
+                            sender = peer_id,
+                            hash = HashDisplay(unknown.hash()),
+                            height = unknown.height(),
+                            parent_hash = HashDisplay(unknown.parent_hash()),
+                            is_best = decoded.is_best,
+                            outcome = "previously-unknown",
+                        );
+                        unknown.insert_and_update_source(());
+                    }
+                    all::BlockAnnounceOutcome::InvalidHeader(error) => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "block-announce",
+                            sender = peer_id,
+                            hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                                decoded.scale_encoded_header
+                            )),
+                            is_best = decoded.is_best,
+                            outcome = "invalid-header",
+                            ?error,
+                        );
+                        task.network_service
+                            .ban_and_disconnect(
+                                peer_id,
+                                network_service::BanSeverity::High,
+                                "bad-block-announce",
+                            )
+                            .await;
+                    }
                 }
+            }
 
-                (
-                    WakeUpReason::ForegroundMessage(ToBackground::SubscribeAll {
-                        send_back,
-                        buffer_size,
-                        ..
-                    }),
-                    ParachainBackgroundState::Subscribed(runtime_subscription),
-                ) => {
-                    let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
+            WakeUpReason::MustSubscribeNetworkEvents => {
+                debug_assert!(task.from_network_service.is_none());
+                for (_, sync_source_id) in task.peers_source_id_map.drain() {
+                    let (_, requests) = task
+                        .sync
+                        .as_mut()
+                        .unwrap_or_else(|| unreachable!())
+                        .remove_source(sync_source_id);
+                    for (_, abort) in requests {
+                        abort.abort();
+                    }
+                }
+                task.from_network_service = Some(Box::pin(task.network_service.subscribe().await));
+            }
 
-                    // There are two possibilities here: either we know of any recent finalized
-                    // parahead, or we don't. In case where we don't know of any finalized parahead
-                    // yet, we report a single obsolete finalized parahead, which is
-                    // `obsolete_finalized_parahead`. The rest of this module makes sure that no
-                    // other block is reported to subscriptions as long as this is the case, and
-                    // that subscriptions are reset once the first known finalized parahead
-                    // is known.
-                    if let Some(finalized_parahead) = runtime_subscription
-                        .async_tree
-                        .output_finalized_async_user_data()
-                    {
-                        // Finalized parahead is known.
-                        let finalized_parahash =
-                            header::hash_from_scale_encoded_header(finalized_parahead);
-                        let _ = send_back.send(super::SubscribeAll {
-                            finalized_block_scale_encoded_header: finalized_parahead.clone(),
-                            finalized_block_runtime: None,
-                            non_finalized_blocks_ancestry_order: {
-                                let mut list =
-                                    Vec::<([u8; 32], super::BlockNotification)>::with_capacity(
-                                        runtime_subscription
-                                            .async_tree
-                                            .num_input_non_finalized_blocks(),
-                                    );
+            WakeUpReason::MustUpdateNetworkWithBestBlock => {
+                let Some(sync) = &task.sync else {
+                    unreachable!()
+                };
+                let fut = task
+                    .network_service
+                    .set_local_best_block(*sync.best_block_hash(), sync.best_block_number());
+                fut.await;
+                task.network_up_to_date_best = true;
+            }
 
-                                for relay_block in runtime_subscription
-                                    .async_tree
-                                    .input_output_iter_ancestry_order()
-                                {
-                                    let parablock = match relay_block.async_op_user_data {
-                                        Some(b) => b.as_ref().unwrap(),
-                                        None => continue,
-                                    };
+            WakeUpReason::ForegroundMessage(ToBackground::IsNearHeadOfChainHeuristic {
+                send_back,
+            }) => {
+                let _ = send_back.send(
+                    task.sync
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!())
+                        .is_near_head_of_chain_heuristic(),
+                );
+            }
 
-                                    let parablock_hash =
-                                        header::hash_from_scale_encoded_header(parablock);
+            WakeUpReason::ForegroundMessage(ToBackground::SubscribeAll {
+                send_back,
+                buffer_size,
+                runtime_interest,
+            }) => {
+                let Some(sync) = &task.sync else {
+                    unreachable!()
+                };
 
-                                    // TODO: O(n)
-                                    if let Some((_, entry)) =
-                                        list.iter_mut().find(|(h, _)| *h == parablock_hash)
-                                    {
-                                        // Block is already in the list. Don't add it a second time.
-                                        if relay_block.is_output_best {
-                                            entry.is_new_best = true;
-                                        }
-                                        continue;
-                                    }
+                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
+                task.all_notifications.push(tx);
 
-                                    // Find the parent of the parablock. This is done by going through
-                                    // the ancestors of the corresponding relay chain block (until and
-                                    // including the finalized relay chain block) until we find one
-                                    // whose parablock is different from the parablock in question.
-                                    // If none is found, the parablock is the same as the finalized
-                                    // parablock.
-                                    let parent_hash = runtime_subscription
-                                        .async_tree
-                                        .ancestors(relay_block.id)
-                                        .find_map(|idx| {
-                                            let hash = header::hash_from_scale_encoded_header(
-                                                runtime_subscription
-                                                    .async_tree
-                                                    .block_async_user_data(idx)
-                                                    .unwrap()
-                                                    .as_ref()
-                                                    .unwrap(),
-                                            );
-                                            if hash != parablock_hash {
-                                                Some(hash)
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .or_else(|| {
-                                            if finalized_parahash != parablock_hash {
-                                                Some(finalized_parahash)
-                                            } else {
-                                                None
-                                            }
-                                        });
+                let non_finalized_blocks_ancestry_order = {
+                    sync.non_finalized_blocks_ancestry_order()
+                        .map(|h| {
+                            let scale_encoding = h.scale_encoding_vec(sync.block_number_bytes());
+                            BlockNotification {
+                                is_new_best: header::hash_from_scale_encoded_header(
+                                    &scale_encoding,
+                                ) == *sync.best_block_hash(),
+                                scale_encoded_header: scale_encoding,
+                                parent_hash: *h.parent_hash,
+                            }
+                        })
+                        .collect()
+                };
 
-                                    // `parent_hash` is `None` if the parablock is
-                                    // the same as the finalized parablock, in which case we
-                                    // don't add it to the list.
-                                    if let Some(parent_hash) = parent_hash {
-                                        debug_assert!(
-                                            list.iter().filter(|(h, _)| *h == parent_hash).count()
-                                                == 1
-                                                || parent_hash == finalized_parahash
-                                        );
-                                        list.push((
-                                            parablock_hash,
-                                            super::BlockNotification {
-                                                is_new_best: relay_block.is_output_best,
-                                                scale_encoded_header: parablock.clone(),
-                                                parent_hash,
-                                            },
-                                        ));
-                                    }
-                                }
-
-                                list.into_iter().map(|(_, v)| v).collect()
-                            },
-                            new_blocks,
-                        });
+                let _ = send_back.send(SubscribeAll {
+                    finalized_block_scale_encoded_header: sync.finalized_block_header().to_vec(),
+                    finalized_block_runtime: if runtime_interest {
+                        task.known_finalized_runtime.take()
                     } else {
-                        // No known finalized parahead.
-                        let _ = send_back.send(super::SubscribeAll {
-                            finalized_block_scale_encoded_header: self
-                                .obsolete_finalized_parahead
-                                .clone(),
-                            finalized_block_runtime: None,
-                            non_finalized_blocks_ancestry_order: Vec::new(),
-                            new_blocks,
+                        None
+                    },
+                    non_finalized_blocks_ancestry_order,
+                    new_blocks,
+                });
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::PeersAssumedKnowBlock {
+                send_back,
+                block_number,
+                block_hash,
+            }) => {
+                let Some(sync) = &task.sync else {
+                    unreachable!()
+                };
+
+                let outcome = if block_number <= sync.finalized_block_number() {
+                    sync.sources()
+                        .filter(|source_id| {
+                            let source_best = sync.source_best_block(*source_id);
+                            source_best.0 > block_number
+                                || (source_best.0 == block_number && *source_best.1 == block_hash)
+                        })
+                        .map(|id| sync[id].0.clone())
+                        .collect()
+                } else {
+                    sync.knows_non_finalized_block(block_number, &block_hash)
+                        .map(|id| sync[id].0.clone())
+                        .collect()
+                };
+
+                let _ = send_back.send(outcome);
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::SyncingPeers { send_back }) => {
+                let Some(sync) = &task.sync else {
+                    unreachable!()
+                };
+
+                let out = sync
+                    .sources()
+                    .map(|src| {
+                        let (peer_id, role) = sync[src].clone();
+                        let (height, hash) = sync.source_best_block(src);
+                        (peer_id, role, height, *hash)
+                    })
+                    .collect::<Vec<_>>();
+
+                let _ = send_back.send(out);
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::SerializeChainInformation {
+                send_back,
+            }) => {
+                let _ = send_back.send(Some(
+                    task.sync
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!())
+                        .as_chain_information()
+                        .into(),
+                ));
+            }
+
+            WakeUpReason::ForegroundClosed => {
+                return;
+            }
+
+            WakeUpReason::RequestFinished(_, Err(_)) => {
+                // A request has been cancelled. Nothing to do.
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Block(Ok(v)))) => {
+                task.sync
+                    .as_mut()
+                    .unwrap_or_else(|| unreachable!())
+                    .blocks_request_response(
+                        request_id,
+                        v.into_iter().filter_map(|block| {
+                            Some(all::BlockRequestSuccessBlock {
+                                scale_encoded_header: block.header?,
+                                scale_encoded_justifications: Vec::new(),
+                                scale_encoded_extrinsics: Vec::new(),
+                                user_data: (),
+                            })
+                        }),
+                    );
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Block(Err(_)))) => {
+                let Some(sync) = &mut task.sync else {
+                    unreachable!()
+                };
+
+                let source_peer_id = sync[sync.request_source_id(request_id)].0.clone();
+
+                task.network_service
+                    .ban_and_disconnect(
+                        source_peer_id,
+                        network_service::BanSeverity::Low,
+                        "failed-blocks-request",
+                    )
+                    .await;
+
+                sync.remove_request(request_id);
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Storage(Ok(r)))) => {
+                let Some(sync) = &mut task.sync else {
+                    unreachable!()
+                };
+                sync.storage_get_response(request_id, r);
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Storage(Err(_)))) => {
+                let Some(sync) = &mut task.sync else {
+                    unreachable!()
+                };
+
+                task.network_service
+                    .ban_and_disconnect(
+                        sync[sync.request_source_id(request_id)].0.clone(),
+                        network_service::BanSeverity::Low,
+                        "failed-storage-request",
+                    )
+                    .await;
+
+                sync.remove_request(request_id);
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::CallProof(Ok(r)))) => {
+                task.sync
+                    .as_mut()
+                    .unwrap_or_else(|| unreachable!())
+                    .call_proof_response(request_id, r.decode().to_vec());
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::CallProof(Err(_)))) => {
+                let Some(sync) = &mut task.sync else {
+                    unreachable!()
+                };
+
+                task.network_service
+                    .ban_and_disconnect(
+                        sync[sync.request_source_id(request_id)].0.clone(),
+                        network_service::BanSeverity::Low,
+                        "failed-call-proof-request",
+                    )
+                    .await;
+
+                sync.remove_request(request_id);
+            }
+
+            WakeUpReason::ObsoleteRequest(request_id) => {
+                let Some(sync) = &mut task.sync else {
+                    unreachable!()
+                };
+                let abort_handle = sync.remove_request(request_id);
+                abort_handle.abort();
+            }
+
+            WakeUpReason::StartRequest(
+                source_id,
+                all::DesiredRequest::BlocksRequest {
+                    first_block_hash,
+                    first_block_height,
+                    num_blocks,
+                    request_headers,
+                    request_bodies,
+                    request_justification: _,
+                },
+            ) => {
+                let Some(sync) = &mut task.sync else {
+                    unreachable!()
+                };
+
+                let num_blocks = NonZero::<u64>::new(cmp::min(64, num_blocks.get())).unwrap();
+                let peer_id = sync[source_id].0.clone();
+
+                let block_request = task.network_service.clone().blocks_request(
+                    peer_id,
+                    network::codec::BlocksRequestConfig {
+                        start: network::codec::BlocksRequestConfigStart::Hash(first_block_hash),
+                        desired_count: NonZero::<u32>::new(
+                            u32::try_from(num_blocks.get()).unwrap_or(u32::MAX),
+                        )
+                        .unwrap(),
+                        direction: network::codec::BlocksRequestDirection::Descending,
+                        fields: network::codec::BlocksRequestFields {
+                            header: request_headers,
+                            body: request_bodies,
+                            justifications: false,
+                        },
+                    },
+                    Duration::from_secs(10),
+                );
+
+                let (block_request, abort) = future::abortable(block_request);
+                let request_id = sync.add_request(
+                    source_id,
+                    all::RequestDetail::BlocksRequest {
+                        first_block_hash,
+                        first_block_height,
+                        num_blocks,
+                        request_headers,
+                        request_bodies,
+                        request_justification: false,
+                    },
+                    abort,
+                );
+
+                task.pending_requests.push(Box::pin(async move {
+                    (request_id, block_request.await.map(RequestOutcome::Block))
+                }));
+            }
+
+            WakeUpReason::StartRequest(
+                source_id,
+                all::DesiredRequest::StorageGetMerkleProof {
+                    block_hash, keys, ..
+                },
+            ) => {
+                let Some(sync) = &mut task.sync else {
+                    unreachable!()
+                };
+
+                let peer_id = sync[source_id].0.clone();
+
+                let storage_request = task.network_service.clone().storage_proof_request(
+                    peer_id,
+                    network::codec::StorageProofRequestConfig {
+                        block_hash,
+                        keys: keys.clone().into_iter(),
+                    },
+                    Duration::from_secs(16),
+                );
+
+                let storage_request = async move {
+                    if let Ok(outcome) = storage_request.await {
+                        Ok(outcome.decode().to_vec())
+                    } else {
+                        Err(())
+                    }
+                };
+
+                let (storage_request, abort) = future::abortable(storage_request);
+                let request_id = sync.add_request(
+                    source_id,
+                    all::RequestDetail::StorageGet { block_hash, keys },
+                    abort,
+                );
+
+                task.pending_requests.push(Box::pin(async move {
+                    (
+                        request_id,
+                        storage_request.await.map(RequestOutcome::Storage),
+                    )
+                }));
+            }
+
+            WakeUpReason::StartRequest(
+                source_id,
+                all::DesiredRequest::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                },
+            ) => {
+                let Some(sync) = &mut task.sync else {
+                    unreachable!()
+                };
+
+                let peer_id = sync[source_id].0.clone();
+
+                let call_proof_request = {
+                    let network_service = task.network_service.clone();
+                    let parameter_vectored = parameter_vectored.clone();
+                    let function_name = function_name.clone();
+                    async move {
+                        let rq = network_service.call_proof_request(
+                            peer_id,
+                            network::codec::CallProofRequestConfig {
+                                block_hash,
+                                method: Cow::Borrowed(&*function_name),
+                                parameter_vectored: iter::once(&parameter_vectored),
+                            },
+                            Duration::from_secs(16),
+                        );
+
+                        match rq.await {
+                            Ok(p) => Ok(p),
+                            Err(_) => Err(()),
+                        }
+                    }
+                };
+
+                let (call_proof_request, abort) = future::abortable(call_proof_request);
+                let request_id = sync.add_request(
+                    source_id,
+                    all::RequestDetail::RuntimeCallMerkleProof {
+                        block_hash,
+                        function_name,
+                        parameter_vectored,
+                    },
+                    abort,
+                );
+
+                task.pending_requests.push(Box::pin(async move {
+                    (
+                        request_id,
+                        call_proof_request.await.map(RequestOutcome::CallProof),
+                    )
+                }));
+            }
+
+            // Paraheads integration: relay chain finalization
+            WakeUpReason::ParaheadSubscribed(subscribe_all) => {
+                task.paraheads_subscribe_future = None;
+
+                log!(
+                    &task.platform,
+                    Debug,
+                    &task.log_target,
+                    "paraheads-subscribed",
+                    finalized_hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                        &subscribe_all.finalized_block_scale_encoded_header
+                    )),
+                );
+
+                // Try to apply the initial finalized parachain head.
+                let finalized_hash = header::hash_from_scale_encoded_header(
+                    &subscribe_all.finalized_block_scale_encoded_header,
+                );
+                let sync = task.sync.as_mut().unwrap();
+                match sync.set_finalized_block(&finalized_hash) {
+                    Ok(result) => {
+                        task.pending_parachain_finalization = None;
+                        if result.updates_best_block {
+                            task.network_up_to_date_best = false;
+                        }
+                        if result.finalized_blocks.iter().any(|b| {
+                            header::decode(&b.header, sync.block_number_bytes())
+                                .map(|h| h.digest.has_runtime_environment_updated())
+                                .unwrap_or(false)
+                        }) {
+                            task.known_finalized_runtime = None;
+                        }
+                        task.dispatch_all_subscribers(Notification::Finalized {
+                            hash: finalized_hash,
+                            best_block_hash_if_changed: if result.updates_best_block {
+                                Some(*task.sync.as_ref().unwrap().best_block_hash())
+                            } else {
+                                None
+                            },
+                            pruned_blocks: result.pruned_blocks,
                         });
                     }
-
-                    runtime_subscription.all_subscriptions.push(tx);
+                    Err(_) => {
+                        // Block not yet synced — store as pending.
+                        task.pending_parachain_finalization = Some(finalized_hash);
+                    }
                 }
 
-                (
-                    WakeUpReason::ForegroundMessage(ToBackground::PeersAssumedKnowBlock {
-                        send_back,
-                        ..
-                    }),
-                    _,
-                ) => {
-                    // Simply assume that all peers know about all blocks.
-                    //
-                    // We could in principle check whether the block is higher than the current
-                    // finalized block, and if not if it is in the list of paraheads found in the
-                    // relay chain. But because parachain blocks might not be decodable, we can't
-                    // know their number, and thus we can't know if the requested block is a
-                    // descendant of the finalized block.
-                    // Assuming that all peers know all blocks is the only sane way of
-                    // implementing this.
-                    let _ = send_back.send(self.sync_sources.keys().cloned().collect());
-                }
+                task.paraheads_notifications = Some(subscribe_all.new_blocks);
+            }
 
-                (WakeUpReason::ForegroundMessage(ToBackground::SyncingPeers { send_back }), _) => {
-                    let _ = send_back.send(
-                        self.sync_sources
-                            .iter()
-                            .map(|(peer_id, (role, best_height, best_hash))| {
-                                //let (height, hash) = self.sync_sources.best_block(local_id);
-                                (peer_id.clone(), *role, *best_height, *best_hash)
-                            })
-                            .collect(),
-                    );
-                }
+            WakeUpReason::ParaheadNotification(Notification::Finalized {
+                hash,
+                best_block_hash_if_changed: _,
+                pruned_blocks: _,
+            }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    &task.log_target,
+                    "paraheads-finalized",
+                    hash = HashDisplay(&hash),
+                );
 
-                (
-                    WakeUpReason::ForegroundMessage(ToBackground::SerializeChainInformation {
-                        send_back,
-                    }),
-                    _,
-                ) => {
-                    let _ = send_back.send(None);
+                let sync = task.sync.as_mut().unwrap();
+                match sync.set_finalized_block(&hash) {
+                    Ok(result) => {
+                        task.pending_parachain_finalization = None;
+                        if result.updates_best_block {
+                            task.network_up_to_date_best = false;
+                        }
+                        if result.finalized_blocks.iter().any(|b| {
+                            header::decode(&b.header, sync.block_number_bytes())
+                                .map(|h| h.digest.has_runtime_environment_updated())
+                                .unwrap_or(false)
+                        }) {
+                            task.known_finalized_runtime = None;
+                        }
+                        task.dispatch_all_subscribers(Notification::Finalized {
+                            hash,
+                            best_block_hash_if_changed: if result.updates_best_block {
+                                Some(*task.sync.as_ref().unwrap().best_block_hash())
+                            } else {
+                                None
+                            },
+                            pruned_blocks: result.pruned_blocks,
+                        });
+                    }
+                    Err(_) => {
+                        // Block not yet synced — store as pending.
+                        task.pending_parachain_finalization = Some(hash);
+                    }
                 }
+            }
 
-                (WakeUpReason::MustSubscribeNetworkEvents, _) => {
-                    debug_assert!(self.from_network_service.is_none());
-                    self.sync_sources.clear();
-                    self.from_network_service = Some(Box::pin(
-                        // As documented, `subscribe().await` is expected to return quickly.
-                        self.network_service.subscribe().await,
-                    ));
-                }
+            WakeUpReason::ParaheadNotification(
+                Notification::Block(_) | Notification::BestBlockChanged { .. },
+            ) => {
+                // AllSync discovers blocks through the P2P network, not from
+                // paraheads. We only use paraheads for finalization.
+            }
 
-                (
-                    WakeUpReason::NetworkEvent(network_service::Event::Connected {
-                        peer_id,
-                        role,
-                        best_block_number,
-                        best_block_hash,
-                    }),
-                    _,
-                ) => {
-                    let _former_value = self
-                        .sync_sources
-                        .insert(peer_id, (role, best_block_number, best_block_hash));
-                    debug_assert!(_former_value.is_none());
-                }
+            WakeUpReason::ParaheadSubscriptionDead => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    &task.log_target,
+                    "paraheads-subscription-reset"
+                );
+                task.paraheads_notifications = None;
+                let to_paraheads = task.paraheads.clone();
+                task.paraheads_subscribe_future = Some(Box::pin(async move {
+                    let (send_back, sub_rx) = oneshot::channel();
+                    let _ = to_paraheads
+                        .send(super::ToBackground::SubscribeAll {
+                            send_back,
+                            buffer_size: 32,
+                            runtime_interest: false,
+                        })
+                        .await;
+                    sub_rx.await.unwrap()
+                }));
+            }
 
-                (
-                    WakeUpReason::NetworkEvent(network_service::Event::Disconnected { peer_id }),
-                    _,
-                ) => {
-                    let _role = self.sync_sources.remove(&peer_id);
-                    debug_assert!(_role.is_some());
-                }
-
-                (
-                    WakeUpReason::NetworkEvent(network_service::Event::BlockAnnounce {
-                        peer_id: _peer_id,
-                        ..
-                    }),
-                    _,
-                ) => {
-                    debug_assert!(self.sync_sources.contains_key(&_peer_id));
-                }
-
-                (WakeUpReason::NetworkEvent(_), _) => {
-                    // Uninteresting message.
-                }
-
-                (
-                    WakeUpReason::ParaheadFetchFinished { .. }
-                    | WakeUpReason::AdvanceSyncTree
-                    | WakeUpReason::Notification(_)
-                    | WakeUpReason::StartParaheadFetch,
-                    ParachainBackgroundState::NotSubscribed { .. },
-                ) => {
-                    // These paths are unreachable.
-                    debug_assert!(false);
-                }
+            // Unreachable variants - parachains don't use warp sync, finality proofs, or Grandpa
+            WakeUpReason::NetworkEvent(
+                network_service::Event::GrandpaNeighborPacket { .. }
+                | network_service::Event::GrandpaCommitMessage { .. },
+            )
+            | WakeUpReason::SyncProcess(
+                all::ProcessOne::AllSync(_)
+                | all::ProcessOne::WarpSyncBuildRuntime(_)
+                | all::ProcessOne::WarpSyncBuildChainInformation(_)
+                | all::ProcessOne::WarpSyncFinished { .. }
+                | all::ProcessOne::VerifyWarpSyncFragment(_)
+                | all::ProcessOne::VerifyFinalityProof(_),
+            )
+            | WakeUpReason::StartRequest(_, all::DesiredRequest::WarpSync { .. }) => {
+                unreachable!()
             }
         }
     }
 }
 
-async fn fetch_parahead<TPlat: PlatformRef>(
-    relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
-    subscription_id: runtime_service::SubscriptionId,
-    parachain_id: u32,
-    block_hash: &[u8; 32],
-) -> Result<Vec<u8>, ParaheadError> {
-    // Call `ParachainHost_persisted_validation_data` in order to know where the parachain is.
-    let (pinned_runtime, block_state_trie_root, block_number) = relay_chain_sync
-        .pin_pinned_block_runtime(subscription_id, *block_hash)
-        .await
-        .map_err(ParaheadError::PinRuntimeError)?;
-    let success = relay_chain_sync
-        .runtime_call(
-            pinned_runtime,
-            *block_hash,
-            block_number,
-            block_state_trie_root,
-            para::PERSISTED_VALIDATION_FUNCTION_NAME.to_owned(),
-            None, // TODO: /!\
-            para::persisted_validation_data_parameters(
-                parachain_id,
-                para::OccupiedCoreAssumption::TimedOut,
-            )
-            .fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            }),
-            6,
-            Duration::from_secs(10),
-            NonZero::<u32>::new(2).unwrap(),
-        )
-        .await
-        .map_err(ParaheadError::RuntimeCall)?;
+struct Task<TPlat: PlatformRef> {
+    log_target: String,
+    platform: TPlat,
 
-    // Try decode the result of the runtime call.
-    // If this fails, it indicates an incompatibility between smoldot and the relay chain.
-    match para::decode_persisted_validation_data_return_value(
-        &success.output,
-        relay_chain_sync.block_number_bytes(),
-    ) {
-        Ok(Some(pvd)) => Ok(pvd.parent_head.to_vec()),
-        Ok(None) => Err(ParaheadError::NoCore),
-        Err(error) => Err(ParaheadError::InvalidRuntimeOutput(error)),
+    /// Main syncing state machine. Always `Some`, except for temporary extraction.
+    sync: Option<all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>>,
+
+    /// If `Some`, contains the runtime of the current finalized block.
+    known_finalized_runtime: Option<FinalizedBlockRuntime>,
+
+    /// For each networking peer, the index of the corresponding peer within the sync.
+    peers_source_id_map: HashMap<libp2p::PeerId, all::SourceId, util::SipHasherBuild>,
+
+    network_up_to_date_best: bool,
+
+    /// Channel to the paraheads background service.
+    paraheads: async_channel::Sender<super::ToBackground>,
+    /// Future for subscribing to paraheads. `None` if already subscribed.
+    paraheads_subscribe_future: Option<future::BoxFuture<'static, super::SubscribeAll>>,
+    /// Notification stream from the paraheads service. `None` if not subscribed yet.
+    paraheads_notifications: Option<async_channel::Receiver<super::Notification>>,
+    /// Pending finalized parachain block hash from relay chain that hasn't been
+    /// applied yet because the block wasn't synced at the time.
+    pending_parachain_finalization: Option<[u8; 32]>,
+
+    all_notifications: Vec<async_channel::Sender<Notification>>,
+
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+    from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::Event>>>>,
+
+    pending_requests: stream::FuturesUnordered<
+        future::BoxFuture<'static, (all::RequestId, Result<RequestOutcome, future::Aborted>)>,
+    >,
+}
+
+enum RequestOutcome {
+    Block(Result<Vec<codec::BlockData>, network_service::BlocksRequestError>),
+    Storage(Result<Vec<u8>, ()>),
+    CallProof(Result<network::service::EncodedMerkleProof, ()>),
+}
+
+impl<TPlat: PlatformRef> Task<TPlat> {
+    fn dispatch_all_subscribers(&mut self, notification: Notification) {
+        for index in (0..self.all_notifications.len()).rev() {
+            let subscription = self.all_notifications.swap_remove(index);
+            if subscription.try_send(notification.clone()).is_err() {
+                if !subscription.is_closed() {
+                    self.all_notifications.push(subscription);
+                }
+                continue;
+            }
+
+            self.all_notifications.push(subscription);
+        }
     }
 }
 
-/// Error that can happen when fetching the parachain head corresponding to a relay chain block.
-#[derive(Debug, derive_more::Display, derive_more::Error)]
-enum ParaheadError {
-    /// Error while performing call request over the network.
-    #[display("Error while performing call request over the network: {_0}")]
-    RuntimeCall(runtime_service::RuntimeCallError),
-    /// Error pinning the runtime of the block.
-    PinRuntimeError(runtime_service::PinPinnedBlockRuntimeError),
-    /// Parachain doesn't have a core in the relay chain.
-    NoCore,
-    /// Error while decoding the output of the call.
-    ///
-    /// This indicates some kind of incompatibility between smoldot and the relay chain.
-    #[display("Error while decoding the output of the call: {_0}")]
-    InvalidRuntimeOutput(para::Error),
+// Fetch the included parachain head from a finalized relay chain block.
+async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
+    log_target: &str,
+    platform: &TPlat,
+    relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
+    para_id: u32,
+    block_number_bytes: usize,
+) -> chain::chain_information::ValidChainInformation {
+    let mut subscription = relay_chain_sync
+        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
+        .await;
+
+    log!(
+        platform,
+        Info,
+        log_target,
+        "Waiting for relay chain to finalize a block..."
+    );
+
+    loop {
+        let finalized_hash = loop {
+            match subscription.new_blocks.next().await {
+                Some(runtime_service::Notification::Finalized { hash, .. }) => {
+                    break hash;
+                }
+                Some(_) => continue,
+                None => {
+                    // Subscription died. Re-subscribe.
+                    subscription = relay_chain_sync
+                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
+                        .await;
+                    break header::hash_from_scale_encoded_header(
+                        &subscription.finalized_block_scale_encoded_header,
+                    );
+                }
+            }
+        };
+
+        log!(
+            platform,
+            Debug,
+            log_target,
+            format!(
+                "Trying to fetch parachain head from relay block {}",
+                HashDisplay(&finalized_hash)
+            )
+        );
+
+        let pinned = relay_chain_sync
+            .pin_pinned_block_runtime(subscription.new_blocks.id(), finalized_hash)
+            .await;
+        let (pinned_runtime, block_state_trie_root, block_number) = match pinned {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let call_result = relay_chain_sync
+            .runtime_call(
+                pinned_runtime,
+                finalized_hash,
+                block_number,
+                block_state_trie_root,
+                String::from(para::PERSISTED_VALIDATION_FUNCTION_NAME),
+                None,
+                para::persisted_validation_data_parameters(
+                    para_id,
+                    para::OccupiedCoreAssumption::TimedOut,
+                )
+                .fold(Vec::new(), |mut a, b| {
+                    a.extend_from_slice(b.as_ref());
+                    a
+                }),
+                6,
+                Duration::from_secs(20),
+                NonZero::<u32>::new(2).unwrap(),
+            )
+            .await;
+        let success = match call_result {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let pvd = match para::decode_persisted_validation_data_return_value(
+            &success.output,
+            relay_chain_sync.block_number_bytes(),
+        ) {
+            Ok(Some(pvd)) => pvd,
+            _ => continue,
+        };
+
+        let parachain_header_bytes = pvd.parent_head.to_vec();
+        let decoded_header = header::decode(&parachain_header_bytes, block_number_bytes).unwrap();
+
+        log!(
+            platform,
+            Info,
+            log_target,
+            format!(
+                "Got parachain head from relay chain: block #{}, hash {}",
+                decoded_header.number,
+                HashDisplay(&header::hash_from_scale_encoded_header(
+                    &parachain_header_bytes
+                ))
+            )
+        );
+
+        let chain_info = chain::chain_information::ChainInformation {
+            finalized_block_header: Box::new(decoded_header.into()),
+            consensus: chain::chain_information::ChainInformationConsensus::Unknown,
+            finality: chain::chain_information::ChainInformationFinality::Outsourced,
+        };
+
+        return chain::chain_information::ValidChainInformation::try_from(chain_info)
+            .expect("parachain head from relay chain must be valid");
+    }
 }
 
-impl ParaheadError {
-    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
-    /// issue.
-    fn is_network_problem(&self) -> bool {
-        match self {
-            ParaheadError::RuntimeCall(runtime_service::RuntimeCallError::Inaccessible(_)) => true,
-            ParaheadError::RuntimeCall(
-                runtime_service::RuntimeCallError::Execution(_)
-                | runtime_service::RuntimeCallError::Crash
-                | runtime_service::RuntimeCallError::InvalidRuntime(_)
-                | runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled,
-            ) => false,
-            ParaheadError::PinRuntimeError(_) => false,
-            ParaheadError::NoCore => false,
-            ParaheadError::InvalidRuntimeOutput(_) => false,
+/// Downloads the parachain runtime from a P2P peer and determines Aura consensus parameters.
+async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
+    log_target: &str,
+    platform: &TPlat,
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    chain_info: &chain::chain_information::ValidChainInformation,
+    block_number_bytes: usize,
+) -> Result<chain::chain_information::ValidChainInformation, String> {
+    let ci_ref = chain_info.as_ref();
+    let state_root = *ci_ref.finalized_block_header.state_root;
+    let block_hash = ci_ref.finalized_block_header.hash(block_number_bytes);
+
+    log!(
+        platform,
+        Info,
+        log_target,
+        format!(
+            "Bootstrapping parachain consensus from block #{} ({})",
+            ci_ref.finalized_block_header.number,
+            HashDisplay(&block_hash)
+        )
+    );
+
+    // Wait for a peer to connect.
+    let peer_id = {
+        let mut from_network = Box::pin(network_service.subscribe().await);
+
+        if let Some(peer) = network_service.peers_list().await.next() {
+            peer
+        } else {
+            loop {
+                match from_network.next().await {
+                    Some(network_service::Event::Connected { peer_id, .. }) => break peer_id,
+                    Some(_) => continue,
+                    None => {
+                        from_network = Box::pin(network_service.subscribe().await);
+                    }
+                }
+            }
+        }
+    };
+
+    log!(
+        platform,
+        Info,
+        log_target,
+        format!("Downloading parachain runtime from peer {peer_id}")
+    );
+
+    // Download :code and :heappages.
+    let proof = network_service
+        .clone()
+        .storage_proof_request(
+            peer_id.clone(),
+            codec::StorageProofRequestConfig {
+                block_hash,
+                keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
+            },
+            Duration::from_secs(60),
+        )
+        .await
+        .map_err(|e| format!("Storage proof request failed: {e}"))?;
+
+    let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+        proof: proof.decode().to_vec(),
+    })
+    .map_err(|e| format!("Failed to decode storage proof: {e}"))?;
+
+    let code = decoded_proof
+        .storage_value(&state_root, b":code")
+        .map_err(|_| String::from("Proof doesn't contain :code"))?
+        .ok_or_else(|| String::from("Runtime :code not found in storage"))?
+        .0
+        .to_vec();
+
+    let heap_pages_raw = decoded_proof
+        .storage_value(&state_root, b":heappages")
+        .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
+
+    let heap_pages = executor::storage_heap_pages_to_value(heap_pages_raw.map(|(v, _)| v))
+        .map_err(|e| format!("Invalid :heappages value: {e}"))?;
+
+    log!(
+        platform,
+        Info,
+        log_target,
+        format!(
+            "Downloaded parachain runtime ({} bytes), compiling...",
+            code.len()
+        )
+    );
+
+    let mut vm = executor::host::HostVmPrototype::new(executor::host::Config {
+        module: &code,
+        heap_pages,
+        exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+        allow_unresolved_imports: true,
+    })
+    .map_err(|e| format!("Failed to compile runtime: {e}"))?;
+
+    // AuraApi_slot_duration
+    let slot_duration = {
+        let call_proof = network_service
+            .clone()
+            .call_proof_request(
+                peer_id.clone(),
+                codec::CallProofRequestConfig {
+                    block_hash,
+                    method: Cow::Borrowed("AuraApi_slot_duration"),
+                    parameter_vectored: iter::empty::<Vec<u8>>(),
+                },
+                Duration::from_secs(16),
+            )
+            .await
+            .map_err(|e| format!("AuraApi_slot_duration call proof request failed: {e}"))?;
+
+        let decoded_call_proof =
+            trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+                proof: call_proof.decode().to_vec(),
+            })
+            .map_err(|e| format!("Failed to decode slot_duration call proof: {e}"))?;
+
+        let output = run_single_runtime_call(
+            vm,
+            "AuraApi_slot_duration",
+            &decoded_call_proof,
+            &state_root,
+        )?;
+
+        // Recompile the VM for the next call.
+        vm = executor::host::HostVmPrototype::new(executor::host::Config {
+            module: &code,
+            heap_pages,
+            exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+            allow_unresolved_imports: true,
+        })
+        .map_err(|e| format!("Failed to recompile runtime: {e}"))?;
+
+        <[u8; 8]>::try_from(output.as_slice())
+            .ok()
+            .and_then(|b| NonZero::<u64>::new(u64::from_le_bytes(b)))
+            .ok_or_else(|| String::from("Failed to decode AuraApi_slot_duration output"))?
+    };
+
+    // AuraApi_authorities
+    let authorities = {
+        let call_proof = network_service
+            .clone()
+            .call_proof_request(
+                peer_id,
+                codec::CallProofRequestConfig {
+                    block_hash,
+                    method: Cow::Borrowed("AuraApi_authorities"),
+                    parameter_vectored: iter::empty::<Vec<u8>>(),
+                },
+                Duration::from_secs(16),
+            )
+            .await
+            .map_err(|e| format!("AuraApi_authorities call proof request failed: {e}"))?;
+
+        let decoded_call_proof =
+            trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+                proof: call_proof.decode().to_vec(),
+            })
+            .map_err(|e| format!("Failed to decode authorities call proof: {e}"))?;
+
+        let output =
+            run_single_runtime_call(vm, "AuraApi_authorities", &decoded_call_proof, &state_root)?;
+
+        header::AuraAuthoritiesIter::decode(&output)
+            .map_err(|_| String::from("Failed to decode AuraApi_authorities output"))?
+            .map(header::AuraAuthority::from)
+            .collect::<Vec<_>>()
+    };
+
+    log!(
+        platform,
+        Info,
+        log_target,
+        format!(
+            "Parachain uses Aura consensus (slot_duration={}ms, authorities={})",
+            slot_duration,
+            authorities.len()
+        )
+    );
+
+    let new_chain_info = chain::chain_information::ChainInformation {
+        finalized_block_header: Box::new(ci_ref.finalized_block_header.into()),
+        consensus: chain::chain_information::ChainInformationConsensus::Aura {
+            finalized_authorities_list: authorities,
+            slot_duration,
+        },
+        finality: chain::chain_information::ChainInformationFinality::Outsourced,
+    };
+
+    chain::chain_information::ValidChainInformation::try_from(new_chain_info)
+        .map_err(|e| format!("Invalid chain information: {e}"))
+}
+
+/// Runs a single runtime call, serving storage reads from the given proof.
+fn run_single_runtime_call(
+    vm: executor::host::HostVmPrototype,
+    function_name: &str,
+    proof: &trie::proof_decode::DecodedTrieProof<Vec<u8>>,
+    state_root: &[u8; 32],
+) -> Result<Vec<u8>, String> {
+    let mut call = executor::runtime_call::run(executor::runtime_call::Config {
+        virtual_machine: vm,
+        function_to_call: function_name,
+        parameter: iter::empty::<Vec<u8>>(),
+        storage_main_trie_changes: Default::default(),
+        storage_proof_size_behavior:
+            executor::runtime_call::StorageProofSizeBehavior::proof_recording_disabled(),
+        max_log_level: 0,
+        calculate_trie_changes: false,
+    })
+    .map_err(|(err, _)| format!("Failed to start {function_name}: {err}"))?;
+
+    loop {
+        match call {
+            executor::runtime_call::RuntimeCall::Finished(Ok(success)) => {
+                let output = success.virtual_machine.value().as_ref().to_vec();
+                return Ok(output);
+            }
+            executor::runtime_call::RuntimeCall::Finished(Err(err)) => {
+                return Err(format!("{function_name} execution error: {}", err.detail));
+            }
+            executor::runtime_call::RuntimeCall::StorageGet(get) => {
+                let child_trie = get.child_trie().map(|c| c.as_ref().to_vec());
+                let trie_root = if let Some(child_trie) = &child_trie {
+                    const PREFIX: &[u8] = b":child_storage:default:";
+                    let mut key = Vec::with_capacity(PREFIX.len() + child_trie.len());
+                    key.extend_from_slice(PREFIX);
+                    key.extend_from_slice(child_trie);
+                    match proof.storage_value(state_root, &key) {
+                        Ok(Some((value, _))) => match <&[u8; 32]>::try_from(value) {
+                            Ok(hash) => Some(*hash),
+                            Err(_) => {
+                                return Err(format!("{function_name}: invalid child trie root"));
+                            }
+                        },
+                        Ok(None) => None,
+                        Err(_) => {
+                            return Err(format!("{function_name}: proof missing child trie root"));
+                        }
+                    }
+                } else {
+                    Some(*state_root)
+                };
+
+                let storage_value = if let Some(trie_root) = &trie_root {
+                    proof.storage_value(trie_root, get.key().as_ref())
+                } else {
+                    Ok(None)
+                };
+                let Ok(storage_value) = storage_value else {
+                    return Err(format!("{function_name}: proof missing entry for key"));
+                };
+                call = get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
+            }
+            executor::runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv) => {
+                let merkle_value = proof.closest_descendant_merkle_value(state_root, mv.key());
+                let Ok(merkle_value) = merkle_value else {
+                    return Err(format!("{function_name}: proof missing merkle value"));
+                };
+                call = mv.inject_merkle_value(merkle_value);
+            }
+            executor::runtime_call::RuntimeCall::NextKey(nk) => {
+                let next_key = proof.next_key(
+                    state_root,
+                    nk.key(),
+                    nk.or_equal(),
+                    nk.prefix(),
+                    nk.branch_nodes(),
+                );
+                let Ok(next_key) = next_key else {
+                    return Err(format!("{function_name}: proof missing next key"));
+                };
+                call = nk.inject_key(next_key);
+            }
+            executor::runtime_call::RuntimeCall::SignatureVerification(sig) => {
+                call = sig.verify_and_resume();
+            }
+            executor::runtime_call::RuntimeCall::LogEmit(log) => {
+                call = log.resume();
+            }
+            executor::runtime_call::RuntimeCall::OffchainStorageSet(req) => {
+                call = req.resume();
+            }
+            executor::runtime_call::RuntimeCall::Offchain(_) => {
+                return Err(format!("{function_name}: forbidden offchain host function"));
+            }
         }
     }
 }
