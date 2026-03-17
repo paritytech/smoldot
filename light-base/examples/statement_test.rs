@@ -20,8 +20,6 @@
 use core::{iter, num::NonZero};
 use std::env;
 
-use smoldot::sync::para;
-
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -89,21 +87,20 @@ fn main() {
                 .unwrap();
 
             log::info!("Parachain added with statement protocol enabled");
-        }
 
-        client
-        .json_rpc_request(
-            r#"{"id":1,"jsonrpc":"2.0","method":"statement_subscribe","params":[{"type":"any"}]}"#,
-            parachain_id,
-        )
-        .unwrap();
-        log::info!("Listening for statements via JSON-RPC subscription...");
+            client
+                .json_rpc_request(
+                    r#"{"id":1,"jsonrpc":"2.0","method":"statement_subscribe","params":[{"type":"any"}]}"#,
+                    parachain_id,
+                )
+                .unwrap();
+            log::info!("Listening for statements via JSON-RPC subscription...");
 
-        // Keep the client running
-        let mut responses = json_rpc_responses.unwrap();
-        loop {
-            let response = responses.next().await.unwrap();
-            log::info!("Statement JSON-RPC response: {response}");
+            let mut responses = json_rpc_responses.unwrap();
+            loop {
+                let response: String = responses.next().await.unwrap();
+                log::info!("Statement JSON-RPC response: {response}");
+            }
         }
     });
 }
