@@ -578,11 +578,12 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     /// Broadcast Bitswap message to all [`service::ChainNetwork::established_bitswap_desired`]
     /// peers.
     ///
-    /// Returns an error if the message cannot be sent to at least one peer.
+    /// Returns the peers message was broadcast to or an error if the message cannot be sent
+    /// to at least one peer.
     pub async fn broadcast_bitswap_message(
         &self,
         message: Vec<u8>,
-    ) -> Result<(), SendBitswapMessageError> {
+    ) -> Result<Vec<PeerId>, SendBitswapMessageError> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -823,7 +824,7 @@ enum ToBackgroundChain {
     },
     BroadcastBitswapMessage {
         message: Vec<u8>,
-        result: oneshot::Sender<Result<(), SendBitswapMessageError>>,
+        result: oneshot::Sender<Result<Vec<PeerId>, SendBitswapMessageError>>,
     },
     Discover {
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
@@ -1799,15 +1800,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .collect::<Vec<_>>();
                 let results = peers
                     .iter()
-                    .map(|peer| task.network.bitswap_send_message(peer, message.clone()))
+                    .map(|peer| {
+                        (
+                            peer,
+                            task.network.bitswap_send_message(peer, message.clone()),
+                        )
+                    })
                     .collect::<Vec<_>>(); // we must collect first to send all messages
 
+                let succeeded_peers = results
+                    .iter()
+                    .filter_map(|(peer, r)| r.is_ok().then(|| (*peer).clone()))
+                    .collect::<Vec<_>>();
+
                 // TODO: introspecting a third-party error type below doesn't seem good.
-                let r = if results.iter().any(|r| r.is_ok()) {
-                    Ok(())
+                let r = if !succeeded_peers.is_empty() {
+                    Ok(succeeded_peers)
                 } else if results
                     .iter()
-                    .any(|r| matches!(r, Err(SendBitswapMessageError::QueueFull)))
+                    .any(|(_peer, r)| matches!(r, Err(SendBitswapMessageError::QueueFull)))
                 {
                     // `QueueFull` has higher priority than `NoConnection` for possible
                     // back-pressure in higher level code.

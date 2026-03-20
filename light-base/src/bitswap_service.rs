@@ -46,7 +46,7 @@
 
 use crate::{
     log,
-    network_service::{self, BitswapEvent, SendBitswapMessageError},
+    network_service::{self, BitswapEvent, PeerId, SendBitswapMessageError},
     platform::PlatformRef,
     util,
 };
@@ -64,6 +64,8 @@ use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{StreamExt as _, future, stream::FuturesUnordered};
 use itertools::Itertools;
+use rand::RngCore;
+use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
     libp2p::cid::{self, Cid, CidPrefix},
     network::codec::{Block, BlockPresence, BlockPresenceType, WantType, build_bitswap_message},
@@ -113,6 +115,11 @@ impl BitswapService {
             pending_block_requests: FuturesUnordered::new(),
             platform: platform.clone(),
             next_request_id_inner: 0,
+            randomness: rand_chacha::ChaCha20Rng::from_seed({
+                let mut seed = [0; 32];
+                platform.fill_random_bytes(&mut seed);
+                seed
+            }),
             requests: hashbrown::HashMap::with_capacity_and_hasher(
                 PARALLEL_REQUESTS,
                 fnv::FnvBuildHasher::default(),
@@ -170,6 +177,9 @@ pub enum BitswapBlockError {
     /// Network sending queue is full.
     #[display("Network sending queue is full.")]
     QueueFull,
+    /// Requested CID not found.
+    #[display("No connected peers have the CID requested.")]
+    NotFound,
     /// Request timeout.
     #[display("Request timeout.")]
     Timeout,
@@ -199,12 +209,12 @@ impl RequestId {
     const MAX: RequestId = RequestId(u64::MAX);
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 enum RequestStage {
-    /// We are waiting for peers to respond to our "have" request.
-    Have,
-    /// At least one peer has responded to a "have" request and we requested the actual data from
-    /// one of the peers.
+    /// We are waiting for peers to respond to our "have" request. `HashSet<PeerId>` are the peers
+    /// we sent the "have" request to.
+    Have(hashbrown::HashSet<PeerId, util::SipHasherBuild>),
+    /// At least one peer has responded to a "have" request and we requested the data from it.
     Block,
 }
 
@@ -217,7 +227,7 @@ struct Request<TPlat: PlatformRef> {
 }
 
 type HaveBroadcastResult = (
-    Result<(), SendBitswapMessageError>,
+    Result<Vec<PeerId>, SendBitswapMessageError>,
     Cid,
     oneshot::Sender<Result<Vec<u8>, BitswapBlockError>>,
 );
@@ -242,6 +252,8 @@ struct BackgroundTask<TPlat: PlatformRef> {
     platform: TPlat,
     /// Next request ID to use.
     next_request_id_inner: u64,
+    /// RNG.
+    randomness: rand_chacha::ChaCha20Rng,
 
     // The fields below are populated if the broadcast of the "have" message was successfully
     // forwarded to the network. Request is tracked from this moment until the requested data is
@@ -379,22 +391,38 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             WakeUpReason::HaveBroadcastResult((result, cid, result_tx)) => {
                 // We either succeeded or failed in broadcasting the "have" request.
 
-                if let Err(err) = result {
-                    // The request is not tracked yet, so we just report the failure.
-                    let _ = result_tx.send(Err(err.into()));
-                    continue;
-                }
+                let broadcast_to = match result {
+                    Ok(peers) => peers,
+                    Err(err) => {
+                        // The request is not tracked yet, so we just report the failure.
+                        let _ = result_tx.send(Err(err.into()));
+                        continue;
+                    }
+                };
 
                 // Start tracking the request.
                 let request_id = task.allocate_request_id();
                 let timeout = task.platform.now() + Duration::from_secs(10); // TODO: 5? 20?
+
+                let have_peers = {
+                    let mut have_peers = hashbrown::HashSet::with_capacity_and_hasher(
+                        broadcast_to.len(),
+                        util::SipHasherBuild::new({
+                            let mut seed = [0; 16];
+                            task.randomness.fill_bytes(&mut seed);
+                            seed
+                        }),
+                    );
+                    have_peers.extend(broadcast_to.into_iter());
+                    have_peers
+                };
 
                 task.requests.insert(
                     request_id,
                     Request {
                         result_tx,
                         timeout: timeout.clone(),
-                        stage: RequestStage::Have,
+                        stage: RequestStage::Have(have_peers),
                         cid: cid.clone(),
                     },
                 );
@@ -408,13 +436,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let message = message.decode();
 
                 for BlockPresence { cid, presence_type } in message.block_presences {
-                    // TODO: we might want to track what peers we sent the "have" request to and
-                    // fail the request as soon as everyone responds `DontHave`, not waiting for
-                    // timeout to kick in. Currently we are only interested in `Have` responses.
-                    let BlockPresenceType::Have = presence_type else {
-                        break;
-                    };
-
                     let cid = match Cid::from_bytes(cid.to_owned()) {
                         Ok(cid) => cid,
                         Err(error) => {
@@ -426,12 +447,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 peer_id,
                                 error,
                             );
-                            // TODO: ban peer? On what errors?
-                            break;
+                            // TODO: Discard entire message? Ban peer? On what errors?
+                            continue;
                         }
                     };
 
-                    let Some(request_ids) = task.requests_by_cid.get(&cid) else {
+                    let hashbrown::hash_map::Entry::Occupied(mut entry) =
+                        task.requests_by_cid.entry(cid.clone())
+                    else {
                         log!(
                             &task.platform,
                             Trace,
@@ -439,20 +462,49 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             "stale/unsolicited have response",
                             peer_id
                         );
-                        break;
+                        continue;
                     };
 
                     let mut needs_block_request = false;
+                    let request_ids = entry.get_mut();
 
-                    for request_id in request_ids {
-                        let request = task.requests.get_mut(request_id).unwrap();
+                    for i in (0..request_ids.len()).rev() {
+                        let request_id = request_ids[i];
+                        let request = task.requests.get_mut(&request_id).unwrap();
 
-                        if request.stage == RequestStage::Have {
-                            request.stage = RequestStage::Block;
-                            needs_block_request = true;
+                        match (&mut request.stage, presence_type) {
+                            (RequestStage::Have(peers), BlockPresenceType::Have) => {
+                                if peers.contains(&peer_id) {
+                                    request.stage = RequestStage::Block;
+                                    needs_block_request = true;
+                                }
+                            }
+                            (RequestStage::Have(peers), BlockPresenceType::DontHave) => {
+                                let _ = peers.remove(&peer_id);
+                                if peers.is_empty() {
+                                    // All peers responded "don't have", fail request.
+                                    // Normally we shouldn't have more than one request per CID.
+                                    request_ids.remove(i);
+                                    let request = task.requests.remove(&request_id).unwrap();
+                                    let _was_in = task
+                                        .requests_by_timeout
+                                        .remove(&(request.timeout, request_id));
+                                    debug_assert!(_was_in);
+
+                                    let _ =
+                                        request.result_tx.send(Err(BitswapBlockError::NotFound));
+                                }
+                            }
+                            (RequestStage::Block, _) => {}
                         }
-                        // TODO: if at least one request above is in the `Block` stage already,
-                        //       does this mean we can skip sending another "block" request?
+
+                        // TODO: if at least one request above is in the `Block` stage
+                        //       already, does this mean we can skip sending another
+                        //       "block" request?
+                    }
+
+                    if entry.get().is_empty() {
+                        entry.remove();
                     }
 
                     if needs_block_request {
