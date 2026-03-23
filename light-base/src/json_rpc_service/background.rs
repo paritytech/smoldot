@@ -2877,7 +2877,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         for peer in &peers {
                             match network
                                 .clone()
-                                .send_statements(peer, encoded.0.clone())
+                                .send_statement(peer, encoded.0.clone())
                                 .await
                             {
                                 Ok(_) => {

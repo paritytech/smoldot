@@ -294,6 +294,9 @@ struct Chain<TChain> {
     /// See [`ChainConfig::statement_protocol_config`].
     statement_protocol_config: Option<StatementProtocolConfig>,
 
+    /// LRU cache of statement hashes that have been received or sent.
+    /// Used to deduplicate incoming statement notifications and prevent re-processing
+    /// statements we have already seen. `None` if statement protocol is not configured.
     seen_statements: Option<lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>>,
 
     /// See [`ChainConfig::user_data`].
@@ -1821,6 +1824,14 @@ where
                                                     chain_index,
                                                 }),
                                         )
+                                        .chain(
+                                            self.chains[chain_index]
+                                                .statement_protocol_config
+                                                .is_some()
+                                                .then(|| NotificationsProtocol::Statement {
+                                                    chain_index,
+                                                }),
+                                        )
                                     {
                                         if self
                                             .notification_substreams_by_peer_id
@@ -2614,12 +2625,6 @@ where
                         .next()
                         .is_some()
                     {
-                        let connection_id = self
-                            .substreams
-                            .get(&substream_id)
-                            .expect("substream was just inserted above; qed")
-                            .connection_id;
-
                         let _was_inserted = self.notification_substreams_by_peer_id.insert((
                             substream_protocol,
                             peer_index,
@@ -2635,65 +2640,6 @@ where
                             self.notifications_protocol_handshake(substream_protocol),
                             self.notifications_protocol_max_notification_size(substream_protocol),
                         );
-
-                        if matches!(substream_protocol, NotificationsProtocol::Statement { .. })
-                            && self
-                                .notification_substreams_by_peer_id
-                                .range(
-                                    (
-                                        substream_protocol,
-                                        peer_index,
-                                        SubstreamDirection::Out,
-                                        NotificationsSubstreamState::MIN,
-                                        SubstreamId::MIN,
-                                    )
-                                        ..=(
-                                            substream_protocol,
-                                            peer_index,
-                                            SubstreamDirection::Out,
-                                            NotificationsSubstreamState::MAX,
-                                            SubstreamId::MAX,
-                                        ),
-                                )
-                                .next()
-                                .is_none()
-                            && !self.inner.connection_state(connection_id).shutting_down
-                        {
-                            let new_substream_id = self.inner.open_out_notifications(
-                                connection_id,
-                                codec::encode_protocol_name_string(
-                                    codec::ProtocolName::Statement {
-                                        genesis_hash: self.chains[chain_index].genesis_hash,
-                                        fork_id: self.chains[chain_index].fork_id.as_deref(),
-                                    },
-                                ),
-                                self.notifications_protocol_handshake_timeout(substream_protocol),
-                                self.notifications_protocol_handshake(substream_protocol),
-                                self.notifications_protocol_max_handshake_size(substream_protocol),
-                            );
-                            self.substreams.insert(
-                                new_substream_id,
-                                SubstreamInfo {
-                                    connection_id,
-                                    protocol: Some(Protocol::Notifications(substream_protocol)),
-                                },
-                            );
-                            self.notification_substreams_by_peer_id.insert((
-                                substream_protocol,
-                                peer_index,
-                                SubstreamDirection::Out,
-                                NotificationsSubstreamState::Pending,
-                                new_substream_id,
-                            ));
-                        }
-
-                        if let NotificationsProtocol::Statement { chain_index } = substream_protocol
-                        {
-                            return Some(Event::StatementProtocolConnected {
-                                peer_id: self.peers[peer_index.0].clone(),
-                                chain_id: ChainId(chain_index),
-                            });
-                        }
 
                         continue;
                     }
@@ -4105,19 +4051,17 @@ where
         )
     }
 
-    /// Sends a statement notification to the given peer, wrapping the single encoded
+    /// Sends a single statement notification to the given peer, wrapping the encoded
     /// `statement` in the `Vec<Statement>` format expected by the protocol.
     ///
-    /// Returns [`QueueNotificationError::NoConnection`] if no
-    /// [`Event::GossipConnected`] of kind [`GossipKind::ConsensusTransactions`] has been
-    /// emitted for the peer. May generate messages to process via
-    /// [`ChainNetwork::pull_message_to_connection`].
+    /// Returns [`QueueNotificationError::NoConnection`] if no outbound statement
+    /// notifications substream is open for the peer.
     ///
     /// # Panic
     ///
     /// Panics if the [`ChainId`] is invalid.
     ///
-    pub fn gossip_send_statements(
+    pub fn gossip_send_statement(
         &mut self,
         target: &PeerId,
         chain_id: ChainId,
@@ -4652,14 +4596,6 @@ pub enum Event<TConn> {
         chain_id: ChainId,
         /// The encoded statements notification.
         statements: EncodedStatementNotification,
-    },
-
-    /// An inbound statement protocol substream has been accepted.
-    StatementProtocolConnected {
-        /// Identity of the peer.
-        peer_id: PeerId,
-        /// Index of the chain.
-        chain_id: ChainId,
     },
 
     /// Error in the protocol in a connection, such as failure to decode a message. This event

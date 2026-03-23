@@ -559,8 +559,8 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
-    /// See [`service::ChainNetwork::gossip_send_statements`].
-    pub async fn send_statements(
+    /// See [`service::ChainNetwork::gossip_send_statement`].
+    pub async fn send_statement(
         self: Arc<Self>,
         target: &PeerId,
         notification: Vec<u8>,
@@ -568,7 +568,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
-            .send(ToBackgroundChain::SendStatements {
+            .send(ToBackgroundChain::SendStatement {
                 target: target.clone(),
                 notification,
                 result: tx,
@@ -828,7 +828,7 @@ enum ToBackgroundChain {
         is_best: bool,
         result: oneshot::Sender<Result<(), QueueNotificationError>>,
     },
-    SendStatements {
+    SendStatement {
         target: PeerId,
         notification: Vec<u8>,
         result: oneshot::Sender<Result<(), QueueNotificationError>>,
@@ -1753,7 +1753,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::MessageForChain(
                 chain_id,
-                ToBackgroundChain::SendStatements {
+                ToBackgroundChain::SendStatement {
                     target,
                     notification,
                     result,
@@ -1761,7 +1761,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             ) => {
                 let send_result =
                     task.network
-                        .gossip_send_statements(&target, chain_id, notification);
+                        .gossip_send_statement(&target, chain_id, notification);
                 if result.send(send_result).is_err() {
                     log!(
                         &task.platform,
@@ -2683,7 +2683,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     },
                 ));
             }
-            WakeUpReason::NetworkEvent(service::Event::StatementProtocolConnected { .. }) => {}
             WakeUpReason::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 // TODO: handle properly?
                 log!(
