@@ -45,6 +45,11 @@ const FIELD_TOPIC_START: u8 = 4;
 const FIELD_TOPIC_END: u8 = FIELD_TOPIC_START + MAX_TOPICS as u8 - 1;
 const FIELD_DATA: u8 = 8;
 
+const PROOF_SR25519: u8 = 0;
+const PROOF_ED25519: u8 = 1;
+const PROOF_SECP256K1_ECDSA: u8 = 2;
+const PROOF_ON_CHAIN: u8 = 3;
+
 /// Statement topic (32 bytes).
 pub type Topic = [u8; 32];
 
@@ -339,7 +344,7 @@ pub fn extract_statement_bytes(
 
 /// Error when decoding a statement notification.
 #[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
-#[display("Failed to decode statement notification")]
+#[display("Failed to decode statement notification {_0:?}")]
 pub struct DecodeStatementNotificationError(#[error(not(source))] nom::error::ErrorKind);
 
 /// Error when encoding a statement.
@@ -417,17 +422,17 @@ fn encode_statement_into(
 fn encode_proof_into(proof: &ProofRef<'_>, out: &mut Vec<u8>) {
     match proof {
         ProofRef::Sr25519 { signature, signer } => {
-            out.push(0);
+            out.push(PROOF_SR25519);
             out.extend_from_slice(*signature);
             out.extend_from_slice(*signer);
         }
         ProofRef::Ed25519 { signature, signer } => {
-            out.push(1);
+            out.push(PROOF_ED25519);
             out.extend_from_slice(*signature);
             out.extend_from_slice(*signer);
         }
         ProofRef::Secp256k1Ecdsa { signature, signer } => {
-            out.push(2);
+            out.push(PROOF_SECP256K1_ECDSA);
             out.extend_from_slice(*signature);
             out.extend_from_slice(*signer);
         }
@@ -436,7 +441,7 @@ fn encode_proof_into(proof: &ProofRef<'_>, out: &mut Vec<u8>) {
             block_hash,
             event_index,
         } => {
-            out.push(3);
+            out.push(PROOF_ON_CHAIN);
             out.extend_from_slice(*who);
             out.extend_from_slice(*block_hash);
             out.extend_from_slice(&event_index.to_le_bytes());
@@ -499,7 +504,9 @@ fn fields_parser(num_fields: usize) -> impl FnMut(&[u8]) -> nom::IResult<&[u8], 
                 }
                 FIELD_DECRYPTION_KEY => {
                     let (rest, key) = nom::bytes::streaming::take(32u32)(rest)?;
-                    decryption_key = Some(<&[u8; 32]>::try_from(key).unwrap());
+                    decryption_key = Some(
+                        <&[u8; 32]>::try_from(key).expect("take(32) guarantees 32 bytes; qed"),
+                    );
                     rest
                 }
                 FIELD_EXPIRY => {
@@ -509,7 +516,8 @@ fn fields_parser(num_fields: usize) -> impl FnMut(&[u8]) -> nom::IResult<&[u8], 
                 }
                 FIELD_CHANNEL => {
                     let (rest, ch) = nom::bytes::streaming::take(32u32)(rest)?;
-                    channel = Some(<&[u8; 32]>::try_from(ch).unwrap());
+                    channel =
+                        Some(<&[u8; 32]>::try_from(ch).expect("take(32) guarantees 32 bytes; qed"));
                     rest
                 }
                 FIELD_TOPIC_START..=FIELD_TOPIC_END => {
@@ -521,7 +529,9 @@ fn fields_parser(num_fields: usize) -> impl FnMut(&[u8]) -> nom::IResult<&[u8], 
                         )));
                     }
                     let (rest, topic) = nom::bytes::streaming::take(32u32)(rest)?;
-                    topics.push(<&[u8; 32]>::try_from(topic).unwrap());
+                    topics.push(
+                        <&[u8; 32]>::try_from(topic).expect("take(32) guarantees 32 bytes; qed"),
+                    );
                     rest
                 }
                 FIELD_DATA => {
@@ -561,52 +571,55 @@ fn fields_parser(num_fields: usize) -> impl FnMut(&[u8]) -> nom::IResult<&[u8], 
 fn proof_parser(input: &[u8]) -> nom::IResult<&[u8], ProofRef<'_>> {
     let (input, variant) = nom::number::streaming::u8(input)?;
     match variant {
-        0 => {
-            // Sr25519
+        PROOF_SR25519 => {
             let (input, signature) = nom::bytes::streaming::take(64u32)(input)?;
             let (input, signer) = nom::bytes::streaming::take(32u32)(input)?;
             Ok((
                 input,
                 ProofRef::Sr25519 {
-                    signature: <&[u8; 64]>::try_from(signature).unwrap(),
-                    signer: <&[u8; 32]>::try_from(signer).unwrap(),
+                    signature: <&[u8; 64]>::try_from(signature)
+                        .expect("take(64) guarantees 64 bytes; qed"),
+                    signer: <&[u8; 32]>::try_from(signer)
+                        .expect("take(32) guarantees 32 bytes; qed"),
                 },
             ))
         }
-        1 => {
-            // Ed25519
+        PROOF_ED25519 => {
             let (input, signature) = nom::bytes::streaming::take(64u32)(input)?;
             let (input, signer) = nom::bytes::streaming::take(32u32)(input)?;
             Ok((
                 input,
                 ProofRef::Ed25519 {
-                    signature: <&[u8; 64]>::try_from(signature).unwrap(),
-                    signer: <&[u8; 32]>::try_from(signer).unwrap(),
+                    signature: <&[u8; 64]>::try_from(signature)
+                        .expect("take(64) guarantees 64 bytes; qed"),
+                    signer: <&[u8; 32]>::try_from(signer)
+                        .expect("take(32) guarantees 32 bytes; qed"),
                 },
             ))
         }
-        2 => {
-            // Secp256k1Ecdsa
+        PROOF_SECP256K1_ECDSA => {
             let (input, signature) = nom::bytes::streaming::take(65u32)(input)?;
             let (input, signer) = nom::bytes::streaming::take(33u32)(input)?;
             Ok((
                 input,
                 ProofRef::Secp256k1Ecdsa {
-                    signature: <&[u8; 65]>::try_from(signature).unwrap(),
-                    signer: <&[u8; 33]>::try_from(signer).unwrap(),
+                    signature: <&[u8; 65]>::try_from(signature)
+                        .expect("take(65) guarantees 65 bytes; qed"),
+                    signer: <&[u8; 33]>::try_from(signer)
+                        .expect("take(33) guarantees 33 bytes; qed"),
                 },
             ))
         }
-        3 => {
-            // OnChain
+        PROOF_ON_CHAIN => {
             let (input, who) = nom::bytes::streaming::take(32u32)(input)?;
             let (input, block_hash) = nom::bytes::streaming::take(32u32)(input)?;
             let (input, event_index) = nom::number::streaming::le_u64(input)?;
             Ok((
                 input,
                 ProofRef::OnChain {
-                    who: <&[u8; 32]>::try_from(who).unwrap(),
-                    block_hash: <&[u8; 32]>::try_from(block_hash).unwrap(),
+                    who: <&[u8; 32]>::try_from(who).expect("take(32) guarantees 32 bytes; qed"),
+                    block_hash: <&[u8; 32]>::try_from(block_hash)
+                        .expect("take(32) guarantees 32 bytes; qed"),
                     event_index,
                 },
             ))
@@ -752,5 +765,77 @@ mod tests {
         encoded.extend_from_slice(&[0u8; 32]);
 
         assert!(statement_parser(&encoded).is_err());
+    }
+
+    #[test]
+    fn topic_filter_any_matches_everything() {
+        let filter = TopicFilter::Any;
+        assert!(filter.matches(&[]));
+        let topic = [1u8; 32];
+        assert!(filter.matches(&[&topic]));
+    }
+
+    #[test]
+    fn topic_filter_match_any_empty_returns_false() {
+        let filter = TopicFilter::MatchAny(Vec::new());
+        let topic = [1u8; 32];
+        assert!(!filter.matches(&[&topic]));
+        assert!(!filter.matches(&[]));
+    }
+
+    #[test]
+    fn topic_filter_match_any_with_overlap() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let t3 = [3u8; 32];
+        let filter = TopicFilter::MatchAny(vec![t1, t2]);
+        assert!(filter.matches(&[&t1]));
+        assert!(filter.matches(&[&t2]));
+        assert!(filter.matches(&[&t3, &t1]));
+        assert!(!filter.matches(&[&t3]));
+        assert!(!filter.matches(&[]));
+    }
+
+    #[test]
+    fn topic_filter_match_all() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let t3 = [3u8; 32];
+        let filter = TopicFilter::MatchAll(vec![t1, t2]);
+        assert!(filter.matches(&[&t1, &t2]));
+        assert!(filter.matches(&[&t1, &t2, &t3]));
+        assert!(!filter.matches(&[&t1]));
+        assert!(!filter.matches(&[&t2]));
+        assert!(!filter.matches(&[&t3]));
+        assert!(!filter.matches(&[]));
+    }
+
+    #[test]
+    fn decode_encoded_statement() {
+        // See "statement_encoding_matches_vec" in polkadot-sdk for the original statement fields
+        let bytes = hex::decode(
+            "1c00032a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a1818181818181818181818181818181818181818181818181818181818181818420000000000000001dededededededededededededededededededededededededededededededede02e70300000000000003cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc04010101010101010101010101010101010101010101010101010101010101010105020202020202020202020202020202020202020202020202020202020202020208083763",
+        )
+        .unwrap();
+
+        let (remaining, decoded) = statement_parser(&bytes).unwrap();
+        assert!(remaining.is_empty());
+
+        assert!(matches!(
+            decoded.proof,
+            Some(ProofRef::OnChain { who, block_hash, event_index })
+            if who == &[42u8; 32]
+                && block_hash == &[24u8; 32]
+                && event_index == 66
+        ));
+        assert_eq!(decoded.decryption_key, Some(&[0xde; 32]));
+        assert_eq!(decoded.topics.len(), 2);
+        assert_eq!(decoded.topics[0], &[0x01; 32]);
+        assert_eq!(decoded.topics[1], &[0x02; 32]);
+        assert_eq!(decoded.data, Some([55, 99].as_slice()));
+        assert_eq!(decoded.expiry, 999);
+        assert_eq!(decoded.channel, Some(&[0xcc; 32]));
+
+        assert_eq!(encode_statement(&decoded).unwrap(), bytes);
     }
 }

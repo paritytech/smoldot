@@ -332,20 +332,16 @@ mod tests {
     }
 
     #[test]
-    fn statement_protocol_name_roundtrip() {
-        let genesis_hash = [0xab; 32];
-        let protocol = ProtocolName::Statement {
-            genesis_hash,
-            fork_id: None,
-        };
-
-        let encoded = encode_to_string(protocol);
-        let decoded = decode_protocol_name(&encoded).unwrap();
+    fn statement_protocol_name() {
+        let decoded = decode_protocol_name(
+            "/fccae9f32db7eedb8310800252752bf649e2e3661a9260f784b3579ce14933af/statement/1",
+        )
+        .unwrap();
 
         assert!(matches!(
             decoded,
-            ProtocolName::Statement { genesis_hash: gh, fork_id: None }
-            if gh == genesis_hash
+            ProtocolName::Statement { genesis_hash, fork_id: None }
+            if hex::encode(genesis_hash) == "fccae9f32db7eedb8310800252752bf649e2e3661a9260f784b3579ce14933af"
         ));
     }
 
