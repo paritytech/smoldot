@@ -2259,7 +2259,7 @@ async fn background_task(mut inner: Inner) {
                 );
             }
 
-            WakeUpReason::NetworkEvent(service::Event::StatementNotification {
+            WakeUpReason::NetworkEvent(service::Event::StatementsNotification {
                 peer_id,
                 chain_id,
                 ..

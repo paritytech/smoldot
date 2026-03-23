@@ -25,8 +25,6 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use nom::Finish as _;
-
 /// Maximum number of topics per statement.
 pub const MAX_TOPICS: usize = 4;
 
@@ -289,20 +287,23 @@ pub fn statement_hash(statement_bytes: &[u8]) -> [u8; 32] {
         .expect("blake2b output is 32 bytes; qed")
 }
 
-/// Decodes a statement notification (a list of statements).
-pub fn decode_statement_notification(
-    scale_encoded: &[u8],
-) -> Result<Vec<StatementRef<'_>>, DecodeStatementNotificationError> {
+/// Decodes a statement.
+pub fn decode_statement(
+    bytes: &[u8],
+) -> Result<StatementRef<'_>, DecodeStatementNotificationError> {
     match nom::Parser::parse(
         &mut nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(
-            nom::combinator::complete(statement_notification_parser),
+            nom::combinator::complete(statement_parser),
         ),
-        scale_encoded,
-    )
-    .finish()
-    {
-        Ok((_, statements)) => Ok(statements),
-        Err(err) => Err(DecodeStatementNotificationError(err.code)),
+        bytes,
+    ) {
+        Ok((_, s)) => Ok(s),
+        Err(nom::Err::Error(e) | nom::Err::Failure(e)) => {
+            Err(DecodeStatementNotificationError(e.code))
+        }
+        Err(nom::Err::Incomplete(_)) => {
+            Err(DecodeStatementNotificationError(nom::error::ErrorKind::Eof))
+        }
     }
 }
 
@@ -450,22 +451,6 @@ fn encode_proof_into(proof: &ProofRef<'_>, out: &mut Vec<u8>) {
 }
 
 // Nom parsers
-
-fn statement_notification_parser(input: &[u8]) -> nom::IResult<&[u8], Vec<StatementRef<'_>>> {
-    let (input, num_statements) = crate::util::nom_scale_compact_usize(input)?;
-
-    if num_statements > MAX_STATEMENTS_PER_NOTIFICATION {
-        return Err(nom::Err::Failure(nom::error::make_error(
-            input,
-            nom::error::ErrorKind::TooLarge,
-        )));
-    }
-
-    nom::Parser::parse(
-        &mut nom::multi::many_m_n(num_statements, num_statements, statement_parser),
-        input,
-    )
-}
 
 fn statement_parser(input: &[u8]) -> nom::IResult<&[u8], StatementRef<'_>> {
     let (input, num_fields) = crate::util::nom_scale_compact_usize(input)?;
@@ -660,13 +645,15 @@ mod tests {
         encoded.extend_from_slice(&encode_statement(&statement1).unwrap());
         encoded.extend_from_slice(&encode_statement(&statement2).unwrap());
 
-        let decoded = decode_statement_notification(&encoded).unwrap();
+        let statement_bytes = extract_statement_bytes(&encoded).unwrap();
+        assert_eq!(statement_bytes.len(), 2);
 
-        assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[0].expiry, 100);
-        assert_eq!(decoded[1].expiry, 200);
-        assert_eq!(decoded[0].data, Some(b"first".as_slice()));
-        assert_eq!(decoded[1].data, Some(b"second".as_slice()));
+        let decoded0 = decode_statement(statement_bytes[0]).unwrap();
+        let decoded1 = decode_statement(statement_bytes[1]).unwrap();
+        assert_eq!(decoded0.expiry, 100);
+        assert_eq!(decoded1.expiry, 200);
+        assert_eq!(decoded0.data, Some(b"first".as_slice()));
+        assert_eq!(decoded1.data, Some(b"second".as_slice()));
     }
 
     #[test]
@@ -720,7 +707,6 @@ mod tests {
         let mut encoded = Vec::new();
         encoded.extend_from_slice(crate::util::encode_scale_compact_usize(count).as_ref());
 
-        assert!(decode_statement_notification(&encoded).is_err());
         assert!(extract_statement_bytes(&encoded).is_err());
     }
 

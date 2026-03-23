@@ -74,8 +74,7 @@ use smoldot::{
 
 pub use codec::{CallProofRequestConfig, Role, TopicFilter};
 pub use service::{
-    ChainId, EncodedMerkleProof, EncodedStatementNotification, PeerId, QueueNotificationError,
-    StatementProtocolConfig,
+    ChainId, EncodedMerkleProof, PeerId, QueueNotificationError, StatementProtocolConfig,
 };
 
 mod tasks;
@@ -233,6 +232,12 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
         // TODO: this code is hacky because we don't want to make `add_chain` async at the moment, because it's not convenient for lib.rs
         self.platform.spawn_task("add-chain-message-send".into(), {
+            let seen_statements = config.statement_protocol_config.as_ref().map(|spc| {
+                lru::LruCache::with_hasher(
+                    spc.max_seen_statements(),
+                    fnv::FnvBuildHasher::default(),
+                )
+            });
             let config = service::ChainConfig {
                 grandpa_protocol_config: config.grandpa_protocol_finalized_block_height.map(
                     |commit_finalized_height| service::GrandpaState {
@@ -256,6 +261,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     num_references: NonZero::<usize>::new(1).unwrap(),
                     next_discovery_period: Duration::from_secs(2),
                     next_discovery_when: self.platform.now(),
+                    seen_statements,
                 },
             };
 
@@ -665,9 +671,9 @@ pub enum Event {
         message: service::EncodedGrandpaCommitMessage,
     },
     /// Received a statement notification from the network.
-    StatementNotification {
+    StatementsNotification {
         peer_id: PeerId,
-        statements: service::EncodedStatementNotification,
+        statements: Vec<Vec<u8>>,
     },
 }
 
@@ -971,6 +977,8 @@ struct Chain<TPlat: PlatformRef> {
     /// After [`Chain::next_discovery_when`] is reached, the following discovery happens after
     /// the given duration.
     next_discovery_period: Duration,
+
+    seen_statements: Option<lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>>,
 }
 
 #[derive(Clone)]
@@ -1759,6 +1767,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     result,
                 },
             ) => {
+                if let Some(cache) = &mut task.network[chain_id].seen_statements {
+                    let hash = codec::statement_hash(&notification);
+                    cache.push(hash, ());
+                }
                 let send_result =
                     task.network
                         .gossip_send_statement(&target, chain_id, notification);
@@ -2669,17 +2681,37 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.event_pending_send =
                     Some((chain_id, Event::GrandpaCommitMessage { peer_id, message }));
             }
-            WakeUpReason::NetworkEvent(service::Event::StatementNotification {
+            WakeUpReason::NetworkEvent(service::Event::StatementsNotification {
                 chain_id,
                 peer_id,
                 statements,
             }) => {
+                let chain = &mut task.network[chain_id];
+                let non_duplicates: Vec<Vec<u8>> = statements
+                    .into_iter()
+                    .filter(|s| {
+                        let hash = codec::statement_hash(s);
+                        let Some(cache) = &mut chain.seen_statements else {
+                            return true;
+                        };
+                        if cache.contains(&hash) {
+                            return false;
+                        }
+                        cache.push(hash, ());
+                        true
+                    })
+                    .collect();
+
+                if non_duplicates.is_empty() {
+                    continue;
+                }
+
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some((
                     chain_id,
-                    Event::StatementNotification {
+                    Event::StatementsNotification {
                         peer_id,
-                        statements,
+                        statements: non_duplicates,
                     },
                 ));
             }

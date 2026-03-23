@@ -294,11 +294,6 @@ struct Chain<TChain> {
     /// See [`ChainConfig::statement_protocol_config`].
     statement_protocol_config: Option<StatementProtocolConfig>,
 
-    /// LRU cache of statement hashes that have been received or sent.
-    /// Used to deduplicate incoming statement notifications and prevent re-processing
-    /// statements we have already seen. `None` if statement protocol is not configured.
-    seen_statements: Option<lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>>,
-
     /// See [`ChainConfig::user_data`].
     user_data: TChain,
 }
@@ -462,10 +457,6 @@ where
             }
         }
 
-        let seen_statements = config.statement_protocol_config.as_ref().map(|spc| {
-            lru::LruCache::with_hasher(spc.max_seen_statements(), fnv::FnvBuildHasher::default())
-        });
-
         chain_entry.insert(Chain {
             block_number_bytes: config.block_number_bytes,
             genesis_hash: config.genesis_hash,
@@ -476,7 +467,6 @@ where
             allow_inbound_block_requests: config.allow_inbound_block_requests,
             grandpa_protocol_config: config.grandpa_protocol_config,
             statement_protocol_config: config.statement_protocol_config,
-            seen_statements,
             user_data: config.user_data,
         });
 
@@ -2839,52 +2829,20 @@ where
                             }
                         }
                         NotificationsProtocol::Statement { .. } => {
-                            let statement_bytes =
-                                match codec::extract_statement_bytes(&notification) {
-                                    Ok(s) => s,
-                                    Err(err) => {
-                                        return Some(Event::ProtocolError {
-                                            error: ProtocolError::BadStatementNotification(err),
-                                            peer_id: self.peers[peer_index.0].clone(),
-                                        });
-                                    }
-                                };
+                            let parsed = match codec::extract_statement_bytes(&notification) {
+                                Ok(s) => s,
+                                Err(err) => {
+                                    return Some(Event::ProtocolError {
+                                        error: ProtocolError::BadStatementNotification(err),
+                                        peer_id: self.peers[peer_index.0].clone(),
+                                    });
+                                }
+                            };
 
-                            let chain = &mut self.chains[chain_index];
-                            let non_duplicate_statement_bytes: Vec<&[u8]> = statement_bytes
-                                .into_iter()
-                                .filter(|statement_bytes| {
-                                    let hash = codec::statement_hash(statement_bytes);
-                                    let Some(cache) = &mut chain.seen_statements else {
-                                        return true;
-                                    };
-                                    if cache.contains(&hash) {
-                                        return false;
-                                    }
-                                    cache.push(hash, ());
-                                    true
-                                })
-                                .collect();
-
-                            if non_duplicate_statement_bytes.is_empty() {
-                                continue;
-                            }
-
-                            let mut encoded = Vec::new();
-                            encoded.extend_from_slice(
-                                crate::util::encode_scale_compact_usize(
-                                    non_duplicate_statement_bytes.len(),
-                                )
-                                .as_ref(),
-                            );
-                            for statement_bytes in &non_duplicate_statement_bytes {
-                                encoded.extend_from_slice(statement_bytes);
-                            }
-
-                            return Some(Event::StatementNotification {
+                            return Some(Event::StatementsNotification {
                                 chain_id: ChainId(chain_index),
                                 peer_id: self.peers[peer_index.0].clone(),
-                                statements: EncodedStatementNotification { message: encoded },
+                                statements: parsed.into_iter().map(|s| s.to_vec()).collect(),
                             });
                         }
                     }
@@ -4071,12 +4029,6 @@ where
         notification.extend_from_slice(util::encode_scale_compact_usize(1).as_ref());
         notification.extend_from_slice(&statement);
 
-        let chain = &mut self.chains[chain_id.0];
-        if let Some(cache) = &mut chain.seen_statements {
-            let hash = codec::statement_hash(&statement);
-            cache.push(hash, ());
-        }
-
         self.queue_notification(
             target,
             NotificationsProtocol::Statement {
@@ -4589,13 +4541,13 @@ pub enum Event<TConn> {
     ///
     /// Can only happen after a [`Event::GossipConnected`] with the given [`PeerId`] and [`ChainId`]
     /// combination has happened.
-    StatementNotification {
+    StatementsNotification {
         /// Identity of the sender of the statements.
         peer_id: PeerId,
         /// Index of the chain the statements relate to.
         chain_id: ChainId,
         /// The encoded statements notification.
-        statements: EncodedStatementNotification,
+        statements: Vec<Vec<u8>>,
     },
 
     /// Error in the protocol in a connection, such as failure to decode a message. This event
@@ -4994,26 +4946,5 @@ impl EncodedGrandpaCommitMessage {
 impl fmt::Debug for EncodedGrandpaCommitMessage {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.decode(), f)
-    }
-}
-
-/// Undecoded but valid statement notification.
-#[derive(Clone)]
-pub struct EncodedStatementNotification {
-    message: Vec<u8>,
-}
-
-impl EncodedStatementNotification {
-    /// Returns the encoded bytes of the statement notification.
-    pub fn as_encoded(&self) -> &[u8] {
-        &self.message
-    }
-}
-
-impl fmt::Debug for EncodedStatementNotification {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("EncodedStatementNotification")
-            .field("len", &self.message.len())
-            .finish()
     }
 }

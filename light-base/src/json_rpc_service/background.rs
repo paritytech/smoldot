@@ -610,7 +610,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             StartStorageSubscriptionsUpdates,
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
-            NetworkStatementReceived(Vec<u8>),
+            NetworkStatementsReceived(Vec<Vec<u8>>),
         }
 
         // Wait until there is something to do.
@@ -711,11 +711,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     let Ok(event) = rx.recv().await else {
                         return future::pending().await;
                     };
-                    if let network_service::Event::StatementNotification { statements, .. } = event
+                    if let network_service::Event::StatementsNotification { statements, .. } = event
                     {
-                        return WakeUpReason::NetworkStatementReceived(
-                            statements.as_encoded().to_vec(),
-                        );
+                        return WakeUpReason::NetworkStatementsReceived(statements);
                     }
                     // Ignore other events and continue polling
                 }
@@ -745,47 +743,35 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.block_runtimes_pending.shrink_to_fit();
             }
 
-            WakeUpReason::NetworkStatementReceived(notification_data) => {
-                // If there is no statement subscription, we can skip decoding the notification entirely.
+            WakeUpReason::NetworkStatementsReceived(notification_data) => {
                 if me.statement_subscriptions.is_empty() {
                     continue;
                 }
 
-                match codec::decode_statement_notification(&notification_data) {
-                    Ok(statements) => {
-                        for statement in statements {
-                            // TODO: re-encoding every statement is inneficient
-                            let Ok(encoded) = codec::encode_statement(&statement) else {
-                                continue;
-                            };
+                for statement_bytes in &notification_data {
+                    let Ok(statement) = codec::decode_statement(statement_bytes) else {
+                        continue;
+                    };
+                    let Ok(encoded) = codec::encode_statement(&statement) else {
+                        continue;
+                    };
 
-                            for (sub_id, topic_filter) in &me.statement_subscriptions {
-                                if topic_filter.matches(&statement.topics) {
-                                    let notification =
-                                        methods::ServerToClient::statement_notification {
-                                            subscription: Cow::Borrowed(sub_id),
-                                            statement: methods::HexString(encoded.clone()),
-                                        }
-                                        .to_json_request_object_parameters(None);
-                                    if me.responses_tx.send(notification).await.is_err() {
-                                        log!(
-                                            &me.platform,
-                                            Debug,
-                                            &me.log_target,
-                                            "Failed to send statement notification: response channel closed"
-                                        );
-                                    }
-                                }
+                    for (sub_id, topic_filter) in &me.statement_subscriptions {
+                        if topic_filter.matches(&statement.topics) {
+                            let notification = methods::ServerToClient::statement_notification {
+                                subscription: Cow::Borrowed(sub_id),
+                                statement: methods::HexString(encoded.clone()),
+                            }
+                            .to_json_request_object_parameters(None);
+                            if me.responses_tx.send(notification).await.is_err() {
+                                log!(
+                                    &me.platform,
+                                    Debug,
+                                    &me.log_target,
+                                    "Failed to send statement notification: response channel closed"
+                                );
                             }
                         }
-                    }
-                    Err(err) => {
-                        log!(
-                            &me.platform,
-                            Warn,
-                            &me.log_target,
-                            format!("Failed to decode statement notification: {:?}", err)
-                        );
                     }
                 }
             }
