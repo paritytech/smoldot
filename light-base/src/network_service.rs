@@ -580,9 +580,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
                 result: tx,
             })
             .await
-            .expect("background task alive; qed");
+            .unwrap();
 
-        rx.await.expect("background task responded; qed")
+        rx.await.unwrap()
     }
 
     /// Marks the given peers as belonging to the given chain, and adds some addresses to these
@@ -1774,15 +1774,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let send_result =
                     task.network
                         .gossip_send_statement(&target, chain_id, notification);
-                if result.send(send_result).is_err() {
-                    log!(
-                        &task.platform,
-                        Debug,
-                        "network",
-                        "send-statements-result-dropped",
-                        peer_id = &target
-                    );
-                }
+                let _ = result.send(send_result);
             }
             WakeUpReason::MessageForChain(
                 chain_id,
