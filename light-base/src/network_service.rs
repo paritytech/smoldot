@@ -565,17 +565,14 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
-    /// See [`service::ChainNetwork::gossip_send_statement`].
-    pub async fn send_statement(
+    pub async fn broadcast_statement(
         self: Arc<Self>,
-        target: &PeerId,
         notification: Vec<u8>,
-    ) -> Result<(), QueueNotificationError> {
+    ) -> BroadcastStatementResult {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
-            .send(ToBackgroundChain::SendStatement {
-                target: target.clone(),
+            .send(ToBackgroundChain::BroadcastStatement {
                 notification,
                 result: tx,
             })
@@ -643,6 +640,12 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .unwrap();
         rx.await.unwrap().into_iter()
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct BroadcastStatementResult {
+    pub sent: usize,
+    pub total: usize,
 }
 
 /// Event that can happen on the network service.
@@ -834,10 +837,9 @@ enum ToBackgroundChain {
         is_best: bool,
         result: oneshot::Sender<Result<(), QueueNotificationError>>,
     },
-    SendStatement {
-        target: PeerId,
+    BroadcastStatement {
         notification: Vec<u8>,
-        result: oneshot::Sender<Result<(), QueueNotificationError>>,
+        result: oneshot::Sender<BroadcastStatementResult>,
     },
     Discover {
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
@@ -1761,8 +1763,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::MessageForChain(
                 chain_id,
-                ToBackgroundChain::SendStatement {
-                    target,
+                ToBackgroundChain::BroadcastStatement {
                     notification,
                     result,
                 },
@@ -1771,10 +1772,37 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let hash = codec::statement_hash(&notification);
                     cache.push(hash, ());
                 }
-                let send_result =
-                    task.network
-                        .gossip_send_statement(&target, chain_id, notification);
-                let _ = result.send(send_result);
+
+                let peers_to_send = task
+                    .network
+                    .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                let total = peers_to_send.len();
+                let mut sent = 0;
+                for peer in &peers_to_send {
+                    match task
+                        .network
+                        .gossip_send_statement(peer, chain_id, notification.clone())
+                    {
+                        Ok(()) => sent += 1,
+                        Err(QueueNotificationError::QueueFull) => {}
+                        Err(QueueNotificationError::NoConnection) => {}
+                    }
+                }
+
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "statement-broadcast",
+                    chain = task.network[chain_id].log_name,
+                    sent,
+                    total,
+                );
+
+                let _ = result.send(BroadcastStatementResult { sent, total });
             }
             WakeUpReason::MessageForChain(
                 chain_id,

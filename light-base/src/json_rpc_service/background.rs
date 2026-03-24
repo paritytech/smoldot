@@ -577,9 +577,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
         platform: config.platform,
     };
 
-    // Subscribe to network events for receiving statements
-    me.network_events_rx = Some(me.network_service.subscribe().await);
-
     loop {
         // Yield at every loop in order to provide better tasks granularity.
         futures_lite::future::yield_now().await;
@@ -611,6 +608,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
             NetworkStatementsReceived(Vec<codec::Statement>),
+            MustSubscribeNetworkEvents,
         }
 
         // Wait until there is something to do.
@@ -703,19 +701,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 WakeUpReason::GarbageCollection
             })
             .or(async {
-                // Poll for network events (incoming statements)
                 let Some(rx) = &me.network_events_rx else {
-                    return future::pending().await;
+                    return WakeUpReason::MustSubscribeNetworkEvents;
                 };
                 loop {
                     let Ok(event) = rx.recv().await else {
-                        return future::pending().await;
+                        me.network_events_rx = None;
+                        return WakeUpReason::MustSubscribeNetworkEvents;
                     };
                     if let network_service::Event::StatementsNotification { statements, .. } = event
                     {
                         return WakeUpReason::NetworkStatementsReceived(statements);
                     }
-                    // Ignore other events and continue polling
                 }
             })
             .await
@@ -741,6 +738,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.multistage_requests_to_advance.shrink_to_fit();
                 me.block_headers_pending.shrink_to_fit();
                 me.block_runtimes_pending.shrink_to_fit();
+            }
+
+            WakeUpReason::MustSubscribeNetworkEvents => {
+                me.network_events_rx = Some(me.network_service.subscribe().await);
             }
 
             WakeUpReason::NetworkStatementsReceived(statements) => {
@@ -2819,80 +2820,22 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::statement_submit { encoded } => {
-                        let network = me.network_service.clone();
-                        let peers: Vec<_> = network.peers_list().await.collect();
-                        let total_peers = peers.len();
+                        let broadcast_result = me
+                            .network_service
+                            .clone()
+                            .broadcast_statement(encoded.0)
+                            .await;
 
-                        log!(
-                            &me.platform,
-                            Debug,
-                            &me.log_target,
-                            format!(
-                                "statement_submit: attempting broadcast to {} peers",
-                                total_peers
-                            )
-                        );
-
-                        if total_peers == 0 {
-                            if me
-                                .responses_tx
-                                .send(
-                                    methods::Response::statement_submit(
-                                        methods::StatementSubmitResult::Error(
-                                            "No connected peers".to_string(),
-                                        ),
-                                    )
-                                    .to_json_response(request_id_json),
-                                )
-                                .await
-                                .is_err()
-                            {
-                                log!(
-                                    &me.platform,
-                                    Debug,
-                                    &me.log_target,
-                                    "Failed to send response for statement_submit: response channel closed"
-                                );
-                            }
-                            continue;
-                        }
-
-                        let mut sent_count = 0;
-                        for peer in &peers {
-                            match network
-                                .clone()
-                                .send_statement(peer, encoded.0.clone())
-                                .await
-                            {
-                                Ok(_) => {
-                                    log!(
-                                        &me.platform,
-                                        Debug,
-                                        &me.log_target,
-                                        format!("statement_submit: successfully sent to {}", peer)
-                                    );
-                                    sent_count += 1;
-                                }
-                                Err(e) => log!(
-                                    &me.platform,
-                                    Warn,
-                                    &me.log_target,
-                                    format!(
-                                        "statement_submit: failed to send to {}: {:?}",
-                                        peer, e
-                                    )
-                                ),
-                            }
-                        }
-
-                        let result = if sent_count == 0 {
+                        let result = if broadcast_result.total == 0 {
+                            methods::StatementSubmitResult::Error("No connected peers".to_string())
+                        } else if broadcast_result.sent == 0 {
                             methods::StatementSubmitResult::Error(
                                 "Failed to send to any peers".to_string(),
                             )
                         } else {
                             methods::StatementSubmitResult::OkBroadcast {
-                                sent: sent_count,
-                                total: total_peers,
+                                sent: broadcast_result.sent,
+                                total: broadcast_result.total,
                             }
                         };
 
