@@ -90,7 +90,7 @@ fn main() {
 
             client
                 .json_rpc_request(
-                    r#"{"id":1,"jsonrpc":"2.0","method":"statement_subscribe","params":[{"type":"any"}]}"#,
+                    r#"{"id":1,"jsonrpc":"2.0","method":"statement_unstable_subscribe","params":[{"type":"any"}]}"#,
                     parachain_id,
                 )
                 .unwrap();

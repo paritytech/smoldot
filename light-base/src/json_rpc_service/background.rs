@@ -757,7 +757,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                     for (sub_id, topic_filter) in &me.statement_subscriptions {
                         if topic_filter.matches(&statement.topics) {
-                            let notification = methods::ServerToClient::statement_notification {
+                            let notification = methods::ServerToClient::statement_unstable_notification {
                                 subscription: Cow::Borrowed(sub_id),
                                 statement: methods::HexString(encoded.clone()),
                             }
@@ -906,9 +906,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
                     | methods::MethodCall::sudo_network_unstable_unwatch { .. }
                     | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
-                    | methods::MethodCall::statement_submit { .. }
-                    | methods::MethodCall::statement_subscribe { .. }
-                    | methods::MethodCall::statement_unsubscribe { .. } => {}
+                    | methods::MethodCall::statement_unstable_submit { .. }
+                    | methods::MethodCall::statement_unstable_subscribe { .. }
+                    | methods::MethodCall::statement_unstable_unsubscribe { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -2819,7 +2819,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
-                    methods::MethodCall::statement_submit { encoded } => {
+                    methods::MethodCall::statement_unstable_submit { encoded } => {
                         let broadcast_result = me
                             .network_service
                             .clone()
@@ -2842,7 +2842,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         if me
                             .responses_tx
                             .send(
-                                methods::Response::statement_submit(result)
+                                methods::Response::statement_unstable_submit(result)
                                     .to_json_response(request_id_json),
                             )
                             .await
@@ -2852,12 +2852,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 &me.platform,
                                 Debug,
                                 &me.log_target,
-                                "Failed to send response for statement_submit: response channel closed"
+                                "Failed to send response for statement_unstable_submit: response channel closed"
                             );
                         }
                     }
 
-                    methods::MethodCall::statement_subscribe { filter } => {
+                    methods::MethodCall::statement_unstable_subscribe { filter } => {
                         let subscription_id: String = {
                             let mut id = [0u8; 32];
                             me.randomness.fill_bytes(&mut id);
@@ -2870,7 +2870,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         if me
                             .responses_tx
                             .send(
-                                methods::Response::statement_subscribe(Cow::Owned(subscription_id))
+                                methods::Response::statement_unstable_subscribe(Cow::Owned(subscription_id))
                                     .to_json_response(request_id_json),
                             )
                             .await
@@ -2880,17 +2880,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 &me.platform,
                                 Debug,
                                 &me.log_target,
-                                "Failed to send response for statement_subscribe: response channel closed"
+                                "Failed to send response for statement_unstable_subscribe: response channel closed"
                             );
                         }
                     }
 
-                    methods::MethodCall::statement_unsubscribe { subscription } => {
+                    methods::MethodCall::statement_unstable_unsubscribe { subscription } => {
                         let existed = me.statement_subscriptions.remove(&subscription).is_some();
                         if me
                             .responses_tx
                             .send(
-                                methods::Response::statement_unsubscribe(existed)
+                                methods::Response::statement_unstable_unsubscribe(existed)
                                     .to_json_response(request_id_json),
                             )
                             .await
@@ -2900,7 +2900,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 &me.platform,
                                 Debug,
                                 &me.log_target,
-                                "Failed to send response for statement_unsubscribe: response channel closed"
+                                "Failed to send response for statement_unstable_unsubscribe: response channel closed"
                             );
                         }
                     }

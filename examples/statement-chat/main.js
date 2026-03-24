@@ -135,14 +135,14 @@ async function subscribeToTopic() {
   try {
     if (subscriptionId) {
       try {
-        await sendJsonRpc("statement_unsubscribe", [subscriptionId]);
+        await sendJsonRpc("statement_unstable_unsubscribe", [subscriptionId]);
       } catch (e) {
         log(LOG.WARN, TARGET, `Failed to unsubscribe from previous topic: ${e.message}`);
       }
     }
 
     log(LOG.DEBUG, TARGET, `Subscribing to topic: ${topic}`);
-    subscriptionId = await sendJsonRpc("statement_subscribe", [
+    subscriptionId = await sendJsonRpc("statement_unstable_subscribe", [
       { type: "match_any", topics: [topic] },
     ]);
     log(LOG.DEBUG, TARGET, `Subscription ID: ${subscriptionId}`);
@@ -168,7 +168,7 @@ async function sendStatement() {
     const statementHex = await createSignedStatement(currentTopic, message);
     log(LOG.DEBUG, TARGET, `Sending signed statement: ${message}`);
 
-    const result = await sendJsonRpc("statement_submit", [statementHex]);
+    const result = await sendJsonRpc("statement_unstable_submit", [statementHex]);
 
     if (result?.ok_broadcast) {
       messageInput.value = "";
@@ -231,7 +231,7 @@ function setupJsonRpcHandler(chainInstance) {
       try {
         const parsed = JSON.parse(response);
 
-        if (parsed.method === "statement_notification" && parsed.params) {
+        if (parsed.method === "statement_unstable_notification" && parsed.params) {
           handleStatementNotification(parsed.params.statement);
         } else if (parsed.id) {
           const pending = pendingRequests.get(parsed.id);

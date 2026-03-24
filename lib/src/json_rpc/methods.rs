@@ -463,11 +463,11 @@ define_methods! {
     system_version() -> Cow<'a, str>,
 
     /// Submit a new statement to the store and broadcast to peers.
-    statement_submit(encoded: HexString) -> StatementSubmitResult,
+    statement_unstable_submit(encoded: HexString) -> StatementSubmitResult,
     /// Subscribe to statements matching the given filter. Returns subscription ID.
-    statement_subscribe(filter: crate::network::codec::TopicFilter) -> Cow<'a, str>,
+    statement_unstable_subscribe(filter: crate::network::codec::TopicFilter) -> Cow<'a, str>,
     /// Unsubscribe from statement notifications.
-    statement_unsubscribe(subscription: String) -> bool,
+    statement_unstable_unsubscribe(subscription: String) -> bool,
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_v1_body(
@@ -549,7 +549,7 @@ define_methods! {
     sudo_networkState_event(subscription: Cow<'a, str>, result: NetworkEvent) -> (),
 
     // Statement notification sent when a statement matching subscribed topics is received.
-    statement_notification(subscription: Cow<'a, str>, statement: HexString) -> (),
+    statement_unstable_notification(subscription: Cow<'a, str>, statement: HexString) -> (),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1323,18 +1323,18 @@ mod tests {
     }
 
     #[test]
-    fn statement_submit_parse_valid() {
+    fn statement_unstable_submit_parse_valid() {
         let (id, call) = super::parse_jsonrpc_client_to_server(
-            r#"{"jsonrpc":"2.0","id":1,"method":"statement_submit","params":["0x1234"]}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"statement_unstable_submit","params":["0x1234"]}"#,
         )
         .unwrap();
 
         assert_eq!(id, "1");
-        assert!(matches!(call, super::MethodCall::statement_submit { .. }));
+        assert!(matches!(call, super::MethodCall::statement_unstable_submit { .. }));
     }
 
     #[test]
-    fn statement_submit_result_ok_broadcast_serialization() {
+    fn statement_unstable_submit_result_ok_broadcast_serialization() {
         let result = super::StatementSubmitResult::OkBroadcast { sent: 5, total: 10 };
         let serialized = serde_json::to_string(&result).unwrap();
         assert_eq!(serialized, r#"{"ok_broadcast":{"sent":5,"total":10}}"#);
@@ -1347,64 +1347,64 @@ mod tests {
     }
 
     #[test]
-    fn statement_subscribe_parse_any() {
+    fn statement_unstable_subscribe_parse_any() {
         let (id, call) = super::parse_jsonrpc_client_to_server(
-            r#"{"jsonrpc":"2.0","id":2,"method":"statement_subscribe","params":[{"type":"any"}]}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"statement_unstable_subscribe","params":[{"type":"any"}]}"#,
         )
         .unwrap();
 
         assert_eq!(id, "2");
         assert!(matches!(
             call,
-            super::MethodCall::statement_subscribe {
+            super::MethodCall::statement_unstable_subscribe {
                 filter: crate::network::codec::TopicFilter::Any
             }
         ));
     }
 
     #[test]
-    fn statement_subscribe_parse_match_any() {
+    fn statement_unstable_subscribe_parse_match_any() {
         let (id, call) = super::parse_jsonrpc_client_to_server(
-            r#"{"jsonrpc":"2.0","id":2,"method":"statement_subscribe","params":[{"type":"match_any","topics":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"statement_unstable_subscribe","params":[{"type":"match_any","topics":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]}"#,
         )
         .unwrap();
 
         assert_eq!(id, "2");
         assert!(matches!(
             call,
-            super::MethodCall::statement_subscribe {
+            super::MethodCall::statement_unstable_subscribe {
                 filter: crate::network::codec::TopicFilter::MatchAny(_)
             }
         ));
     }
 
     #[test]
-    fn statement_subscribe_parse_match_all() {
+    fn statement_unstable_subscribe_parse_match_all() {
         let (id, call) = super::parse_jsonrpc_client_to_server(
-            r#"{"jsonrpc":"2.0","id":2,"method":"statement_subscribe","params":[{"type":"match_all","topics":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"statement_unstable_subscribe","params":[{"type":"match_all","topics":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]}"#,
         )
         .unwrap();
 
         assert_eq!(id, "2");
         assert!(matches!(
             call,
-            super::MethodCall::statement_subscribe {
+            super::MethodCall::statement_unstable_subscribe {
                 filter: crate::network::codec::TopicFilter::MatchAll(_)
             }
         ));
     }
 
     #[test]
-    fn statement_unsubscribe_parse_valid() {
+    fn statement_unstable_unsubscribe_parse_valid() {
         let (id, call) = super::parse_jsonrpc_client_to_server(
-            r#"{"jsonrpc":"2.0","id":4,"method":"statement_unsubscribe","params":["sub123"]}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"statement_unstable_unsubscribe","params":["sub123"]}"#,
         )
         .unwrap();
 
         assert_eq!(id, "4");
         assert!(matches!(
             call,
-            super::MethodCall::statement_unsubscribe { .. }
+            super::MethodCall::statement_unstable_unsubscribe { .. }
         ));
     }
 }
