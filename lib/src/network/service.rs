@@ -2829,20 +2829,22 @@ where
                             }
                         }
                         NotificationsProtocol::Statement { .. } => {
-                            let parsed = match codec::extract_statement_bytes(&notification) {
-                                Ok(s) => s,
-                                Err(err) => {
-                                    return Some(Event::ProtocolError {
-                                        error: ProtocolError::BadStatementNotification(err),
-                                        peer_id: self.peers[peer_index.0].clone(),
-                                    });
-                                }
-                            };
+                            let statements =
+                                match codec::decode_statement_notification(&notification) {
+                                    Ok(s) if s.is_empty() => continue,
+                                    Ok(s) => s,
+                                    Err(err) => {
+                                        return Some(Event::ProtocolError {
+                                            error: ProtocolError::BadStatementNotification(err),
+                                            peer_id: self.peers[peer_index.0].clone(),
+                                        });
+                                    }
+                                };
 
                             return Some(Event::StatementsNotification {
                                 chain_id: ChainId(chain_index),
                                 peer_id: self.peers[peer_index.0].clone(),
-                                statements: parsed.into_iter().map(|s| s.to_vec()).collect(),
+                                statements,
                             });
                         }
                     }
@@ -4546,8 +4548,8 @@ pub enum Event<TConn> {
         peer_id: PeerId,
         /// Index of the chain the statements relate to.
         chain_id: ChainId,
-        /// The encoded statements notification.
-        statements: Vec<Vec<u8>>,
+        /// Decoded statements with their pre-computed hashes.
+        statements: Vec<([u8; 32], codec::Statement)>,
     },
 
     /// Error in the protocol in a connection, such as failure to decode a message. This event

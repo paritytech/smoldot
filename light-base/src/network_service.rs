@@ -673,7 +673,7 @@ pub enum Event {
     /// Received a statement notification from the network.
     StatementsNotification {
         peer_id: PeerId,
-        statements: Vec<Vec<u8>>,
+        statements: Vec<codec::Statement>,
     },
 }
 
@@ -2679,18 +2679,17 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 statements,
             }) => {
                 let chain = &mut task.network[chain_id];
-                let non_duplicates: Vec<Vec<u8>> = statements
+                let non_duplicates: Vec<codec::Statement> = statements
                     .into_iter()
-                    .filter(|s| {
-                        let hash = codec::statement_hash(s);
+                    .filter_map(|(hash, statement)| {
                         let Some(cache) = &mut chain.seen_statements else {
-                            return true;
+                            return Some(statement);
                         };
                         if cache.contains(&hash) {
-                            return false;
+                            return None;
                         }
                         cache.push(hash, ());
-                        true
+                        Some(statement)
                     })
                     .collect();
 

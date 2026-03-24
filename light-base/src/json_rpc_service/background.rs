@@ -610,7 +610,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             StartStorageSubscriptionsUpdates,
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
-            NetworkStatementsReceived(Vec<Vec<u8>>),
+            NetworkStatementsReceived(Vec<codec::Statement>),
         }
 
         // Wait until there is something to do.
@@ -743,17 +743,15 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.block_runtimes_pending.shrink_to_fit();
             }
 
-            WakeUpReason::NetworkStatementsReceived(notification_data) => {
+            WakeUpReason::NetworkStatementsReceived(statements) => {
                 if me.statement_subscriptions.is_empty() {
                     continue;
                 }
 
-                for statement_bytes in &notification_data {
-                    let Ok(statement) = codec::decode_statement(statement_bytes) else {
-                        continue;
-                    };
-                    let Ok(encoded) = codec::encode_statement(&statement) else {
-                        continue;
+                for statement in &statements {
+                    let encoded = match codec::encode_statement(statement) {
+                        Ok(e) => e,
+                        Err(_) => continue,
                     };
 
                     for (sub_id, topic_filter) in &me.statement_subscriptions {
