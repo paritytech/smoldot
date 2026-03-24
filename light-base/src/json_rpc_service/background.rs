@@ -757,11 +757,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                     for (sub_id, topic_filter) in &me.statement_subscriptions {
                         if topic_filter.matches(&statement.topics) {
-                            let notification = methods::ServerToClient::statement_unstable_notification {
-                                subscription: Cow::Borrowed(sub_id),
-                                statement: methods::HexString(encoded.clone()),
-                            }
-                            .to_json_request_object_parameters(None);
+                            let notification =
+                                methods::ServerToClient::statement_unstable_notification {
+                                    subscription: Cow::Borrowed(sub_id),
+                                    statement: methods::HexString(encoded.clone()),
+                                }
+                                .to_json_request_object_parameters(None);
                             if me.responses_tx.send(notification).await.is_err() {
                                 log!(
                                     &me.platform,
@@ -2870,8 +2871,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         if me
                             .responses_tx
                             .send(
-                                methods::Response::statement_unstable_subscribe(Cow::Owned(subscription_id))
-                                    .to_json_response(request_id_json),
+                                methods::Response::statement_unstable_subscribe(Cow::Owned(
+                                    subscription_id,
+                                ))
+                                .to_json_response(request_id_json),
                             )
                             .await
                             .is_err()

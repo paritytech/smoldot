@@ -1176,7 +1176,9 @@ impl SubscriptionStartProcess {
                 methods::Response::state_subscribeStorage(Cow::Borrowed(&self.subscription_id))
             }
             methods::MethodCall::statement_unstable_subscribe { .. } => {
-                methods::Response::statement_unstable_subscribe(Cow::Borrowed(&self.subscription_id))
+                methods::Response::statement_unstable_subscribe(Cow::Borrowed(
+                    &self.subscription_id,
+                ))
             }
             methods::MethodCall::transactionWatch_v1_submitAndWatch { .. } => {
                 methods::Response::transactionWatch_v1_submitAndWatch(Cow::Borrowed(
