@@ -55,7 +55,7 @@ use alloc::{
     boxed::Box,
     collections::{BTreeSet, VecDeque},
     format,
-    string::String,
+    string::{String, ToString as _},
     sync::Arc,
     vec::Vec,
 };
@@ -67,6 +67,7 @@ use itertools::Itertools;
 use rand::RngCore;
 use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
+    json_rpc::parse,
     libp2p::cid::{self, Cid, CidPrefix},
     network::codec::{Block, BlockPresence, BlockPresenceType, WantType, build_bitswap_message},
 };
@@ -183,6 +184,61 @@ pub enum BitswapGetError {
     /// Request timeout.
     #[display("Request timeout.")]
     Timeout,
+}
+
+/// JSON-RPC error categories for `bitswap_v1_get` method.
+///
+/// Clients should use the error code to determine recovery action,
+/// not parse the human-readable message string.
+enum BitswapJsonRpcError {
+    /// Permanent failure for this request. E.g., there is no requested data in the network.
+    /// Doesn't make sense to retry until you put the data on chain.
+    Fail = -32810,
+    /// Transient failure. Can retry immediately.
+    ///
+    /// Even though the client can retry immediately, the clients are encouraged to rate-limit the
+    /// retry attempts and retry count, e.g. introducing a delay of 50ms between retries.
+    FailRetry = -32811,
+    /// Transient failure. Retry after a backoff delay.
+    ///
+    /// The recommended backoff delay is 5s.
+    FailRetryBackoff = -32812,
+}
+
+impl BitswapGetError {
+    /// Build a complete JSON-RPC error response string for this error.
+    pub fn to_json_rpc_error(&self, request_id_json: &str) -> String {
+        let message = self.to_string();
+        let (variant, category) = match self {
+            BitswapGetError::CidParsingError(_) => ("CidParsingError", None),
+            BitswapGetError::NotFound => ("NotFound", Some(BitswapJsonRpcError::Fail)),
+            BitswapGetError::BlockRequestFailed => {
+                ("BlockRequestFailed", Some(BitswapJsonRpcError::FailRetry))
+            }
+            BitswapGetError::Timeout => ("Timeout", Some(BitswapJsonRpcError::FailRetry)),
+            BitswapGetError::QueueFull => {
+                ("QueueFull", Some(BitswapJsonRpcError::FailRetryBackoff))
+            }
+            BitswapGetError::NoPeers => ("NoPeers", Some(BitswapJsonRpcError::FailRetryBackoff)),
+        };
+
+        let data = match category {
+            None => {
+                // JSON-escape the message to safely embed it in the data field.
+                let details_json =
+                    serde_json::to_string(&message).expect("valid UTF-8 string; qed");
+                format!("{{\"variant\":\"{variant}\",\"details\":{details_json}}}")
+            }
+            Some(_) => format!("{{\"variant\":\"{variant}\"}}"),
+        };
+
+        let error_response = match category {
+            None => parse::ErrorResponse::InvalidParams,
+            Some(cat) => parse::ErrorResponse::ApplicationDefined(cat as i64, &message),
+        };
+
+        parse::build_error_response(request_id_json, error_response, Some(&data))
+    }
 }
 
 impl From<SendBitswapMessageError> for BitswapGetError {

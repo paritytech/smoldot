@@ -5733,14 +5733,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 let response = match result {
                     Ok(block) => methods::Response::bitswap_v1_get(methods::HexString(block))
                         .to_json_response(&request_id_json),
-                    Err(error) => parse::build_error_response(
-                        &request_id_json,
-                        parse::ErrorResponse::ApplicationDefined(
-                            -32802, // TODO: proper error code.
-                            &error.to_string(),
-                        ),
-                        None,
-                    ),
+                    Err(error) => error.to_json_rpc_error(&request_id_json),
                 };
                 let _ = me.responses_tx.send(response).await;
             }
