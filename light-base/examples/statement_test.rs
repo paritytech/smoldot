@@ -16,6 +16,12 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Example demonstrating how to use the statement store protocol with smoldot.
+//!
+//! # Prerequisites
+//!
+//! - A running local network with the statement-store enabled.
+//! - `RELAY_CHAIN_SPEC` env var: path to the relay chain spec JSON file.
+//! - `PARA_CHAIN_SPEC` env var: path to the parachain spec JSON file.
 
 use core::{iter, num::NonZero};
 use std::env;
