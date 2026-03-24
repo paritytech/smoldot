@@ -458,9 +458,9 @@ enum Event<TPlat: PlatformRef> {
         block_hash: [u8; 32],
         result: Result<Vec<sync_service::StorageResultItem>, sync_service::StorageQueryError>,
     },
-    BitswapBlockResult {
+    BitswapGetResult {
         request_id_json: String,
-        result: Result<Vec<u8>, bitswap_service::BitswapBlockError>,
+        result: Result<Vec<u8>, bitswap_service::BitswapGetError>,
     },
 }
 
@@ -851,7 +851,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
                     | methods::MethodCall::sudo_network_unstable_unwatch { .. }
                     | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
-                    | methods::MethodCall::bitswap_block { .. } => {}
+                    | methods::MethodCall::bitswap_v1_get { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -974,7 +974,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         // renewing itself the next time it generates a notification.
                     }
 
-                    methods::MethodCall::bitswap_block { cid } => {
+                    methods::MethodCall::bitswap_v1_get { cid } => {
                         log!(
                             &me.platform,
                             Debug,
@@ -987,9 +987,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             let request_id_json = request_id_json.to_owned();
 
                             Box::pin(async move {
-                                let result = bitswap_service.bitswap_block(cid).await;
+                                let result = bitswap_service.bitswap_get(cid).await;
 
-                                Event::BitswapBlockResult {
+                                Event::BitswapGetResult {
                                     request_id_json,
                                     result,
                                 }
@@ -5726,12 +5726,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // TODO: add a delay or something?
             }
 
-            WakeUpReason::Event(Event::BitswapBlockResult {
+            WakeUpReason::Event(Event::BitswapGetResult {
                 request_id_json,
                 result,
             }) => {
                 let response = match result {
-                    Ok(block) => methods::Response::bitswap_block(methods::HexString(block))
+                    Ok(block) => methods::Response::bitswap_v1_get(methods::HexString(block))
                         .to_json_response(&request_id_json),
                     Err(error) => parse::build_error_response(
                         &request_id_json,

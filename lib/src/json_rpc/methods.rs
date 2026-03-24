@@ -515,6 +515,9 @@ define_methods! {
     transactionWatch_v1_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
     transactionWatch_v1_unwatch(subscription: Cow<'a, str>) -> (),
 
+    /// Request a data chunk by its CID from one of the connected peers that have it.
+    bitswap_v1_get(cid: String) -> HexString,
+
     // These functions are a custom addition in smoldot. As of the writing of this comment, there
     // is no plan to standardize them. See <https://github.com/paritytech/smoldot/issues/2245> and
     // <https://github.com/paritytech/smoldot/issues/2456>.
@@ -522,8 +525,6 @@ define_methods! {
     sudo_network_unstable_unwatch(subscription: Cow<'a, str>) -> (),
     chainHead_unstable_finalizedDatabase(#[rename = "maxSizeBytes"] max_size_bytes: Option<u64>) -> Cow<'a, str>,
 
-    /// Request a data block by its CID from one of the connected peers that have it.
-    bitswap_block(cid: String) -> HexString,
 }
 
 define_methods! {

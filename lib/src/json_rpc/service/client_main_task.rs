@@ -394,7 +394,7 @@ impl ClientMainTask {
                 | methods::MethodCall::author_rotateKeys { .. }
                 | methods::MethodCall::author_submitExtrinsic { .. }
                 | methods::MethodCall::babe_epochAuthorship { .. }
-                | methods::MethodCall::bitswap_block { .. }
+                | methods::MethodCall::bitswap_v1_get { .. }
                 | methods::MethodCall::chain_getBlock { .. }
                 | methods::MethodCall::chain_getBlockHash { .. }
                 | methods::MethodCall::chain_getFinalizedHead { .. }

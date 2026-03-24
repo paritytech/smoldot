@@ -18,7 +18,7 @@
 //! Background Bitswap service.
 //!
 //! The role of Bitswap service is to handle Bitswap RPC requests, specifically
-//! `bitswap_block(cid)`.
+//! `bitswap_v1_get(cid)`.
 //!
 //! In order to handle a request for a Bitswap block with a given CID, [`BitswapService`] issues
 //! Bitswap "have" request to all the connected Bitswap peers, then issues Bitswap "block" request
@@ -147,9 +147,9 @@ impl BitswapService {
     }
 
     /// Request a Bitswap block.
-    pub async fn bitswap_block(&self, cid: String) -> Result<Vec<u8>, BitswapBlockError> {
+    pub async fn bitswap_get(&self, cid: String) -> Result<Vec<u8>, BitswapGetError> {
         // Decoding CID is fast, so we can fail early on the API user side.
-        let cid = Cid::from_str(&cid).map_err(BitswapBlockError::CidParsingError)?;
+        let cid = Cid::from_str(&cid).map_err(BitswapGetError::CidParsingError)?;
 
         let (result_tx, result_rx) = oneshot::channel();
 
@@ -162,9 +162,9 @@ impl BitswapService {
     }
 }
 
-/// Error by [`BitswapService::bitswap_block`].
+/// Error by [`BitswapService::bitswap_get`].
 #[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
-pub enum BitswapBlockError {
+pub enum BitswapGetError {
     /// Invalid/unsupported CID.
     #[display("Invalid/unsupported CID: {_0}")]
     CidParsingError(cid::ParseError),
@@ -185,11 +185,11 @@ pub enum BitswapBlockError {
     Timeout,
 }
 
-impl From<SendBitswapMessageError> for BitswapBlockError {
-    fn from(error: SendBitswapMessageError) -> BitswapBlockError {
+impl From<SendBitswapMessageError> for BitswapGetError {
+    fn from(error: SendBitswapMessageError) -> BitswapGetError {
         match error {
-            SendBitswapMessageError::NoConnection => BitswapBlockError::NoPeers,
-            SendBitswapMessageError::QueueFull => BitswapBlockError::QueueFull,
+            SendBitswapMessageError::NoConnection => BitswapGetError::NoPeers,
+            SendBitswapMessageError::QueueFull => BitswapGetError::QueueFull,
         }
     }
 }
@@ -197,7 +197,7 @@ impl From<SendBitswapMessageError> for BitswapBlockError {
 enum ToBackground {
     BitswapBlock {
         cid: Cid,
-        result_tx: oneshot::Sender<Result<Vec<u8>, BitswapBlockError>>,
+        result_tx: oneshot::Sender<Result<Vec<u8>, BitswapGetError>>,
     },
 }
 
@@ -220,7 +220,7 @@ enum RequestStage {
 
 #[derive(Debug)]
 struct Request<TPlat: PlatformRef> {
-    result_tx: oneshot::Sender<Result<Vec<u8>, BitswapBlockError>>,
+    result_tx: oneshot::Sender<Result<Vec<u8>, BitswapGetError>>,
     timeout: TPlat::Instant,
     stage: RequestStage,
     cid: Cid,
@@ -229,7 +229,7 @@ struct Request<TPlat: PlatformRef> {
 type HaveBroadcastResult = (
     Result<Vec<PeerId>, SendBitswapMessageError>,
     Cid,
-    oneshot::Sender<Result<Vec<u8>, BitswapBlockError>>,
+    oneshot::Sender<Result<Vec<u8>, BitswapGetError>>,
 );
 
 struct BackgroundTask<TPlat: PlatformRef> {
@@ -491,8 +491,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                         .remove(&(request.timeout, request_id));
                                     debug_assert!(_was_in);
 
-                                    let _ =
-                                        request.result_tx.send(Err(BitswapBlockError::NotFound));
+                                    let _ = request.result_tx.send(Err(BitswapGetError::NotFound));
                                 }
                             }
                             (RequestStage::Block, _) => {}
@@ -562,9 +561,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     // network service.
                     if let Some(request_ids) = task.requests_by_cid.remove(&cid) {
                         let err = match err {
-                            SendBitswapMessageError::QueueFull => BitswapBlockError::QueueFull,
+                            SendBitswapMessageError::QueueFull => BitswapGetError::QueueFull,
                             SendBitswapMessageError::NoConnection => {
-                                BitswapBlockError::BlockRequestFailed
+                                BitswapGetError::BlockRequestFailed
                             }
                         };
 
@@ -615,7 +614,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
                     }
 
-                    let _ = request.result_tx.send(Err(BitswapBlockError::Timeout));
+                    let _ = request.result_tx.send(Err(BitswapGetError::Timeout));
                 }
             }
             WakeUpReason::ForegroundClosed => {

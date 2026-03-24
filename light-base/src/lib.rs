@@ -1298,8 +1298,8 @@ fn start_services<TPlat: platform::PlatformRef>(
         },
     ));
 
-    // The Bitswap service fulfils `bitswap_block(cid)` JSON-RPC requests by querying remote nodes for
-    // IPFS blocks.
+    // The Bitswap service fulfils `bitswap_v1_get(cid)` JSON-RPC requests by querying remote
+    // nodes for IPFS blocks.
     let bitswap_service = Arc::new(bitswap_service::BitswapService::new(
         bitswap_service::Config {
             log_name,
