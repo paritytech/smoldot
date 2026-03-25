@@ -549,7 +549,7 @@ define_methods! {
     sudo_networkState_event(subscription: Cow<'a, str>, result: NetworkEvent) -> (),
 
     // Statement notification sent when statements matching subscribed topics are received.
-    statement_subscribeStatement(subscription: Cow<'a, str>, result: StatementEvent) -> (),
+    statement_statement(subscription: Cow<'a, str>, result: StatementEvent) -> (),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]

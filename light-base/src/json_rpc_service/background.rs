@@ -766,7 +766,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     let notification =
-                        methods::ServerToClient::statement_subscribeStatement {
+                        methods::ServerToClient::statement_statement {
                             subscription: Cow::Borrowed(sub_id),
                             result: methods::StatementEvent::NewStatements {
                                 statements: matching,

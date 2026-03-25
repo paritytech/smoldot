@@ -232,7 +232,7 @@ function setupJsonRpcHandler(chainInstance) {
       try {
         const parsed = JSON.parse(response);
 
-        if (parsed.method === "statement_subscribeStatement" && parsed.params?.result) {
+        if (parsed.method === "statement_statement" && parsed.params?.result) {
           const event = parsed.params.result;
           if (event.event === "newStatements" && event.data?.statements) {
             for (const stmt of event.data.statements) {
