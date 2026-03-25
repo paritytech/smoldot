@@ -2819,24 +2819,31 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::statement_unstable_submit { encoded } => {
-                        let broadcast_result = me
-                            .network_service
-                            .clone()
-                            .broadcast_statement(encoded.0)
-                            .await;
-
-                        let result = if broadcast_result.total == 0 {
-                            methods::StatementSubmitResult::Error("No connected peers".to_string())
-                        } else if broadcast_result.sent == 0 {
-                            methods::StatementSubmitResult::Error(
-                                "Failed to send to any peers".to_string(),
-                            )
-                        } else {
-                            methods::StatementSubmitResult::OkBroadcast {
-                                sent: broadcast_result.sent,
-                                total: broadcast_result.total,
-                            }
-                        };
+                        let result =
+                            if smoldot::network::codec::decode_statement_notification(&encoded.0)
+                                .is_err()
+                            {
+                                methods::StatementSubmitResult::Error(
+                                    "Invalid statement encoding".into(),
+                                )
+                            } else {
+                                let broadcasted = me
+                                    .network_service
+                                    .clone()
+                                    .broadcast_statement(encoded.0)
+                                    .await;
+                                match (broadcasted.sent, broadcasted.total) {
+                                    (_, 0) => methods::StatementSubmitResult::Error(
+                                        "No connected peers".into(),
+                                    ),
+                                    (0, _) => methods::StatementSubmitResult::Error(
+                                        "Failed to send to any peers".into(),
+                                    ),
+                                    (sent, total) => {
+                                        methods::StatementSubmitResult::OkBroadcast { sent, total }
+                                    }
+                                }
+                            };
 
                         if me
                             .responses_tx
