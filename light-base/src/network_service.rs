@@ -567,13 +567,13 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
 
     pub async fn broadcast_statement(
         self: Arc<Self>,
-        notification: Vec<u8>,
+        statement: Vec<u8>,
     ) -> BroadcastStatementResult {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
             .send(ToBackgroundChain::BroadcastStatement {
-                notification,
+                statement,
                 result: tx,
             })
             .await
@@ -838,7 +838,7 @@ enum ToBackgroundChain {
         result: oneshot::Sender<Result<(), QueueNotificationError>>,
     },
     BroadcastStatement {
-        notification: Vec<u8>,
+        statement: Vec<u8>,
         result: oneshot::Sender<BroadcastStatementResult>,
     },
     Discover {
@@ -1763,13 +1763,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::MessageForChain(
                 chain_id,
-                ToBackgroundChain::BroadcastStatement {
-                    notification,
-                    result,
-                },
+                ToBackgroundChain::BroadcastStatement { statement, result },
             ) => {
                 if let Some(cache) = &mut task.network[chain_id].seen_statements {
-                    let hash = codec::statement_hash(&notification);
+                    let hash = codec::statement_hash(&statement);
                     cache.push(hash, ());
                 }
 
@@ -1784,7 +1781,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 for peer in &peers_to_send {
                     match task
                         .network
-                        .gossip_send_statement(peer, chain_id, notification.clone())
+                        .gossip_send_statement(peer, chain_id, statement.clone())
                     {
                         Ok(()) => sent += 1,
                         Err(QueueNotificationError::QueueFull) => {}
