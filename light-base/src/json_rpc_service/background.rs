@@ -701,9 +701,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 WakeUpReason::GarbageCollection
             })
             .or(async {
-                if me.statement_subscriptions.is_empty() {
-                    return future::pending().await;
-                }
                 let Some(rx) = &me.network_events_rx else {
                     return WakeUpReason::MustSubscribeNetworkEvents;
                 };
@@ -2898,9 +2895,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                     methods::MethodCall::statement_unstable_unsubscribe { subscription } => {
                         let existed = me.statement_subscriptions.remove(&subscription).is_some();
-                        if me.statement_subscriptions.is_empty() {
-                            me.network_events_rx = None;
-                        }
                         if me
                             .responses_tx
                             .send(
