@@ -135,15 +135,15 @@ async function subscribeToTopic() {
   try {
     if (subscriptionId) {
       try {
-        await sendJsonRpc("statement_unstable_unsubscribe", [subscriptionId]);
+        await sendJsonRpc("statement_unsubscribeStatement", [subscriptionId]);
       } catch (e) {
         log(LOG.WARN, TARGET, `Failed to unsubscribe from previous topic: ${e.message}`);
       }
     }
 
     log(LOG.DEBUG, TARGET, `Subscribing to topic: ${topic}`);
-    subscriptionId = await sendJsonRpc("statement_unstable_subscribe", [
-      { type: "match_any", topics: [topic] },
+    subscriptionId = await sendJsonRpc("statement_subscribeStatement", [
+      { matchAny: [topic] },
     ]);
     log(LOG.DEBUG, TARGET, `Subscription ID: ${subscriptionId}`);
 
@@ -168,17 +168,18 @@ async function sendStatement() {
     const statementHex = await createSignedStatement(currentTopic, message);
     log(LOG.DEBUG, TARGET, `Sending signed statement: ${message}`);
 
-    const result = await sendJsonRpc("statement_unstable_submit", [statementHex]);
+    const result = await sendJsonRpc("statement_submit", [statementHex]);
 
-    if (result?.ok_broadcast) {
+    if (result?.status === "new") {
       messageInput.value = "";
       addMessage(message, "sent");
-      log(
-        LOG.INFO,
-        TARGET,
-        `Statement broadcast to ${result.ok_broadcast.sent}/${result.ok_broadcast.total} peers`,
-      );
-    } else if (result?.error) {
+      log(LOG.INFO, TARGET, "Statement broadcast to peers");
+    } else if (result?.status === "known") {
+      messageInput.value = "";
+      log(LOG.INFO, TARGET, "Statement already known");
+    } else if (result?.status === "invalid") {
+      log(LOG.ERROR, TARGET, `Invalid statement: ${result.reason}`);
+    } else if (result?.status === "internalError") {
       log(LOG.ERROR, TARGET, `Failed to send: ${result.error}`);
     } else {
       messageInput.value = "";
@@ -231,8 +232,13 @@ function setupJsonRpcHandler(chainInstance) {
       try {
         const parsed = JSON.parse(response);
 
-        if (parsed.method === "statement_unstable_notification" && parsed.params) {
-          handleStatementNotification(parsed.params.statement);
+        if (parsed.method === "statement_subscribeStatement" && parsed.params?.result) {
+          const event = parsed.params.result;
+          if (event.event === "newStatements" && event.data?.statements) {
+            for (const stmt of event.data.statements) {
+              handleStatementNotification(stmt);
+            }
+          }
         } else if (parsed.id) {
           const pending = pendingRequests.get(parsed.id);
           if (pending) {

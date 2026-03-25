@@ -749,27 +749,38 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     continue;
                 }
 
-                for statement in &statements {
-                    let encoded = codec::encode_statement(statement)
-                        .expect("re-encoding a decoded statement always succeeds; qed");
+                for (sub_id, topic_filter) in &me.statement_subscriptions {
+                    let matching: Vec<methods::HexString> = statements
+                        .iter()
+                        .filter(|s| topic_filter.matches(&s.topics))
+                        .map(|s| {
+                            methods::HexString(
+                                codec::encode_statement(s)
+                                    .expect("re-encoding a decoded statement always succeeds; qed"),
+                            )
+                        })
+                        .collect();
 
-                    for (sub_id, topic_filter) in &me.statement_subscriptions {
-                        if topic_filter.matches(&statement.topics) {
-                            let notification =
-                                methods::ServerToClient::statement_unstable_notification {
-                                    subscription: Cow::Borrowed(sub_id),
-                                    statement: methods::HexString(encoded.clone()),
-                                }
-                                .to_json_request_object_parameters(None);
-                            if me.responses_tx.send(notification).await.is_err() {
-                                log!(
-                                    &me.platform,
-                                    Debug,
-                                    &me.log_target,
-                                    "Failed to send statement notification: response channel closed"
-                                );
-                            }
+                    if matching.is_empty() {
+                        continue;
+                    }
+
+                    let notification =
+                        methods::ServerToClient::statement_subscribeStatement {
+                            subscription: Cow::Borrowed(sub_id),
+                            result: methods::StatementEvent::NewStatements {
+                                statements: matching,
+                                remaining: None,
+                            },
                         }
+                        .to_json_request_object_parameters(None);
+                    if me.responses_tx.send(notification).await.is_err() {
+                        log!(
+                            &me.platform,
+                            Debug,
+                            &me.log_target,
+                            "Failed to send statement notification: response channel closed"
+                        );
                     }
                 }
             }
@@ -905,9 +916,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
                     | methods::MethodCall::sudo_network_unstable_unwatch { .. }
                     | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
-                    | methods::MethodCall::statement_unstable_submit { .. }
-                    | methods::MethodCall::statement_unstable_subscribe { .. }
-                    | methods::MethodCall::statement_unstable_unsubscribe { .. } => {}
+                    | methods::MethodCall::statement_submit { .. }
+                    | methods::MethodCall::statement_subscribeStatement { .. }
+                    | methods::MethodCall::statement_unsubscribeStatement { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -2818,37 +2829,35 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
-                    methods::MethodCall::statement_unstable_submit { encoded } => {
+                    methods::MethodCall::statement_submit { encoded } => {
                         let result =
                             if smoldot::network::codec::decode_statement(&encoded.0)
                                 .is_err()
                             {
-                                methods::StatementSubmitResult::Error(
-                                    "Invalid statement encoding".into(),
-                                )
+                                methods::StatementSubmitResult::Invalid {
+                                    reason: "Invalid statement encoding".into(),
+                                }
                             } else {
                                 let broadcasted = me
                                     .network_service
                                     .clone()
                                     .broadcast_statement(encoded.0)
                                     .await;
-                                match (broadcasted.sent, broadcasted.total) {
-                                    (_, 0) => methods::StatementSubmitResult::Error(
-                                        "No connected peers".into(),
-                                    ),
-                                    (0, _) => methods::StatementSubmitResult::Error(
-                                        "Failed to send to any peers".into(),
-                                    ),
-                                    (sent, total) => {
-                                        methods::StatementSubmitResult::OkBroadcast { sent, total }
+                                if broadcasted.is_known {
+                                    methods::StatementSubmitResult::Known
+                                } else if broadcasted.total == 0 {
+                                    methods::StatementSubmitResult::InternalError {
+                                        error: "No connected peers".into(),
                                     }
+                                } else {
+                                    methods::StatementSubmitResult::New
                                 }
                             };
 
                         if me
                             .responses_tx
                             .send(
-                                methods::Response::statement_unstable_submit(result)
+                                methods::Response::statement_submit(result)
                                     .to_json_response(request_id_json),
                             )
                             .await
@@ -2858,12 +2867,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 &me.platform,
                                 Debug,
                                 &me.log_target,
-                                "Failed to send response for statement_unstable_submit: response channel closed"
+                                "Failed to send response for statement_submit: response channel closed"
                             );
                         }
                     }
 
-                    methods::MethodCall::statement_unstable_subscribe { filter } => {
+                    methods::MethodCall::statement_subscribeStatement { filter } => {
                         let subscription_id: String = {
                             let mut id = [0u8; 32];
                             me.randomness.fill_bytes(&mut id);
@@ -2876,7 +2885,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         if me
                             .responses_tx
                             .send(
-                                methods::Response::statement_unstable_subscribe(Cow::Owned(
+                                methods::Response::statement_subscribeStatement(Cow::Owned(
                                     subscription_id,
                                 ))
                                 .to_json_response(request_id_json),
@@ -2888,17 +2897,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 &me.platform,
                                 Debug,
                                 &me.log_target,
-                                "Failed to send response for statement_unstable_subscribe: response channel closed"
+                                "Failed to send response for statement_subscribeStatement: response channel closed"
                             );
                         }
                     }
 
-                    methods::MethodCall::statement_unstable_unsubscribe { subscription } => {
+                    methods::MethodCall::statement_unsubscribeStatement { subscription } => {
                         let existed = me.statement_subscriptions.remove(&subscription).is_some();
                         if me
                             .responses_tx
                             .send(
-                                methods::Response::statement_unstable_unsubscribe(existed)
+                                methods::Response::statement_unsubscribeStatement(existed)
                                     .to_json_response(request_id_json),
                             )
                             .await
@@ -2908,7 +2917,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 &me.platform,
                                 Debug,
                                 &me.log_target,
-                                "Failed to send response for statement_unstable_unsubscribe: response channel closed"
+                                "Failed to send response for statement_unsubscribeStatement: response channel closed"
                             );
                         }
                     }

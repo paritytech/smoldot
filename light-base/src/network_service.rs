@@ -646,6 +646,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
 pub struct BroadcastStatementResult {
     pub sent: usize,
     pub total: usize,
+    pub is_known: bool,
 }
 
 /// Event that can happen on the network service.
@@ -1765,40 +1766,48 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 ToBackgroundChain::BroadcastStatement { statement, result },
             ) => {
-                if let Some(cache) = &mut task.network[chain_id].seen_statements {
+                let is_known = task.network[chain_id].seen_statements.as_mut().map_or(false, |cache| {
                     let hash = codec::statement_hash(&statement);
+                    let already_known = cache.contains(&hash);
                     cache.push(hash, ());
-                }
+                    already_known
+                });
 
-                let peers_to_send = task
-                    .network
-                    .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
-                    .cloned()
-                    .collect::<Vec<_>>();
-
-                let total = peers_to_send.len();
-                let mut sent = 0;
-                for peer in &peers_to_send {
-                    if task
+                let (sent, total) = if is_known {
+                    (0, 0)
+                } else {
+                    let peers_to_send = task
                         .network
-                        .gossip_send_statement(peer, chain_id, statement.clone())
-                        .is_ok()
-                    {
-                        sent += 1;
+                        .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
+                        .cloned()
+                        .collect::<Vec<_>>();
+
+                    let total = peers_to_send.len();
+                    let mut sent = 0;
+                    for peer in &peers_to_send {
+                        if task
+                            .network
+                            .gossip_send_statement(peer, chain_id, statement.clone())
+                            .is_ok()
+                        {
+                            sent += 1;
+                        }
                     }
-                }
 
-                log!(
-                    &task.platform,
-                    Debug,
-                    "network",
-                    "statement-broadcast",
-                    chain = task.network[chain_id].log_name,
-                    sent,
-                    total,
-                );
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "statement-broadcast",
+                        chain = task.network[chain_id].log_name,
+                        sent,
+                        total,
+                    );
 
-                let _ = result.send(BroadcastStatementResult { sent, total });
+                    (sent, total)
+                };
+
+                let _ = result.send(BroadcastStatementResult { sent, total, is_known });
             }
             WakeUpReason::MessageForChain(
                 chain_id,

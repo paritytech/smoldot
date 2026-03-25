@@ -463,11 +463,11 @@ define_methods! {
     system_version() -> Cow<'a, str>,
 
     /// Broadcast a new statement to peers (light node has no local statement-store).
-    statement_unstable_submit(encoded: HexString) -> StatementSubmitResult,
+    statement_submit(encoded: HexString) -> StatementSubmitResult,
     /// Subscribe to statements matching the given filter. Returns subscription ID.
-    statement_unstable_subscribe(filter: crate::network::codec::TopicFilter) -> Cow<'a, str>,
+    statement_subscribeStatement(filter: crate::network::codec::TopicFilter) -> Cow<'a, str>,
     /// Unsubscribe from statement notifications.
-    statement_unstable_unsubscribe(subscription: String) -> bool,
+    statement_unsubscribeStatement(subscription: String) -> bool,
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_v1_body(
@@ -548,8 +548,8 @@ define_methods! {
     // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
     sudo_networkState_event(subscription: Cow<'a, str>, result: NetworkEvent) -> (),
 
-    // Statement notification sent when a statement matching subscribed topics is received.
-    statement_unstable_notification(subscription: Cow<'a, str>, statement: HexString) -> (),
+    // Statement notification sent when statements matching subscribed topics are received.
+    statement_subscribeStatement(subscription: Cow<'a, str>, result: StatementEvent) -> (),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1086,20 +1086,29 @@ pub enum SystemPeerRole {
     Light,
 }
 
-/// Result of submitting a statement to the statement store.
+/// Result of submitting a statement.
+///
+/// JSON format is compatible with polkadot-sdk's `SubmitResult`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
 pub enum StatementSubmitResult {
-    /// Statement was accepted and broadcasted to peers.
-    #[serde(rename = "ok_broadcast")]
-    OkBroadcast {
-        /// Number of peers the statement was successfully sent to.
-        sent: usize,
-        /// Total number of peers attempted.
-        total: usize,
+    New,
+    Known,
+    Invalid { reason: String },
+    InternalError { error: String },
+}
+
+/// Notification event for statement subscriptions.
+///
+/// JSON format is compatible with polkadot-sdk's `StatementEvent`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event", content = "data", rename_all = "camelCase")]
+pub enum StatementEvent {
+    NewStatements {
+        statements: Vec<HexString>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remaining: Option<u32>,
     },
-    /// Statement was invalid or rejected.
-    #[serde(rename = "error")]
-    Error(String),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1323,91 +1332,127 @@ mod tests {
     }
 
     #[test]
-    fn statement_unstable_submit_parse_valid() {
+    fn statement_submit_parse_valid() {
         let (id, call) = super::parse_jsonrpc_client_to_server(
-            r#"{"jsonrpc":"2.0","id":1,"method":"statement_unstable_submit","params":["0x1234"]}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"statement_submit","params":["0x1234"]}"#,
         )
         .unwrap();
 
         assert_eq!(id, "1");
         assert!(matches!(
             call,
-            super::MethodCall::statement_unstable_submit { .. }
+            super::MethodCall::statement_submit { .. }
         ));
     }
 
     #[test]
-    fn statement_unstable_submit_result_ok_broadcast_serialization() {
-        let result = super::StatementSubmitResult::OkBroadcast { sent: 5, total: 10 };
-        let serialized = serde_json::to_string(&result).unwrap();
-        assert_eq!(serialized, r#"{"ok_broadcast":{"sent":5,"total":10}}"#);
+    fn statement_submit_result_serialization() {
+        let new = super::StatementSubmitResult::New;
+        assert_eq!(serde_json::to_string(&new).unwrap(), r#"{"status":"new"}"#);
 
-        let deserialized: super::StatementSubmitResult = serde_json::from_str(&serialized).unwrap();
-        assert!(matches!(
-            deserialized,
-            super::StatementSubmitResult::OkBroadcast { sent: 5, total: 10 }
-        ));
+        let known = super::StatementSubmitResult::Known;
+        assert_eq!(
+            serde_json::to_string(&known).unwrap(),
+            r#"{"status":"known"}"#
+        );
+
+        let invalid = super::StatementSubmitResult::Invalid {
+            reason: "bad encoding".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&invalid).unwrap(),
+            r#"{"status":"invalid","reason":"bad encoding"}"#
+        );
+
+        let internal = super::StatementSubmitResult::InternalError {
+            error: "No connected peers".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&internal).unwrap(),
+            r#"{"status":"internalError","error":"No connected peers"}"#
+        );
     }
 
     #[test]
-    fn statement_unstable_subscribe_parse_any() {
+    fn statement_event_serialization() {
+        let event = super::StatementEvent::NewStatements {
+            statements: vec![super::HexString(vec![0x12, 0x34])],
+            remaining: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"event":"newStatements","data":{"statements":["0x1234"]}}"#
+        );
+
+        let event_with_remaining = super::StatementEvent::NewStatements {
+            statements: vec![super::HexString(vec![0xab])],
+            remaining: Some(5),
+        };
+        assert_eq!(
+            serde_json::to_string(&event_with_remaining).unwrap(),
+            r#"{"event":"newStatements","data":{"statements":["0xab"],"remaining":5}}"#
+        );
+    }
+
+    #[test]
+    fn statement_subscribe_parse_any() {
         let (id, call) = super::parse_jsonrpc_client_to_server(
-            r#"{"jsonrpc":"2.0","id":2,"method":"statement_unstable_subscribe","params":[{"type":"any"}]}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"statement_subscribeStatement","params":["any"]}"#,
         )
         .unwrap();
 
         assert_eq!(id, "2");
         assert!(matches!(
             call,
-            super::MethodCall::statement_unstable_subscribe {
+            super::MethodCall::statement_subscribeStatement {
                 filter: crate::network::codec::TopicFilter::Any
             }
         ));
     }
 
     #[test]
-    fn statement_unstable_subscribe_parse_match_any() {
+    fn statement_subscribe_parse_match_any() {
         let (id, call) = super::parse_jsonrpc_client_to_server(
-            r#"{"jsonrpc":"2.0","id":2,"method":"statement_unstable_subscribe","params":[{"type":"match_any","topics":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"statement_subscribeStatement","params":[{"matchAny":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]}"#,
         )
         .unwrap();
 
         assert_eq!(id, "2");
         assert!(matches!(
             call,
-            super::MethodCall::statement_unstable_subscribe {
+            super::MethodCall::statement_subscribeStatement {
                 filter: crate::network::codec::TopicFilter::MatchAny(_)
             }
         ));
     }
 
     #[test]
-    fn statement_unstable_subscribe_parse_match_all() {
+    fn statement_subscribe_parse_match_all() {
         let (id, call) = super::parse_jsonrpc_client_to_server(
-            r#"{"jsonrpc":"2.0","id":2,"method":"statement_unstable_subscribe","params":[{"type":"match_all","topics":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"statement_subscribeStatement","params":[{"matchAll":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]}"#,
         )
         .unwrap();
 
         assert_eq!(id, "2");
         assert!(matches!(
             call,
-            super::MethodCall::statement_unstable_subscribe {
+            super::MethodCall::statement_subscribeStatement {
                 filter: crate::network::codec::TopicFilter::MatchAll(_)
             }
         ));
     }
 
     #[test]
-    fn statement_unstable_unsubscribe_parse_valid() {
+    fn statement_unsubscribe_parse_valid() {
         let (id, call) = super::parse_jsonrpc_client_to_server(
-            r#"{"jsonrpc":"2.0","id":4,"method":"statement_unstable_unsubscribe","params":["sub123"]}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"statement_unsubscribeStatement","params":["sub123"]}"#,
         )
         .unwrap();
 
         assert_eq!(id, "4");
         assert!(matches!(
             call,
-            super::MethodCall::statement_unstable_unsubscribe { .. }
+            super::MethodCall::statement_unsubscribeStatement { .. }
         ));
     }
 }

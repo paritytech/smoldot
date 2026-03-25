@@ -20,9 +20,6 @@
 //! Statements are encoded as `Vec<Field>` where each field has a discriminant byte
 //! followed by field-specific data. Fields must appear in ascending order by discriminant.
 
-use alloc::format;
-use alloc::string::String;
-use alloc::string::ToString;
 use alloc::vec::Vec;
 
 /// Maximum number of topics per statement.
@@ -53,21 +50,11 @@ pub type Topic = [u8; 32];
 
 /// Filter for subscribing to statements based on topics.
 ///
-/// # JSON Format
-///
-/// Match all statements:
+/// JSON format is compatible with polkadot-sdk's `TopicFilter`:
 /// ```json
-/// {"type": "any"}
-/// ```
-///
-/// Match statements with any of the given topics:
-/// ```json
-/// {"type": "match_any", "topics": ["0x0123...abcd"]}
-/// ```
-///
-/// Match statements with all of the given topics:
-/// ```json
-/// {"type": "match_all", "topics": ["0x0123...abcd", "0x5678...efgh"]}
+/// "any"
+/// {"matchAll": ["0x0123...abcd", "0x5678...efgh"]}
+/// {"matchAny": ["0x0123...abcd"]}
 /// ```
 #[derive(Debug, Clone)]
 pub enum TopicFilter {
@@ -87,38 +74,24 @@ impl serde::Serialize for TopicFilter {
     where
         S: serde::Serializer,
     {
+        fn topics_to_hex(topics: &[Topic]) -> Vec<alloc::string::String> {
+            topics
+                .iter()
+                .map(|t| alloc::format!("0x{}", hex::encode(t)))
+                .collect()
+        }
+
         use serde::ser::SerializeMap;
 
-        fn serialize_topics<S: serde::ser::SerializeMap>(
-            map: &mut S,
-            topics: &[Topic],
-        ) -> Result<(), S::Error> {
-            let hex_topics: Vec<String> = topics
-                .iter()
-                .map(|t| format!("0x{}", hex::encode(t)))
-                .collect();
-            map.serialize_entry("topics", &hex_topics)
-        }
+        let (key, topics) = match self {
+            TopicFilter::Any => return serializer.serialize_str("any"),
+            TopicFilter::MatchAll(topics) => ("matchAll", topics),
+            TopicFilter::MatchAny(topics) => ("matchAny", topics),
+        };
 
-        match self {
-            TopicFilter::Any => {
-                let mut map = serializer.serialize_map(Some(1))?;
-                map.serialize_entry("type", "any")?;
-                map.end()
-            }
-            TopicFilter::MatchAll(topics) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("type", "match_all")?;
-                serialize_topics(&mut map, topics)?;
-                map.end()
-            }
-            TopicFilter::MatchAny(topics) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("type", "match_any")?;
-                serialize_topics(&mut map, topics)?;
-                map.end()
-            }
-        }
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(key, &topics_to_hex(topics))?;
+        map.end()
     }
 }
 
@@ -127,47 +100,55 @@ impl<'de> serde::Deserialize<'de> for TopicFilter {
     where
         D: serde::Deserializer<'de>,
     {
-        use alloc::string::String;
         use serde::de::Error;
 
-        #[derive(serde::Deserialize)]
-        struct TopicFilterHelper {
-            #[serde(rename = "type")]
-            filter_type: String,
-            topics: Option<Vec<String>>,
+        struct TopicFilterVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TopicFilterVisitor {
+            type Value = TopicFilter;
+
+            fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                formatter.write_str(r#""any" or {"matchAll": [...]} or {"matchAny": [...]}"#)
+            }
+
+            fn visit_str<E: Error>(self, value: &str) -> Result<TopicFilter, E> {
+                match value {
+                    "any" => Ok(TopicFilter::Any),
+                    other => Err(E::custom(alloc::format!(
+                        "unknown filter type: {other}, expected \"any\""
+                    ))),
+                }
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<TopicFilter, A::Error> {
+                let key: alloc::string::String =
+                    map.next_key()?.ok_or_else(|| A::Error::custom("empty object"))?;
+                let hex_topics: alloc::vec::Vec<alloc::string::String> = map.next_value()?;
+                let topics: Vec<Topic> = hex_topics
+                    .iter()
+                    .map(|s| {
+                        let s = s.strip_prefix("0x").unwrap_or(s);
+                        let bytes = hex::decode(s)
+                            .map_err(|e| A::Error::custom(alloc::format!("{e}")))?;
+                        <[u8; 32]>::try_from(bytes.as_slice())
+                            .map_err(|_| A::Error::custom("topic must be exactly 32 bytes"))
+                    })
+                    .collect::<Result<_, _>>()?;
+
+                match key.as_str() {
+                    "matchAll" => TopicFilter::match_all(topics).map_err(A::Error::custom),
+                    "matchAny" => TopicFilter::match_any(topics).map_err(A::Error::custom),
+                    other => Err(A::Error::custom(alloc::format!(
+                        "unknown filter key: {other}, expected \"matchAll\" or \"matchAny\""
+                    ))),
+                }
+            }
         }
 
-        let helper = TopicFilterHelper::deserialize(deserializer)?;
-
-        let parse_topics = |hex_topics: Vec<String>| -> Result<Vec<Topic>, D::Error> {
-            hex_topics
-                .into_iter()
-                .map(|s| {
-                    let s = s.strip_prefix("0x").unwrap_or(&s);
-                    let bytes = hex::decode(s).map_err(|e| D::Error::custom(e.to_string()))?;
-                    <[u8; 32]>::try_from(bytes.as_slice())
-                        .map_err(|_| D::Error::custom("topic must be exactly 32 bytes"))
-                })
-                .collect()
-        };
-
-        match helper.filter_type.as_str() {
-            "any" => Ok(TopicFilter::Any),
-            "match_all" => {
-                let topics = helper.topics.unwrap_or_default();
-                let parsed = parse_topics(topics)?;
-                TopicFilter::match_all(parsed).map_err(D::Error::custom)
-            }
-            "match_any" => {
-                let topics = helper.topics.unwrap_or_default();
-                let parsed = parse_topics(topics)?;
-                TopicFilter::match_any(parsed).map_err(D::Error::custom)
-            }
-            other => Err(D::Error::custom(format!(
-                "unknown filter type: {}, expected 'any', 'match_all', or 'match_any'",
-                other
-            ))),
-        }
+        deserializer.deserialize_any(TopicFilterVisitor)
     }
 }
 
