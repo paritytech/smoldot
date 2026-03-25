@@ -172,7 +172,7 @@ impl<'de> serde::Deserialize<'de> for TopicFilter {
 }
 
 impl TopicFilter {
-    fn match_all(topics: Vec<Topic>) -> Result<Self, alloc::string::String> {
+    pub fn match_all(topics: Vec<Topic>) -> Result<Self, alloc::string::String> {
         if topics.len() > MAX_TOPICS {
             return Err(alloc::format!(
                 "Too many topics for MatchAll: got {}, max {}",
@@ -183,7 +183,7 @@ impl TopicFilter {
         Ok(TopicFilter::MatchAll(topics))
     }
 
-    fn match_any(topics: Vec<Topic>) -> Result<Self, alloc::string::String> {
+    pub fn match_any(topics: Vec<Topic>) -> Result<Self, alloc::string::String> {
         if topics.len() > MAX_ANY_TOPICS {
             return Err(alloc::format!(
                 "Too many topics for MatchAny: got {}, max {}",
@@ -754,7 +754,7 @@ mod tests {
 
     #[test]
     fn topic_filter_match_any_empty_returns_false() {
-        let filter = TopicFilter::MatchAny(Vec::new());
+        let filter = TopicFilter::match_any(Vec::new()).unwrap();
         let topic = [1u8; 32];
         assert!(!filter.matches(&[topic]));
         assert!(!filter.matches(&[]));
@@ -765,7 +765,7 @@ mod tests {
         let t1 = [1u8; 32];
         let t2 = [2u8; 32];
         let t3 = [3u8; 32];
-        let filter = TopicFilter::MatchAny(vec![t1, t2]);
+        let filter = TopicFilter::match_any(vec![t1, t2]).unwrap();
         assert!(filter.matches(&[t1]));
         assert!(filter.matches(&[t2]));
         assert!(filter.matches(&[t3, t1]));
@@ -778,7 +778,7 @@ mod tests {
         let t1 = [1u8; 32];
         let t2 = [2u8; 32];
         let t3 = [3u8; 32];
-        let filter = TopicFilter::MatchAll(vec![t1, t2]);
+        let filter = TopicFilter::match_all(vec![t1, t2]).unwrap();
         assert!(filter.matches(&[t1, t2]));
         assert!(filter.matches(&[t1, t2, t3]));
         assert!(!filter.matches(&[t1]));
