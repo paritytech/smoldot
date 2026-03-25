@@ -462,7 +462,7 @@ define_methods! {
     /// Returns, as an opaque string, the version of the client serving these JSON-RPC requests.
     system_version() -> Cow<'a, str>,
 
-    /// Submit a new statement to the store and broadcast to peers.
+    /// Broadcast a new statement to peers (light node has no local statement-store).
     statement_unstable_submit(encoded: HexString) -> StatementSubmitResult,
     /// Subscribe to statements matching the given filter. Returns subscription ID.
     statement_unstable_subscribe(filter: crate::network::codec::TopicFilter) -> Cow<'a, str>,
