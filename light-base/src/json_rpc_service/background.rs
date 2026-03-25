@@ -2820,7 +2820,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                     methods::MethodCall::statement_unstable_submit { encoded } => {
                         let result =
-                            if smoldot::network::codec::decode_statement_notification(&encoded.0)
+                            if smoldot::network::codec::decode_statement(&encoded.0)
                                 .is_err()
                             {
                                 methods::StatementSubmitResult::Error(
