@@ -1339,10 +1339,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(id, "1");
-        assert!(matches!(
-            call,
-            super::MethodCall::statement_submit { .. }
-        ));
+        assert!(matches!(call, super::MethodCall::statement_submit { .. }));
     }
 
     #[test]

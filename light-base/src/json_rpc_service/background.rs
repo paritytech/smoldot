@@ -765,15 +765,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         continue;
                     }
 
-                    let notification =
-                        methods::ServerToClient::statement_statement {
-                            subscription: Cow::Borrowed(sub_id),
-                            result: methods::StatementEvent::NewStatements {
-                                statements: matching,
-                                remaining: None,
-                            },
-                        }
-                        .to_json_request_object_parameters(None);
+                    let notification = methods::ServerToClient::statement_statement {
+                        subscription: Cow::Borrowed(sub_id),
+                        result: methods::StatementEvent::NewStatements {
+                            statements: matching,
+                            remaining: None,
+                        },
+                    }
+                    .to_json_request_object_parameters(None);
                     if me.responses_tx.send(notification).await.is_err() {
                         log!(
                             &me.platform,
@@ -2831,9 +2830,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                     methods::MethodCall::statement_submit { encoded } => {
                         let result =
-                            if smoldot::network::codec::decode_statement(&encoded.0)
-                                .is_err()
-                            {
+                            if smoldot::network::codec::decode_statement(&encoded.0).is_err() {
                                 methods::StatementSubmitResult::Invalid {
                                     reason: "Invalid statement encoding".into(),
                                 }

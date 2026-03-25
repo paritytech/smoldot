@@ -124,15 +124,16 @@ impl<'de> serde::Deserialize<'de> for TopicFilter {
                 self,
                 mut map: A,
             ) -> Result<TopicFilter, A::Error> {
-                let key: alloc::string::String =
-                    map.next_key()?.ok_or_else(|| A::Error::custom("empty object"))?;
+                let key: alloc::string::String = map
+                    .next_key()?
+                    .ok_or_else(|| A::Error::custom("empty object"))?;
                 let hex_topics: alloc::vec::Vec<alloc::string::String> = map.next_value()?;
                 let topics: Vec<Topic> = hex_topics
                     .iter()
                     .map(|s| {
                         let s = s.strip_prefix("0x").unwrap_or(s);
-                        let bytes = hex::decode(s)
-                            .map_err(|e| A::Error::custom(alloc::format!("{e}")))?;
+                        let bytes =
+                            hex::decode(s).map_err(|e| A::Error::custom(alloc::format!("{e}")))?;
                         <[u8; 32]>::try_from(bytes.as_slice())
                             .map_err(|_| A::Error::custom("topic must be exactly 32 bytes"))
                     })

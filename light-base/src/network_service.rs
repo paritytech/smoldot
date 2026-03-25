@@ -1766,19 +1766,26 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 ToBackgroundChain::BroadcastStatement { statement, result },
             ) => {
-                let is_known = task.network[chain_id].seen_statements.as_mut().map_or(false, |cache| {
-                    let hash = codec::statement_hash(&statement);
-                    let already_known = cache.contains(&hash);
-                    cache.push(hash, ());
-                    already_known
-                });
+                let is_known =
+                    task.network[chain_id]
+                        .seen_statements
+                        .as_mut()
+                        .map_or(false, |cache| {
+                            let hash = codec::statement_hash(&statement);
+                            let already_known = cache.contains(&hash);
+                            cache.push(hash, ());
+                            already_known
+                        });
 
                 let (sent, total) = if is_known {
                     (0, 0)
                 } else {
                     let peers_to_send = task
                         .network
-                        .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
+                        .gossip_connected_peers(
+                            chain_id,
+                            service::GossipKind::ConsensusTransactions,
+                        )
                         .cloned()
                         .collect::<Vec<_>>();
 
@@ -1807,7 +1814,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     (sent, total)
                 };
 
-                let _ = result.send(BroadcastStatementResult { sent, total, is_known });
+                let _ = result.send(BroadcastStatementResult {
+                    sent,
+                    total,
+                    is_known,
+                });
             }
             WakeUpReason::MessageForChain(
                 chain_id,
