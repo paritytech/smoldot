@@ -750,10 +750,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
 
                 for statement in &statements {
-                    let encoded = match codec::encode_statement(statement) {
-                        Ok(e) => e,
-                        Err(_) => continue,
-                    };
+                    let encoded = codec::encode_statement(statement)
+                        .expect("re-encoding a decoded statement always succeeds; qed");
 
                     for (sub_id, topic_filter) in &me.statement_subscriptions {
                         if topic_filter.matches(&statement.topics) {
