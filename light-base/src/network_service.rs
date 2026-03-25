@@ -1779,13 +1779,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let total = peers_to_send.len();
                 let mut sent = 0;
                 for peer in &peers_to_send {
-                    match task
+                    if task
                         .network
                         .gossip_send_statement(peer, chain_id, statement.clone())
+                        .is_ok()
                     {
-                        Ok(()) => sent += 1,
-                        Err(QueueNotificationError::QueueFull) => {}
-                        Err(QueueNotificationError::NoConnection) => {}
+                        sent += 1;
                     }
                 }
 
