@@ -209,6 +209,10 @@ impl BitswapGetError {
     /// Build a complete JSON-RPC error response string for this error.
     pub fn to_json_rpc_error(&self, request_id_json: &str) -> String {
         let message = self.to_string();
+
+        // Even though the spec says the error variants like `NoPeers` etc. are not stable and
+        // provided for debugging purposes only, any changes to the variant names should be avoided
+        // to not surprize anybody.
         let (variant, category) = match self {
             BitswapGetError::CidParsingError(_) => ("CidParsingError", None),
             BitswapGetError::NotFound => ("NotFound", Some(BitswapJsonRpcError::Fail)),
