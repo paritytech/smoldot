@@ -1946,7 +1946,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
-                                    parse::ErrorResponse::InvalidParams,
+                                    parse::ErrorResponse::InvalidParams(None),
                                     None,
                                 ))
                                 .await;
@@ -2480,7 +2480,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         .responses_tx
                                         .send(parse::build_error_response(
                                             request_id_json,
-                                            parse::ErrorResponse::InvalidParams,
+                                            parse::ErrorResponse::InvalidParams(None),
                                             None,
                                         ))
                                         .await;
@@ -2608,7 +2608,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                             .responses_tx
                                             .send(parse::build_error_response(
                                                 request_id_json,
-                                                parse::ErrorResponse::InvalidParams,
+                                                parse::ErrorResponse::InvalidParams(None),
                                                 Some(
                                                     &serde_json::to_string(
                                                         "multiaddr doesn't end with /p2p",
@@ -2625,7 +2625,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
+                                        parse::ErrorResponse::InvalidParams(None),
                                         Some(
                                             &serde_json::to_string(
                                                 "multiaddr doesn't end with /p2p",
@@ -2640,7 +2640,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
+                                        parse::ErrorResponse::InvalidParams(None),
                                         Some(
                                             &serde_json::to_string(&err.to_string())
                                                 .unwrap_or_else(|_| unreachable!()),
@@ -2759,7 +2759,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
-                                    json_rpc::parse::ErrorResponse::InvalidParams,
+                                    json_rpc::parse::ErrorResponse::InvalidParams(None),
                                     None,
                                 ))
                                 .await;

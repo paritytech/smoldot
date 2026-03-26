@@ -174,7 +174,9 @@ impl<'a> MethodError<'a> {
                 MethodError::InvalidParametersFormat { .. }
                 | MethodError::TooManyParameters { .. }
                 | MethodError::InvalidParameter { .. }
-                | MethodError::MissingParameters { .. } => parse::ErrorResponse::InvalidParams,
+                | MethodError::MissingParameters { .. } => {
+                    parse::ErrorResponse::InvalidParams(None)
+                }
             },
             None,
         )

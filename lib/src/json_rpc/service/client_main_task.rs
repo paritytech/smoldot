@@ -603,7 +603,7 @@ impl ClientMainTask {
                                 }
                                 _ => parse::build_error_response(
                                     request_id,
-                                    ErrorResponse::InvalidParams,
+                                    ErrorResponse::InvalidParams(None),
                                     None,
                                 ),
                             };

@@ -222,18 +222,10 @@ impl BitswapGetError {
             BitswapGetError::NoPeers => ("NoPeers", Some(BitswapJsonRpcError::FailRetryBackoff)),
         };
 
-        let data = match category {
-            None => {
-                // JSON-escape the message to safely embed it in the data field.
-                let details_json =
-                    serde_json::to_string(&message).expect("valid UTF-8 string; qed");
-                format!("{{\"variant\":\"{variant}\",\"details\":{details_json}}}")
-            }
-            Some(_) => format!("{{\"variant\":\"{variant}\"}}"),
-        };
+        let data = format!("{{\"variant\":\"{variant}\"}}");
 
         let error_response = match category {
-            None => parse::ErrorResponse::InvalidParams,
+            None => parse::ErrorResponse::InvalidParams(Some(&message)),
             Some(cat) => parse::ErrorResponse::ApplicationDefined(cat as i64, &message),
         };
 

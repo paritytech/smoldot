@@ -618,7 +618,8 @@ fn spawn_client_main_task(
                                             .respond(methods::Response::chainHead_v1_unpin(()));
                                     }
                                     Ok(Err(())) => {
-                                        request_process.fail(service::ErrorResponse::InvalidParams);
+                                        request_process
+                                            .fail(service::ErrorResponse::InvalidParams(None));
                                     }
                                 }
                             }
