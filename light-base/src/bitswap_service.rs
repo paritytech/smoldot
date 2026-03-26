@@ -167,7 +167,7 @@ impl BitswapService {
 #[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum BitswapGetError {
     /// Invalid/unsupported CID.
-    #[display("Invalid/unsupported CID: {_0}")]
+    #[display("Invalid CID: {_0}")]
     CidParsingError(cid::ParseError),
     /// No Bitswap peers connected, can't issue "have" request.
     #[display("No Bitswap peers connected, can't issue \"have\" request.")]
