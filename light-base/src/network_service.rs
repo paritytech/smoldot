@@ -72,7 +72,7 @@ use smoldot::{
     network::{basic_peering_strategy, codec, service},
 };
 
-pub use codec::{CallProofRequestConfig, Role, TopicFilter};
+pub use codec::{CallProofRequestConfig, Role};
 pub use service::{
     ChainId, EncodedMerkleProof, PeerId, QueueNotificationError, StatementProtocolConfig,
 };

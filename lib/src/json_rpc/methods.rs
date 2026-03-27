@@ -465,7 +465,7 @@ define_methods! {
     /// Broadcast a new statement to peers (light node has no local statement-store).
     statement_submit(encoded: HexString) -> StatementSubmitResult,
     /// Subscribe to statements matching the given filter. Returns subscription ID.
-    statement_subscribeStatement(filter: crate::network::codec::TopicFilter) -> Cow<'a, str>,
+    statement_subscribeStatement(filter: TopicFilter) -> Cow<'a, str>,
     /// Unsubscribe from statement notifications.
     statement_unsubscribeStatement(subscription: String) -> bool,
 
@@ -1111,6 +1111,150 @@ pub enum StatementEvent {
     },
 }
 
+/// Filter for subscribing to statements based on topics.
+///
+/// JSON format is compatible with polkadot-sdk's `TopicFilter`:
+/// ```json
+/// "any"
+/// {"matchAll": ["0x0123...abcd", "0x5678...efgh"]}
+/// {"matchAny": ["0x0123...abcd"]}
+/// ```
+#[derive(Debug, Clone)]
+pub enum TopicFilter {
+    Any,
+    MatchAll(Vec<crate::network::codec::Topic>),
+    MatchAny(Vec<crate::network::codec::Topic>),
+}
+
+impl serde::Serialize for TopicFilter {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        fn topics_to_hex(
+            topics: &[crate::network::codec::Topic],
+        ) -> Vec<alloc::string::String> {
+            topics
+                .iter()
+                .map(|t| alloc::format!("0x{}", hex::encode(t)))
+                .collect()
+        }
+
+        use serde::ser::SerializeMap;
+
+        let (key, topics) = match self {
+            TopicFilter::Any => return serializer.serialize_str("any"),
+            TopicFilter::MatchAll(topics) => ("matchAll", topics),
+            TopicFilter::MatchAny(topics) => ("matchAny", topics),
+        };
+
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(key, &topics_to_hex(topics))?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TopicFilter {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        struct TopicFilterVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TopicFilterVisitor {
+            type Value = TopicFilter;
+
+            fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                formatter.write_str(r#""any" or {"matchAll": [...]} or {"matchAny": [...]}"#)
+            }
+
+            fn visit_str<E: Error>(self, value: &str) -> Result<TopicFilter, E> {
+                match value {
+                    "any" => Ok(TopicFilter::Any),
+                    other => Err(E::custom(alloc::format!(
+                        "unknown filter type: {other}, expected \"any\""
+                    ))),
+                }
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<TopicFilter, A::Error> {
+                let key: alloc::string::String = map
+                    .next_key()?
+                    .ok_or_else(|| A::Error::custom("empty object"))?;
+                let hex_topics: alloc::vec::Vec<alloc::string::String> = map.next_value()?;
+                let topics: Vec<crate::network::codec::Topic> = hex_topics
+                    .iter()
+                    .map(|s| {
+                        let s = s.strip_prefix("0x").unwrap_or(s);
+                        let bytes =
+                            hex::decode(s).map_err(|e| A::Error::custom(alloc::format!("{e}")))?;
+                        <[u8; 32]>::try_from(bytes.as_slice())
+                            .map_err(|_| A::Error::custom("topic must be exactly 32 bytes"))
+                    })
+                    .collect::<Result<_, _>>()?;
+
+                match key.as_str() {
+                    "matchAll" => TopicFilter::match_all(topics).map_err(A::Error::custom),
+                    "matchAny" => TopicFilter::match_any(topics).map_err(A::Error::custom),
+                    other => Err(A::Error::custom(alloc::format!(
+                        "unknown filter key: {other}, expected \"matchAll\" or \"matchAny\""
+                    ))),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(TopicFilterVisitor)
+    }
+}
+
+impl TopicFilter {
+    pub fn match_all(
+        topics: Vec<crate::network::codec::Topic>,
+    ) -> Result<Self, alloc::string::String> {
+        if topics.len() > crate::network::codec::MAX_TOPICS {
+            return Err(alloc::format!(
+                "Too many topics for MatchAll: got {}, max {}",
+                topics.len(),
+                crate::network::codec::MAX_TOPICS
+            ));
+        }
+        Ok(TopicFilter::MatchAll(topics))
+    }
+
+    pub fn match_any(
+        topics: Vec<crate::network::codec::Topic>,
+    ) -> Result<Self, alloc::string::String> {
+        if topics.len() > crate::network::codec::MAX_ANY_TOPICS {
+            return Err(alloc::format!(
+                "Too many topics for MatchAny: got {}, max {}",
+                topics.len(),
+                crate::network::codec::MAX_ANY_TOPICS
+            ));
+        }
+        Ok(TopicFilter::MatchAny(topics))
+    }
+
+    pub fn matches(&self, statement_topics: &[crate::network::codec::Topic]) -> bool {
+        match self {
+            TopicFilter::Any => true,
+            TopicFilter::MatchAny(filter_topics) => {
+                if filter_topics.is_empty() {
+                    return false;
+                }
+                statement_topics.iter().any(|t| filter_topics.contains(t))
+            }
+            TopicFilter::MatchAll(filter_topics) => {
+                filter_topics.iter().all(|t| statement_topics.contains(t))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TransactionStatus {
     #[serde(rename = "future")]
@@ -1402,7 +1546,7 @@ mod tests {
         assert!(matches!(
             call,
             super::MethodCall::statement_subscribeStatement {
-                filter: crate::network::codec::TopicFilter::Any
+                filter: super::TopicFilter::Any
             }
         ));
     }
@@ -1418,7 +1562,7 @@ mod tests {
         assert!(matches!(
             call,
             super::MethodCall::statement_subscribeStatement {
-                filter: crate::network::codec::TopicFilter::MatchAny(_)
+                filter: super::TopicFilter::MatchAny(_)
             }
         ));
     }
@@ -1434,7 +1578,7 @@ mod tests {
         assert!(matches!(
             call,
             super::MethodCall::statement_subscribeStatement {
-                filter: crate::network::codec::TopicFilter::MatchAll(_)
+                filter: super::TopicFilter::MatchAll(_)
             }
         ));
     }
@@ -1451,5 +1595,48 @@ mod tests {
             call,
             super::MethodCall::statement_unsubscribeStatement { .. }
         ));
+    }
+
+    #[test]
+    fn topic_filter_any_matches_everything() {
+        let filter = super::TopicFilter::Any;
+        assert!(filter.matches(&[]));
+        let topic = [1u8; 32];
+        assert!(filter.matches(&[topic]));
+    }
+
+    #[test]
+    fn topic_filter_match_any_empty_returns_false() {
+        let filter = super::TopicFilter::match_any(Vec::new()).unwrap();
+        let topic = [1u8; 32];
+        assert!(!filter.matches(&[topic]));
+        assert!(!filter.matches(&[]));
+    }
+
+    #[test]
+    fn topic_filter_match_any_with_overlap() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let t3 = [3u8; 32];
+        let filter = super::TopicFilter::match_any(vec![t1, t2]).unwrap();
+        assert!(filter.matches(&[t1]));
+        assert!(filter.matches(&[t2]));
+        assert!(filter.matches(&[t3, t1]));
+        assert!(!filter.matches(&[t3]));
+        assert!(!filter.matches(&[]));
+    }
+
+    #[test]
+    fn topic_filter_match_all() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let t3 = [3u8; 32];
+        let filter = super::TopicFilter::match_all(vec![t1, t2]).unwrap();
+        assert!(filter.matches(&[t1, t2]));
+        assert!(filter.matches(&[t1, t2, t3]));
+        assert!(!filter.matches(&[t1]));
+        assert!(!filter.matches(&[t2]));
+        assert!(!filter.matches(&[t3]));
+        assert!(!filter.matches(&[]));
     }
 }

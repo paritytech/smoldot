@@ -222,7 +222,7 @@ struct Background<TPlat: PlatformRef> {
 
     /// Active statement subscriptions. Maps subscription ID to topic filter.
     statement_subscriptions:
-        hashbrown::HashMap<String, network_service::TopicFilter, fnv::FnvBuildHasher>,
+        hashbrown::HashMap<String, smoldot::json_rpc::methods::TopicFilter, fnv::FnvBuildHasher>,
 
     /// Receiver for network events (statements from peers).
     network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
