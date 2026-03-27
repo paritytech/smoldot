@@ -2879,7 +2879,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         me.statement_subscriptions
                             .insert(subscription_id.clone(), filter);
 
-                        if me
+                        let _ = me
                             .responses_tx
                             .send(
                                 methods::Response::statement_subscribeStatement(Cow::Owned(
@@ -2887,16 +2887,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 ))
                                 .to_json_response(request_id_json),
                             )
-                            .await
-                            .is_err()
-                        {
-                            log!(
-                                &me.platform,
-                                Debug,
-                                &me.log_target,
-                                "Failed to send response for statement_subscribeStatement: response channel closed"
-                            );
-                        }
+                            .await;
                     }
 
                     methods::MethodCall::statement_unsubscribeStatement { subscription } => {
