@@ -1790,7 +1790,7 @@ where
                                         .chain(
                                             self.chains[chain_index]
                                                 .enable_statement_protocol
-                                                .then(|| NotificationsProtocol::Statement {
+                                                .then_some(NotificationsProtocol::Statement {
                                                     chain_index,
                                                 }),
                                         )
