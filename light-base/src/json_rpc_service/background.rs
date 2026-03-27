@@ -570,7 +570,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: false,
         statement_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-            2,
+            16,
             Default::default(),
         ),
         network_events_rx: None,
