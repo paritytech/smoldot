@@ -2722,6 +2722,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 peer_id,
                 statements,
             }) => {
+                debug_assert!(task.event_pending_send.is_none());
+
                 let chain = &mut task.network[chain_id];
                 let non_duplicates: Vec<codec::Statement> = statements
                     .into_iter()
@@ -2741,7 +2743,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     continue;
                 }
 
-                debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some((
                     chain_id,
                     Event::StatementsNotification {
