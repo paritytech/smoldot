@@ -1131,9 +1131,7 @@ impl serde::Serialize for TopicFilter {
     where
         S: serde::Serializer,
     {
-        fn topics_to_hex(
-            topics: &[crate::network::codec::Topic],
-        ) -> Vec<alloc::string::String> {
+        fn topics_to_hex(topics: &[crate::network::codec::Topic]) -> Vec<alloc::string::String> {
             topics
                 .iter()
                 .map(|t| alloc::format!("0x{}", hex::encode(t)))
