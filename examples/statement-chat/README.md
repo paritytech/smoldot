@@ -39,6 +39,6 @@ The script automatically extracts chain specs, builds smoldot, and starts the de
 The app uses smoldot's statement store protocol:
 - `statement_subscribeStatement` - Subscribe to topics on a chain
 - `statement_submit` - Broadcast signed statements to the network
-- `statement_subscribeStatement` (notification) - Receive statements from other peers
+- `statement_statement` (notification) - Receive statements from other peers
 
 Messages are signed with Ed25519 keys (stored in localStorage) and distributed peer-to-peer without central servers.
