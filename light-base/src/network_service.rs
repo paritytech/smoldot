@@ -54,7 +54,7 @@ use alloc::{
     sync::Arc,
     vec::{self, Vec},
 };
-use core::{cmp, mem, num::NonZero, pin::Pin, time::Duration};
+use core::{cmp, mem, num::NonZero, num::NonZeroUsize, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{StreamExt as _, future, stream};
@@ -74,6 +74,32 @@ use smoldot::{
 
 pub use codec::{CallProofRequestConfig, Role};
 pub use service::{ChainId, EncodedMerkleProof, PeerId, QueueNotificationError};
+
+/// Configuration for the Statement Store protocol.
+#[derive(Debug, Clone)]
+pub struct StatementProtocolConfig {
+    max_seen_statements: NonZeroUsize,
+}
+
+impl StatementProtocolConfig {
+    pub fn new(max_seen_statements: NonZeroUsize) -> Self {
+        StatementProtocolConfig {
+            max_seen_statements,
+        }
+    }
+
+    pub fn max_seen_statements(&self) -> NonZeroUsize {
+        self.max_seen_statements
+    }
+}
+
+impl Default for StatementProtocolConfig {
+    fn default() -> Self {
+        StatementProtocolConfig {
+            max_seen_statements: NonZeroUsize::new(65536).expect("65536 is not zero; qed"),
+        }
+    }
+}
 
 mod tasks;
 
@@ -134,6 +160,9 @@ pub struct ConfigChain {
     /// Must be `Some` if and only if the chain uses the GrandPa networking protocol. Contains the
     /// number of the finalized block at the time of the initialization.
     pub grandpa_protocol_finalized_block_height: Option<u64>,
+
+    /// If `Some`, enables the statement store protocol.
+    pub statement_protocol_config: Option<StatementProtocolConfig>,
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
@@ -227,6 +256,16 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
         // TODO: this code is hacky because we don't want to make `add_chain` async at the moment, because it's not convenient for lib.rs
         self.platform.spawn_task("add-chain-message-send".into(), {
+            let seen_statements =
+                config
+                    .statement_protocol_config
+                    .as_ref()
+                    .map(|spc: &StatementProtocolConfig| {
+                        lru::LruCache::with_hasher(
+                            spc.max_seen_statements(),
+                            fnv::FnvBuildHasher::default(),
+                        )
+                    });
             let config = service::ChainConfig {
                 grandpa_protocol_config: config.grandpa_protocol_finalized_block_height.map(
                     |commit_finalized_height| service::GrandpaState {
@@ -235,6 +274,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                         set_id: 0,
                     },
                 ),
+                enable_statement_protocol: config.statement_protocol_config.is_some(),
                 fork_id: config.fork_id.clone(),
                 block_number_bytes: config.block_number_bytes,
                 best_hash: config.best_block.1,
@@ -249,6 +289,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     num_references: NonZero::<usize>::new(1).unwrap(),
                     next_discovery_period: Duration::from_secs(2),
                     next_discovery_when: self.platform.now(),
+                    seen_statements,
                 },
             };
 
@@ -552,6 +593,23 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
+    pub async fn broadcast_statement(
+        self: Arc<Self>,
+        statement: Vec<u8>,
+    ) -> BroadcastStatementResult {
+        let (tx, rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackgroundChain::BroadcastStatement {
+                statement,
+                result: tx,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
     /// Marks the given peers as belonging to the given chain, and adds some addresses to these
     /// peers to the address book.
     ///
@@ -612,6 +670,13 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct BroadcastStatementResult {
+    pub sent: usize,
+    pub total: usize,
+    pub is_known: bool,
+}
+
 /// Event that can happen on the network service.
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -636,6 +701,11 @@ pub enum Event {
     GrandpaCommitMessage {
         peer_id: PeerId,
         message: service::EncodedGrandpaCommitMessage,
+    },
+    /// Received a statement notification from the network.
+    StatementsNotification {
+        peer_id: PeerId,
+        statements: Vec<codec::Statement>,
     },
 }
 
@@ -796,6 +866,10 @@ enum ToBackgroundChain {
         is_best: bool,
         result: oneshot::Sender<Result<(), QueueNotificationError>>,
     },
+    BroadcastStatement {
+        statement: Vec<u8>,
+        result: oneshot::Sender<BroadcastStatementResult>,
+    },
     Discover {
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
         important_nodes: bool,
@@ -934,6 +1008,8 @@ struct Chain<TPlat: PlatformRef> {
     /// After [`Chain::next_discovery_when`] is reached, the following discovery happens after
     /// the given duration.
     next_discovery_period: Duration,
+
+    seen_statements: Option<lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>>,
 }
 
 #[derive(Clone)]
@@ -1713,6 +1789,64 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &scale_encoded_header,
                     is_best,
                 ));
+            }
+            WakeUpReason::MessageForChain(
+                chain_id,
+                ToBackgroundChain::BroadcastStatement { statement, result },
+            ) => {
+                let is_known =
+                    task.network[chain_id]
+                        .seen_statements
+                        .as_mut()
+                        .map_or(false, |cache| {
+                            let hash = codec::statement_hash(&statement);
+                            let already_known = cache.contains(&hash);
+                            cache.push(hash, ());
+                            already_known
+                        });
+
+                let (sent, total) = if is_known {
+                    (0, 0)
+                } else {
+                    let peers_to_send = task
+                        .network
+                        .gossip_connected_peers(
+                            chain_id,
+                            service::GossipKind::ConsensusTransactions,
+                        )
+                        .cloned()
+                        .collect::<Vec<_>>();
+
+                    let total = peers_to_send.len();
+                    let mut sent = 0;
+                    for peer in &peers_to_send {
+                        if task
+                            .network
+                            .gossip_send_statement(peer, chain_id, statement.clone())
+                            .is_ok()
+                        {
+                            sent += 1;
+                        }
+                    }
+
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "statement-broadcast",
+                        chain = task.network[chain_id].log_name,
+                        sent,
+                        total,
+                    );
+
+                    (sent, total)
+                };
+
+                let _ = result.send(BroadcastStatementResult {
+                    sent,
+                    total,
+                    is_known,
+                });
             }
             WakeUpReason::MessageForChain(
                 chain_id,
@@ -2610,6 +2744,40 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send =
                     Some((chain_id, Event::GrandpaCommitMessage { peer_id, message }));
+            }
+            WakeUpReason::NetworkEvent(service::Event::StatementsNotification {
+                chain_id,
+                peer_id,
+                statements,
+            }) => {
+                debug_assert!(task.event_pending_send.is_none());
+
+                let chain = &mut task.network[chain_id];
+                let non_duplicates: Vec<codec::Statement> = statements
+                    .into_iter()
+                    .filter_map(|(hash, statement)| {
+                        let Some(cache) = &mut chain.seen_statements else {
+                            return Some(statement);
+                        };
+                        if cache.contains(&hash) {
+                            return None;
+                        }
+                        cache.push(hash, ());
+                        Some(statement)
+                    })
+                    .collect();
+
+                if non_duplicates.is_empty() {
+                    continue;
+                }
+
+                task.event_pending_send = Some((
+                    chain_id,
+                    Event::StatementsNotification {
+                        peer_id,
+                        statements: non_duplicates,
+                    },
+                ));
             }
             WakeUpReason::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 // TODO: handle properly?

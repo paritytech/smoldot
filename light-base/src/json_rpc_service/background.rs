@@ -219,6 +219,13 @@ struct Background<TPlat: PlatformRef> {
     /// The values are list of keys.
     state_get_keys_paged_cache:
         lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
+
+    /// Active statement subscriptions. Maps subscription ID to topic filter.
+    statement_subscriptions:
+        hashbrown::HashMap<String, smoldot::json_rpc::methods::TopicFilter, fnv::FnvBuildHasher>,
+
+    /// Receiver for network events (statements from peers).
+    network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
 }
 
 /// State of the subscription towards the runtime service.
@@ -562,6 +569,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
         ),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: false,
+        statement_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+            16,
+            Default::default(),
+        ),
+        network_events_rx: None,
         platform: config.platform,
     };
 
@@ -595,6 +607,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
             StartStorageSubscriptionsUpdates,
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
+            NetworkStatementsReceived(Vec<codec::Statement>),
+            MustSubscribeNetworkEvents,
         }
 
         // Wait until there is something to do.
@@ -686,6 +700,21 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.next_garbage_collection = Box::pin(me.platform.sleep(Duration::from_secs(10)));
                 WakeUpReason::GarbageCollection
             })
+            .or(async {
+                let Some(rx) = &me.network_events_rx else {
+                    return WakeUpReason::MustSubscribeNetworkEvents;
+                };
+                loop {
+                    let Ok(event) = rx.recv().await else {
+                        me.network_events_rx = None;
+                        return WakeUpReason::MustSubscribeNetworkEvents;
+                    };
+                    if let network_service::Event::StatementsNotification { statements, .. } = event
+                    {
+                        return WakeUpReason::NetworkStatementsReceived(statements);
+                    }
+                }
+            })
             .await
         };
 
@@ -704,10 +733,57 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.finalized_heads_subscriptions.shrink_to_fit();
                 me.runtime_version_subscriptions.shrink_to_fit();
                 me.transactions_subscriptions.shrink_to_fit();
+                me.statement_subscriptions.shrink_to_fit();
                 me.legacy_api_stale_storage_subscriptions.shrink_to_fit();
                 me.multistage_requests_to_advance.shrink_to_fit();
                 me.block_headers_pending.shrink_to_fit();
                 me.block_runtimes_pending.shrink_to_fit();
+            }
+
+            WakeUpReason::MustSubscribeNetworkEvents => {
+                debug_assert!(me.network_events_rx.is_none());
+                me.network_events_rx = Some(me.network_service.subscribe().await);
+            }
+
+            WakeUpReason::NetworkStatementsReceived(statements) => {
+                if me.statement_subscriptions.is_empty() {
+                    continue;
+                }
+
+                // TODO: not efficient on a big number of subscriptions
+                for (sub_id, topic_filter) in &me.statement_subscriptions {
+                    let matching: Vec<methods::HexString> = statements
+                        .iter()
+                        .filter(|s| topic_filter.matches(&s.topics))
+                        .map(|s| {
+                            methods::HexString(
+                                codec::encode_statement(s)
+                                    .expect("re-encoding a decoded statement always succeeds; qed"),
+                            )
+                        })
+                        .collect();
+
+                    if matching.is_empty() {
+                        continue;
+                    }
+
+                    let notification = methods::ServerToClient::statement_statement {
+                        subscription: Cow::Borrowed(sub_id),
+                        result: methods::StatementEvent::NewStatements {
+                            statements: matching,
+                            remaining: None,
+                        },
+                    }
+                    .to_json_request_object_parameters(None);
+                    if me.responses_tx.send(notification).await.is_err() {
+                        log!(
+                            &me.platform,
+                            Debug,
+                            &me.log_target,
+                            "Failed to send statement notification: response channel closed"
+                        );
+                    }
+                }
             }
 
             WakeUpReason::IncomingJsonRpcRequest(request_json) => {
@@ -840,7 +916,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::transactionWatch_v1_unwatch { .. }
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
                     | methods::MethodCall::sudo_network_unstable_unwatch { .. }
-                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
+                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
+                    | methods::MethodCall::statement_submit { .. }
+                    | methods::MethodCall::statement_subscribeStatement { .. }
+                    | methods::MethodCall::statement_unsubscribeStatement { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -2746,6 +2825,70 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::Response::transactionWatch_v1_unwatch(())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::statement_submit { encoded } => {
+                        let result =
+                            if smoldot::network::codec::decode_statement(&encoded.0).is_err() {
+                                methods::StatementSubmitResult::Invalid {
+                                    reason: "Invalid statement encoding".into(),
+                                }
+                            } else {
+                                let broadcasted = me
+                                    .network_service
+                                    .clone()
+                                    .broadcast_statement(encoded.0)
+                                    .await;
+                                if broadcasted.is_known {
+                                    methods::StatementSubmitResult::Known
+                                } else if broadcasted.total == 0 {
+                                    methods::StatementSubmitResult::InternalError {
+                                        error: "No connected peers".into(),
+                                    }
+                                } else {
+                                    methods::StatementSubmitResult::New
+                                }
+                            };
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_submit(result)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::statement_subscribeStatement { filter } => {
+                        let subscription_id: String = {
+                            let mut id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut id);
+                            hex::encode(id)
+                        };
+
+                        me.statement_subscriptions
+                            .insert(subscription_id.clone(), filter);
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_subscribeStatement(Cow::Owned(
+                                    subscription_id,
+                                ))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::statement_unsubscribeStatement { subscription } => {
+                        let existed = me.statement_subscriptions.remove(&subscription).is_some();
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_unsubscribeStatement(existed)
                                     .to_json_response(request_id_json),
                             )
                             .await;
