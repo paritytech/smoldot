@@ -741,6 +741,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }
 
             WakeUpReason::MustSubscribeNetworkEvents => {
+                debug_assert!(me.network_events_rx.is_none());
                 me.network_events_rx = Some(me.network_service.subscribe().await);
             }
 
