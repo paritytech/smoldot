@@ -85,7 +85,6 @@ use core::{
     fmt,
     hash::Hash,
     iter,
-    num::NonZeroUsize,
     ops::{self, Add, Sub},
     time::Duration,
 };
@@ -161,34 +160,8 @@ pub struct ChainConfig<TChain> {
     /// on the behavior of any function.
     pub role: Role,
 
-    /// If `Some`, the chain uses the Statement Store networking protocol.
-    pub statement_protocol_config: Option<StatementProtocolConfig>,
-}
-
-/// Configuration for the Statement Store protocol.
-#[derive(Debug, Clone)]
-pub struct StatementProtocolConfig {
-    max_seen_statements: NonZeroUsize,
-}
-
-impl StatementProtocolConfig {
-    pub fn new(max_seen_statements: NonZeroUsize) -> Self {
-        StatementProtocolConfig {
-            max_seen_statements,
-        }
-    }
-
-    pub fn max_seen_statements(&self) -> NonZeroUsize {
-        self.max_seen_statements
-    }
-}
-
-impl Default for StatementProtocolConfig {
-    fn default() -> Self {
-        StatementProtocolConfig {
-            max_seen_statements: NonZeroUsize::new(65536).expect("65536 is not zero; qed"),
-        }
-    }
+    /// If `true`, the chain uses the Statement Store networking protocol.
+    pub enable_statement_protocol: bool,
 }
 
 /// Identifier of a chain added through [`ChainNetwork::add_chain`].
@@ -291,8 +264,8 @@ struct Chain<TChain> {
     /// See [`ChainConfig::allow_inbound_block_requests`].
     allow_inbound_block_requests: bool,
 
-    /// See [`ChainConfig::statement_protocol_config`].
-    statement_protocol_config: Option<StatementProtocolConfig>,
+    /// See [`ChainConfig::enable_statement_protocol`].
+    enable_statement_protocol: bool,
 
     /// See [`ChainConfig::user_data`].
     user_data: TChain,
@@ -466,7 +439,7 @@ where
             best_number: config.best_number,
             allow_inbound_block_requests: config.allow_inbound_block_requests,
             grandpa_protocol_config: config.grandpa_protocol_config,
-            statement_protocol_config: config.statement_protocol_config,
+            enable_statement_protocol: config.enable_statement_protocol,
             user_data: config.user_data,
         });
 
@@ -1457,7 +1430,7 @@ where
                         }
                         Protocol::Notifications(NotificationsProtocol::Statement {
                             chain_index,
-                        }) if self.chains[chain_index].statement_protocol_config.is_none() => {
+                        }) if !self.chains[chain_index].enable_statement_protocol => {
                             self.inner.reject_inbound(substream_id);
                             continue;
                         }
@@ -1816,8 +1789,7 @@ where
                                         )
                                         .chain(
                                             self.chains[chain_index]
-                                                .statement_protocol_config
-                                                .is_some()
+                                                .enable_statement_protocol
                                                 .then(|| NotificationsProtocol::Statement {
                                                     chain_index,
                                                 }),
@@ -3354,8 +3326,7 @@ where
                     )
                     .chain(
                         chain
-                            .statement_protocol_config
-                            .is_some()
+                            .enable_statement_protocol
                             .then_some(codec::ProtocolName::Statement {
                                 genesis_hash: chain.genesis_hash,
                                 fork_id: chain.fork_id.as_deref(),

@@ -408,7 +408,7 @@ impl NetworkService {
                         max_in_peers: chain.max_in_peers,
                         max_slots: chain.max_slots,
                     },
-                    statement_protocol_config: None,
+                    enable_statement_protocol: false,
                 })
                 .unwrap(); // TODO: don't unwrap?
 

@@ -54,7 +54,7 @@ use alloc::{
     sync::Arc,
     vec::{self, Vec},
 };
-use core::{cmp, mem, num::NonZero, pin::Pin, time::Duration};
+use core::{cmp, mem, num::NonZero, num::NonZeroUsize, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{StreamExt as _, future, stream};
@@ -73,9 +73,33 @@ use smoldot::{
 };
 
 pub use codec::{CallProofRequestConfig, Role};
-pub use service::{
-    ChainId, EncodedMerkleProof, PeerId, QueueNotificationError, StatementProtocolConfig,
-};
+pub use service::{ChainId, EncodedMerkleProof, PeerId, QueueNotificationError};
+
+/// Configuration for the Statement Store protocol.
+#[derive(Debug, Clone)]
+pub struct StatementProtocolConfig {
+    max_seen_statements: NonZeroUsize,
+}
+
+impl StatementProtocolConfig {
+    pub fn new(max_seen_statements: NonZeroUsize) -> Self {
+        StatementProtocolConfig {
+            max_seen_statements,
+        }
+    }
+
+    pub fn max_seen_statements(&self) -> NonZeroUsize {
+        self.max_seen_statements
+    }
+}
+
+impl Default for StatementProtocolConfig {
+    fn default() -> Self {
+        StatementProtocolConfig {
+            max_seen_statements: NonZeroUsize::new(65536).expect("65536 is not zero; qed"),
+        }
+    }
+}
 
 mod tasks;
 
@@ -138,7 +162,7 @@ pub struct ConfigChain {
     pub grandpa_protocol_finalized_block_height: Option<u64>,
 
     /// If `Some`, enables the statement store protocol.
-    pub statement_protocol_config: Option<service::StatementProtocolConfig>,
+    pub statement_protocol_config: Option<StatementProtocolConfig>,
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
@@ -232,12 +256,16 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
         // TODO: this code is hacky because we don't want to make `add_chain` async at the moment, because it's not convenient for lib.rs
         self.platform.spawn_task("add-chain-message-send".into(), {
-            let seen_statements = config.statement_protocol_config.as_ref().map(|spc| {
-                lru::LruCache::with_hasher(
-                    spc.max_seen_statements(),
-                    fnv::FnvBuildHasher::default(),
-                )
-            });
+            let seen_statements =
+                config
+                    .statement_protocol_config
+                    .as_ref()
+                    .map(|spc: &StatementProtocolConfig| {
+                        lru::LruCache::with_hasher(
+                            spc.max_seen_statements(),
+                            fnv::FnvBuildHasher::default(),
+                        )
+                    });
             let config = service::ChainConfig {
                 grandpa_protocol_config: config.grandpa_protocol_finalized_block_height.map(
                     |commit_finalized_height| service::GrandpaState {
@@ -246,7 +274,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                         set_id: 0,
                     },
                 ),
-                statement_protocol_config: config.statement_protocol_config,
+                enable_statement_protocol: config.statement_protocol_config.is_some(),
                 fork_id: config.fork_id.clone(),
                 block_number_bytes: config.block_number_bytes,
                 best_hash: config.best_block.1,
