@@ -2630,7 +2630,6 @@ where
                             self.notifications_protocol_handshake(substream_protocol),
                             self.notifications_protocol_max_notification_size(substream_protocol),
                         );
-
                         continue;
                     }
 
