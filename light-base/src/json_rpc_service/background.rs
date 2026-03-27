@@ -2851,22 +2851,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 }
                             };
 
-                        if me
+                        let _ =  me
                             .responses_tx
                             .send(
                                 methods::Response::statement_submit(result)
                                     .to_json_response(request_id_json),
                             )
-                            .await
-                            .is_err()
-                        {
-                            log!(
-                                &me.platform,
-                                Debug,
-                                &me.log_target,
-                                "Failed to send response for statement_submit: response channel closed"
-                            );
-                        }
+                            .await;
                     }
 
                     methods::MethodCall::statement_subscribeStatement { filter } => {
