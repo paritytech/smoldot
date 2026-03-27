@@ -750,6 +750,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     continue;
                 }
 
+                // TODO: not efficient on a big number of subscriptions
                 for (sub_id, topic_filter) in &me.statement_subscriptions {
                     let matching: Vec<methods::HexString> = statements
                         .iter()
@@ -2852,7 +2853,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 }
                             };
 
-                        let _ =  me
+                        let _ = me
                             .responses_tx
                             .send(
                                 methods::Response::statement_submit(result)
