@@ -150,7 +150,7 @@ impl BitswapService {
     /// Request a Bitswap block.
     pub async fn bitswap_get(&self, cid: String) -> Result<Vec<u8>, BitswapGetError> {
         // Decoding CID is fast, so we can fail early on the API user side.
-        let cid = Cid::from_str(&cid).map_err(BitswapGetError::CidParsingError)?;
+        let cid = Cid::from_str(&cid).map_err(BitswapGetError::InvalidCid)?;
 
         let (result_tx, result_rx) = oneshot::channel();
 
@@ -168,7 +168,7 @@ impl BitswapService {
 pub enum BitswapGetError {
     /// Invalid/unsupported CID.
     #[display("Invalid CID: {_0}")]
-    CidParsingError(cid::ParseError),
+    InvalidCid(cid::ParseError),
     /// No Bitswap peers connected, can't issue "have" request.
     #[display("No Bitswap peers connected, can't issue \"have\" request.")]
     NoPeers,
@@ -214,7 +214,7 @@ impl BitswapGetError {
         // provided for debugging purposes only, any changes to the variant names should be avoided
         // to not surprize anybody.
         let (variant, category) = match self {
-            BitswapGetError::CidParsingError(_) => ("CidParsingError", None),
+            BitswapGetError::InvalidCid(_) => ("InvalidCid", None),
             BitswapGetError::NotFound => ("NotFound", Some(BitswapJsonRpcError::Fail)),
             BitswapGetError::BlockRequestFailed => {
                 ("BlockRequestFailed", Some(BitswapJsonRpcError::FailRetry))
