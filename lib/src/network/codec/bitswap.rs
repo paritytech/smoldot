@@ -81,8 +81,10 @@ impl BlockPresenceType {
 pub struct WantlistEntry<'a> {
     /// The CID (Content Identifier) of the wanted block.
     pub cid: &'a [u8],
-    /// Priority of the request (higher = more important).
-    pub priority: i32,
+    /// Priority of the request. Defaults to `1` according to the spec.
+    // TODO: the original protobuf spec uses signed integers, so we will need to correctly decode
+    //       them if we ever implement Bitswap server in smoldot.
+    pub priority: u32,
     /// If true, this cancels a previous request for this CID.
     pub cancel: bool,
     /// Type of want request (Block or Have).
@@ -130,7 +132,7 @@ pub struct BitswapMessageRef<'a> {
     /// Block presence information.
     pub block_presences: Vec<BlockPresence<'a>>,
     /// Number of bytes of data pending to be sent.
-    pub pending_bytes: i32,
+    pub pending_bytes: u32,
 }
 
 /// Builds a Bitswap message requesting blocks.
@@ -150,8 +152,8 @@ pub fn build_bitswap_message(
 
     // Build wantlist entries
     let mut entries_encoded = Vec::new();
-    for (priority, cid) in cids.iter().enumerate() {
-        let entry = build_wantlist_entry(cid.as_ref(), priority as i32, want_type, send_dont_have);
+    for cid in cids {
+        let entry = build_wantlist_entry(cid.as_ref(), 1, want_type, send_dont_have);
         // Encode as repeated message field (tag 1, wire type 2)
         for slice in protobuf::message_tag_encode(1, core::iter::once(entry.as_slice())) {
             entries_encoded.extend_from_slice(slice.as_ref());
@@ -177,7 +179,7 @@ pub fn build_bitswap_message(
 /// Builds a single wantlist entry as a byte vector.
 fn build_wantlist_entry(
     cid: &[u8],
-    priority: i32,
+    priority: u32,
     want_type: WantType,
     send_dont_have: bool,
 ) -> Vec<u8> {
@@ -189,7 +191,7 @@ fn build_wantlist_entry(
     }
 
     // Field 2: priority (int32)
-    for slice in protobuf::uint32_tag_encode(2, priority as u32) {
+    for slice in protobuf::uint32_tag_encode(2, priority) {
         entry.extend_from_slice(slice.as_ref());
     }
 
@@ -303,7 +305,7 @@ pub fn decode_bitswap_message(
             .map(|e| {
                 Ok(WantlistEntry {
                     cid: e.block.ok_or(DecodeBitswapMessageError::MissingCid)?,
-                    priority: e.priority.unwrap_or(1) as i32,
+                    priority: e.priority.unwrap_or(1),
                     cancel: e.cancel.unwrap_or(false),
                     want_type: WantType::from_u64(e.want_type.unwrap_or(0))
                         .ok_or(DecodeBitswapMessageError::InvalidWantType)?,
@@ -332,20 +334,24 @@ pub fn decode_bitswap_message(
     let block_presences = parsed
         .block_presences
         .into_iter()
-        .filter_map(|bp| {
-            Some(BlockPresence {
-                cid: bp.cid?,
-                presence_type: BlockPresenceType::from_u64(bp.presence_type.unwrap_or(0))?,
+        .map(|bp| {
+            Ok(BlockPresence {
+                cid: bp.cid.ok_or(DecodeBitswapMessageError::MissingCid)?,
+                presence_type: BlockPresenceType::from_u64(
+                    bp.presence_type
+                        .ok_or(DecodeBitswapMessageError::MissingPresenceType)?,
+                )
+                .ok_or(DecodeBitswapMessageError::InvalidPresenceType)?,
             })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(BitswapMessageRef {
         wantlist,
         blocks_legacy: parsed.blocks_legacy,
         payload,
         block_presences,
-        pending_bytes: parsed.pending_bytes.unwrap_or(0) as i32,
+        pending_bytes: parsed.pending_bytes.unwrap_or(0),
     })
 }
 
@@ -364,6 +370,9 @@ pub enum DecodeBitswapMessageError {
     /// Invalid block presence type value.
     #[display("Invalid block presence type")]
     InvalidPresenceType,
+    /// Missing block presence type.
+    #[display("Missing block presence type")]
+    MissingPresenceType,
 }
 
 #[cfg(test)]

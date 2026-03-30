@@ -26,7 +26,7 @@
 //!
 //! cidv1 ::= <leb128(cid_version)><leb128(codec)><leb128(mh_type)><leb128(mh_len)><hash_digest>
 //!
-//! Subparts of the CIDv1 binary representation we are interested in are _CID prefix_ & _mulihash_
+//! Subparts of the CIDv1 binary representation we are interested in are _CID prefix_ & _multihash_
 //! correspondingly:
 //!
 //! cid_prefix ::= <leb128(cid_version)><leb128(codec)><leb128(mh_type)><leb128(mh_len)>
@@ -36,8 +36,8 @@
 //!
 //! In Bitswap requests, complete `cidv1` of requested data block is sent, while the Bitswap
 //! responses only include the `cid_prefix`. This means we should manually compute the hash digest
-//! identified by `mh_type` in order to recover the complete CID and match the recived data block to
-//! the request (request and response messages are sent asynchronously in Bitswap through
+//! identified by `mh_type` in order to recover the complete CID and match the received data block
+//! to the request (request and response messages are sent asynchronously in Bitswap through
 //! independent substreams).
 
 use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
@@ -138,7 +138,7 @@ impl CidPrefix {
         Cid(bytes)
     }
 
-    /// Build full CID from thhi prefix, calculating the missing digest.
+    /// Build full CID from this prefix, calculating the missing digest.
     pub fn with_digest_of(self, bytes: &[u8]) -> Cid {
         let digest = self.multihash_type().digest(bytes);
 
@@ -158,6 +158,14 @@ pub enum MultihashType {
 }
 
 impl MultihashType {
+    pub fn from_code(code: u64) -> Option<Self> {
+        match code {
+            0x12 => Some(MultihashType::Sha2_256),
+            0xb220 => Some(MultihashType::Blake2b256),
+            _ => None,
+        }
+    }
+
     pub fn digest(&self, bytes: &[u8]) -> [u8; 32] {
         match self {
             MultihashType::Sha2_256 => Sha256::digest(bytes).into(),
@@ -169,12 +177,9 @@ impl MultihashType {
         }
     }
 
-    fn from_code(code: u64) -> Option<Self> {
-        match code {
-            0x12 => Some(MultihashType::Sha2_256),
-            0xb220 => Some(MultihashType::Blake2b256),
-            _ => None,
-        }
+    pub fn digest_size(&self) -> usize {
+        // Both sha2-256 & blake2b-256 has 32-byte hash digests.
+        32
     }
 }
 
@@ -289,7 +294,7 @@ fn decode_cid_prefix(bytes: &[u8]) -> Result<DecodedCidPrefix, ParseError> {
             let mh_type =
                 MultihashType::from_code(mh_type).ok_or(ParseError::UnsupportedMultihash)?;
 
-            if mh_len != 32 {
+            if mh_len != mh_type.digest_size() {
                 return Err(ParseError::InvalidDigestSize(mh_len));
             }
 
@@ -466,4 +471,6 @@ mod tests {
         assert_eq!(prefix.multihash_type(), MultihashType::Blake2b256);
         assert_eq!(prefix.0, vec![0x01, 0x55, 0xa0, 0xe4, 0x02, 0x20]);
     }
+
+    // TODO: test `from_str`.
 }
