@@ -212,7 +212,7 @@ impl BitswapGetError {
 
         // Even though the spec says the error variants like `NoPeers` etc. are not stable and
         // provided for debugging purposes only, any changes to the variant names should be avoided
-        // to not surprize anybody.
+        // to not surprise anybody.
         let (variant, category) = match self {
             BitswapGetError::InvalidCid(_) => ("InvalidCid", None),
             BitswapGetError::NotFound => ("NotFound", Some(BitswapJsonRpcError::Fail)),
@@ -294,6 +294,8 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Events coming from the network service. `None` if not subscribed yet.
     from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::BitswapEvent>>>>,
     /// Initiated Bitswap "have" broadcast.
+    // TODO: consider handling more than one have broadcast at a time to not backpressure the RPC
+    // layer.
     pending_have_broadcast:
         Option<Pin<Box<dyn Future<Output = HaveBroadcastResult> + Send + Sync>>>,
     /// Initiated Bitswap "block" requests.
@@ -331,7 +333,7 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
 }
 
 fn bitswap_have_message(cid: &Cid) -> Vec<u8> {
-    build_bitswap_message(iter::once(cid), WantType::Have, false, true)
+    build_bitswap_message(iter::once(cid), WantType::Have, true, true)
 }
 
 fn bitswap_block_message(cid: &Cid) -> Vec<u8> {
