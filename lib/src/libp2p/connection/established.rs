@@ -199,7 +199,8 @@ pub enum Event<TSubUd> {
     /// An outgoing ping has failed. This event is generated automatically over time.
     PingOutFailed,
 
-    /// Remote has accepted or refused a substream opened with [`Substream::bitswap_out`].
+    /// Remote has accepted or refused a substream opened with either
+    /// [`SingleStream::open_bitswap_substream`] or [`MultiStream::open_bitswap_substream`].
     ///
     /// If `Ok`, it is now possible to send Bitswap messages on this substream.
     BitswapOutOpenResult {
