@@ -343,7 +343,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     ///
     /// The `Receiver` never yields `None` unless the [`NetworkService`] crashes or is destroyed.
     /// If `None` is yielded and the [`NetworkService`] is still alive, you should call
-    /// [`NetworkServiceChain::subscribe`] again to obtain a new `Receiver`.
+    /// [`NetworkServiceChain::subscribe_bitswap`] again to obtain a new `Receiver`.
     ///
     // TODO: the last section of the doc seem to contradict itself.
     pub async fn subscribe_bitswap(&self) -> async_channel::Receiver<BitswapEvent> {
@@ -580,6 +580,8 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     ///
     /// Returns the peers message was broadcast to or an error if the message cannot be sent
     /// to at least one peer.
+    // TODO: better use a dedicated error type instead of reusing a lower-level
+    // `SendBitswapMessageErorr`.
     pub async fn broadcast_bitswap_message(
         &self,
         message: Vec<u8>,
@@ -1050,7 +1052,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             let service_event = async {
                 if let Some(event) = (task.event_pending_send.is_none()
                     && task.bitswap_event_pending_send.is_none()
-                    && task.pending_new_subscriptions.is_empty())
+                    && task.pending_new_subscriptions.is_empty()
+                    && task.pending_new_bitswap_subscriptions.is_empty())
                 .then(|| task.network.next_event())
                 .flatten()
                 {
@@ -1824,6 +1827,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     // back-pressure in higher level code.
                     Err(SendBitswapMessageError::QueueFull)
                 } else {
+                    // This is only emitted if all peers fail with `NoConnection` or there is no
+                    // peers at all.
                     Err(SendBitswapMessageError::NoConnection)
                 };
 
