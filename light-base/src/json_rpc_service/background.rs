@@ -224,6 +224,8 @@ struct Background<TPlat: PlatformRef> {
     statement_subscriptions:
         hashbrown::HashMap<String, smoldot::json_rpc::methods::TopicFilter, fnv::FnvBuildHasher>,
 
+    v2_statement_peers: hashbrown::HashSet<network_service::PeerId, fnv::FnvBuildHasher>,
+
     /// Receiver for network events (statements from peers).
     network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
 }
@@ -573,6 +575,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             16,
             Default::default(),
         ),
+        v2_statement_peers: hashbrown::HashSet::with_capacity_and_hasher(16, Default::default()),
         network_events_rx: None,
         platform: config.platform,
     };
@@ -608,6 +611,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
             NetworkStatementsReceived(Vec<codec::Statement>),
+            StatementPeerConnected {
+                peer_id: network_service::PeerId,
+                version: network_service::StatementProtocolVersion,
+            },
+            StatementPeerDisconnected {
+                peer_id: network_service::PeerId,
+            },
             MustSubscribeNetworkEvents,
         }
 
@@ -709,9 +719,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         me.network_events_rx = None;
                         return WakeUpReason::MustSubscribeNetworkEvents;
                     };
-                    if let network_service::Event::StatementsNotification { statements, .. } = event
-                    {
-                        return WakeUpReason::NetworkStatementsReceived(statements);
+                    match event {
+                        network_service::Event::StatementsNotification { statements, .. } => {
+                            return WakeUpReason::NetworkStatementsReceived(statements);
+                        }
+                        network_service::Event::StatementProtocolConnected { peer_id, version } => {
+                            return WakeUpReason::StatementPeerConnected { peer_id, version };
+                        }
+                        network_service::Event::Disconnected { peer_id } => {
+                            return WakeUpReason::StatementPeerDisconnected { peer_id };
+                        }
+                        _ => {}
                     }
                 }
             })
@@ -743,6 +761,24 @@ pub(super) async fn run<TPlat: PlatformRef>(
             WakeUpReason::MustSubscribeNetworkEvents => {
                 debug_assert!(me.network_events_rx.is_none());
                 me.network_events_rx = Some(me.network_service.subscribe().await);
+            }
+
+            WakeUpReason::StatementPeerConnected { peer_id, version } => {
+                if matches!(version, network_service::StatementProtocolVersion::V2) {
+                    me.v2_statement_peers.insert(peer_id.clone());
+                    if !me.statement_subscriptions.is_empty() {
+                        let combined_filter =
+                            build_combined_affinity_filter(&me.statement_subscriptions);
+                        let _ = me
+                            .network_service
+                            .send_topic_affinity(&peer_id, combined_filter)
+                            .await;
+                    }
+                }
+            }
+
+            WakeUpReason::StatementPeerDisconnected { peer_id } => {
+                me.v2_statement_peers.remove(&peer_id);
             }
 
             WakeUpReason::NetworkStatementsReceived(statements) => {
@@ -2873,6 +2909,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         me.statement_subscriptions
                             .insert(subscription_id.clone(), filter);
 
+                        if !me.v2_statement_peers.is_empty() {
+                            let combined_filter =
+                                build_combined_affinity_filter(&me.statement_subscriptions);
+                            for peer_id in me.v2_statement_peers.clone() {
+                                let _ = me
+                                    .network_service
+                                    .send_topic_affinity(&peer_id, combined_filter.clone())
+                                    .await;
+                            }
+                        }
+
                         let _ = me
                             .responses_tx
                             .send(
@@ -2886,6 +2933,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                     methods::MethodCall::statement_unsubscribeStatement { subscription } => {
                         let existed = me.statement_subscriptions.remove(&subscription).is_some();
+
+                        if existed && !me.v2_statement_peers.is_empty() {
+                            let combined_filter =
+                                build_combined_affinity_filter(&me.statement_subscriptions);
+                            for peer_id in me.v2_statement_peers.clone() {
+                                let _ = me
+                                    .network_service
+                                    .send_topic_affinity(&peer_id, combined_filter.clone())
+                                    .await;
+                            }
+                        }
+
                         let _ = me
                             .responses_tx
                             .send(
@@ -6017,4 +6076,40 @@ fn convert_runtime_version(
             .map(|api| (methods::HexString(api.name_hash.to_vec()), api.version))
             .collect(),
     }
+}
+
+const AFFINITY_SEED: u128 = 0x5EED_5EED_5EED_5EED;
+
+fn build_combined_affinity_filter(
+    subscriptions: &hashbrown::HashMap<
+        String,
+        smoldot::json_rpc::methods::TopicFilter,
+        fnv::FnvBuildHasher,
+    >,
+) -> network_service::AffinityFilter {
+    use smoldot::json_rpc::methods::TopicFilter;
+
+    if subscriptions.is_empty() {
+        return network_service::AffinityFilter::with_default_fpr(AFFINITY_SEED, 1);
+    }
+
+    let mut all_topics: Vec<&[u8; 32]> = Vec::new();
+
+    for filter in subscriptions.values() {
+        match filter {
+            TopicFilter::Any => {
+                return network_service::AffinityFilter::match_all(AFFINITY_SEED);
+            }
+            TopicFilter::MatchAll(topics) | TopicFilter::MatchAny(topics) => {
+                all_topics.extend(topics.iter());
+            }
+        }
+    }
+
+    let count = all_topics.len().max(1);
+    let mut affinity = network_service::AffinityFilter::with_default_fpr(AFFINITY_SEED, count);
+    for topic in all_topics {
+        affinity.insert(topic);
+    }
+    affinity
 }

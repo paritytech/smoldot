@@ -72,8 +72,10 @@ use smoldot::{
     network::{basic_peering_strategy, codec, service},
 };
 
-pub use codec::{CallProofRequestConfig, Role};
-pub use service::{ChainId, EncodedMerkleProof, PeerId, QueueNotificationError};
+pub use codec::{AffinityFilter, CallProofRequestConfig, Role, StatementProtocolVersion};
+pub use service::{
+    ChainId, EncodedMerkleProof, PeerId, QueueNotificationError, SendTopicAffinityError,
+};
 
 /// Configuration for the Statement Store protocol.
 #[derive(Debug, Clone)]
@@ -610,6 +612,25 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
+    pub async fn send_topic_affinity(
+        &self,
+        target: &PeerId,
+        filter: AffinityFilter,
+    ) -> Result<(), SendTopicAffinityError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackgroundChain::SendTopicAffinity {
+                target: target.clone(),
+                filter,
+                result: tx,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
     /// Marks the given peers as belonging to the given chain, and adds some addresses to these
     /// peers to the address book.
     ///
@@ -706,6 +727,10 @@ pub enum Event {
     StatementsNotification {
         peer_id: PeerId,
         statements: Vec<codec::Statement>,
+    },
+    StatementProtocolConnected {
+        peer_id: PeerId,
+        version: StatementProtocolVersion,
     },
 }
 
@@ -869,6 +894,11 @@ enum ToBackgroundChain {
     BroadcastStatement {
         statement: Vec<u8>,
         result: oneshot::Sender<BroadcastStatementResult>,
+    },
+    SendTopicAffinity {
+        target: PeerId,
+        filter: AffinityFilter,
+        result: oneshot::Sender<Result<(), SendTopicAffinityError>>,
     },
     Discover {
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
@@ -1850,6 +1880,19 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::MessageForChain(
                 chain_id,
+                ToBackgroundChain::SendTopicAffinity {
+                    target,
+                    filter,
+                    result,
+                },
+            ) => {
+                let r = task
+                    .network
+                    .send_topic_affinity(&target, chain_id, &filter);
+                let _ = result.send(r);
+            }
+            WakeUpReason::MessageForChain(
+                chain_id,
                 ToBackgroundChain::Discover {
                     list,
                     important_nodes,
@@ -2779,6 +2822,18 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     },
                 ));
             }
+            WakeUpReason::NetworkEvent(service::Event::StatementProtocolConnected {
+                peer_id,
+                chain_id,
+                version,
+            }) => {
+                debug_assert!(task.event_pending_send.is_none());
+                task.event_pending_send = Some((
+                    chain_id,
+                    Event::StatementProtocolConnected { peer_id, version },
+                ));
+            }
+            WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived { .. }) => {}
             WakeUpReason::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 // TODO: handle properly?
                 log!(

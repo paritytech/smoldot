@@ -2272,6 +2272,22 @@ async fn background_task(mut inner: Inner) {
                     ),
                 );
             }
+
+            WakeUpReason::NetworkEvent(service::Event::StatementProtocolConnected {
+                peer_id,
+                chain_id,
+                version,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "statement-protocol-connected; peer_id={}; chain={}; version={:?}",
+                        peer_id, inner.network[chain_id].log_name, version
+                    ),
+                );
+            }
+
+            WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived { .. }) => {}
         }
     }
 }

@@ -45,6 +45,14 @@ const PROOF_ED25519: u8 = 1;
 const PROOF_SECP256K1_ECDSA: u8 = 2;
 const PROOF_ON_CHAIN: u8 = 3;
 
+pub use super::affinity::AffinityFilter;
+
+#[derive(Debug, Clone)]
+pub enum StatementMessage<'a> {
+    Statements(Vec<&'a [u8]>),
+    ExplicitTopicAffinity(AffinityFilter),
+}
+
 /// Statement topic (32 bytes).
 pub type Topic = [u8; 32];
 
@@ -195,6 +203,102 @@ pub enum EncodeStatementError {
         /// Maximum allowed topics.
         max: usize,
     },
+}
+
+const V2_TAG_STATEMENTS: u8 = 0x00;
+const V2_TAG_AFFINITY: u8 = 0x01;
+
+pub fn decode_statement_message(bytes: &[u8]) -> Result<StatementMessage<'_>, DecodeStatementMessageError> {
+    if bytes.is_empty() {
+        return Err(DecodeStatementMessageError::Empty);
+    }
+
+    match bytes[0] {
+        V2_TAG_STATEMENTS => {
+            let stmts = extract_statement_bytes(&bytes[1..])?;
+            Ok(StatementMessage::Statements(stmts))
+        }
+        V2_TAG_AFFINITY => {
+            let filter = AffinityFilter::decode(&bytes[1..])
+                .map_err(|_| DecodeStatementMessageError::InvalidBloomFilter)?;
+            Ok(StatementMessage::ExplicitTopicAffinity(filter))
+        }
+        other => Err(DecodeStatementMessageError::UnknownVariant(other)),
+    }
+}
+
+pub fn encode_statements_message(statements: &[&[u8]]) -> Vec<u8> {
+    let total_len: usize = statements.iter().map(|s| s.len()).sum();
+    let mut out = Vec::with_capacity(1 + 5 + total_len);
+    out.push(V2_TAG_STATEMENTS);
+    out.extend_from_slice(
+        crate::util::encode_scale_compact_usize(statements.len()).as_ref(),
+    );
+    for stmt in statements {
+        out.extend_from_slice(
+            crate::util::encode_scale_compact_usize(stmt.len()).as_ref(),
+        );
+        out.extend_from_slice(stmt);
+    }
+    out
+}
+
+pub fn encode_topic_affinity_message(filter: &AffinityFilter) -> Vec<u8> {
+    let encoded = filter.encode_to_vec();
+    let mut out = Vec::with_capacity(1 + encoded.len());
+    out.push(V2_TAG_AFFINITY);
+    out.extend_from_slice(&encoded);
+    out
+}
+
+fn extract_statement_bytes(data: &[u8]) -> Result<Vec<&[u8]>, DecodeStatementMessageError> {
+    let (mut remaining, count) =
+        crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(data)
+            .map_err(|_| DecodeStatementMessageError::InvalidStatements(
+                DecodeStatementNotificationError(nom::error::ErrorKind::Fail),
+            ))?;
+
+    if count > MAX_STATEMENTS_PER_NOTIFICATION {
+        return Err(DecodeStatementMessageError::InvalidStatements(
+            DecodeStatementNotificationError(nom::error::ErrorKind::TooLarge),
+        ));
+    }
+
+    let mut statements = Vec::with_capacity(count);
+    for _ in 0..count {
+        let (rest, len) =
+            crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(remaining)
+                .map_err(|_| DecodeStatementMessageError::InvalidStatements(
+                    DecodeStatementNotificationError(nom::error::ErrorKind::Fail),
+                ))?;
+        if rest.len() < len {
+            return Err(DecodeStatementMessageError::InvalidStatements(
+                DecodeStatementNotificationError(nom::error::ErrorKind::Eof),
+            ));
+        }
+        statements.push(&rest[..len]);
+        remaining = &rest[len..];
+    }
+
+    if !remaining.is_empty() {
+        return Err(DecodeStatementMessageError::InvalidStatements(
+            DecodeStatementNotificationError(nom::error::ErrorKind::NonEmpty),
+        ));
+    }
+
+    Ok(statements)
+}
+
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+pub enum DecodeStatementMessageError {
+    #[display("Empty V2 statement message")]
+    Empty,
+    #[display("Unknown V2 statement message variant: {_0}")]
+    UnknownVariant(#[error(not(source))] u8),
+    #[display("Invalid bloom filter in affinity message")]
+    InvalidBloomFilter,
+    #[display("Invalid statements in V2 message: {_0}")]
+    InvalidStatements(DecodeStatementNotificationError),
 }
 
 /// Encodes a single statement.
@@ -613,5 +717,64 @@ mod tests {
         assert_eq!(decoded.channel, Some([0xcc; 32]));
 
         assert_eq!(encode_statement(&decoded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn v2_statements_roundtrip() {
+        let statement1 = Statement {
+            proof: None,
+            decryption_key: None,
+            expiry: 100,
+            channel: None,
+            topics: Vec::new(),
+            data: Some(b"test1".to_vec()),
+        };
+        let statement2 = Statement {
+            proof: None,
+            decryption_key: None,
+            expiry: 200,
+            channel: None,
+            topics: Vec::new(),
+            data: Some(b"test2".to_vec()),
+        };
+
+        let encoded1 = encode_statement(&statement1).unwrap();
+        let encoded2 = encode_statement(&statement2).unwrap();
+
+        let statements: Vec<&[u8]> = vec![&encoded1, &encoded2];
+        let v2_encoded = encode_statements_message(&statements);
+
+        let decoded = decode_statement_message(&v2_encoded).unwrap();
+
+        match decoded {
+            StatementMessage::Statements(stmts) => {
+                assert_eq!(stmts.len(), 2);
+                assert_eq!(stmts[0], encoded1.as_slice());
+                assert_eq!(stmts[1], encoded2.as_slice());
+            }
+            _ => panic!("Expected Statements variant"),
+        }
+    }
+
+    #[test]
+    fn v2_affinity_roundtrip() {
+        let topic1 = [0x01u8; 32];
+        let topic2 = [0x02u8; 32];
+        let topic3 = [0x03u8; 32];
+
+        let mut filter = AffinityFilter::new(0x5EED_5EED_5EED_5EED, 0.01, 2);
+        filter.insert(&topic1);
+        filter.insert(&topic2);
+
+        let encoded = encode_topic_affinity_message(&filter);
+        let decoded = decode_statement_message(&encoded).unwrap();
+
+        let StatementMessage::ExplicitTopicAffinity(af) = decoded else {
+            panic!("Expected ExplicitTopicAffinity variant");
+        };
+
+        assert!(af.contains(&topic1));
+        assert!(af.contains(&topic2));
+        assert!(!af.contains(&topic3));
     }
 }
