@@ -750,7 +750,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     continue;
                 }
 
-                // TODO: not efficient on a big number of subscriptions
+                // TODO: O(n_statements * n_subscriptions * n_topics_in_filter * n_topics_in_statement) complexity.
+                // Create a reverse index `topic` -> `subscription` for adequate complexity.
                 for (sub_id, topic_filter) in &me.statement_subscriptions {
                     let matching: Vec<methods::HexString> = statements
                         .iter()
