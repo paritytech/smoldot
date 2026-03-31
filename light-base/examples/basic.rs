@@ -80,6 +80,9 @@ fn main() {
             // client.
             // In this example, this feature isn't used. The chain simply has `()`.
             user_data: (),
+
+            // Statement protocol is not used in this example.
+            statement_protocol_config: None,
         })
         .unwrap();
     // The Polkadot chain is now properly initialized.
@@ -114,6 +117,7 @@ fn main() {
             // only one API user (like is the case here), passing the list of all chains that have
             // previously been created is completely appropriate.
             potential_relay_chains: [polkadot_chain_id].into_iter(),
+            statement_protocol_config: None,
         })
         .unwrap();
     // The Assethub chain is now properly initialized.

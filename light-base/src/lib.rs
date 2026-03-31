@@ -142,6 +142,9 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
 
     /// Configuration for the JSON-RPC endpoint.
     pub json_rpc: AddChainConfigJsonRpc,
+
+    /// If `Some`, enables the statement store networking protocol.
+    pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
 }
 
 /// See [`AddChainConfig::json_rpc`].
@@ -693,6 +696,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         self.platform.client_version()
                     );
 
+                    let statement_protocol_config = config.statement_protocol_config;
+
                     let config = match (&relay_chain, &chain_information) {
                         (Some((relay_chain, para_id, _)), _) => StartServicesChainTy::Parachain {
                             relay_chain,
@@ -717,6 +722,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_spec.fork_id().map(|f| f.to_owned()),
                         config,
                         network_identify_agent_version,
+                        statement_protocol_config,
                     )
                 };
 
@@ -1118,6 +1124,7 @@ fn start_services<TPlat: platform::PlatformRef>(
     fork_id: Option<String>,
     config: StartServicesChainTy<'_, TPlat>,
     network_identify_agent_version: String,
+    statement_protocol_config: Option<network_service::StatementProtocolConfig>,
 ) -> ChainServices<TPlat> {
     let network_service = network_service.get_or_insert_with(|| {
         network_service::NetworkService::new(network_service::Config {
@@ -1161,6 +1168,7 @@ fn start_services<TPlat: platform::PlatformRef>(
         },
         fork_id,
         block_number_bytes,
+        statement_protocol_config,
     });
 
     let (sync_service, runtime_service) = match config {

@@ -456,4 +456,13 @@ export interface AddChainOptions {
      * If this value is not set, it means that there is no maximum.
      */
     jsonRpcMaxSubscriptions?: number
+
+    /**
+     * If set, enables the Statement Store protocol on this chain.
+     *
+     * `maxSeenStatements` is the maximum number of seen statements to cache. Defaults to 65536.
+     */
+    statementStore?: {
+        maxSeenStatements?: number,
+    }
 }
