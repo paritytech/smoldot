@@ -979,6 +979,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             &me.platform,
                             Debug,
                             &me.log_target,
+                            // TODO: only log `cid` if it validates, do not log raw RPC input.
                             format!("Request for Bitswap CID {cid}")
                         );
 
