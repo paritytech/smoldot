@@ -9,6 +9,9 @@ edition.workspace = true
 repository.workspace = true
 include.workspace = true
 
+[lib]
+name = "smoldot_light"
+
 [[example]]
 name = "basic"
 required-features = ["std"]

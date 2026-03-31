@@ -10,6 +10,9 @@ edition.workspace = true
 repository.workspace = true
 include.workspace = true
 
+[lib]
+name = "smoldot"
+
 [features]
 default = ["database-sqlite", "std", "wasmtime"]
 database-sqlite = [
