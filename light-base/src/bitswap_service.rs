@@ -24,12 +24,14 @@
 //! Bitswap "have" request to all the connected Bitswap peers, then issues Bitswap "block" request
 //! to the first peer that answered "yes" to that request.
 //!
-//! Note that we have [`BitswapService`] per chain, even though currently [`NetworkService`]
-//! doesn't track what chain the Bitswap request is destined to, and doesn't track what chain peers
-//! responded to it to forward the response to specific chain's [`BitswapService`]. As a result,
-//! [`BitswapService`] receives the responses intended for all the other Bitswap services as well.
-//! This should be fixed in [`NetworkService`], but it is somewhat mitigated in [`BitswapService`]
-//! by not decoding the incoming Bitswap messages when there are no active requests.
+//! Note that we have [`BitswapService`] per chain, even though currently
+//! [`NetworkService`](crate::network_service::NetworkService) doesn't track what chain the Bitswap
+//! request is destined to, and doesn't track what chain peers responded to it to forward the
+//! response to specific chain's [`BitswapService`]. As a result, [`BitswapService`] receives the
+//! responses intended for all the other Bitswap services as well. This should be fixed in
+//! [`NetworkService`](crate::network_service::NetworkService), but it is somewhat mitigated in
+//! [`BitswapService`] by not decoding the incoming Bitswap messages when there are no active
+//! requests.
 //
 // TODO: backpressure.
 //
