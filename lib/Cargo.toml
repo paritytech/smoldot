@@ -1,14 +1,17 @@
 [package]
-name = "smoldot"
-version = "0.21.0"
+name = "parity-smoldot"
+version = "0.22.0"
 description = "Primitives to build a client for Substrate-based blockchains"
-documentation = "https://docs.rs/smoldot"
+documentation = "https://docs.rs/parity-smoldot"
 keywords = ["blockchain", "peer-to-peer"]
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
 repository.workspace = true
 include.workspace = true
+
+[lib]
+name = "smoldot"
 
 [features]
 default = ["database-sqlite", "std", "wasmtime"]
@@ -38,7 +41,7 @@ wasmtime = [
 arrayvec = { version = "0.7.6", default-features = false }
 async-lock = { version = "3.0.0", default-features = false }
 atomic-take = { version = "1.1.0" }
-base32 = { version = "0.5.1", default-fetures = false }
+base32 = { version = "0.5.1", default-features = false }
 base64 = { version = "0.22.0", default-features = false, features = ["alloc"] }
 bip39 = { version = "2.0.0", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
