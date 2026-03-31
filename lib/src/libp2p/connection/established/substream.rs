@@ -1229,7 +1229,13 @@ where
                             // Never happens when dialing.
                             unreachable!()
                         }
-                        Ok(multistream_select::Negotiation::Success) => true,
+                        Ok(multistream_select::Negotiation::Success) => {
+                            // Bitswap substreams are unidirectional, discard incoming data after
+                            // the negotiation.
+                            read_write.discard_all_incoming();
+
+                            true
+                        }
                         Ok(multistream_select::Negotiation::NotAvailable) => {
                             return (
                                 None,
@@ -1276,7 +1282,14 @@ where
                     // Remote closed the writing side of the stream.
                     (
                         Some(SubstreamInner::BitswapOutClosed),
-                        if nego_just_succeeded || negotiation.is_some() {
+                        if nego_just_succeeded {
+                            // Even though we already know the remote closed the stream,
+                            // report open success so the upper level code knows the remote speaks
+                            // the Bitswap protocol (i.e., negotiation succeeded).
+                            // The event `Event::BitswapOutClose` will be reported on the next
+                            // iteration.
+                            Some(Event::BitswapOutOpenResult { result: Ok(()) })
+                        } else if negotiation.is_some() {
                             Some(Event::BitswapOutOpenResult {
                                 result: Err(BitswapOutOpenErr::SubstreamClosed),
                             })
@@ -1535,7 +1548,7 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if the substream isn't a notifications substream, or if the notifications substream
+    /// Panics if the substream isn't a Bitswap substream, or if the Bitswap substream
     /// isn't in the appropriate state.
     ///
     pub fn close_in_bitswap_substream(&mut self) {
@@ -1779,11 +1792,11 @@ pub enum Event {
 
     /// Remote has accepted or refused a substream opened with [`Substream::bitswap_out`].
     ///
-    /// If `Ok`, it is now possiblr to send Bitswap messages on this substream.
+    /// If `Ok`, it is now possible to send Bitswap messages on this substream.
     BitswapOutOpenResult {
         result: Result<(), BitswapOutOpenErr>,
     },
-    /// Remote has closed a writing side of our outbound Bitswap substream or error occured.
+    /// Remote has closed a writing side of our outbound Bitswap substream or error occurred.
     /// The substream is instantly closed.
     BitswapOutClose {
         /// Bitswap spec doesn't describe a way of gracefully closing the outbound substreams,

@@ -201,14 +201,14 @@ pub enum Event<TSubUd> {
 
     /// Remote has accepted or refused a substream opened with [`Substream::bitswap_out`].
     ///
-    /// If `Ok`, it is now possiblr to send Bitswap messages on this substream.
+    /// If `Ok`, it is now possible to send Bitswap messages on this substream.
     BitswapOutOpenResult {
         /// Identifier of the substream.
         id: SubstreamId,
         /// If `Ok`, the substream was successfully opened.
         result: Result<(), (BitswapOutOpenErr, TSubUd)>,
     },
-    /// Remote has closed a writing side of our outbound Bitswap substream or error occured.
+    /// Remote has closed a writing side of our outbound Bitswap substream or error occurred.
     /// The substream is instantly closed.
     BitswapOutClose {
         /// Identifier of the substream.

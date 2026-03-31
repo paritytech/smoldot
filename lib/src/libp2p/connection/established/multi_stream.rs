@@ -676,10 +676,10 @@ where
             _ => panic!(),
         };
 
-        let inner_susbtream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
 
         self.in_substreams
-            .get_mut(inner_susbtream_id)
+            .get_mut(inner_substream_id)
             .unwrap()
             .inner
             .as_mut()

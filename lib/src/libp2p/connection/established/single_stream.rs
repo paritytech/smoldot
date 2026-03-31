@@ -560,7 +560,7 @@ where
     /// does not support the Bitswap protocol.
     ///
     /// This method only inserts the multistream-select negotioation into the connection object.
-    /// The negotiation will later be carried out through [`MultiStream::substream_read_write`].
+    /// The negotiation will later be carried out through [`SingleStream::substream_read_write`].
     ///
     /// Assuming that the remote is using the same implementation, an [`Event::BitswapInOpen`]
     /// will be generated on its side.
