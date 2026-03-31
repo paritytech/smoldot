@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix execution proofs with inputs bigger than 1MiB failing due to protocol limits. Smoldot now uses storage-on-demand for large inputs. ([#2196](https://github.com/smol-dot/smoldot/pull/2196))
+
 ## 2.0.40 - 2025-12-02
 
 ### Added

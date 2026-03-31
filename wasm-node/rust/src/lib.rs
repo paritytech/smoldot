@@ -57,6 +57,7 @@ fn add_chain(
     json_rpc_max_pending_requests: u32,
     json_rpc_max_subscriptions: u32,
     potential_relay_chains: Box<[u8]>,
+    statement_store_max_seen_statements: u32,
 ) -> u32 {
     let mut client_lock = CLIENT.try_lock().unwrap();
 
@@ -135,6 +136,10 @@ fn add_chain(
                         smoldot_light::AddChainConfigJsonRpc::Disabled
                     },
                     potential_relay_chains: potential_relay_chains.into_iter(),
+                    statement_protocol_config: NonZero::<usize>::new(
+                        usize::try_from(statement_store_max_seen_statements).unwrap_or(0),
+                    )
+                    .map(smoldot_light::network_service::StatementProtocolConfig::new),
                 }) {
                 Ok(c) => c,
                 Err(error) => {

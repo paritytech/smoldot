@@ -183,7 +183,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         }
     }
 
-    /// Returns the value initially passed as [`Config::block_number_bytes`̀].
+    /// Returns the value initially passed as [`Config::block_number_bytes`].
     pub fn block_number_bytes(&self) -> usize {
         self.block_number_bytes
     }

@@ -36,7 +36,7 @@ jobs:
     steps:
     - uses: docker/setup-qemu-action@v3
     - uses: docker/setup-buildx-action@v3
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - uses: docker/login-action@v3 
       # This `if` adds an additional safety against accidental pushes.
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -56,13 +56,13 @@ jobs:
   build-js-doc:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: repo
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v4.2.0
+      - uses: actions/setup-node@v6.1.0
         with:
           node-version: current
       - run: npm install
@@ -75,7 +75,7 @@ jobs:
       - run: |
           mkdir -p ./doc
           mv ./repo/wasm-node/javascript/dist/doc/* ./doc
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: javascript-documentation
           path: ./doc/
@@ -83,9 +83,9 @@ jobs:
   build-rust-doc:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: repo
       - uses: Swatinem/rust-cache@v2
@@ -96,7 +96,7 @@ jobs:
       - run: |
           mkdir -p ./doc
           mv ./repo/target/doc/* ./doc
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: rust-documentation
           path: ./doc/
@@ -104,11 +104,11 @@ jobs:
   build-tests-coverage:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
       - run: apt update && apt install -y jq
       - run: rustup component add llvm-tools-preview
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: repo
       - uses: Swatinem/rust-cache@v2
@@ -123,7 +123,7 @@ jobs:
           `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata merge -sparse ./coverage/default_*.profraw -o ./coverage/tests-coverage.profdata
           `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov show --format=html --output-dir=./html-out --instr-profile=./coverage/tests-coverage.profdata --ignore-filename-regex='cargo/registry' --ignore-filename-regex='/rustc/' --show-instantiations --show-line-counts-or-regions $(for file in `cat ./coverage/binaries-list`; do printf "%s %s " -object $file; done)
           `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov report --instr-profile=./coverage/tests-coverage.profdata --ignore-filename-regex='cargo/registry' --ignore-filename-regex='/rustc/' $(for file in `cat ./coverage/binaries-list`; do printf "%s %s " -object $file; done)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: code-coverage-report
           path: ./html-out/
@@ -134,7 +134,7 @@ jobs:
     permissions:
       contents: write   # Necessary to push on the `gh-pages` branch.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: repo
       - run: |
@@ -142,15 +142,15 @@ jobs:
           mkdir -p ./upload/doc-rust
           mkdir -p ./upload/tests-coverage
           touch ./upload/.nojekyll
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: javascript-documentation
           path: ./upload/doc-javascript
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: rust-documentation
           path: ./upload/doc-rust
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: code-coverage-report
           path: ./upload/tests-coverage
@@ -174,11 +174,11 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v4.2.0
+      - uses: actions/setup-node@v6.1.0
         with:
           # Set to the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 18
@@ -203,11 +203,11 @@ jobs:
     # This action checks if a certain git tag exists. If not, it compiles the JavaScript package,
     # then commits the compilation artifacts, tags the commit, and pushes the tag.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v4.2.0
+      - uses: actions/setup-node@v6.1.0
         with:
           # Set to the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 18
@@ -245,9 +245,9 @@ jobs:
   crates-io-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.89
+      image: rust:1.92
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: cargo publish --dry-run --locked
         working-directory: ./lib
         # Note that no dry run is performed for the crates that have dependencies towards the

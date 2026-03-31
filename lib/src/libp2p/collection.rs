@@ -146,9 +146,9 @@ pub struct Config {
 pub struct ConnectionId(u64);
 
 impl ConnectionId {
-    /// Value that compares inferior or equal to any possible [`ConnectionId`̀].
+    /// Value that compares inferior or equal to any possible [`ConnectionId`].
     pub const MIN: Self = ConnectionId(u64::MIN);
-    /// Value that compares superior or equal to any possible [`ConnectionId`̀].
+    /// Value that compares superior or equal to any possible [`ConnectionId`].
     pub const MAX: Self = ConnectionId(u64::MAX);
 }
 
@@ -159,9 +159,9 @@ impl ConnectionId {
 pub struct SubstreamId(u64);
 
 impl SubstreamId {
-    /// Value that compares inferior or equal to any possible [`SubstreamId`̀].
+    /// Value that compares inferior or equal to any possible [`SubstreamId`].
     pub const MIN: Self = SubstreamId(u64::MIN);
-    /// Value that compares superior or equal to any possible [`SubstreamId`̀].
+    /// Value that compares superior or equal to any possible [`SubstreamId`].
     pub const MAX: Self = SubstreamId(u64::MAX);
 }
 
