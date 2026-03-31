@@ -1586,7 +1586,7 @@ where
                         }
                     }
 
-                    // If peer is desired for Bitswap, and we have no coonnection or only shutting
+                    // If peer is desired for Bitswap, and we have no connection or only shutting
                     // down connections, remove peer from `connected_unopened_bitswap_desired`.
                     if self.bitswap_desired_peers.contains(&peer_index)
                         && !self
@@ -1673,19 +1673,20 @@ where
                         },
                         Protocol::Ping => collection::InboundTy::Ping,
                         Protocol::Bitswap => {
+                            // Check that either `Pending` or `Open` outbound connection exists.
                             if self
                                 .bitswap_substreams_by_peer_id
                                 .range(
                                     (
                                         *peer_index,
                                         SubstreamDirection::Out,
-                                        BitswapSubstreamState::Open,
+                                        BitswapSubstreamState::MIN,
                                         collection::SubstreamId::MIN,
                                     )
                                         ..=(
                                             *peer_index,
                                             SubstreamDirection::Out,
-                                            BitswapSubstreamState::Open,
+                                            BitswapSubstreamState::MAX,
                                             collection::SubstreamId::MAX,
                                         ),
                                 )
@@ -4619,6 +4620,9 @@ where
     /// Also closes any inbound Bitswap substreams with that peer, since inbound substreams are
     /// only allowed when an outbound substream is open.
     ///
+    /// Note that the functions does not automatically remove the peer from the list of Bitswap
+    /// desired peers.
+    ///
     /// This function might generate a message destined a connection. Use
     /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
     pub fn bitswap_close(&mut self, target: &PeerId) -> Result<(), CloseBitswapError> {
@@ -5195,7 +5199,7 @@ pub enum Event<TConn> {
     },
     /// No longer connected to the given peer over Bitswap protocol.
     BitswapDisconnected {
-        /// Peer we has been disconnected from.
+        /// Peer we have been disconnected from.
         peer_id: PeerId,
     },
     //Transactions {
@@ -5411,7 +5415,7 @@ impl fmt::Debug for EncodedBlockAnnounce {
     }
 }
 
-/// Udecoded but valid Bitswap message.
+/// Undecoded but valid Bitswap message.
 #[derive(Clone)]
 pub struct EncodedBitswapMessage {
     message: Vec<u8>,

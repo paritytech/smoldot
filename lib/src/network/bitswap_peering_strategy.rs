@@ -17,7 +17,7 @@
 
 //! Simple slot assignment algorithm for Bitswap protocol.
 //!
-//! The strategy tries to open Bitswap substerams with all connected peers. In case a substream can't
+//! The strategy tries to open Bitswap substreams with all connected peers. In case a substream can't
 //! be opened (for example, the remote doesn't support Bitswap protocol) or the peer misbehaves,
 //! the peer is banned for a certain period of time, preventing it from being returned as
 //! a candidate for a Bitswap connection.

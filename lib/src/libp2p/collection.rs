@@ -1133,7 +1133,7 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if [`SubstreamId`] doesn't correspond to an outbound Bitswap substream.
+    /// Panics if [`SubstreamId`] doesn't correspond to an inbound Bitswap substream.
     ///
     #[track_caller]
     pub fn close_in_bitswap(&mut self, substream_id: SubstreamId) {
@@ -2242,7 +2242,7 @@ enum ConnectionToCoordinatorInner {
         id: SubstreamId,
     },
 
-    /// Remote has opened an inbound Bitswap substream. We can use this event too close other
+    /// Remote has opened an inbound Bitswap substream. We can use this event to close other
     /// Bitswap substreams the remote has opened before.
     BitswapInOpen {
         /// Inner substream ID.
@@ -2255,9 +2255,9 @@ enum ConnectionToCoordinatorInner {
         /// Message sent by the remote.
         message: Vec<u8>,
     },
-    /// Remote has closed the inbound Bitswap substream with us, or the substream error occured.
-    /// Unlike `NotificaationsInClose`, we don't need to acknowledge this event.
-    // TODO: may be we need an acqnowledgement mechanism like Notifications?
+    /// Remote has closed the inbound Bitswap substream with us, or the substream error occurred.
+    /// Unlike `NotificationsInClose`, we don't need to acknowledge this event.
+    // TODO: may be we need an acknowledgement mechanism like Notifications?
     BitswapInClose {
         /// Inner substream ID.
         id: established::SubstreamId,

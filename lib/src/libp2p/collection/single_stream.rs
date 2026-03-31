@@ -395,7 +395,7 @@ where
                 // delivered to the coordinator.
                 // If that happens, we intentionally silently discard the message, causing the
                 // Bitswap message to not be sent. This is consistent with the guarantees about
-                // Bitswap messages deliverey that are documented in the public API.
+                // Bitswap messages delivery that are documented in the public API.
                 if let Some(inner_substream_id) = outbound_substreams_map.get(&substream_id) {
                     established.write_bitswap_message_unbounded(*inner_substream_id, message);
                 }
@@ -809,7 +809,7 @@ where
                                 .push_back(ConnectionToCoordinatorInner::BitswapIn { id, message });
                         }
                         Some(established::Event::BitswapInClose { id, outcome }) => {
-                            // TODO: do we need a close acqnowledgement mechanism similar to
+                            // TODO: do we need a close acknowledgement mechanism similar to
                             // Notifications?
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::BitswapInClose { id, outcome },
