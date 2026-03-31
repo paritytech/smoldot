@@ -81,25 +81,23 @@ pub use service::{
 #[derive(Debug, Clone)]
 pub struct StatementProtocolConfig {
     max_seen_statements: NonZeroUsize,
+    false_positive_rate: f64,
 }
 
 impl StatementProtocolConfig {
-    pub fn new(max_seen_statements: NonZeroUsize) -> Self {
+    pub fn new(max_seen_statements: NonZeroUsize, false_positive_rate: f64) -> Self {
         StatementProtocolConfig {
             max_seen_statements,
+            false_positive_rate,
         }
     }
 
     pub fn max_seen_statements(&self) -> NonZeroUsize {
         self.max_seen_statements
     }
-}
 
-impl Default for StatementProtocolConfig {
-    fn default() -> Self {
-        StatementProtocolConfig {
-            max_seen_statements: NonZeroUsize::new(65536).expect("65536 is not zero; qed"),
-        }
+    pub fn false_positive_rate(&self) -> f64 {
+        self.false_positive_rate
     }
 }
 
@@ -1886,9 +1884,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     result,
                 },
             ) => {
-                let r = task
-                    .network
-                    .send_topic_affinity(&target, chain_id, &filter);
+                let r = task.network.send_topic_affinity(&target, chain_id, &filter);
                 let _ = result.send(r);
             }
             WakeUpReason::MessageForChain(
@@ -2833,7 +2829,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     Event::StatementProtocolConnected { peer_id, version },
                 ));
             }
-            WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived { .. }) => {}
+            WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived {
+                ..
+            }) => {}
             WakeUpReason::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 // TODO: handle properly?
                 log!(

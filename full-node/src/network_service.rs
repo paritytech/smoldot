@@ -2287,7 +2287,9 @@ async fn background_task(mut inner: Inner) {
                 );
             }
 
-            WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived { .. }) => {}
+            WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived {
+                ..
+            }) => {}
         }
     }
 }

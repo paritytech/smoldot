@@ -208,7 +208,9 @@ pub enum EncodeStatementError {
 const V2_TAG_STATEMENTS: u8 = 0x00;
 const V2_TAG_AFFINITY: u8 = 0x01;
 
-pub fn decode_statement_message(bytes: &[u8]) -> Result<StatementMessage<'_>, DecodeStatementMessageError> {
+pub fn decode_statement_message(
+    bytes: &[u8],
+) -> Result<StatementMessage<'_>, DecodeStatementMessageError> {
     if bytes.is_empty() {
         return Err(DecodeStatementMessageError::Empty);
     }
@@ -231,13 +233,9 @@ pub fn encode_statements_message(statements: &[&[u8]]) -> Vec<u8> {
     let total_len: usize = statements.iter().map(|s| s.len()).sum();
     let mut out = Vec::with_capacity(1 + 5 + total_len);
     out.push(V2_TAG_STATEMENTS);
-    out.extend_from_slice(
-        crate::util::encode_scale_compact_usize(statements.len()).as_ref(),
-    );
+    out.extend_from_slice(crate::util::encode_scale_compact_usize(statements.len()).as_ref());
     for stmt in statements {
-        out.extend_from_slice(
-            crate::util::encode_scale_compact_usize(stmt.len()).as_ref(),
-        );
+        out.extend_from_slice(crate::util::encode_scale_compact_usize(stmt.len()).as_ref());
         out.extend_from_slice(stmt);
     }
     out
@@ -253,10 +251,11 @@ pub fn encode_topic_affinity_message(filter: &AffinityFilter) -> Vec<u8> {
 
 fn extract_statement_bytes(data: &[u8]) -> Result<Vec<&[u8]>, DecodeStatementMessageError> {
     let (mut remaining, count) =
-        crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(data)
-            .map_err(|_| DecodeStatementMessageError::InvalidStatements(
-                DecodeStatementNotificationError(nom::error::ErrorKind::Fail),
-            ))?;
+        crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(data).map_err(|_| {
+            DecodeStatementMessageError::InvalidStatements(DecodeStatementNotificationError(
+                nom::error::ErrorKind::Fail,
+            ))
+        })?;
 
     if count > MAX_STATEMENTS_PER_NOTIFICATION {
         return Err(DecodeStatementMessageError::InvalidStatements(
@@ -266,11 +265,14 @@ fn extract_statement_bytes(data: &[u8]) -> Result<Vec<&[u8]>, DecodeStatementMes
 
     let mut statements = Vec::with_capacity(count);
     for _ in 0..count {
-        let (rest, len) =
-            crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(remaining)
-                .map_err(|_| DecodeStatementMessageError::InvalidStatements(
-                    DecodeStatementNotificationError(nom::error::ErrorKind::Fail),
-                ))?;
+        let (rest, len) = crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(
+            remaining,
+        )
+        .map_err(|_| {
+            DecodeStatementMessageError::InvalidStatements(DecodeStatementNotificationError(
+                nom::error::ErrorKind::Fail,
+            ))
+        })?;
         if rest.len() < len {
             return Err(DecodeStatementMessageError::InvalidStatements(
                 DecodeStatementNotificationError(nom::error::ErrorKind::Eof),

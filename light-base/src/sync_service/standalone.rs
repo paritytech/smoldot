@@ -812,9 +812,9 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             WakeUpReason::NetworkEvent(network_service::Event::StatementsNotification {
                 ..
             }) => {}
-            WakeUpReason::NetworkEvent(
-                network_service::Event::StatementProtocolConnected { .. },
-            ) => {}
+            WakeUpReason::NetworkEvent(network_service::Event::StatementProtocolConnected {
+                ..
+            }) => {}
 
             WakeUpReason::MustSubscribeNetworkEvents => {
                 debug_assert!(task.from_network_service.is_none());

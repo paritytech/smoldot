@@ -86,6 +86,8 @@ pub(super) struct Config<TPlat: PlatformRef> {
 
     /// Hash of the genesis block of the chain.
     pub genesis_block_hash: [u8; 32],
+
+    pub bloom_false_positive_rate: Option<f64>,
 }
 
 /// Fields used to process JSON-RPC requests in the background.
@@ -115,6 +117,10 @@ struct Background<TPlat: PlatformRef> {
 
     /// Randomness used for various purposes, such as generating subscription IDs.
     randomness: ChaCha20Rng,
+
+    bloom_false_positive_rate: Option<f64>,
+
+    bloom_seed: u128,
 
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
@@ -511,6 +517,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
             config.platform.fill_random_bytes(&mut seed);
             seed
         }),
+        bloom_false_positive_rate: config.bloom_false_positive_rate,
+        bloom_seed: {
+            let mut seed_bytes = [0u8; 16];
+            config.platform.fill_random_bytes(&mut seed_bytes);
+            u128::from_le_bytes(seed_bytes)
+        },
         next_garbage_collection: Box::pin(config.platform.sleep(Duration::new(0, 0))),
         network_service: config.network_service.clone(),
         sync_service: config.sync_service.clone(),
@@ -767,8 +779,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 if matches!(version, network_service::StatementProtocolVersion::V2) {
                     me.v2_statement_peers.insert(peer_id.clone());
                     if !me.statement_subscriptions.is_empty() {
-                        let combined_filter =
-                            build_combined_affinity_filter(&me.statement_subscriptions);
+                        let fpr = me.bloom_false_positive_rate.unwrap_or(0.01);
+                        let combined_filter = build_combined_affinity_filter(
+                            &me.statement_subscriptions,
+                            me.bloom_seed,
+                            fpr,
+                        );
                         let _ = me
                             .network_service
                             .send_topic_affinity(&peer_id, combined_filter)
@@ -2910,8 +2926,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .insert(subscription_id.clone(), filter);
 
                         if !me.v2_statement_peers.is_empty() {
-                            let combined_filter =
-                                build_combined_affinity_filter(&me.statement_subscriptions);
+                            let fpr = me.bloom_false_positive_rate.unwrap_or(0.01);
+                            let combined_filter = build_combined_affinity_filter(
+                                &me.statement_subscriptions,
+                                me.bloom_seed,
+                                fpr,
+                            );
                             for peer_id in me.v2_statement_peers.clone() {
                                 let _ = me
                                     .network_service
@@ -2935,8 +2955,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let existed = me.statement_subscriptions.remove(&subscription).is_some();
 
                         if existed && !me.v2_statement_peers.is_empty() {
-                            let combined_filter =
-                                build_combined_affinity_filter(&me.statement_subscriptions);
+                            let fpr = me.bloom_false_positive_rate.unwrap_or(0.01);
+                            let combined_filter = build_combined_affinity_filter(
+                                &me.statement_subscriptions,
+                                me.bloom_seed,
+                                fpr,
+                            );
                             for peer_id in me.v2_statement_peers.clone() {
                                 let _ = me
                                     .network_service
@@ -6078,19 +6102,19 @@ fn convert_runtime_version(
     }
 }
 
-const AFFINITY_SEED: u128 = 0x5EED_5EED_5EED_5EED;
-
 fn build_combined_affinity_filter(
     subscriptions: &hashbrown::HashMap<
         String,
         smoldot::json_rpc::methods::TopicFilter,
         fnv::FnvBuildHasher,
     >,
+    seed: u128,
+    false_positive_rate: f64,
 ) -> network_service::AffinityFilter {
     use smoldot::json_rpc::methods::TopicFilter;
 
     if subscriptions.is_empty() {
-        return network_service::AffinityFilter::with_default_fpr(AFFINITY_SEED, 1);
+        return network_service::AffinityFilter::new(seed, false_positive_rate, 1);
     }
 
     let mut all_topics: Vec<&[u8; 32]> = Vec::new();
@@ -6098,7 +6122,7 @@ fn build_combined_affinity_filter(
     for filter in subscriptions.values() {
         match filter {
             TopicFilter::Any => {
-                return network_service::AffinityFilter::match_all(AFFINITY_SEED);
+                return network_service::AffinityFilter::match_all(seed);
             }
             TopicFilter::MatchAll(topics) | TopicFilter::MatchAny(topics) => {
                 all_topics.extend(topics.iter());
@@ -6107,7 +6131,7 @@ fn build_combined_affinity_filter(
     }
 
     let count = all_topics.len().max(1);
-    let mut affinity = network_service::AffinityFilter::with_default_fpr(AFFINITY_SEED, count);
+    let mut affinity = network_service::AffinityFilter::new(seed, false_positive_rate, count);
     for topic in all_topics {
         affinity.insert(topic);
     }

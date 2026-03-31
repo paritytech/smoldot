@@ -115,6 +115,10 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Hash of the genesis block of the chain.
     pub genesis_block_hash: [u8; 32],
+
+    /// False positive rate for bloom filters used in statement topic affinity.
+    /// `None` if the statement protocol is disabled.
+    pub bloom_false_positive_rate: Option<f64>,
 }
 
 /// Creates a new JSON-RPC service with the given configuration.
@@ -153,6 +157,7 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
                 system_name: config.system_name,
                 system_version: config.system_version,
                 genesis_block_hash: config.genesis_block_hash,
+                bloom_false_positive_rate: config.bloom_false_positive_rate,
             },
             requests_rx,
             responses_tx,

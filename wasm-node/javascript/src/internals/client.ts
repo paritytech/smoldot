@@ -511,6 +511,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
 
             // Sanitize `statementStore`.
             let statementStoreMaxSeenStatements = 0;
+            let statementStoreFalsePositiveRate = 0.0;
             if (options.statementStore !== undefined) {
                 statementStoreMaxSeenStatements = options.statementStore.maxSeenStatements === undefined ? 65536 : options.statementStore.maxSeenStatements;
                 statementStoreMaxSeenStatements = Math.floor(statementStoreMaxSeenStatements);
@@ -519,6 +520,10 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 }
                 if (statementStoreMaxSeenStatements > 0xffffffff) {
                     statementStoreMaxSeenStatements = 0xffffffff;
+                }
+                statementStoreFalsePositiveRate = options.statementStore.falsePositiveRate === undefined ? 0.01 : options.statementStore.falsePositiveRate;
+                if (statementStoreFalsePositiveRate <= 0.0 || statementStoreFalsePositiveRate >= 1.0 || isNaN(statementStoreFalsePositiveRate)) {
+                    throw new AddChainError("Invalid value for `statementStore.falsePositiveRate`");
                 }
             }
 
@@ -535,7 +540,8 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 !!options.disableJsonRpc,
                 jsonRpcMaxPendingRequests,
                 jsonRpcMaxSubscriptions,
-                statementStoreMaxSeenStatements
+                statementStoreMaxSeenStatements,
+                statementStoreFalsePositiveRate
             );
 
             const outcome = await promise;

@@ -314,10 +314,19 @@ enum Protocol {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum NotificationsProtocol {
-    BlockAnnounces { chain_index: usize },
-    Transactions { chain_index: usize },
-    Grandpa { chain_index: usize },
-    Statement { chain_index: usize, version: codec::StatementProtocolVersion },
+    BlockAnnounces {
+        chain_index: usize,
+    },
+    Transactions {
+        chain_index: usize,
+    },
+    Grandpa {
+        chain_index: usize,
+    },
+    Statement {
+        chain_index: usize,
+        version: codec::StatementProtocolVersion,
+    },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -615,7 +624,10 @@ where
                     chain_index,
                 }))
                 | Some(Protocol::Notifications(NotificationsProtocol::Grandpa { chain_index }))
-                | Some(Protocol::Notifications(NotificationsProtocol::Statement { chain_index, .. }))
+                | Some(Protocol::Notifications(NotificationsProtocol::Statement {
+                    chain_index,
+                    ..
+                }))
                 | Some(Protocol::Sync { chain_index })
                 | Some(Protocol::LightUnknown { chain_index })
                 | Some(Protocol::LightStorage { chain_index })
@@ -1434,7 +1446,8 @@ where
                             continue;
                         }
                         Protocol::Notifications(NotificationsProtocol::Statement {
-                            chain_index, ..
+                            chain_index,
+                            ..
                         }) if !self.chains[chain_index].enable_statement_protocol => {
                             self.inner.reject_inbound(substream_id);
                             continue;
@@ -1974,8 +1987,14 @@ where
                                         NotificationsProtocol::BlockAnnounces { chain_index },
                                         NotificationsProtocol::Transactions { chain_index },
                                         NotificationsProtocol::Grandpa { chain_index },
-                                        NotificationsProtocol::Statement { chain_index, version: codec::StatementProtocolVersion::V1 },
-                                        NotificationsProtocol::Statement { chain_index, version: codec::StatementProtocolVersion::V2 },
+                                        NotificationsProtocol::Statement {
+                                            chain_index,
+                                            version: codec::StatementProtocolVersion::V1,
+                                        },
+                                        NotificationsProtocol::Statement {
+                                            chain_index,
+                                            version: codec::StatementProtocolVersion::V2,
+                                        },
                                     ] {
                                         for (substream_id, direction, state) in self
                                             .notification_substreams_by_peer_id
@@ -2361,8 +2380,14 @@ where
                             for proto in [
                                 NotificationsProtocol::Transactions { chain_index },
                                 NotificationsProtocol::Grandpa { chain_index },
-                                NotificationsProtocol::Statement { chain_index, version: codec::StatementProtocolVersion::V1 },
-                                NotificationsProtocol::Statement { chain_index, version: codec::StatementProtocolVersion::V2 },
+                                NotificationsProtocol::Statement {
+                                    chain_index,
+                                    version: codec::StatementProtocolVersion::V1,
+                                },
+                                NotificationsProtocol::Statement {
+                                    chain_index,
+                                    version: codec::StatementProtocolVersion::V2,
+                                },
                             ] {
                                 for (substream_direction, substream_state, substream_id) in self
                                     .notification_substreams_by_peer_id
@@ -2489,13 +2514,14 @@ where
                                             fork_id: self.chains[chain_index].fork_id.as_deref(),
                                         }
                                     }
-                                    NotificationsProtocol::Statement { chain_index, version } => {
-                                        codec::ProtocolName::Statement {
-                                            genesis_hash: self.chains[chain_index].genesis_hash,
-                                            fork_id: self.chains[chain_index].fork_id.as_deref(),
-                                            version,
-                                        }
-                                    }
+                                    NotificationsProtocol::Statement {
+                                        chain_index,
+                                        version,
+                                    } => codec::ProtocolName::Statement {
+                                        genesis_hash: self.chains[chain_index].genesis_hash,
+                                        fork_id: self.chains[chain_index].fork_id.as_deref(),
+                                        version,
+                                    },
                                     _ => unreachable!(),
                                 }),
                                 self.notifications_protocol_handshake_timeout(substream_protocol),
@@ -2829,69 +2855,70 @@ where
                                 }
                             }
                         }
-                        NotificationsProtocol::Statement { version, .. } => {
-                            match version {
-                                codec::StatementProtocolVersion::V1 => {
-                                    let statements =
-                                        match codec::decode_statement_notification(&notification) {
-                                            Ok(s) if s.is_empty() => continue,
-                                            Ok(s) => s,
-                                            Err(err) => {
-                                                return Some(Event::ProtocolError {
-                                                    error: ProtocolError::BadStatementNotification(err),
-                                                    peer_id: self.peers[peer_index.0].clone(),
-                                                });
-                                            }
-                                        };
-
-                                    return Some(Event::StatementsNotification {
-                                        chain_id: ChainId(chain_index),
-                                        peer_id: self.peers[peer_index.0].clone(),
-                                        statements,
-                                    });
-                                }
-                                codec::StatementProtocolVersion::V2 => {
-                                    match codec::decode_statement_message(&notification) {
-                                        Ok(codec::StatementMessage::Statements(stmts)) => {
-                                            let mut statements = Vec::with_capacity(stmts.len());
-                                            for raw in stmts {
-                                                let hash = codec::statement_hash(raw);
-                                                match codec::decode_statement(raw) {
-                                                    Ok(s) => statements.push((hash, s)),
-                                                    Err(err) => {
-                                                        return Some(Event::ProtocolError {
-                                                            error: ProtocolError::BadStatementNotification(err),
-                                                            peer_id: self.peers[peer_index.0].clone(),
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                            if statements.is_empty() {
-                                                continue;
-                                            }
-                                            return Some(Event::StatementsNotification {
-                                                chain_id: ChainId(chain_index),
-                                                peer_id: self.peers[peer_index.0].clone(),
-                                                statements,
-                                            });
-                                        }
-                                        Ok(codec::StatementMessage::ExplicitTopicAffinity(filter)) => {
-                                            return Some(Event::StatementTopicAffinityReceived {
-                                                peer_id: self.peers[peer_index.0].clone(),
-                                                chain_id: ChainId(chain_index),
-                                                filter,
-                                            });
-                                        }
+                        NotificationsProtocol::Statement { version, .. } => match version {
+                            codec::StatementProtocolVersion::V1 => {
+                                let statements =
+                                    match codec::decode_statement_notification(&notification) {
+                                        Ok(s) if s.is_empty() => continue,
+                                        Ok(s) => s,
                                         Err(err) => {
                                             return Some(Event::ProtocolError {
-                                                error: ProtocolError::BadStatementMessage(err),
+                                                error: ProtocolError::BadStatementNotification(err),
                                                 peer_id: self.peers[peer_index.0].clone(),
                                             });
                                         }
+                                    };
+
+                                return Some(Event::StatementsNotification {
+                                    chain_id: ChainId(chain_index),
+                                    peer_id: self.peers[peer_index.0].clone(),
+                                    statements,
+                                });
+                            }
+                            codec::StatementProtocolVersion::V2 => {
+                                match codec::decode_statement_message(&notification) {
+                                    Ok(codec::StatementMessage::Statements(stmts)) => {
+                                        let mut statements = Vec::with_capacity(stmts.len());
+                                        for raw in stmts {
+                                            let hash = codec::statement_hash(raw);
+                                            match codec::decode_statement(raw) {
+                                                Ok(s) => statements.push((hash, s)),
+                                                Err(err) => {
+                                                    return Some(Event::ProtocolError {
+                                                        error:
+                                                            ProtocolError::BadStatementNotification(
+                                                                err,
+                                                            ),
+                                                        peer_id: self.peers[peer_index.0].clone(),
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        if statements.is_empty() {
+                                            continue;
+                                        }
+                                        return Some(Event::StatementsNotification {
+                                            chain_id: ChainId(chain_index),
+                                            peer_id: self.peers[peer_index.0].clone(),
+                                            statements,
+                                        });
+                                    }
+                                    Ok(codec::StatementMessage::ExplicitTopicAffinity(filter)) => {
+                                        return Some(Event::StatementTopicAffinityReceived {
+                                            peer_id: self.peers[peer_index.0].clone(),
+                                            chain_id: ChainId(chain_index),
+                                            filter,
+                                        });
+                                    }
+                                    Err(err) => {
+                                        return Some(Event::ProtocolError {
+                                            error: ProtocolError::BadStatementMessage(err),
+                                            peer_id: self.peers[peer_index.0].clone(),
+                                        });
                                     }
                                 }
                             }
-                        }
+                        },
                     }
                 }
 
@@ -3268,7 +3295,10 @@ where
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
-                Protocol::Notifications(NotificationsProtocol::Statement { chain_index, version }) => {
+                Protocol::Notifications(NotificationsProtocol::Statement {
+                    chain_index,
+                    version,
+                }) => {
                     let chain_info = &self.chains[chain_index];
                     codec::ProtocolName::Statement {
                         genesis_hash: chain_info.genesis_hash,
@@ -4098,9 +4128,8 @@ where
                 let notification = match version {
                     codec::StatementProtocolVersion::V1 => {
                         let mut notification = Vec::with_capacity(1 + statement.len());
-                        notification.extend_from_slice(
-                            util::encode_scale_compact_usize(1).as_ref(),
-                        );
+                        notification
+                            .extend_from_slice(util::encode_scale_compact_usize(1).as_ref());
                         notification.extend_from_slice(&statement);
                         notification
                     }
