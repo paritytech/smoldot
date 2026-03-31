@@ -337,11 +337,8 @@ pub fn decode_bitswap_message(
         .map(|bp| {
             Ok(BlockPresence {
                 cid: bp.cid.ok_or(DecodeBitswapMessageError::MissingCid)?,
-                presence_type: BlockPresenceType::from_u64(
-                    bp.presence_type
-                        .ok_or(DecodeBitswapMessageError::MissingPresenceType)?,
-                )
-                .ok_or(DecodeBitswapMessageError::InvalidPresenceType)?,
+                presence_type: BlockPresenceType::from_u64(bp.presence_type.unwrap_or(0))
+                    .ok_or(DecodeBitswapMessageError::InvalidPresenceType)?,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -370,9 +367,6 @@ pub enum DecodeBitswapMessageError {
     /// Invalid block presence type value.
     #[display("Invalid block presence type")]
     InvalidPresenceType,
-    /// Missing block presence type.
-    #[display("Missing block presence type")]
-    MissingPresenceType,
 }
 
 #[cfg(test)]
