@@ -684,9 +684,9 @@ pub struct PrunedNode<T> {
 pub struct NodeIndex(usize);
 
 impl NodeIndex {
-    /// Value that compares inferior or equal to any possible [`NodeIndex`̀].
+    /// Value that compares inferior or equal to any possible [`NodeIndex`].
     pub const MIN: Self = NodeIndex(usize::MIN);
-    /// Returns the value that compares superior or equal to any possible [`NodeIndex`̀].
+    /// Returns the value that compares superior or equal to any possible [`NodeIndex`].
     pub const MAX: Self = NodeIndex(usize::MAX);
 
     /// Adds `1` to `self`. Returns `None` if this causes an overflow.

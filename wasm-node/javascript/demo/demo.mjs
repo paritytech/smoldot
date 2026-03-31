@@ -25,16 +25,32 @@ import { Worker } from 'node:worker_threads';
 
 // List of files containing chains available to the user.
 const chainSpecsFiles = [
-    '../../demo-chain-specs/westend.json',
-    '../../demo-chain-specs/westend-westmint.json',
+    '../../demo-chain-specs/ksmcc3.json',
+    '../../demo-chain-specs/ksmcc3_asset_hub.json',
+    '../../demo-chain-specs/ksmcc3_bridge_hub.json',
+    '../../demo-chain-specs/ksmcc3_coretime.json',
+    '../../demo-chain-specs/ksmcc3_encointer.json',
+    '../../demo-chain-specs/ksmcc3_people.json',
+    '../../demo-chain-specs/paseo.json',
+    '../../demo-chain-specs/paseo_asset_hub.json',
+    '../../demo-chain-specs/paseo_coretime.json',
+    '../../demo-chain-specs/paseo_people.json',
     '../../demo-chain-specs/polkadot.json',
-    '../../demo-chain-specs/polkadot-asset-hub.json',
-    '../../demo-chain-specs/polkadot-acala.json',
-    '../../demo-chain-specs/kusama.json',
-    '../../demo-chain-specs/kusama-statemine.json',
-    '../../demo-chain-specs/kusama-karura.json',
-    '../../demo-chain-specs/rococo.json',
-    '../../demo-chain-specs/rococo-canvas.json',
+    '../../demo-chain-specs/polkadot_asset_hub.json',
+    '../../demo-chain-specs/polkadot_bridge_hub.json',
+    '../../demo-chain-specs/polkadot_collectives.json',
+    '../../demo-chain-specs/polkadot_coretime.json',
+    '../../demo-chain-specs/polkadot_people.json',
+    '../../demo-chain-specs/rococo_v2_2.json',
+    '../../demo-chain-specs/rococo_v2_2_asset_hub.json',
+    '../../demo-chain-specs/rococo_v2_2_bridge_hub.json',
+    '../../demo-chain-specs/rococo_v2_2_people.json',
+    '../../demo-chain-specs/westend2.json',
+    '../../demo-chain-specs/westend2_asset_hub.json',
+    '../../demo-chain-specs/westend2_bridge_hub.json',
+    '../../demo-chain-specs/westend2_collectives.json',
+    '../../demo-chain-specs/westend2_coretime.json',
+    '../../demo-chain-specs/westend2_people.json',
 ];
 
 // Check for custom chainspec passed as a command line argument.
@@ -100,7 +116,7 @@ const client = smoldot.start({
 let defaultChainDb = "";
 try {
     defaultChainDb = fs.readFileSync('database.json', { encoding: 'utf-8' });
-} catch(error) {}
+} catch (error) { }
 
 // Note that We call `addChain` again with the same chain spec again every time a new WebSocket
 // connection is established, but smoldot will de-duplicate them and only connect to the chain
@@ -181,7 +197,7 @@ wsServer.on('connection', function (connection, request) {
                     for await (const response of para.jsonRpcResponses) {
                         connection.send(response);
                     }
-                } catch(_error) {}
+                } catch (_error) { }
             })()
 
             return { relay, para };
@@ -195,7 +211,7 @@ wsServer.on('connection', function (connection, request) {
                     for await (const response of relay.jsonRpcResponses) {
                         connection.send(response);
                     }
-                } catch(_error) {}
+                } catch (_error) { }
             })()
 
             return {

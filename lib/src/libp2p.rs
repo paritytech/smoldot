@@ -73,7 +73,7 @@
 //! - A list of events that happen on the set of peer-to-peer connections, and that can be
 //! retrieved one by one by calling [`collection::Network::next_event`].
 //!
-//! It is the responsibility of the API user to grab the list of unfulfilled [`̀PeerId`]s and
+//! It is the responsibility of the API user to grab the list of unfulfilled [`PeerId`]s and
 //! insert new connections that are expected to reach these unfulfilled [`PeerId`]s. To do so,
 //! one must run a certain discovery mechanism in order to find out the addresses that will
 //! permit to reach peers. This is out of scope of this module.
