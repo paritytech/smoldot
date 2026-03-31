@@ -1192,7 +1192,12 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
         };
 
         let parachain_header_bytes = pvd.parent_head.to_vec();
-        let decoded_header = header::decode(&parachain_header_bytes, block_number_bytes).unwrap();
+        // `parent_head` is documented as opaque data, but for chains built on Cumulus (the vast
+        // majority) it is a SCALE-encoded block header.
+        let decoded_header = match header::decode(&parachain_header_bytes, block_number_bytes) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
 
         log!(
             platform,
@@ -1310,7 +1315,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         )
     );
 
-    let mut vm = executor::host::HostVmPrototype::new(executor::host::Config {
+    let vm = executor::host::HostVmPrototype::new(executor::host::Config {
         module: &code,
         heap_pages,
         exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
@@ -1341,20 +1346,11 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
             .map_err(|e| format!("Failed to decode slot_duration call proof: {e}"))?;
 
         let output = run_single_runtime_call(
-            vm,
+            vm.clone(),
             "AuraApi_slot_duration",
             &decoded_call_proof,
             &state_root,
         )?;
-
-        // Recompile the VM for the next call.
-        vm = executor::host::HostVmPrototype::new(executor::host::Config {
-            module: &code,
-            heap_pages,
-            exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
-            allow_unresolved_imports: true,
-        })
-        .map_err(|e| format!("Failed to recompile runtime: {e}"))?;
 
         <[u8; 8]>::try_from(output.as_slice())
             .ok()

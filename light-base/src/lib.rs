@@ -1231,7 +1231,6 @@ fn start_services<TPlat: platform::PlatformRef>(
                                 closest_ancestor_excluding: hint.closest_ancestor_excluding,
                             }
                         }),
-                        relay_chain: None,
                     },
                 ),
             }));

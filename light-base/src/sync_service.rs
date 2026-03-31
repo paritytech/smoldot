@@ -74,13 +74,13 @@ pub struct Config<TPlat: PlatformRef> {
 /// See [`Config::chain_type`].
 pub enum ConfigChainType<TPlat: PlatformRef> {
     /// Chain is a Substrate-compatible non-parachain.
-    SubstrateCompatible(ConfigSubstrateCompatible<TPlat>),
+    SubstrateCompatible(ConfigSubstrateCompatible),
     /// Chain is a parachain.
     Parachain(ConfigParachain<TPlat>),
 }
 
 /// See [`ConfigChainType::SubstrateCompatible`].
-pub struct ConfigSubstrateCompatible<TPlat: PlatformRef> {
+pub struct ConfigSubstrateCompatible {
     /// State of the finalized chain.
     pub chain_information: chain::chain_information::ValidChainInformation,
 
@@ -91,10 +91,6 @@ pub struct ConfigSubstrateCompatible<TPlat: PlatformRef> {
     /// instead of downloading it. If the hint doesn't match, an extra round-trip will be needed,
     /// but if the hint matches it saves a big download.
     pub runtime_code_hint: Option<ConfigSubstrateCompatibleRuntimeCodeHint>,
-
-    /// If this chain is a parachain, contains the information of the relay chain.
-    /// `None` if this chain isn't a parachain.
-    pub relay_chain: Option<ConfigRelayChain<TPlat>>,
 }
 
 /// See [`ConfigSubstrateCompatible::runtime_code_hint`].
@@ -114,7 +110,7 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
     pub relay_chain: ConfigRelayChain<TPlat>,
 }
 
-/// See [`ConfigSubstrateCompatible::relay_chain`] and [`ConfigParachain::relay_chain`].
+/// See [`ConfigParachain::relay_chain`].
 pub struct ConfigRelayChain<TPlat: PlatformRef> {
     /// Runtime service that synchronizes the relay chain of this parachain.
     pub relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
@@ -165,9 +161,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     config.platform.clone(),
                     config_substrate_compat.chain_information,
                     config.block_number_bytes,
-                    config_substrate_compat
-                        .relay_chain
-                        .map(|rc| (rc.relay_chain_sync, rc.para_id)),
                     config_substrate_compat.runtime_code_hint,
                     from_foreground,
                     config.network_service.clone(),
