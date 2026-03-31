@@ -1,8 +1,8 @@
 [package]
-name = "smoldot"
-version = "0.21.0"
+name = "parity-smoldot"
+version = "0.22.0"
 description = "Primitives to build a client for Substrate-based blockchains"
-documentation = "https://docs.rs/smoldot"
+documentation = "https://docs.rs/parity-smoldot"
 keywords = ["blockchain", "peer-to-peer"]
 authors.workspace = true
 license.workspace = true

@@ -29,5 +29,5 @@ hashbrown = { version = "0.16.0", default-features = false }
 nom = { version = "8.0.0", default-features = false }
 pin-project = "1.1.5"
 slab = { version = "0.4.8", default-features = false }
-smoldot = { version = "0.21.0", path = "../../lib", default-features = false }
-smoldot-light = { version = "0.19.0", path = "../../light-base", default-features = false }
+smoldot = { package = "parity-smoldot", version = "0.22.0", path = "../../lib", default-features = false }
+smoldot-light = { package = "parity-smoldot-light", version = "0.20.0", path = "../../light-base", default-features = false }
