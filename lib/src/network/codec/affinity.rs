@@ -22,9 +22,6 @@ use super::statement::Topic;
 
 use fastbloom::DefaultHasher as BloomDefaultHasher;
 
-// TODO: We should configure it in the statement-protocol config
-const BLOOM_FALSE_POS_RATE: f64 = 0.01;
-
 /// Maximum number of bits allowed in a bloom filter received from the network.
 /// 1 MiB (the notification size budget) = 8_388_608 bits.
 const MAX_BLOOM_BITS: usize = 1024 * 1024 * 8;
@@ -136,10 +133,6 @@ impl AffinityFilter {
         AffinityFilter { bloom, seed }
     }
 
-    pub fn with_default_fpr(seed: u128, expected_items: usize) -> Self {
-        Self::new(seed, BLOOM_FALSE_POS_RATE, expected_items)
-    }
-
     pub fn decode(data: &[u8]) -> Result<Self, DecodeAffinityFilterError> {
         let encoded = EncodedBloomFilter::decode(data)?;
         if encoded.bits.is_empty() {
@@ -202,6 +195,7 @@ pub struct DecodeAffinityFilterError;
 mod tests {
     use super::*;
 
+    const BLOOM_FALSE_POS_RATE: f64 = 0.01;
     const TEST_SEED: u128 = 0x5EED_5EED_5EED_5EED;
 
     const MAX_BLOOM_WORDS: usize = MAX_BLOOM_BITS / u64::BITS as usize;
