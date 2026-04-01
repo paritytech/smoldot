@@ -773,14 +773,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 if matches!(version, network_service::StatementProtocolVersion::V2) {
                     me.v2_statement_peers.insert(peer_id.clone());
                     if !me.statement_subscriptions.is_empty() {
-                        let spc = me
-                            .statement_protocol_config
-                            .as_ref()
-                            .expect("V2 peers require statement protocol; qed");
                         let combined_filter = build_combined_affinity_filter(
                             &me.statement_subscriptions,
-                            spc.bloom_seed(),
-                            spc.false_positive_rate(),
+                            me.statement_protocol_config.as_ref()
+                                .expect("V2 peers require statement protocol; qed"),
                         );
                         let _ = me
                             .network_service
@@ -2923,14 +2919,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .insert(subscription_id.clone(), filter);
 
                         if !me.v2_statement_peers.is_empty() {
-                            let spc = me
-                                .statement_protocol_config
-                                .as_ref()
-                                .expect("V2 peers require statement protocol; qed");
-                            let combined_filter = build_combined_affinity_filter(
+                                let combined_filter = build_combined_affinity_filter(
                                 &me.statement_subscriptions,
-                                spc.bloom_seed(),
-                                spc.false_positive_rate(),
+                                me.statement_protocol_config.as_ref()
+                                    .expect("V2 peers require statement protocol; qed"),
                             );
                             for peer_id in me.v2_statement_peers.clone() {
                                 let _ = me
@@ -2955,14 +2947,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let existed = me.statement_subscriptions.remove(&subscription).is_some();
 
                         if existed && !me.v2_statement_peers.is_empty() {
-                            let spc = me
-                                .statement_protocol_config
-                                .as_ref()
-                                .expect("V2 peers require statement protocol; qed");
-                            let combined_filter = build_combined_affinity_filter(
+                                let combined_filter = build_combined_affinity_filter(
                                 &me.statement_subscriptions,
-                                spc.bloom_seed(),
-                                spc.false_positive_rate(),
+                                me.statement_protocol_config.as_ref()
+                                    .expect("V2 peers require statement protocol; qed"),
                             );
                             for peer_id in me.v2_statement_peers.clone() {
                                 let _ = me
@@ -6111,8 +6099,7 @@ fn build_combined_affinity_filter(
         smoldot::json_rpc::methods::TopicFilter,
         fnv::FnvBuildHasher,
     >,
-    seed: u128,
-    false_positive_rate: f64,
+    config: &network_service::StatementProtocolConfig,
 ) -> network_service::AffinityFilter {
     use smoldot::json_rpc::methods::TopicFilter;
 
@@ -6121,7 +6108,7 @@ fn build_combined_affinity_filter(
     for filter in subscriptions.values() {
         match filter {
             TopicFilter::Any => {
-                return network_service::AffinityFilter::match_all(seed);
+                return network_service::AffinityFilter::match_all(config.bloom_seed());
             }
             TopicFilter::MatchAll(topics) | TopicFilter::MatchAny(topics) => {
                 all_topics.extend(topics.iter());
@@ -6129,5 +6116,9 @@ fn build_combined_affinity_filter(
         }
     }
 
-    network_service::AffinityFilter::from_topics(all_topics.into_iter(), seed, false_positive_rate)
+    network_service::AffinityFilter::from_topics(
+        all_topics.into_iter(),
+        config.bloom_seed(),
+        config.false_positive_rate(),
+    )
 }
