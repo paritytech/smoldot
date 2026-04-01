@@ -672,6 +672,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             }
         };
 
+        let statement_protocol_config = config.statement_protocol_config;
+
         // Start the services of the chain to add, or grab the services if they already exist.
         let (services, log_name) = match chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
@@ -695,9 +697,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         self.platform.client_name(),
                         self.platform.client_version()
                     );
-
-                    let statement_protocol_config = config.statement_protocol_config;
-                    let statement_protocol_config_for_rpc = statement_protocol_config.clone();
 
                     let config = match (&relay_chain, &chain_information) {
                         (Some((relay_chain, para_id, _)), Some(chain_information)) => {
@@ -738,7 +737,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_spec.fork_id().map(|f| f.to_owned()),
                         config,
                         network_identify_agent_version,
-                        statement_protocol_config,
+                        statement_protocol_config.clone(),
                     )
                 };
 
@@ -952,7 +951,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 system_name: self.platform.client_name().into_owned(),
                 system_version: self.platform.client_version().into_owned(),
                 genesis_block_hash,
-                statement_protocol_config: statement_protocol_config_for_rpc,
+                statement_protocol_config,
             });
 
             Some(frontend)
