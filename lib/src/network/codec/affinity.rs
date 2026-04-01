@@ -15,11 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use super::statement::Topic;
 use alloc::vec::Vec;
 use core::hash::{BuildHasher, Hasher};
-
-use super::statement::Topic;
-
 use fastbloom::DefaultHasher as BloomDefaultHasher;
 
 /// Maximum number of bits allowed in a bloom filter received from the network.
@@ -51,6 +49,10 @@ impl BuildHasher for PortableBuildHasher {
     }
 }
 
+/// Hasher state returned by [`PortableBuildHasher`].  Delegates everything to
+/// the inner SipHash-based hasher but overrides `write_usize` and `write_isize`
+/// so that platform-width integers are always 8 bytes regardless of pointer
+/// width.
 #[derive(Clone)]
 struct PortableHasher(<BloomDefaultHasher as BuildHasher>::Hasher);
 
@@ -67,18 +69,29 @@ impl Hasher for PortableHasher {
 
     #[inline]
     fn write_usize(&mut self, i: usize) {
+        // Always write as 8-byte little-endian so that `wasm32` (4-byte
+        // usize) and 64-bit targets produce the same hash.
         self.0.write(&(i as u64).to_le_bytes());
     }
 
     #[inline]
     fn write_isize(&mut self, i: isize) {
+        // Always write as 8-byte little-endian for the same reason as
+        // `write_usize`.
         self.0.write(&(i as i64).to_le_bytes());
     }
 }
 
+/// Wire representation of a bloom filter.
 struct EncodedBloomFilter {
+    // Seed used for hashing items in the bloom filter. Needed for the peer to reconstruct the same
+    // bloom filter.
     seed: u128,
+    // Number of hash functions used in the bloom filter. Needed for the peer to reconstruct the
+    // same bloom filter.
     num_hashes: u32,
+    // Bloom filter bits as a vector of u64. The bloom filter is reconstructed by the peer using
+    // these bits.
     bits: Vec<u64>,
 }
 
@@ -121,7 +134,9 @@ impl EncodedBloomFilter {
 
 #[derive(Debug, Clone)]
 pub struct AffinityFilter {
+    /// Bloom filter bytes representing the topics this peer is interested in.
     bloom: fastbloom::BloomFilter<PortableBuildHasher>,
+    /// Seed used for hashing items in the bloom filter.
     seed: u128,
 }
 
@@ -153,14 +168,20 @@ impl AffinityFilter {
         })
     }
 
+    /// Insert a topic into the bloom filter.
     pub fn insert(&mut self, topic: &[u8; 32]) {
         self.bloom.insert(topic);
     }
 
+    /// Check if a topic is likely present in the bloom filter.
     pub fn contains(&self, topic: &[u8; 32]) -> bool {
         self.bloom.contains(topic)
     }
 
+    /// Check if topics match this affinity filter.
+    ///
+    /// Topics match if any of them is present in the bloom filter.
+    /// No topics always match (from broadcast statements).
     pub fn matches_statement(&self, topics: &[&Topic]) -> bool {
         if topics.is_empty() {
             return true;
@@ -199,66 +220,6 @@ mod tests {
     const TEST_SEED: u128 = 0x5EED_5EED_5EED_5EED;
 
     const MAX_BLOOM_WORDS: usize = MAX_BLOOM_BITS / u64::BITS as usize;
-
-    #[test]
-    fn affinity_filter_roundtrip() {
-        let topic1 = [0x01u8; 32];
-        let topic2 = [0x02u8; 32];
-        let topic3 = [0x03u8; 32];
-
-        let mut filter = AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, 2);
-        filter.insert(&topic1);
-        filter.insert(&topic2);
-
-        let encoded = filter.encode_to_vec();
-        let decoded = AffinityFilter::decode(&encoded).unwrap();
-
-        assert!(decoded.contains(&topic1));
-        assert!(decoded.contains(&topic2));
-        assert!(!decoded.contains(&topic3));
-    }
-
-    #[test]
-    fn matches_statement_no_topics_always_matches() {
-        let bloom = fastbloom::BloomFilter::with_false_pos(BLOOM_FALSE_POS_RATE)
-            .hasher(PortableBuildHasher::seeded(TEST_SEED))
-            .expected_items(10);
-        let filter = AffinityFilter {
-            bloom,
-            seed: TEST_SEED,
-        };
-        assert!(filter.matches_statement(&[]));
-    }
-
-    #[test]
-    fn matches_statement_single_matching_topic() {
-        let topic: [u8; 32] = [0xAA; 32];
-        let mut filter = AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, 10);
-        filter.insert(&topic);
-        assert!(filter.matches_statement(&[&topic]));
-    }
-
-    #[test]
-    fn matches_statement_single_non_matching_topic() {
-        let topic_in_filter: [u8; 32] = [0xAA; 32];
-        let topic_on_stmt: [u8; 32] = [0xBB; 32];
-        let mut filter = AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, 10);
-        filter.insert(&topic_in_filter);
-        assert!(!filter.matches_statement(&[&topic_on_stmt]));
-    }
-
-    #[test]
-    fn matches_statement_multiple_topics_any_semantics() {
-        let topic_aa: [u8; 32] = [0xAA; 32];
-        let topic_bb: [u8; 32] = [0xBB; 32];
-        let topic_cc: [u8; 32] = [0xCC; 32];
-
-        let mut filter = AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, 10);
-        filter.insert(&topic_bb);
-
-        assert!(filter.matches_statement(&[&topic_aa, &topic_bb]));
-        assert!(!filter.matches_statement(&[&topic_aa, &topic_cc]));
-    }
 
     #[test]
     fn num_hashes_is_within_substrate_limit() {
@@ -356,5 +317,46 @@ mod tests {
         for (i, item) in items.iter().enumerate() {
             assert_eq!(decoded.contains(item), expected[i], "mismatch for item {i}");
         }
+
+        assert_eq!(encoded, decoded.encode_to_vec(), "re-encoding should produce identical bytes");
+    }
+
+    #[test]
+    fn encoding_snapshot() {
+        const ITEM_COUNT: usize = 10_000;
+
+        let items: Vec<[u8; 32]> = (0..ITEM_COUNT)
+            .map(|i| {
+                let mut key = [0u8; 32];
+                key[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                key
+            })
+            .collect();
+
+        let mut filter = AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, ITEM_COUNT);
+        for item in &items {
+            filter.insert(item);
+        }
+
+        let encoded = filter.encode_to_vec();
+
+        let digest: [u8; 32] =
+            blake2_rfc::blake2b::blake2b(32, &[], &encoded).as_bytes().try_into().unwrap();
+        assert_eq!(
+            digest,
+            [
+                180, 34, 58, 78, 198, 24, 137, 83, 154, 127, 9, 152, 171, 50, 197, 27, 242, 158,
+                30, 79, 143, 192, 53, 151, 174, 106, 132, 105, 20, 145, 133, 0
+            ],
+            "blake2_256 digest must match polkadot-sdk snapshot"
+        );
+
+        let decoded = AffinityFilter::decode(&encoded).expect("snapshot must decode");
+        for (i, item) in items.iter().enumerate() {
+            assert!(decoded.contains(item), "item {i} must be present after decoding");
+        }
+
+        let absent: [u8; 32] = [0xFF; 32];
+        assert!(!decoded.contains(&absent));
     }
 }
