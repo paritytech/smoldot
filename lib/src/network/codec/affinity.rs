@@ -318,7 +318,11 @@ mod tests {
             assert_eq!(decoded.contains(item), expected[i], "mismatch for item {i}");
         }
 
-        assert_eq!(encoded, decoded.encode_to_vec(), "re-encoding should produce identical bytes");
+        assert_eq!(
+            encoded,
+            decoded.encode_to_vec(),
+            "re-encoding should produce identical bytes"
+        );
     }
 
     #[test]
@@ -340,8 +344,10 @@ mod tests {
 
         let encoded = filter.encode_to_vec();
 
-        let digest: [u8; 32] =
-            blake2_rfc::blake2b::blake2b(32, &[], &encoded).as_bytes().try_into().unwrap();
+        let digest: [u8; 32] = blake2_rfc::blake2b::blake2b(32, &[], &encoded)
+            .as_bytes()
+            .try_into()
+            .unwrap();
         assert_eq!(
             digest,
             [
@@ -353,7 +359,10 @@ mod tests {
 
         let decoded = AffinityFilter::decode(&encoded).expect("snapshot must decode");
         for (i, item) in items.iter().enumerate() {
-            assert!(decoded.contains(item), "item {i} must be present after decoding");
+            assert!(
+                decoded.contains(item),
+                "item {i} must be present after decoding"
+            );
         }
 
         let absent: [u8; 32] = [0xFF; 32];
