@@ -75,28 +75,28 @@ jobs:
     - run: rustup target add i686-unknown-linux-gnu
     # We test for both x86_64 and i686 because there is some `cfg(target_arch = "x86_64")`
     # conditional compilation within the source code.
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features std
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features std
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features wasmtime
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features wasmtime
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features std --features wasmtime
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features std --features wasmtime
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std --features wasmtime
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std --features wasmtime
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot-light --locked --no-default-features
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot-light --locked --no-default-features
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features std
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features std
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features wasmtime
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features wasmtime
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features std --features wasmtime
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features std --features wasmtime
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package parity-smoldot --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package parity-smoldot --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package parity-smoldot --locked --no-default-features --features database-sqlite
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package parity-smoldot --locked --no-default-features --features database-sqlite
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package parity-smoldot --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package parity-smoldot --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package parity-smoldot --locked --no-default-features --features database-sqlite --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package parity-smoldot --locked --no-default-features --features database-sqlite --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package parity-smoldot --locked --no-default-features --features database-sqlite --features wasmtime
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package parity-smoldot --locked --no-default-features --features database-sqlite --features wasmtime
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package parity-smoldot --locked --no-default-features --features std --features wasmtime
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package parity-smoldot --locked --no-default-features --features std --features wasmtime
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package parity-smoldot --locked --no-default-features --features database-sqlite --features std --features wasmtime
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package parity-smoldot --locked --no-default-features --features database-sqlite --features std --features wasmtime
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package parity-smoldot-light --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package parity-smoldot-light --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package parity-smoldot-light --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package parity-smoldot-light --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package parity-smoldot-light --locked --no-default-features --features wasmtime
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package parity-smoldot-light --locked --no-default-features --features wasmtime
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package parity-smoldot-light --locked --no-default-features --features std --features wasmtime
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package parity-smoldot-light --locked --no-default-features --features std --features wasmtime
 
   check-no-std:
     runs-on: ubuntu-latest
@@ -107,8 +107,8 @@ jobs:
     - run: rustup target add thumbv7m-none-eabi
     - uses: Swatinem/rust-cache@v2
     # We use `thumbv7m-none-eabi` as this target seems to generally work fine and doesn't support `std`. Many targets unfortunately have Rust/LLVM bugs preventing compilation.
-    - run: RUSTFLAGS=-Dwarnings cargo build --package smoldot --locked --no-default-features --target=thumbv7m-none-eabi
-    - run: RUSTFLAGS=-Dwarnings cargo build --package smoldot-light --locked --no-default-features --target=thumbv7m-none-eabi
+    - run: RUSTFLAGS=-Dwarnings cargo build --package parity-smoldot --locked --no-default-features --target=thumbv7m-none-eabi
+    - run: RUSTFLAGS=-Dwarnings cargo build --package parity-smoldot-light --locked --no-default-features --target=thumbv7m-none-eabi
 
   check-rustdoc-links:
     runs-on: ubuntu-latest
