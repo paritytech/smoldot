@@ -67,6 +67,7 @@ fn main() {
                     smoldot_light::network_service::StatementProtocolConfig::new(
                         core::num::NonZeroUsize::new(65536).unwrap(),
                         0.01,
+                        rand::random(),
                     ),
                 ),
             })

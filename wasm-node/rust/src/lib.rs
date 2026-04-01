@@ -140,7 +140,11 @@ fn add_chain(
                     statement_protocol_config: NonZero::<usize>::new(
                         usize::try_from(statement_store_max_seen_statements).unwrap_or(0),
                     )
-                    .map(|max_seen| smoldot_light::network_service::StatementProtocolConfig::new(max_seen, statement_store_false_positive_rate)),
+                    .map(|max_seen| {
+                        let mut seed_bytes = [0u8; 16];
+                        smoldot_light::platform::PlatformRef::fill_random_bytes(&platform::PLATFORM_REF, &mut seed_bytes);
+                        smoldot_light::network_service::StatementProtocolConfig::new(max_seen, statement_store_false_positive_rate, u128::from_le_bytes(seed_bytes))
+                    }),
                 }) {
                 Ok(c) => c,
                 Err(error) => {

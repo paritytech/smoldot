@@ -82,13 +82,15 @@ pub use service::{
 pub struct StatementProtocolConfig {
     max_seen_statements: NonZeroUsize,
     false_positive_rate: f64,
+    bloom_seed: u128,
 }
 
 impl StatementProtocolConfig {
-    pub fn new(max_seen_statements: NonZeroUsize, false_positive_rate: f64) -> Self {
+    pub fn new(max_seen_statements: NonZeroUsize, false_positive_rate: f64, bloom_seed: u128) -> Self {
         StatementProtocolConfig {
             max_seen_statements,
             false_positive_rate,
+            bloom_seed,
         }
     }
 
@@ -98,6 +100,10 @@ impl StatementProtocolConfig {
 
     pub fn false_positive_rate(&self) -> f64 {
         self.false_positive_rate
+    }
+
+    pub fn bloom_seed(&self) -> u128 {
+        self.bloom_seed
     }
 }
 

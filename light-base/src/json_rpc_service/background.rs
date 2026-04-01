@@ -121,8 +121,6 @@ struct Background<TPlat: PlatformRef> {
 
     statement_protocol_config: Option<network_service::StatementProtocolConfig>,
 
-    bloom_seed: u128,
-
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     /// See [`Config::sync_service`].
@@ -519,11 +517,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
             seed
         }),
         statement_protocol_config: config.statement_protocol_config,
-        bloom_seed: {
-            let mut seed_bytes = [0u8; 16];
-            config.platform.fill_random_bytes(&mut seed_bytes);
-            u128::from_le_bytes(seed_bytes)
-        },
         next_garbage_collection: Box::pin(config.platform.sleep(Duration::new(0, 0))),
         network_service: config.network_service.clone(),
         sync_service: config.sync_service.clone(),
@@ -780,11 +773,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 if matches!(version, network_service::StatementProtocolVersion::V2) {
                     me.v2_statement_peers.insert(peer_id.clone());
                     if !me.statement_subscriptions.is_empty() {
-                        let fpr = me.statement_protocol_config.as_ref().expect("V2 peers require statement protocol; qed").false_positive_rate();
+                        let spc = me.statement_protocol_config.as_ref().expect("V2 peers require statement protocol; qed");
                         let combined_filter = build_combined_affinity_filter(
                             &me.statement_subscriptions,
-                            me.bloom_seed,
-                            fpr,
+                            spc.bloom_seed(),
+                            spc.false_positive_rate(),
                         );
                         let _ = me
                             .network_service
