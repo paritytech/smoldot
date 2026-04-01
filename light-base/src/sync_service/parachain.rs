@@ -536,8 +536,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 let Some(sync) = &task.sync else {
                     unreachable!()
                 };
-                task
-                    .network_service
+                task.network_service
                     .set_local_best_block(*sync.best_block_hash(), sync.best_block_number())
                     .await;
                 task.network_up_to_date_best = true;

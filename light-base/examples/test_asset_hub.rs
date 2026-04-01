@@ -43,6 +43,7 @@ fn main() {
             potential_relay_chains: iter::empty(),
             database_content: "",
             user_data: (),
+            statement_protocol_config: None,
         })
         .unwrap();
 
@@ -60,6 +61,7 @@ fn main() {
             potential_relay_chains: [kusama_chain_id].into_iter(),
             database_content: "",
             user_data: (),
+            statement_protocol_config: None,
         })
         .unwrap();
 
