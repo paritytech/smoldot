@@ -148,6 +148,20 @@ impl AffinityFilter {
         AffinityFilter { bloom, seed }
     }
 
+    pub fn from_topics<'a>(
+        topics: impl Iterator<Item = &'a [u8; 32]>,
+        seed: u128,
+        false_positive_rate: f64,
+    ) -> Self {
+        let topics: Vec<&[u8; 32]> = topics.collect();
+        let count = topics.len().max(1);
+        let mut filter = Self::new(seed, false_positive_rate, count);
+        for topic in topics {
+            filter.insert(topic);
+        }
+        filter
+    }
+
     pub fn decode(data: &[u8]) -> Result<Self, DecodeAffinityFilterError> {
         let encoded = EncodedBloomFilter::decode(data)?;
         if encoded.bits.is_empty() {
