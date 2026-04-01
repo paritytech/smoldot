@@ -2877,23 +2877,7 @@ where
                             }
                             codec::StatementProtocolVersion::V2 => {
                                 match codec::decode_statement_message(&notification) {
-                                    Ok(codec::StatementMessage::Statements(stmts)) => {
-                                        let mut statements = Vec::with_capacity(stmts.len());
-                                        for raw in stmts {
-                                            let hash = codec::statement_hash(raw);
-                                            match codec::decode_statement(raw) {
-                                                Ok(s) => statements.push((hash, s)),
-                                                Err(err) => {
-                                                    return Some(Event::ProtocolError {
-                                                        error:
-                                                            ProtocolError::BadStatementNotification(
-                                                                err,
-                                                            ),
-                                                        peer_id: self.peers[peer_index.0].clone(),
-                                                    });
-                                                }
-                                            }
-                                        }
+                                    Ok(codec::StatementMessage::Statements(statements)) => {
                                         if statements.is_empty() {
                                             continue;
                                         }
@@ -4119,7 +4103,6 @@ where
         let Some(&peer_index) = self.peers_by_peer_id.get(target) else {
             return Err(QueueNotificationError::NoConnection);
         };
-
         let chain_index = chain_id.0;
 
         let (protocol, notification) = self
@@ -4159,7 +4142,6 @@ where
         let Some(&peer_index) = self.peers_by_peer_id.get(target) else {
             return Err(SendTopicAffinityError::NoConnection);
         };
-
         let chain_index = chain_id.0;
 
         match self.find_statement_protocol_for_peer(peer_index, chain_index) {
@@ -4739,15 +4721,28 @@ pub enum Event<TConn> {
         statements: Vec<([u8; 32], codec::Statement)>,
     },
 
+    /// A statement protocol substream has been successfully negotiated with a peer.
+    ///
+    /// Indicates which protocol version (V1 or V2) was agreed upon.
     StatementProtocolConnected {
+        /// Identity of the remote peer.
         peer_id: PeerId,
+        /// Index of the chain the substream relates to.
         chain_id: ChainId,
+        /// Negotiated statement protocol version.
         version: codec::StatementProtocolVersion,
     },
 
+    /// Received a topic affinity bloom filter from a V2 peer.
+    ///
+    /// The filter indicates which statement topics the peer is interested in.
+    /// Only statements matching the filter need to be sent to this peer.
     StatementTopicAffinityReceived {
+        /// Identity of the remote peer.
         peer_id: PeerId,
+        /// Index of the chain the affinity relates to.
         chain_id: ChainId,
+        /// Bloom filter representing the peer's topic interests.
         filter: codec::AffinityFilter,
     },
 

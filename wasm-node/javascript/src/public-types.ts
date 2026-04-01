@@ -464,6 +464,6 @@ export interface AddChainOptions {
      */
     statementStore?: {
         maxSeenStatements?: number,
-        falsePositiveRate?: number,
+        falsePositiveRate: number,
     }
 }

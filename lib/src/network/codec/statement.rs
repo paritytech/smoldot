@@ -48,8 +48,8 @@ const PROOF_ON_CHAIN: u8 = 3;
 pub use super::affinity::AffinityFilter;
 
 #[derive(Debug, Clone)]
-pub enum StatementMessage<'a> {
-    Statements(Vec<&'a [u8]>),
+pub enum StatementMessage {
+    Statements(Vec<([u8; 32], Statement)>),
     ExplicitTopicAffinity(AffinityFilter),
 }
 
@@ -210,14 +210,15 @@ const V2_TAG_AFFINITY: u8 = 0x01;
 
 pub fn decode_statement_message(
     bytes: &[u8],
-) -> Result<StatementMessage<'_>, DecodeStatementMessageError> {
+) -> Result<StatementMessage, DecodeStatementMessageError> {
     if bytes.is_empty() {
         return Err(DecodeStatementMessageError::Empty);
     }
 
     match bytes[0] {
         V2_TAG_STATEMENTS => {
-            let stmts = extract_statement_bytes(&bytes[1..])?;
+            let stmts = decode_statement_notification(&bytes[1..])
+                .map_err(DecodeStatementMessageError::InvalidStatements)?;
             Ok(StatementMessage::Statements(stmts))
         }
         V2_TAG_AFFINITY => {
@@ -230,65 +231,25 @@ pub fn decode_statement_message(
 }
 
 pub fn encode_statements_message(statements: &[&[u8]]) -> Vec<u8> {
+    let tag_len = 1;
+    let max_compact_len = 5;
     let total_len: usize = statements.iter().map(|s| s.len()).sum();
-    let mut out = Vec::with_capacity(1 + 5 + total_len);
+    let mut out = Vec::with_capacity(tag_len + max_compact_len + total_len);
     out.push(V2_TAG_STATEMENTS);
     out.extend_from_slice(crate::util::encode_scale_compact_usize(statements.len()).as_ref());
     for stmt in statements {
-        out.extend_from_slice(crate::util::encode_scale_compact_usize(stmt.len()).as_ref());
         out.extend_from_slice(stmt);
     }
     out
 }
 
 pub fn encode_topic_affinity_message(filter: &AffinityFilter) -> Vec<u8> {
+    let tag_len = 1;
     let encoded = filter.encode_to_vec();
-    let mut out = Vec::with_capacity(1 + encoded.len());
+    let mut out = Vec::with_capacity(tag_len + encoded.len());
     out.push(V2_TAG_AFFINITY);
     out.extend_from_slice(&encoded);
     out
-}
-
-fn extract_statement_bytes(data: &[u8]) -> Result<Vec<&[u8]>, DecodeStatementMessageError> {
-    let (mut remaining, count) =
-        crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(data).map_err(|_| {
-            DecodeStatementMessageError::InvalidStatements(DecodeStatementNotificationError(
-                nom::error::ErrorKind::Fail,
-            ))
-        })?;
-
-    if count > MAX_STATEMENTS_PER_NOTIFICATION {
-        return Err(DecodeStatementMessageError::InvalidStatements(
-            DecodeStatementNotificationError(nom::error::ErrorKind::TooLarge),
-        ));
-    }
-
-    let mut statements = Vec::with_capacity(count);
-    for _ in 0..count {
-        let (rest, len) = crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(
-            remaining,
-        )
-        .map_err(|_| {
-            DecodeStatementMessageError::InvalidStatements(DecodeStatementNotificationError(
-                nom::error::ErrorKind::Fail,
-            ))
-        })?;
-        if rest.len() < len {
-            return Err(DecodeStatementMessageError::InvalidStatements(
-                DecodeStatementNotificationError(nom::error::ErrorKind::Eof),
-            ));
-        }
-        statements.push(&rest[..len]);
-        remaining = &rest[len..];
-    }
-
-    if !remaining.is_empty() {
-        return Err(DecodeStatementMessageError::InvalidStatements(
-            DecodeStatementNotificationError(nom::error::ErrorKind::NonEmpty),
-        ));
-    }
-
-    Ok(statements)
 }
 
 #[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
@@ -751,15 +712,56 @@ mod tests {
         match decoded {
             StatementMessage::Statements(stmts) => {
                 assert_eq!(stmts.len(), 2);
-                assert_eq!(stmts[0], encoded1.as_slice());
-                assert_eq!(stmts[1], encoded2.as_slice());
+                assert_eq!(stmts[0].1, statement1);
+                assert_eq!(stmts[1].1, statement2);
             }
             _ => panic!("Expected Statements variant"),
         }
     }
 
     #[test]
-    fn v2_affinity_roundtrip() {
+    fn v2_statements_encoding_snapshot() {
+        let statement = Statement {
+            proof: Some(Proof::OnChain {
+                who: [42u8; 32],
+                block_hash: [24u8; 32],
+                event_index: 66,
+            }),
+            decryption_key: Some([0xde; 32]),
+            expiry: 999,
+            channel: Some([0xcc; 32]),
+            topics: vec![[0x01; 32], [0x02; 32]],
+            data: Some(vec![55, 99]),
+        };
+
+        let stmt_bytes = encode_statement(&statement).unwrap();
+        let v2_encoded = encode_statements_message(&[&stmt_bytes]);
+
+        let digest: [u8; 32] = blake2_rfc::blake2b::blake2b(32, &[], &v2_encoded)
+            .as_bytes()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            digest,
+            [
+                44, 71, 235, 73, 238, 115, 6, 15, 128, 174, 159, 216, 166, 76, 26, 101, 28, 143,
+                88, 21, 22, 128, 169, 62, 180, 19, 164, 234, 174, 210, 81, 105
+            ],
+            "blake2_256 digest must match polkadot-sdk snapshot"
+        );
+
+        let decoded = decode_statement_message(&v2_encoded).unwrap();
+        match decoded {
+            StatementMessage::Statements(stmts) => {
+                assert_eq!(stmts.len(), 1);
+                assert_eq!(stmts[0].1, statement);
+            }
+            _ => panic!("Expected Statements variant"),
+        }
+    }
+
+    #[test]
+    fn v2_affinity_encoding_snapshot() {
         let topic1 = [0x01u8; 32];
         let topic2 = [0x02u8; 32];
         let topic3 = [0x03u8; 32];
@@ -769,8 +771,21 @@ mod tests {
         filter.insert(&topic2);
 
         let encoded = encode_topic_affinity_message(&filter);
-        let decoded = decode_statement_message(&encoded).unwrap();
 
+        let digest: [u8; 32] = blake2_rfc::blake2b::blake2b(32, &[], &encoded)
+            .as_bytes()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            digest,
+            [
+                82, 59, 251, 163, 43, 156, 130, 249, 35, 214, 187, 99, 4, 105, 179, 131, 42, 117,
+                191, 57, 160, 243, 233, 20, 204, 239, 62, 120, 55, 5, 234, 62
+            ],
+            "blake2_256 digest must match polkadot-sdk snapshot"
+        );
+
+        let decoded = decode_statement_message(&encoded).unwrap();
         let StatementMessage::ExplicitTopicAffinity(af) = decoded else {
             panic!("Expected ExplicitTopicAffinity variant");
         };

@@ -87,7 +87,8 @@ pub(super) struct Config<TPlat: PlatformRef> {
     /// Hash of the genesis block of the chain.
     pub genesis_block_hash: [u8; 32],
 
-    pub bloom_false_positive_rate: Option<f64>,
+    /// Statement protocol configuration. `None` if the statement protocol is disabled.
+    pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
 }
 
 /// Fields used to process JSON-RPC requests in the background.
@@ -118,7 +119,7 @@ struct Background<TPlat: PlatformRef> {
     /// Randomness used for various purposes, such as generating subscription IDs.
     randomness: ChaCha20Rng,
 
-    bloom_false_positive_rate: Option<f64>,
+    statement_protocol_config: Option<network_service::StatementProtocolConfig>,
 
     bloom_seed: u128,
 
@@ -517,7 +518,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             config.platform.fill_random_bytes(&mut seed);
             seed
         }),
-        bloom_false_positive_rate: config.bloom_false_positive_rate,
+        statement_protocol_config: config.statement_protocol_config,
         bloom_seed: {
             let mut seed_bytes = [0u8; 16];
             config.platform.fill_random_bytes(&mut seed_bytes);
@@ -779,7 +780,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 if matches!(version, network_service::StatementProtocolVersion::V2) {
                     me.v2_statement_peers.insert(peer_id.clone());
                     if !me.statement_subscriptions.is_empty() {
-                        let fpr = me.bloom_false_positive_rate.unwrap_or(0.01);
+                        let fpr = me.statement_protocol_config.as_ref().expect("V2 peers require statement protocol; qed").false_positive_rate();
                         let combined_filter = build_combined_affinity_filter(
                             &me.statement_subscriptions,
                             me.bloom_seed,
@@ -2926,7 +2927,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .insert(subscription_id.clone(), filter);
 
                         if !me.v2_statement_peers.is_empty() {
-                            let fpr = me.bloom_false_positive_rate.unwrap_or(0.01);
+                            let fpr = me.statement_protocol_config.as_ref().expect("V2 peers require statement protocol; qed").false_positive_rate();
                             let combined_filter = build_combined_affinity_filter(
                                 &me.statement_subscriptions,
                                 me.bloom_seed,
@@ -2955,7 +2956,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let existed = me.statement_subscriptions.remove(&subscription).is_some();
 
                         if existed && !me.v2_statement_peers.is_empty() {
-                            let fpr = me.bloom_false_positive_rate.unwrap_or(0.01);
+                            let fpr = me.statement_protocol_config.as_ref().expect("V2 peers require statement protocol; qed").false_positive_rate();
                             let combined_filter = build_combined_affinity_filter(
                                 &me.statement_subscriptions,
                                 me.bloom_seed,

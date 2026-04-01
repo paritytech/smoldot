@@ -672,11 +672,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             }
         };
 
-        let bloom_false_positive_rate = config
-            .statement_protocol_config
-            .as_ref()
-            .map(|c| c.false_positive_rate());
-
         // Start the services of the chain to add, or grab the services if they already exist.
         let (services, log_name) = match chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
@@ -702,6 +697,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     );
 
                     let statement_protocol_config = config.statement_protocol_config;
+                    let statement_protocol_config_for_rpc = statement_protocol_config.clone();
 
                     let config = match (&relay_chain, &chain_information) {
                         (Some((relay_chain, para_id, _)), Some(chain_information)) => {
@@ -956,7 +952,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 system_name: self.platform.client_name().into_owned(),
                 system_version: self.platform.client_version().into_owned(),
                 genesis_block_hash,
-                bloom_false_positive_rate,
+                statement_protocol_config: statement_protocol_config_for_rpc,
             });
 
             Some(frontend)
