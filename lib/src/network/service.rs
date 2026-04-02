@@ -76,7 +76,7 @@
 
 // TODO: expand explanations once the API is finalized
 
-use crate::libp2p::collection;
+use crate::libp2p::{collection, connection::established};
 use crate::network::codec;
 use crate::util::{self, SipHasherBuild};
 
@@ -1813,14 +1813,6 @@ where
                                                     version: codec::StatementProtocolVersion::V2,
                                                 }),
                                         )
-                                        .chain(
-                                            self.chains[chain_index]
-                                                .enable_statement_protocol
-                                                .then_some(NotificationsProtocol::Statement {
-                                                    chain_index,
-                                                    version: codec::StatementProtocolVersion::V1,
-                                                }),
-                                        )
                                     {
                                         if self
                                             .notification_substreams_by_peer_id
@@ -2159,6 +2151,23 @@ where
                                     continue;
                                 }
 
+                                // Fallback to Statement V1 if Statement V2 failed
+                                let substream_protocol = match (result, substream_protocol) {
+                                    (
+                                        Err(collection::NotificationsOutErr::Substream(
+                                            established::NotificationsOutErr::ProtocolNotAvailable,
+                                        )),
+                                        NotificationsProtocol::Statement {
+                                            version: codec::StatementProtocolVersion::V2,
+                                            ..
+                                        },
+                                    ) => NotificationsProtocol::Statement {
+                                        chain_index,
+                                        version: codec::StatementProtocolVersion::V1,
+                                    },
+                                    _ => substream_protocol,
+                                };
+
                                 let new_substream_id = self.inner.open_out_notifications(
                                     connection_id,
                                     codec::encode_protocol_name_string(match substream_protocol {
@@ -2210,7 +2219,7 @@ where
                                     new_substream_id,
                                     SubstreamInfo {
                                         connection_id,
-                                        protocol: substream_info.protocol,
+                                        protocol: Some(Protocol::Notifications(substream_protocol)),
                                     },
                                 );
                                 debug_assert!(_prev_value.is_none());
