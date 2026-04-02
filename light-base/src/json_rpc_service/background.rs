@@ -48,6 +48,8 @@ use smoldot::{
     trie::{minimize_proof, proof_decode},
 };
 
+const STATEMENT_AFFINITY_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Configuration for a JSON-RPC service.
 pub(super) struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
@@ -230,6 +232,9 @@ struct Background<TPlat: PlatformRef> {
         hashbrown::HashMap<String, smoldot::json_rpc::methods::TopicFilter, fnv::FnvBuildHasher>,
 
     v2_statement_peers: hashbrown::HashSet<network_service::PeerId, fnv::FnvBuildHasher>,
+
+    statement_affinity_stale: bool,
+    next_statement_affinity_update: Pin<Box<TPlat::Delay>>,
 
     /// Receiver for network events (statements from peers).
     network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
@@ -582,6 +587,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
             Default::default(),
         ),
         v2_statement_peers: hashbrown::HashSet::with_capacity_and_hasher(16, Default::default()),
+        statement_affinity_stale: false,
+        next_statement_affinity_update: Box::pin(
+            config.platform.sleep(Duration::from_secs(86400 * 365)),
+        ),
         network_events_rx: None,
         platform: config.platform,
     };
@@ -625,6 +634,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 peer_id: network_service::PeerId,
             },
             MustSubscribeNetworkEvents,
+            StatementAffinityUpdate,
         }
 
         // Wait until there is something to do.
@@ -717,6 +727,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 WakeUpReason::GarbageCollection
             })
             .or(async {
+                (&mut me.next_statement_affinity_update).await;
+                me.next_statement_affinity_update =
+                    Box::pin(me.platform.sleep(Duration::from_secs(86400 * 365)));
+                WakeUpReason::StatementAffinityUpdate
+            })
+            .or(async {
                 let Some(rx) = &me.network_events_rx else {
                     return WakeUpReason::MustSubscribeNetworkEvents;
                 };
@@ -764,6 +780,25 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.block_runtimes_pending.shrink_to_fit();
             }
 
+            WakeUpReason::StatementAffinityUpdate => {
+                me.statement_affinity_stale = false;
+
+                if !me.v2_statement_peers.is_empty() {
+                    let combined_filter = build_combined_affinity_filter(
+                        &me.statement_subscriptions,
+                        me.statement_protocol_config
+                            .as_ref()
+                            .expect("V2 peers require statement protocol; qed"),
+                    );
+                    for peer_id in me.v2_statement_peers.clone() {
+                        let _ = me
+                            .network_service
+                            .send_topic_affinity(&peer_id, combined_filter.clone())
+                            .await;
+                    }
+                }
+            }
+
             WakeUpReason::MustSubscribeNetworkEvents => {
                 debug_assert!(me.network_events_rx.is_none());
                 me.network_events_rx = Some(me.network_service.subscribe().await);
@@ -775,7 +810,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     if !me.statement_subscriptions.is_empty() {
                         let combined_filter = build_combined_affinity_filter(
                             &me.statement_subscriptions,
-                            me.statement_protocol_config.as_ref()
+                            me.statement_protocol_config
+                                .as_ref()
                                 .expect("V2 peers require statement protocol; qed"),
                         );
                         let _ = me
@@ -2918,18 +2954,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         me.statement_subscriptions
                             .insert(subscription_id.clone(), filter);
 
-                        if !me.v2_statement_peers.is_empty() {
-                                let combined_filter = build_combined_affinity_filter(
-                                &me.statement_subscriptions,
-                                me.statement_protocol_config.as_ref()
-                                    .expect("V2 peers require statement protocol; qed"),
-                            );
-                            for peer_id in me.v2_statement_peers.clone() {
-                                let _ = me
-                                    .network_service
-                                    .send_topic_affinity(&peer_id, combined_filter.clone())
-                                    .await;
-                            }
+                        if !me.statement_affinity_stale {
+                            me.statement_affinity_stale = true;
+                            me.next_statement_affinity_update =
+                                Box::pin(me.platform.sleep(STATEMENT_AFFINITY_UPDATE_INTERVAL));
                         }
 
                         let _ = me
@@ -2946,18 +2974,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::statement_unsubscribeStatement { subscription } => {
                         let existed = me.statement_subscriptions.remove(&subscription).is_some();
 
-                        if existed && !me.v2_statement_peers.is_empty() {
-                                let combined_filter = build_combined_affinity_filter(
-                                &me.statement_subscriptions,
-                                me.statement_protocol_config.as_ref()
-                                    .expect("V2 peers require statement protocol; qed"),
-                            );
-                            for peer_id in me.v2_statement_peers.clone() {
-                                let _ = me
-                                    .network_service
-                                    .send_topic_affinity(&peer_id, combined_filter.clone())
-                                    .await;
-                            }
+                        if existed && !me.statement_affinity_stale {
+                            me.statement_affinity_stale = true;
+                            me.next_statement_affinity_update =
+                                Box::pin(me.platform.sleep(STATEMENT_AFFINITY_UPDATE_INTERVAL));
                         }
 
                         let _ = me

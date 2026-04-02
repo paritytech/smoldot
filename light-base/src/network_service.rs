@@ -86,7 +86,11 @@ pub struct StatementProtocolConfig {
 }
 
 impl StatementProtocolConfig {
-    pub fn new(max_seen_statements: NonZeroUsize, false_positive_rate: f64, bloom_seed: u128) -> Self {
+    pub fn new(
+        max_seen_statements: NonZeroUsize,
+        false_positive_rate: f64,
+        bloom_seed: u128,
+    ) -> Self {
         StatementProtocolConfig {
             max_seen_statements,
             false_positive_rate,
