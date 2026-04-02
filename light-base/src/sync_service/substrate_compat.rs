@@ -16,8 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{
-    BlockNotification, ConfigRelayChainRuntimeCodeHint, FinalizedBlockRuntime, Notification,
-    SubscribeAll, ToBackground,
+    BlockNotification, ConfigSubstrateCompatibleRuntimeCodeHint, FinalizedBlockRuntime,
+    Notification, SubscribeAll, ToBackground,
 };
 use crate::{log, network_service, platform::PlatformRef, util};
 
@@ -41,13 +41,14 @@ use smoldot::{
     sync::all,
 };
 
-/// Starts a sync service background task to synchronize a standalone chain (relay chain or not).
-pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
+/// Starts a sync service background task to synchronize a chain (relay chain or not) that is
+/// built with Substrate.
+pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
     log_target: String,
     platform: TPlat,
     chain_information: chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
-    runtime_code_hint: Option<ConfigRelayChainRuntimeCodeHint>,
+    runtime_code_hint: Option<ConfigSubstrateCompatibleRuntimeCodeHint>,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 ) {

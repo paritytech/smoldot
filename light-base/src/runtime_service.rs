@@ -2491,13 +2491,15 @@ async fn run_background<TPlat: PlatformRef>(
                         let parent_index = if new_block.parent_hash == finalized_block.hash {
                             None
                         } else {
-                            Some(
-                                // TODO: O(n)
-                                tree.input_output_iter_unordered()
-                                    .find(|block| block.user_data.hash == new_block.parent_hash)
-                                    .unwrap()
-                                    .id,
-                            )
+                            match tree
+                                .input_output_iter_unordered()
+                                .find(|block| block.user_data.hash == new_block.parent_hash)
+                            {
+                                Some(block) => Some(block.id),
+                                // Parent already pruned by finalization; block is
+                                // on a stale fork and can be silently discarded.
+                                None => continue,
+                            }
                         };
 
                         tree.input_insert_block(
@@ -2520,11 +2522,13 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                     Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
                         // TODO: O(n)
-                        let parent_index = tree
+                        let parent_index = match tree
                             .input_output_iter_unordered()
                             .find(|block| block.user_data.hash == new_block.parent_hash)
-                            .unwrap()
-                            .id;
+                        {
+                            Some(block) => block.id,
+                            None => continue,
+                        };
                         tree.input_insert_block(
                             Block {
                                 hash: header::hash_from_scale_encoded_header(
