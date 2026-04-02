@@ -1,12 +1,16 @@
 [package]
-name = "smoldot-light"
-version = "0.19.0"
+name = "parity-smoldot-light"
+version = "0.20.0"
 description = "Browser bindings to a light client for Substrate-based blockchains"
+documentation = "https://docs.rs/parity-smoldot-light"
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
 repository.workspace = true
 include.workspace = true
+
+[lib]
+name = "smoldot_light"
 
 [[example]]
 name = "basic"
@@ -36,7 +40,7 @@ serde = { version = "1.0.183", default-features = false, features = ["alloc", "d
 serde_json = { version = "1.0.104", default-features = false, features = ["alloc"] }
 siphasher = { version = "1.0.1", default-features = false }
 slab = { version = "0.4.8", default-features = false }
-smoldot = { version = "0.21.0", path = "../lib", default-features = false }
+smoldot = { package = "parity-smoldot", version = "0.22.0", path = "../lib", default-features = false }
 zeroize = { version = "1.7.0", default-features = false, features = ["alloc"] }
 
 # `std` feature
