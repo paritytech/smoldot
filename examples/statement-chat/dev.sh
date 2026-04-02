@@ -33,11 +33,8 @@ echo "Copied parachain spec to public/chain-specs/parachain.json (id changed to 
 echo ""
 echo "Building smoldot..."
 cd ../../wasm-node/javascript
-npm run build
-
-echo ""
-echo "Installing dependencies with npm..."
 npm install
+npm run build
 
 echo ""
 echo "Starting dev server with npm..."
