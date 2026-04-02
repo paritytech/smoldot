@@ -91,6 +91,11 @@ impl StatementProtocolConfig {
         false_positive_rate: f64,
         bloom_seed: u128,
     ) -> Self {
+        assert!(
+            false_positive_rate.is_finite()
+                && false_positive_rate > 0.0
+                && false_positive_rate < 1.0
+        );
         StatementProtocolConfig {
             max_seen_statements,
             false_positive_rate,
