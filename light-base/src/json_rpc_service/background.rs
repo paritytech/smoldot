@@ -2986,8 +2986,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         if !me.statement_affinity_stale {
                             me.statement_affinity_stale = true;
-                            me.next_statement_affinity_update =
-                                Some(Box::pin(me.platform.sleep(STATEMENT_AFFINITY_UPDATE_INTERVAL)));
+                            me.next_statement_affinity_update = Some(Box::pin(
+                                me.platform.sleep(STATEMENT_AFFINITY_UPDATE_INTERVAL),
+                            ));
                         }
 
                         let _ = me
@@ -3006,8 +3007,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         if existed && !me.statement_affinity_stale {
                             me.statement_affinity_stale = true;
-                            me.next_statement_affinity_update =
-                                Some(Box::pin(me.platform.sleep(STATEMENT_AFFINITY_UPDATE_INTERVAL)));
+                            me.next_statement_affinity_update = Some(Box::pin(
+                                me.platform.sleep(STATEMENT_AFFINITY_UPDATE_INTERVAL),
+                            ));
                         }
 
                         let _ = me
