@@ -2844,6 +2844,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     Event::StatementProtocolConnected { peer_id, version },
                 ));
             }
+            // TODO: we don't filter outbound statements yet
             WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived {
                 ..
             }) => {}

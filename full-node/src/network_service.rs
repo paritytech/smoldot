@@ -2287,6 +2287,7 @@ async fn background_task(mut inner: Inner) {
                 );
             }
 
+            // TODO: we don't filter outbound statements yet
             WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived {
                 ..
             }) => {}
