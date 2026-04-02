@@ -509,6 +509,19 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 jsonRpcMaxSubscriptions = 0xffffffff
             }
 
+            // Sanitize `statementStore`.
+            let statementStoreMaxSeenStatements = 0;
+            if (options.statementStore !== undefined) {
+                statementStoreMaxSeenStatements = options.statementStore.maxSeenStatements === undefined ? 65536 : options.statementStore.maxSeenStatements;
+                statementStoreMaxSeenStatements = Math.floor(statementStoreMaxSeenStatements);
+                if (statementStoreMaxSeenStatements <= 0 || isNaN(statementStoreMaxSeenStatements)) {
+                    throw new AddChainError("Invalid value for `statementStore.maxSeenStatements`");
+                }
+                if (statementStoreMaxSeenStatements > 0xffffffff) {
+                    statementStoreMaxSeenStatements = 0xffffffff;
+                }
+            }
+
             // Sanitize `databaseContent`.
             if (options.databaseContent !== undefined && typeof options.databaseContent !== 'string')
                 throw new AddChainError("`databaseContent` is not a string");
@@ -521,7 +534,8 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 potentialRelayChainsIds,
                 !!options.disableJsonRpc,
                 jsonRpcMaxPendingRequests,
-                jsonRpcMaxSubscriptions
+                jsonRpcMaxSubscriptions,
+                statementStoreMaxSeenStatements
             );
 
             const outcome = await promise;

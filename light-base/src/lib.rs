@@ -142,6 +142,9 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
 
     /// Configuration for the JSON-RPC endpoint.
     pub json_rpc: AddChainConfigJsonRpc,
+
+    /// If `Some`, enables the statement store networking protocol.
+    pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
 }
 
 /// See [`AddChainConfig::json_rpc`].
@@ -693,28 +696,15 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         self.platform.client_version()
                     );
 
+                    let statement_protocol_config = config.statement_protocol_config;
+
                     let config = match (&relay_chain, &chain_information) {
-                        (Some((relay_chain, para_id, _)), Some(chain_information)) => {
-                            StartServicesChainTy::Parachain {
-                                relay_chain,
-                                finalized_block_header: chain_information
-                                    .as_ref()
-                                    .finalized_block_header
-                                    .scale_encoding_vec(usize::from(
-                                        chain_spec.block_number_bytes(),
-                                    )),
-                                para_id: *para_id,
-                            }
-                        }
-                        (Some((relay_chain, para_id, _)), None) => {
-                            StartServicesChainTy::Parachain {
-                                relay_chain,
-                                finalized_block_header: genesis_block_header.clone(),
-                                para_id: *para_id,
-                            }
-                        }
+                        (Some((relay_chain, para_id, _)), _) => StartServicesChainTy::Parachain {
+                            relay_chain,
+                            para_id: *para_id,
+                        },
                         (None, Some(chain_information)) => {
-                            StartServicesChainTy::RelayChain { chain_information }
+                            StartServicesChainTy::SubstrateCompatible { chain_information }
                         }
                         (None, None) => {
                             // Checked above.
@@ -732,6 +722,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_spec.fork_id().map(|f| f.to_owned()),
                         config,
                         network_identify_agent_version,
+                        statement_protocol_config,
                     )
                 };
 
@@ -1110,12 +1101,11 @@ pub enum AddChainError {
 }
 
 enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
-    RelayChain {
+    SubstrateCompatible {
         chain_information: &'a chain::chain_information::ValidChainInformation,
     },
     Parachain {
         relay_chain: &'a ChainServices<TPlat>,
-        finalized_block_header: Vec<u8>,
         para_id: u32,
     },
 }
@@ -1134,6 +1124,7 @@ fn start_services<TPlat: platform::PlatformRef>(
     fork_id: Option<String>,
     config: StartServicesChainTy<'_, TPlat>,
     network_identify_agent_version: String,
+    statement_protocol_config: Option<network_service::StatementProtocolConfig>,
 ) -> ChainServices<TPlat> {
     let network_service = network_service.get_or_insert_with(|| {
         network_service::NetworkService::new(network_service::Config {
@@ -1148,60 +1139,42 @@ fn start_services<TPlat: platform::PlatformRef>(
     let network_service_chain = network_service.add_chain(network_service::ConfigChain {
         log_name: log_name.clone(),
         num_out_slots: 4,
-        grandpa_protocol_finalized_block_height: if let StartServicesChainTy::RelayChain {
-            chain_information,
-        } = &config
-        {
-            if matches!(
-                chain_information.as_ref().finality,
-                chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-            ) {
+        grandpa_protocol_finalized_block_height: match &config {
+            StartServicesChainTy::SubstrateCompatible { chain_information }
+                if matches!(
+                    chain_information.as_ref().finality,
+                    chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
+                ) =>
+            {
                 Some(chain_information.as_ref().finalized_block_header.number)
-            } else {
-                None
             }
-        } else {
-            // Parachains never use GrandPa.
-            None
+            _ => None,
         },
         genesis_block_hash: header::hash_from_scale_encoded_header(
             &genesis_block_scale_encoded_header,
         ),
         best_block: match &config {
-            StartServicesChainTy::RelayChain { chain_information } => (
+            StartServicesChainTy::SubstrateCompatible { chain_information } => (
                 chain_information.as_ref().finalized_block_header.number,
                 chain_information
                     .as_ref()
                     .finalized_block_header
                     .hash(block_number_bytes),
             ),
-            StartServicesChainTy::Parachain {
-                finalized_block_header,
-                ..
-            } => {
-                if let Ok(decoded) = header::decode(finalized_block_header, block_number_bytes) {
-                    (
-                        decoded.number,
-                        header::hash_from_scale_encoded_header(finalized_block_header),
-                    )
-                } else {
-                    (
-                        0,
-                        header::hash_from_scale_encoded_header(&genesis_block_scale_encoded_header),
-                    )
-                }
-            }
+            _ => (
+                0,
+                header::hash_from_scale_encoded_header(&genesis_block_scale_encoded_header),
+            ),
         },
         fork_id,
         block_number_bytes,
+        statement_protocol_config,
     });
 
     let (sync_service, runtime_service) = match config {
         StartServicesChainTy::Parachain {
             relay_chain,
-            finalized_block_header,
             para_id,
-            ..
         } => {
             // Chain is a parachain.
 
@@ -1215,9 +1188,10 @@ fn start_services<TPlat: platform::PlatformRef>(
                 network_service: network_service_chain.clone(),
                 chain_type: sync_service::ConfigChainType::Parachain(
                     sync_service::ConfigParachain {
-                        finalized_block_header,
-                        para_id,
-                        relay_chain_sync: relay_chain.runtime_service.clone(),
+                        relay_chain: sync_service::ConfigRelayChain {
+                            para_id,
+                            relay_chain_sync: relay_chain.runtime_service.clone(),
+                        },
                     },
                 ),
             }));
@@ -1236,8 +1210,8 @@ fn start_services<TPlat: platform::PlatformRef>(
 
             (sync_service, runtime_service)
         }
-        StartServicesChainTy::RelayChain { chain_information } => {
-            // Chain is a relay chain.
+        StartServicesChainTy::SubstrateCompatible { chain_information } => {
+            // Chain is a Substrate-compatible non-parachain chain.
 
             // The sync service is leveraging the network service, downloads block headers,
             // and verifies them, to determine what are the best and finalized blocks of the
@@ -1247,11 +1221,11 @@ fn start_services<TPlat: platform::PlatformRef>(
                 block_number_bytes,
                 platform: platform.clone(),
                 network_service: network_service_chain.clone(),
-                chain_type: sync_service::ConfigChainType::RelayChain(
-                    sync_service::ConfigRelayChain {
+                chain_type: sync_service::ConfigChainType::SubstrateCompatible(
+                    sync_service::ConfigSubstrateCompatible {
                         chain_information: chain_information.clone(),
                         runtime_code_hint: runtime_code_hint.map(|hint| {
-                            sync_service::ConfigRelayChainRuntimeCodeHint {
+                            sync_service::ConfigSubstrateCompatibleRuntimeCodeHint {
                                 storage_value: hint.code,
                                 merkle_value: hint.code_merkle_value,
                                 closest_ancestor_excluding: hint.closest_ancestor_excluding,

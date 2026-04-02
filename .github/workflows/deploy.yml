@@ -91,7 +91,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ./repo -> target
-      - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light --package smoldot-full-node
+      - run: cargo doc --verbose --all-features --no-deps --package parity-smoldot --package parity-smoldot-light --package parity-smoldot-full-node
         working-directory: ./repo
       - run: |
           mkdir -p ./doc
