@@ -16,7 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    log, network_service,
+    log,
+    network_service::{self, SendTopicAffinityError},
     platform::PlatformRef,
     runtime_service, sync_service, transactions_service,
     util::{self, SipHasherBuild},
@@ -790,11 +791,30 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .as_ref()
                             .expect("V2 peers require statement protocol; qed"),
                     );
+                    let mut peers_to_remove = Vec::new();
                     for peer_id in me.v2_statement_peers.clone() {
-                        let _ = me
+                        if let Err(
+                            SendTopicAffinityError::NoConnection
+                            | SendTopicAffinityError::ProtocolV1,
+                        ) = me
                             .network_service
                             .send_topic_affinity(&peer_id, combined_filter.clone())
-                            .await;
+                            .await
+                        {
+                            log!(
+                                &me.platform,
+                                Debug,
+                                &me.log_target,
+                                format!(
+                                    "Removing stale v2 statement peer {}",
+                                    peer_id
+                                )
+                            );
+                            peers_to_remove.push(peer_id);
+                        }
+                    }
+                    for peer_id in peers_to_remove {
+                        me.v2_statement_peers.remove(&peer_id);
                     }
                 }
             }
@@ -814,10 +834,25 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .as_ref()
                                 .expect("V2 peers require statement protocol; qed"),
                         );
-                        let _ = me
+                        if let Err(
+                            SendTopicAffinityError::NoConnection
+                            | SendTopicAffinityError::ProtocolV1,
+                        ) = me
                             .network_service
                             .send_topic_affinity(&peer_id, combined_filter)
-                            .await;
+                            .await
+                        {
+                            log!(
+                                &me.platform,
+                                Debug,
+                                &me.log_target,
+                                format!(
+                                    "Removing stale v2 statement peer {}",
+                                    peer_id
+                                )
+                            );
+                            me.v2_statement_peers.remove(&peer_id);
+                        }
                     }
                 }
             }
