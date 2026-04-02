@@ -382,4 +382,36 @@ mod tests {
         let absent: [u8; 32] = [0xFF; 32];
         assert!(!decoded.contains(&absent));
     }
+
+    #[test]
+    fn matches_empty_topics_is_broadcast() {
+        let filter = AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, 1);
+        assert!(filter.matches_statement(&[]));
+    }
+
+    #[test]
+    fn matches_inserted_topic() {
+        let topic: Topic = [0xAA; 32];
+        let mut filter = AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, 1);
+        filter.insert(&topic);
+        assert!(filter.matches_statement(&[&topic]));
+    }
+
+    #[test]
+    fn no_match_missing_topic() {
+        let inserted: Topic = [0xAA; 32];
+        let missing: Topic = [0xBB; 32];
+        let mut filter = AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, 1);
+        filter.insert(&inserted);
+        assert!(!filter.matches_statement(&[&missing]));
+    }
+
+    #[test]
+    fn matches_any_topic() {
+        let inserted: Topic = [0xAA; 32];
+        let missing: Topic = [0xBB; 32];
+        let mut filter = AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, 2);
+        filter.insert(&inserted);
+        assert!(filter.matches_statement(&[&missing, &inserted]));
+    }
 }

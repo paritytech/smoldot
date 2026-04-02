@@ -761,6 +761,30 @@ mod tests {
     }
 
     #[test]
+    fn decode_message_empty() {
+        assert!(matches!(
+            decode_statement_message(&[]),
+            Err(DecodeStatementMessageError::Empty)
+        ));
+    }
+
+    #[test]
+    fn decode_message_unknown_variant() {
+        assert!(matches!(
+            decode_statement_message(&[0xFF]),
+            Err(DecodeStatementMessageError::UnknownVariant(0xFF))
+        ));
+    }
+
+    #[test]
+    fn decode_message_invalid_bloom() {
+        assert!(matches!(
+            decode_statement_message(&[0x01, 0xFF]),
+            Err(DecodeStatementMessageError::InvalidBloomFilter)
+        ));
+    }
+
+    #[test]
     fn v2_affinity_encoding_snapshot() {
         let topic1 = [0x01u8; 32];
         let topic2 = [0x02u8; 32];
