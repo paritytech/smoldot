@@ -805,10 +805,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 &me.platform,
                                 Debug,
                                 &me.log_target,
-                                format!(
-                                    "Removing stale v2 statement peer {}",
-                                    peer_id
-                                )
+                                format!("Removing stale v2 statement peer {}", peer_id)
                             );
                             peers_to_remove.push(peer_id);
                         }
@@ -846,10 +843,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 &me.platform,
                                 Debug,
                                 &me.log_target,
-                                format!(
-                                    "Removing stale v2 statement peer {}",
-                                    peer_id
-                                )
+                                format!("Removing stale v2 statement peer {}", peer_id)
                             );
                             me.v2_statement_peers.remove(&peer_id);
                         }
