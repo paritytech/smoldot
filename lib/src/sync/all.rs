@@ -1346,11 +1346,15 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         self.shared.sources[request.source_id.0].num_requests -= 1;
 
         if let Some(warp_sync_request_id) = request.warp_sync {
-            self.warp_sync.as_mut().unwrap().warp_sync_request_response(
-                warp_sync_request_id,
-                fragments,
-                is_finished,
-            );
+            // Responses can legitimately arrive after warp sync has transitioned into the
+            // all-forks state machine. In that case the request is stale and can be ignored.
+            if let Some(warp_sync) = self.warp_sync.as_mut() {
+                warp_sync.warp_sync_request_response(
+                    warp_sync_request_id,
+                    fragments,
+                    is_finished,
+                );
+            }
         }
 
         // TODO: type of request not always verified
@@ -1378,10 +1382,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         self.shared.sources[request.source_id.0].num_requests -= 1;
 
         if let Some(warp_sync_request_id) = request.warp_sync {
-            self.warp_sync
-                .as_mut()
-                .unwrap()
-                .storage_get_response(warp_sync_request_id, response);
+            // Responses can legitimately arrive after warp sync has transitioned into the
+            // all-forks state machine. In that case the request is stale and can be ignored.
+            if let Some(warp_sync) = self.warp_sync.as_mut() {
+                warp_sync.storage_get_response(warp_sync_request_id, response);
+            }
         }
 
         // TODO: type of request not always verified
@@ -1412,10 +1417,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         self.shared.sources[request.source_id.0].num_requests -= 1;
 
         if let Some(warp_sync_request_id) = request.warp_sync {
-            self.warp_sync
-                .as_mut()
-                .unwrap()
-                .runtime_call_merkle_proof_response(warp_sync_request_id, response);
+            // Responses can legitimately arrive after warp sync has transitioned into the
+            // all-forks state machine. In that case the request is stale and can be ignored.
+            if let Some(warp_sync) = self.warp_sync.as_mut() {
+                warp_sync.runtime_call_merkle_proof_response(warp_sync_request_id, response);
+            }
         }
 
         // TODO: type of request not always verified
@@ -2526,5 +2532,91 @@ fn all_forks_request_convert(
         request_bodies: download_body,
         request_headers: true,
         request_justification: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_all_forks_source_id(value: u64) -> all_forks::SourceId {
+        // SAFETY: test-only construction of an opaque newtype for handler coverage.
+        unsafe { core::mem::transmute::<u64, all_forks::SourceId>(value) }
+    }
+
+    fn fake_warp_sync_request_id(value: usize) -> warp_sync::RequestId {
+        // SAFETY: test-only construction of an opaque newtype for handler coverage.
+        unsafe { core::mem::transmute::<usize, warp_sync::RequestId>(value) }
+    }
+
+    fn sync_with_late_warp_sync_request() -> (AllSync<(), (), ()>, RequestId) {
+        let mut sources = slab::Slab::new();
+        let source_index = sources.insert(SourceMapping {
+            warp_sync: None,
+            all_forks: fake_all_forks_source_id(0),
+            num_requests: 1,
+            user_data: (),
+        });
+
+        let mut requests = slab::Slab::new();
+        let request_index = requests.insert(RequestInfo {
+            warp_sync: Some(fake_warp_sync_request_id(0)),
+            all_forks: None,
+            source_id: SourceId(source_index),
+            user_data: (),
+        });
+
+        (
+            AllSync {
+                warp_sync: None,
+                ready_to_transition: None,
+                all_forks: None,
+                shared: Shared {
+                    sources,
+                    requests,
+                    download_bodies: false,
+                    sources_capacity: 1,
+                    blocks_capacity: 1,
+                    max_disjoint_headers: 1,
+                    max_requests_per_block: NonZero::new(1).unwrap(),
+                    block_number_bytes: 4,
+                    allow_unknown_consensus_engines: true,
+                },
+            },
+            RequestId(request_index),
+        )
+    }
+
+    #[test]
+    fn late_warp_sync_grandpa_response_is_ignored_after_transition() {
+        let (mut sync, request_id) = sync_with_late_warp_sync_request();
+
+        let (_user_data, outcome) = sync.grandpa_warp_sync_response(request_id, Vec::new(), false);
+
+        assert!(matches!(outcome, ResponseOutcome::Queued));
+        assert!(sync.shared.requests.is_empty());
+        assert_eq!(sync.shared.sources[0].num_requests, 0);
+    }
+
+    #[test]
+    fn late_warp_sync_storage_response_is_ignored_after_transition() {
+        let (mut sync, request_id) = sync_with_late_warp_sync_request();
+
+        let (_user_data, outcome) = sync.storage_get_response(request_id, Vec::new());
+
+        assert!(matches!(outcome, ResponseOutcome::Queued));
+        assert!(sync.shared.requests.is_empty());
+        assert_eq!(sync.shared.sources[0].num_requests, 0);
+    }
+
+    #[test]
+    fn late_warp_sync_call_proof_response_is_ignored_after_transition() {
+        let (mut sync, request_id) = sync_with_late_warp_sync_request();
+
+        let (_user_data, outcome) = sync.call_proof_response(request_id, Vec::new());
+
+        assert!(matches!(outcome, ResponseOutcome::Queued));
+        assert!(sync.shared.requests.is_empty());
+        assert_eq!(sync.shared.sources[0].num_requests, 0);
     }
 }
