@@ -35,6 +35,15 @@ use smoldot::{
     trie,
 };
 
+fn parachain_needs_consensus_bootstrap(
+    chain_info: &chain::chain_information::ValidChainInformation,
+) -> bool {
+    matches!(
+        chain_info.as_ref().consensus,
+        chain::chain_information::ChainInformationConsensusRef::Unknown
+    )
+}
+
 /// Starts a sync service background task to synchronize a parachain.
 ///
 /// This implementation uses AllSync for block sync with Aura consensus verification,
@@ -43,54 +52,89 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     log_target: String,
     platform: TPlat,
     block_number_bytes: usize,
+    restored_chain_information: Option<chain::chain_information::ValidChainInformation>,
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
     parachain_id: u32,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 ) {
     // Phase 1: Fetch the current finalized parachain head from the relay chain.
-    let effective_chain_info = fetch_parachain_head_from_relay(
-        &log_target,
-        &platform,
-        &relay_chain_sync,
-        parachain_id,
-        block_number_bytes,
-    )
-    .await;
-
-    log!(
-        &platform,
-        Info,
-        &log_target,
-        format!(
-            "Fetched parachain finalized head from relay chain at block #{}",
-            effective_chain_info.as_ref().finalized_block_header.number
-        )
-    );
-
-    // Phase 2: Download the parachain runtime from a P2P peer and determine Aura
-    // consensus parameters. Retries indefinitely until successful.
-    let effective_chain_info = loop {
-        match bootstrap_parachain_consensus(
+    let effective_chain_info = if let Some(restored_chain_information) = restored_chain_information
+    {
+        log!(
+            &platform,
+            Info,
+            &log_target,
+            format!(
+                "Warm-starting parachain from restored database state at block #{}",
+                restored_chain_information
+                    .as_ref()
+                    .finalized_block_header
+                    .number
+            )
+        );
+        restored_chain_information
+    } else {
+        let effective_chain_info = fetch_parachain_head_from_relay(
             &log_target,
             &platform,
-            &network_service,
-            &effective_chain_info,
+            &relay_chain_sync,
+            parachain_id,
             block_number_bytes,
         )
-        .await
-        {
-            Ok(ci) => break ci,
-            Err(err) => {
-                log!(
-                    &platform,
-                    Warn,
-                    &log_target,
-                    format!("Failed to bootstrap parachain consensus: {err}. Retrying in 5s...")
-                );
-                platform.sleep(Duration::from_secs(5)).await;
+        .await;
+
+        log!(
+            &platform,
+            Info,
+            &log_target,
+            format!(
+                "Fetched parachain finalized head from relay chain at block #{}",
+                effective_chain_info.as_ref().finalized_block_header.number
+            )
+        );
+
+        effective_chain_info
+    };
+
+    // Phase 2: Download the parachain runtime from a P2P peer and determine Aura
+    // consensus parameters if the restored chain information doesn't already include them.
+    let effective_chain_info = if parachain_needs_consensus_bootstrap(&effective_chain_info) {
+        loop {
+            match bootstrap_parachain_consensus(
+                &log_target,
+                &platform,
+                &network_service,
+                &effective_chain_info,
+                block_number_bytes,
+            )
+            .await
+            {
+                Ok(ci) => break ci,
+                Err(err) => {
+                    log!(
+                        &platform,
+                        Warn,
+                        &log_target,
+                        format!(
+                            "Failed to bootstrap parachain consensus: {err}. Retrying in 5s..."
+                        )
+                    );
+                    platform.sleep(Duration::from_secs(5)).await;
+                }
             }
         }
+    } else {
+        log!(
+            &platform,
+            Info,
+            &log_target,
+            format!(
+                "Using restored parachain consensus state at block #{}",
+                effective_chain_info.as_ref().finalized_block_header.number
+            )
+        );
+        effective_chain_info
     };
 
     // Phase 3: Spawn the paraheads background service that tracks relay chain
@@ -1511,5 +1555,43 @@ fn run_single_runtime_call(
                 return Err(format!("{function_name}: forbidden offchain host function"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smoldot::chain_spec::ChainSpec;
+
+    fn unknown_parachain_chain_information() -> chain::chain_information::ValidChainInformation {
+        let known = known_chain_information();
+        chain::chain_information::ValidChainInformation::try_from(
+            chain::chain_information::ChainInformation {
+                finalized_block_header: Box::new(known.as_ref().finalized_block_header.into()),
+                consensus: chain::chain_information::ChainInformationConsensus::Unknown,
+                finality: chain::chain_information::ChainInformationFinality::Outsourced,
+            },
+        )
+        .unwrap()
+    }
+
+    fn known_chain_information() -> chain::chain_information::ValidChainInformation {
+        let chain_spec = ChainSpec::from_json_bytes(include_str!(
+            "../../../lib/src/chain_spec/tests/example.json"
+        ))
+        .unwrap();
+        chain_spec.to_chain_information().unwrap().0
+    }
+
+    #[test]
+    fn parachain_bootstrap_is_required_for_unknown_consensus() {
+        let chain_information = unknown_parachain_chain_information();
+        assert!(parachain_needs_consensus_bootstrap(&chain_information));
+    }
+
+    #[test]
+    fn parachain_bootstrap_is_skipped_for_restored_known_consensus() {
+        let chain_information = known_chain_information();
+        assert!(!parachain_needs_consensus_bootstrap(&chain_information));
     }
 }
