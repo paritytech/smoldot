@@ -108,6 +108,12 @@ pub struct ConfigSubstrateCompatibleRuntimeCodeHint {
 pub struct ConfigParachain<TPlat: PlatformRef> {
     /// Parameters of the relay chain.
     pub relay_chain: ConfigRelayChain<TPlat>,
+
+    /// Previously-serialized finalized chain state restored from `database_content`.
+    ///
+    /// When present, the parachain sync service can warm-start from this state instead of
+    /// blocking on a fresh relay-chain finalization before it begins syncing.
+    pub restored_chain_information: Option<chain::chain_information::ValidChainInformation>,
 }
 
 /// See [`ConfigParachain::relay_chain`].
@@ -150,6 +156,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 log_target.clone(),
                 config.platform.clone(),
                 config.block_number_bytes,
+                config_parachain.restored_chain_information,
                 config_parachain.relay_chain.relay_chain_sync.clone(),
                 config_parachain.relay_chain.para_id,
                 from_foreground,
