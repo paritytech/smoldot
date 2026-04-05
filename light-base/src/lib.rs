@@ -453,7 +453,13 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // it describes.
         // At the same time, we deconstruct the database into `known_nodes`
         // and `runtime_code_hint`.
-        let (chain_information, used_database_chain_information, known_nodes, runtime_code_hint) = {
+        let (
+            chain_information,
+            selected_database_chain_information,
+            restored_database_chain_information,
+            known_nodes,
+            runtime_code_hint,
+        ) = {
             let checkpoint = chain_spec
                 .light_sync_state()
                 .map(|s| s.to_chain_information());
@@ -473,7 +479,13 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 ) if db_ci.as_ref().finalized_block_header.number
                     >= checkpoint.as_ref().finalized_block_header.number =>
                 {
-                    (Some(db_ci), true, known_nodes, runtime_code_hint)
+                    (
+                        Some(db_ci.clone()),
+                        true,
+                        Some(db_ci),
+                        known_nodes,
+                        runtime_code_hint,
+                    )
                 }
 
                 // Otherwise, use the chain spec checkpoint.
@@ -481,12 +493,21 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     _,
                     Some(Ok(checkpoint)),
                     Some(database::DatabaseContent {
+                        chain_information: db_ci,
                         known_nodes,
                         runtime_code_hint,
                         ..
                     }),
-                ) => (Some(checkpoint), false, known_nodes, runtime_code_hint),
-                (_, Some(Ok(checkpoint)), None) => (Some(checkpoint), false, Vec::new(), None),
+                ) => (
+                    Some(checkpoint),
+                    false,
+                    db_ci,
+                    known_nodes,
+                    runtime_code_hint,
+                ),
+                (_, Some(Ok(checkpoint)), None) => {
+                    (Some(checkpoint), false, None, Vec::new(), None)
+                }
 
                 // If neither the genesis chain information nor the checkpoint chain information
                 // is available, we could in principle use the database, but for API reasons we
@@ -496,12 +517,13 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     None,
                     None,
                     Some(database::DatabaseContent {
+                        chain_information: db_ci,
                         known_nodes,
                         runtime_code_hint,
                         ..
                     }),
-                ) => (None, false, known_nodes, runtime_code_hint),
-                (None, None, None) => (None, false, Vec::new(), None),
+                ) => (None, false, db_ci, known_nodes, runtime_code_hint),
+                (None, None, None) => (None, false, None, Vec::new(), None),
 
                 // Use the genesis block if no checkpoint is available.
                 (
@@ -511,11 +533,18 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
                     )),
                     Some(database::DatabaseContent {
+                        chain_information: db_ci,
                         known_nodes,
                         runtime_code_hint,
                         ..
                     }),
-                ) => (Some(genesis_ci), false, known_nodes, runtime_code_hint),
+                ) => (
+                    Some(genesis_ci),
+                    false,
+                    db_ci,
+                    known_nodes,
+                    runtime_code_hint,
+                ),
                 (
                     Some(genesis_ci),
                     None
@@ -523,7 +552,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
                     )),
                     None,
-                ) => (Some(genesis_ci), false, Vec::new(), None),
+                ) => (Some(genesis_ci), false, None, Vec::new(), None),
 
                 // If the checkpoint format is invalid, we return an error no matter whether the
                 // genesis chain information could be used.
@@ -634,8 +663,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             });
 
         let restored_parachain_chain_information = initial_parachain_chain_information(
-            used_database_chain_information,
-            chain_information.as_ref(),
+            restored_database_chain_information.as_ref(),
         );
 
         // Determinate the name under which the chain will be identified in the logs.
@@ -760,7 +788,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             log_name,
                             chain_spec.name(),
                             HashDisplay(&genesis_block_hash),
-                            if used_database_chain_information {
+                            if selected_database_chain_information {
                                 "Database"
                             } else {
                                 "Chain specification"
@@ -1118,12 +1146,9 @@ enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
 }
 
 fn initial_parachain_chain_information<'a>(
-    used_database_chain_information: bool,
-    chain_information: Option<&'a chain::chain_information::ValidChainInformation>,
+    database_chain_information: Option<&'a chain::chain_information::ValidChainInformation>,
 ) -> Option<&'a chain::chain_information::ValidChainInformation> {
-    used_database_chain_information
-        .then_some(chain_information)
-        .flatten()
+    database_chain_information
 }
 
 fn parachain_network_best_block(
@@ -1347,13 +1372,24 @@ mod tests {
     fn initial_parachain_chain_information_only_uses_database_state() {
         let chain_information = example_chain_information();
 
-        assert!(initial_parachain_chain_information(false, Some(&chain_information)).is_none());
-        assert!(initial_parachain_chain_information(true, None).is_none());
+        assert!(initial_parachain_chain_information(None).is_none());
 
-        let restored = initial_parachain_chain_information(true, Some(&chain_information)).unwrap();
+        let restored = initial_parachain_chain_information(Some(&chain_information)).unwrap();
         assert_eq!(
             restored.as_ref().finalized_block_header.number,
             chain_information.as_ref().finalized_block_header.number
+        );
+    }
+
+    #[test]
+    fn initial_parachain_chain_information_keeps_database_state_even_if_checkpoint_wins() {
+        let database_chain_information = example_chain_information();
+
+        let restored =
+            initial_parachain_chain_information(Some(&database_chain_information)).unwrap();
+        assert_eq!(
+            restored.as_ref().finalized_block_header.number,
+            database_chain_information.as_ref().finalized_block_header.number
         );
     }
 
