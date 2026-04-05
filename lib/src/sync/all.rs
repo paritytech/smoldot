@@ -1348,11 +1348,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             // Responses can legitimately arrive after warp sync has transitioned into the
             // all-forks state machine. In that case the request is stale and can be ignored.
             if let Some(warp_sync) = self.warp_sync.as_mut() {
-                warp_sync.warp_sync_request_response(
-                    warp_sync_request_id,
-                    fragments,
-                    is_finished,
-                );
+                warp_sync.warp_sync_request_response(warp_sync_request_id, fragments, is_finished);
             }
         }
 
@@ -2556,9 +2552,26 @@ mod tests {
         unsafe { core::mem::transmute::<u64, all_forks::SourceId>(value) }
     }
 
+    fn fake_all_forks_request_id(value: usize) -> all_forks::RequestId {
+        // SAFETY: test-only construction of an opaque newtype for handler coverage.
+        unsafe { core::mem::transmute::<usize, all_forks::RequestId>(value) }
+    }
+
+    fn fake_warp_sync_source_id(value: usize) -> warp_sync::SourceId {
+        // SAFETY: test-only construction of an opaque newtype for handler coverage.
+        unsafe { core::mem::transmute::<usize, warp_sync::SourceId>(value) }
+    }
+
     fn fake_warp_sync_request_id(value: usize) -> warp_sync::RequestId {
         // SAFETY: test-only construction of an opaque newtype for handler coverage.
         unsafe { core::mem::transmute::<usize, warp_sync::RequestId>(value) }
+    }
+
+    fn next_seed(seed: &mut u64) -> u64 {
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *seed
     }
 
     fn sync_with_late_warp_sync_request() -> (AllSync<(), (), ()>, RequestId) {
@@ -2636,10 +2649,7 @@ mod tests {
     fn stale_warp_sync_source_mapping_does_not_panic_when_adding_request() {
         let mut sources = slab::Slab::new();
         let source_index = sources.insert(SourceMapping {
-            warp_sync: Some(unsafe {
-                // SAFETY: test-only construction of an opaque newtype for handler coverage.
-                core::mem::transmute::<usize, warp_sync::SourceId>(0)
-            }),
+            warp_sync: Some(fake_warp_sync_source_id(0)),
             all_forks: fake_all_forks_source_id(0),
             num_requests: 0,
             user_data: (),
@@ -2681,10 +2691,7 @@ mod tests {
     fn transition_cleanup_clears_stale_warp_sync_tracking() {
         let mut sources = slab::Slab::new();
         sources.insert(SourceMapping {
-            warp_sync: Some(unsafe {
-                // SAFETY: test-only construction of an opaque newtype for handler coverage.
-                core::mem::transmute::<usize, warp_sync::SourceId>(0)
-            }),
+            warp_sync: Some(fake_warp_sync_source_id(0)),
             all_forks: fake_all_forks_source_id(0),
             num_requests: 1,
             user_data: (),
@@ -2693,10 +2700,7 @@ mod tests {
         let mut requests = slab::Slab::new();
         requests.insert(RequestInfo {
             warp_sync: Some(fake_warp_sync_request_id(0)),
-            all_forks: Some(unsafe {
-                // SAFETY: test-only construction of an opaque newtype for handler coverage.
-                core::mem::transmute::<usize, all_forks::RequestId>(0)
-            }),
+            all_forks: Some(fake_all_forks_request_id(0)),
             source_id: SourceId(0),
             user_data: (),
         });
@@ -2723,5 +2727,149 @@ mod tests {
         assert!(sync.shared.sources[0].warp_sync.is_none());
         assert!(sync.shared.requests[0].all_forks.is_none());
         assert!(sync.shared.requests[0].warp_sync.is_none());
+    }
+
+    #[test]
+    fn repeated_mixed_state_add_request_and_cleanup_stays_consistent() {
+        let mut sources = slab::Slab::new();
+        for index in 0..4 {
+            sources.insert(SourceMapping {
+                warp_sync: Some(fake_warp_sync_source_id(index)),
+                all_forks: fake_all_forks_source_id(index as u64),
+                num_requests: 0,
+                user_data: (),
+            });
+        }
+
+        let mut sync: AllSync<(), (), ()> = AllSync {
+            warp_sync: None,
+            ready_to_transition: None,
+            all_forks: None,
+            shared: Shared {
+                sources,
+                requests: slab::Slab::new(),
+                download_bodies: false,
+                sources_capacity: 4,
+                blocks_capacity: 4,
+                max_disjoint_headers: 4,
+                max_requests_per_block: NonZero::new(1).unwrap(),
+                block_number_bytes: 4,
+                allow_unknown_consensus_engines: true,
+            },
+        };
+
+        let mut seed = 0x3159_u64;
+        for step in 0..1024 {
+            let source_index = (next_seed(&mut seed) as usize) % 4;
+            if step % 7 == 0 {
+                sync.clear_transition_stale_state();
+                for source in sync.shared.sources.iter() {
+                    assert!(source.1.warp_sync.is_none());
+                }
+            }
+
+            if step % 11 == 0 {
+                let refresh_index = (next_seed(&mut seed) as usize) % 4;
+                sync.shared.sources[refresh_index].warp_sync =
+                    Some(fake_warp_sync_source_id(refresh_index + step + 1));
+            }
+
+            let request_detail = match next_seed(&mut seed) % 3 {
+                0 => RequestDetail::StorageGet {
+                    block_hash: [step as u8; 32],
+                    keys: vec![vec![step as u8]],
+                },
+                1 => RequestDetail::RuntimeCallMerkleProof {
+                    block_hash: [step as u8; 32],
+                    function_name: Cow::Borrowed("test_call"),
+                    parameter_vectored: Cow::Owned(vec![step as u8, step.wrapping_add(1) as u8]),
+                },
+                _ => RequestDetail::BlocksRequest {
+                    first_block_height: step as u64,
+                    first_block_hash: [step as u8; 32],
+                    num_blocks: NonZero::new(1).unwrap(),
+                    request_headers: false,
+                    request_bodies: true,
+                    request_justification: false,
+                },
+            };
+
+            let request_id = sync.add_request(SourceId(source_index), request_detail, ());
+            let request = &sync.shared.requests[request_id.0];
+            assert!(request.all_forks.is_none());
+            assert!(request.warp_sync.is_none());
+            assert_eq!(sync.shared.sources[source_index].num_requests, 1);
+
+            sync.remove_request(request_id);
+            assert_eq!(sync.shared.sources[source_index].num_requests, 0);
+        }
+    }
+
+    #[test]
+    fn repeated_transition_cleanup_clears_existing_mixed_tracking() {
+        let mut sync: AllSync<(), (), ()> = AllSync {
+            warp_sync: None,
+            ready_to_transition: None,
+            all_forks: None,
+            shared: Shared {
+                sources: slab::Slab::new(),
+                requests: slab::Slab::new(),
+                download_bodies: false,
+                sources_capacity: 16,
+                blocks_capacity: 16,
+                max_disjoint_headers: 16,
+                max_requests_per_block: NonZero::new(1).unwrap(),
+                block_number_bytes: 4,
+                allow_unknown_consensus_engines: true,
+            },
+        };
+
+        let mut seed = 0x851_u64;
+        for iteration in 0..64 {
+            for index in 0..8 {
+                let source_id = sync.shared.sources.insert(SourceMapping {
+                    warp_sync: Some(fake_warp_sync_source_id(index + iteration * 8)),
+                    all_forks: fake_all_forks_source_id((index + iteration * 8) as u64),
+                    num_requests: 1,
+                    user_data: (),
+                });
+
+                let variant = next_seed(&mut seed) % 3;
+                sync.shared.requests.insert(RequestInfo {
+                    warp_sync: (variant != 2)
+                        .then(|| fake_warp_sync_request_id(index + iteration * 8)),
+                    all_forks: (variant != 1)
+                        .then(|| fake_all_forks_request_id(index + iteration * 8)),
+                    source_id: SourceId(source_id),
+                    user_data: (),
+                });
+            }
+
+            sync.clear_transition_stale_state();
+
+            for (_, source) in sync.shared.sources.iter() {
+                assert!(source.warp_sync.is_none());
+            }
+
+            for (_, request) in sync.shared.requests.iter() {
+                assert!(request.warp_sync.is_none());
+                assert!(request.all_forks.is_none());
+            }
+
+            let request_ids = sync
+                .shared
+                .requests
+                .iter()
+                .map(|(id, _)| RequestId(id))
+                .collect::<Vec<_>>();
+            for request_id in request_ids {
+                sync.remove_request(request_id);
+            }
+            assert!(sync.shared.requests.is_empty());
+            for (_, source) in sync.shared.sources.iter() {
+                assert_eq!(source.num_requests, 0);
+            }
+            sync.shared.sources.clear();
+        }
     }
 }
