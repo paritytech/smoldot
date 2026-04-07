@@ -115,6 +115,8 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Hash of the genesis block of the chain.
     pub genesis_block_hash: [u8; 32],
+
+    pub max_seen_statements: Option<NonZero<usize>>,
 }
 
 /// Creates a new JSON-RPC service with the given configuration.
@@ -153,6 +155,7 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
                 system_name: config.system_name,
                 system_version: config.system_version,
                 genesis_block_hash: config.genesis_block_hash,
+                max_seen_statements: config.max_seen_statements,
             },
             requests_rx,
             responses_tx,
