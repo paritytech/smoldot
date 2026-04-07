@@ -607,7 +607,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             StartStorageSubscriptionsUpdates,
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
-            NetworkStatementsReceived(Vec<codec::Statement>),
+            NetworkStatementsReceived(Vec<([u8; 32], codec::Statement)>),
             MustSubscribeNetworkEvents,
         }
 
@@ -755,8 +755,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 for (sub_id, topic_filter) in &me.statement_subscriptions {
                     let matching: Vec<methods::HexString> = statements
                         .iter()
-                        .filter(|s| topic_filter.matches(&s.topics))
-                        .map(|s| {
+                        .filter(|(_hash, s)| topic_filter.matches(&s.topics))
+                        .map(|(_hash, s)| {
                             methods::HexString(
                                 codec::encode_statement(s)
                                     .expect("re-encoding a decoded statement always succeeds; qed"),
@@ -2843,9 +2843,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .clone()
                                     .broadcast_statement(encoded.0)
                                     .await;
-                                if broadcasted.is_known {
-                                    methods::StatementSubmitResult::Known
-                                } else if broadcasted.total == 0 {
+                                if broadcasted.total == 0 {
                                     methods::StatementSubmitResult::InternalError {
                                         error: "No connected peers".into(),
                                     }

@@ -96,7 +96,7 @@ impl StatementProtocolConfig {
 impl Default for StatementProtocolConfig {
     fn default() -> Self {
         StatementProtocolConfig {
-            max_seen_statements: NonZeroUsize::new(65536).expect("65536 is not zero; qed"),
+            max_seen_statements: NonZeroUsize::new(512).expect("512 is not zero; qed"),
         }
     }
 }
@@ -256,16 +256,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
         // TODO: this code is hacky because we don't want to make `add_chain` async at the moment, because it's not convenient for lib.rs
         self.platform.spawn_task("add-chain-message-send".into(), {
-            let seen_statements =
-                config
-                    .statement_protocol_config
-                    .as_ref()
-                    .map(|spc: &StatementProtocolConfig| {
-                        lru::LruCache::with_hasher(
-                            spc.max_seen_statements(),
-                            fnv::FnvBuildHasher::default(),
-                        )
-                    });
             let config = service::ChainConfig {
                 grandpa_protocol_config: config.grandpa_protocol_finalized_block_height.map(
                     |commit_finalized_height| service::GrandpaState {
@@ -289,7 +279,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     num_references: NonZero::<usize>::new(1).unwrap(),
                     next_discovery_period: Duration::from_secs(2),
                     next_discovery_when: self.platform.now(),
-                    seen_statements,
                 },
             };
 
@@ -674,7 +663,6 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
 pub struct BroadcastStatementResult {
     pub sent: usize,
     pub total: usize,
-    pub is_known: bool,
 }
 
 /// Event that can happen on the network service.
@@ -705,7 +693,7 @@ pub enum Event {
     /// Received a statement notification from the network.
     StatementsNotification {
         peer_id: PeerId,
-        statements: Vec<codec::Statement>,
+        statements: Vec<([u8; 32], codec::Statement)>,
     },
 }
 
@@ -1009,7 +997,6 @@ struct Chain<TPlat: PlatformRef> {
     /// the given duration.
     next_discovery_period: Duration,
 
-    seen_statements: Option<lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>>,
 }
 
 #[derive(Clone)]
@@ -1794,59 +1781,38 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 ToBackgroundChain::BroadcastStatement { statement, result },
             ) => {
-                let is_known =
-                    task.network[chain_id]
-                        .seen_statements
-                        .as_mut()
-                        .map_or(false, |cache| {
-                            let hash = codec::statement_hash(&statement);
-                            let already_known = cache.contains(&hash);
-                            cache.push(hash, ());
-                            already_known
-                        });
+                let peers_to_send = task
+                    .network
+                    .gossip_connected_peers(
+                        chain_id,
+                        service::GossipKind::ConsensusTransactions,
+                    )
+                    .cloned()
+                    .collect::<Vec<_>>();
 
-                let (sent, total) = if is_known {
-                    (0, 0)
-                } else {
-                    let peers_to_send = task
+                let total = peers_to_send.len();
+                let mut sent = 0;
+                for peer in &peers_to_send {
+                    if task
                         .network
-                        .gossip_connected_peers(
-                            chain_id,
-                            service::GossipKind::ConsensusTransactions,
-                        )
-                        .cloned()
-                        .collect::<Vec<_>>();
-
-                    let total = peers_to_send.len();
-                    let mut sent = 0;
-                    for peer in &peers_to_send {
-                        if task
-                            .network
-                            .gossip_send_statement(peer, chain_id, statement.clone())
-                            .is_ok()
-                        {
-                            sent += 1;
-                        }
+                        .gossip_send_statement(peer, chain_id, statement.clone())
+                        .is_ok()
+                    {
+                        sent += 1;
                     }
+                }
 
-                    log!(
-                        &task.platform,
-                        Debug,
-                        "network",
-                        "statement-broadcast",
-                        chain = task.network[chain_id].log_name,
-                        sent,
-                        total,
-                    );
-
-                    (sent, total)
-                };
-
-                let _ = result.send(BroadcastStatementResult {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "statement-broadcast",
+                    chain = task.network[chain_id].log_name,
                     sent,
                     total,
-                    is_known,
-                });
+                );
+
+                let _ = result.send(BroadcastStatementResult { sent, total });
             }
             WakeUpReason::MessageForChain(
                 chain_id,
@@ -2752,22 +2718,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 debug_assert!(task.event_pending_send.is_none());
 
-                let chain = &mut task.network[chain_id];
-                let non_duplicates: Vec<codec::Statement> = statements
-                    .into_iter()
-                    .filter_map(|(hash, statement)| {
-                        let Some(cache) = &mut chain.seen_statements else {
-                            return Some(statement);
-                        };
-                        if cache.contains(&hash) {
-                            return None;
-                        }
-                        cache.push(hash, ());
-                        Some(statement)
-                    })
-                    .collect();
-
-                if non_duplicates.is_empty() {
+                if statements.is_empty() {
                     continue;
                 }
 
@@ -2775,7 +2726,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     chain_id,
                     Event::StatementsNotification {
                         peer_id,
-                        statements: non_duplicates,
+                        statements,
                     },
                 ));
             }
