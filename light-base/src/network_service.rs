@@ -997,7 +997,6 @@ struct Chain<TPlat: PlatformRef> {
     /// After [`Chain::next_discovery_when`] is reached, the following discovery happens after
     /// the given duration.
     next_discovery_period: Duration,
-
 }
 
 #[derive(Clone)]
@@ -1784,10 +1783,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             ) => {
                 let peers_to_send = task
                     .network
-                    .gossip_connected_peers(
-                        chain_id,
-                        service::GossipKind::ConsensusTransactions,
-                    )
+                    .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
                     .cloned()
                     .collect::<Vec<_>>();
 

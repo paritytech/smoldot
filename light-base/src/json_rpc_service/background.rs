@@ -229,8 +229,7 @@ struct Background<TPlat: PlatformRef> {
     max_seen_statements: Option<NonZero<usize>>,
 
     /// Active statement subscriptions. Maps subscription ID to subscription state.
-    statement_subscriptions:
-        hashbrown::HashMap<String, StatementSubscription, fnv::FnvBuildHasher>,
+    statement_subscriptions: hashbrown::HashMap<String, StatementSubscription, fnv::FnvBuildHasher>,
 
     /// Receiver for network events (statements from peers).
     network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
@@ -498,9 +497,8 @@ impl StatementSubscription {
     fn new(topic_filter: methods::TopicFilter, max_seen: Option<NonZero<usize>>) -> Self {
         Self {
             topic_filter,
-            seen: max_seen.map(|cap| {
-                lru::LruCache::with_hasher(cap, fnv::FnvBuildHasher::default())
-            }),
+            seen: max_seen
+                .map(|cap| lru::LruCache::with_hasher(cap, fnv::FnvBuildHasher::default())),
         }
     }
 
@@ -796,10 +794,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             if !sub.should_deliver(hash, s) {
                                 return None;
                             }
-                            Some(methods::HexString(
-                                codec::encode_statement(s)
-                                    .expect("re-encoding a decoded statement always succeeds; qed"),
-                            ))
+                            Some(methods::HexString(codec::encode_statement(s).expect(
+                                "re-encoding a decoded statement always succeeds; qed",
+                            )))
                         })
                         .collect();
 
