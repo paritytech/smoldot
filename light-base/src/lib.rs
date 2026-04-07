@@ -662,9 +662,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 )
             });
 
-        let restored_parachain_chain_information = initial_parachain_chain_information(
-            restored_database_chain_information.as_ref(),
-        );
+        let restored_parachain_chain_information =
+            initial_parachain_chain_information(restored_database_chain_information.as_ref());
 
         // Determinate the name under which the chain will be identified in the logs.
         // Because the chain spec is untrusted input, we must transform the `id` to remove all
@@ -1395,7 +1394,10 @@ mod tests {
             initial_parachain_chain_information(Some(&database_chain_information)).unwrap();
         assert_eq!(
             restored.as_ref().finalized_block_header.number,
-            database_chain_information.as_ref().finalized_block_header.number
+            database_chain_information
+                .as_ref()
+                .finalized_block_header
+                .number
         );
     }
 
