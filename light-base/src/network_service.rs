@@ -78,6 +78,7 @@ pub use service::{ChainId, EncodedMerkleProof, PeerId, QueueNotificationError};
 /// Configuration for the Statement Store protocol.
 #[derive(Debug, Clone)]
 pub struct StatementProtocolConfig {
+    /// Per-subscription LRU cache size used for deduplicating delivered statements.
     max_seen_statements: NonZeroUsize,
 }
 
