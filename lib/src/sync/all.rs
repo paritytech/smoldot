@@ -1349,11 +1349,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             // Responses can legitimately arrive after warp sync has transitioned into the
             // all-forks state machine. In that case the request is stale and can be ignored.
             if let Some(warp_sync) = self.warp_sync.as_mut() {
-                warp_sync.warp_sync_request_response(
-                    warp_sync_request_id,
-                    fragments,
-                    is_finished,
-                );
+                warp_sync.warp_sync_request_response(warp_sync_request_id, fragments, is_finished);
             }
         }
 
