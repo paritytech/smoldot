@@ -59,7 +59,8 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 ) {
     // Phase 1: Determine the finalized parachain head we should start from.
-    let effective_chain_info = if let Some(restored_chain_information) = restored_chain_information {
+    let effective_chain_info = if let Some(restored_chain_information) = restored_chain_information
+    {
         log!(
             &platform,
             Info,
@@ -1346,8 +1347,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     let (code, _) = decoded_proof
         .storage_value(&state_root, b":code")
         .map_err(|_| String::from("Proof doesn't contain :code"))?
-        .ok_or_else(|| String::from("Runtime :code not found in storage"))?
-        ;
+        .ok_or_else(|| String::from("Runtime :code not found in storage"))?;
     let code = code.to_vec();
 
     let heap_pages_raw = decoded_proof
@@ -1357,7 +1357,10 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     let heap_pages = executor::storage_heap_pages_to_value(heap_pages_raw.map(|(v, _)| v))
         .map_err(|e| format!("Invalid :heappages value: {e}"))?;
     let closest_ancestor_excluding = decoded_proof
-        .closest_ancestor_in_proof(&state_root, trie::bytes_to_nibbles(b":code".iter().copied()))
+        .closest_ancestor_in_proof(
+            &state_root,
+            trie::bytes_to_nibbles(b":code".iter().copied()),
+        )
         .map_err(|_| String::from("Proof missing :code closest ancestor"))?
         .map(|ancestor| ancestor.collect::<Vec<_>>());
 
