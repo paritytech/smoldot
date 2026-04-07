@@ -87,6 +87,8 @@ pub(super) struct Config<TPlat: PlatformRef> {
     /// Hash of the genesis block of the chain.
     pub genesis_block_hash: [u8; 32],
 
+    /// Maximum number of seen statement hashes tracked per subscription for dedup.
+    /// `None` if the statement protocol is disabled.
     pub max_seen_statements: Option<NonZero<usize>>,
 }
 
@@ -494,12 +496,24 @@ struct StatementSubscription {
 
 impl StatementSubscription {
     fn new(topic_filter: methods::TopicFilter, max_seen: Option<NonZero<usize>>) -> Self {
-        StatementSubscription {
+        Self {
             topic_filter,
             seen: max_seen.map(|cap| {
                 lru::LruCache::with_hasher(cap, fnv::FnvBuildHasher::default())
             }),
         }
+    }
+
+    fn should_deliver(&mut self, hash: &[u8; 32], statement: &codec::Statement) -> bool {
+        if !self.topic_filter.matches(&statement.topics) {
+            return false;
+        }
+        if let Some(seen) = &mut self.seen {
+            if seen.put(*hash, ()).is_some() {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -779,14 +793,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     let matching: Vec<methods::HexString> = statements
                         .iter()
                         .filter_map(|(hash, s)| {
-                            if !sub.topic_filter.matches(&s.topics) {
+                            if !sub.should_deliver(hash, s) {
                                 return None;
-                            }
-                            if let Some(seen) = &mut sub.seen {
-                                if seen.contains(hash) {
-                                    return None;
-                                }
-                                seen.push(*hash, ());
                             }
                             Some(methods::HexString(
                                 codec::encode_statement(s)

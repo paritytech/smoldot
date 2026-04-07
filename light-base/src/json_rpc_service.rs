@@ -116,6 +116,8 @@ pub struct Config<TPlat: PlatformRef> {
     /// Hash of the genesis block of the chain.
     pub genesis_block_hash: [u8; 32],
 
+    /// Maximum number of seen statement hashes tracked per subscription for dedup.
+    /// `None` if the statement protocol is disabled.
     pub max_seen_statements: Option<NonZero<usize>>,
 }
 
