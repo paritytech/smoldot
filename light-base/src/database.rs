@@ -62,6 +62,9 @@ pub struct DatabaseContent {
     /// Does **not** necessarily match the finalized block found in
     /// [`DatabaseContent::chain_information`].
     pub runtime_code_hint: Option<DatabaseContentRuntimeCodeHint>,
+
+    /// Runtime code hint that is known to match [`DatabaseContent::chain_information`].
+    pub finalized_runtime: Option<DatabaseContentFinalizedRuntime>,
 }
 
 /// See [`DatabaseContent::runtime_code_hint`].
@@ -77,6 +80,15 @@ pub struct DatabaseContentRuntimeCodeHint {
     pub closest_ancestor_excluding: Vec<Nibble>,
 }
 
+/// See [`DatabaseContent::finalized_runtime`].
+#[derive(Debug, Clone)]
+pub struct DatabaseContentFinalizedRuntime {
+    pub code: Vec<u8>,
+    pub heap_pages: Option<Vec<u8>>,
+    pub code_merkle_value: Option<Vec<u8>>,
+    pub closest_ancestor_excluding: Option<Vec<Nibble>>,
+}
+
 /// Serializes the finalized state of the chain, using the given services.
 ///
 /// The returned string is guaranteed to not exceed `max_size` bytes. A truncated or invalid
@@ -88,15 +100,48 @@ pub async fn encode_database<TPlat: platform::PlatformRef>(
     genesis_block_hash: &[u8; 32],
     max_size: usize,
 ) -> String {
-    let (code_storage_value, code_merkle_value, code_closest_ancestor_excluding) = runtime_service
+    let runtime_snapshot = runtime_service
         .finalized_runtime_storage_merkle_values()
-        .await
-        .unwrap_or((None, None, None));
+        .await;
+    let chain_information = sync_service.serialize_chain_information().await;
+
+    let finalized_runtime = runtime_snapshot.as_ref().and_then(|snapshot| {
+        let chain_information = chain_information.as_ref()?;
+        let chain_information = chain_information.as_ref();
+
+        if chain_information
+            .finalized_block_header
+            .hash(sync_service.block_number_bytes())
+            != snapshot.finalized_block_hash
+            || *chain_information.finalized_block_header.state_root
+                != snapshot.finalized_block_state_root_hash
+        {
+            return None;
+        }
+
+        Some(SerdeFinalizedRuntime {
+            block_hash: hex::encode(snapshot.finalized_block_hash),
+            state_root: hex::encode(snapshot.finalized_block_state_root_hash),
+            heap_pages: snapshot.heap_pages.as_ref().map(|data| {
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, data)
+            }),
+        })
+    });
+
+    let code_storage_value = runtime_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.runtime_code.clone());
+    let code_merkle_value = runtime_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.code_merkle_value.clone());
+    let code_closest_ancestor_excluding = runtime_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.closest_ancestor_excluding.clone());
 
     // Craft the structure containing all the data that we would like to include.
     let mut database_draft = SerdeDatabase {
         genesis_hash: hex::encode(genesis_block_hash),
-        chain: sync_service.serialize_chain_information().await.map(|ci| {
+        chain: chain_information.map(|ci| {
             let encoded = finalized_serialize::encode_chain(&ci, sync_service.block_number_bytes());
             serde_json::from_str(&encoded).unwrap()
         }),
@@ -121,6 +166,7 @@ pub async fn encode_database<TPlat: platform::PlatformRef>(
                 .map(|nibble| format!("{:x}", nibble))
                 .collect::<String>()
         }),
+        finalized_runtime,
     };
 
     // Cap the database length to the maximum size.
@@ -132,10 +178,15 @@ pub async fn encode_database<TPlat: platform::PlatformRef>(
         }
 
         // Scrap the code, as it is the biggest item.
-        if database_draft.code_merkle_value.is_some() || database_draft.code_storage_value.is_some()
+        if database_draft.finalized_runtime.is_some()
+            || database_draft.code_merkle_value.is_some()
+            || database_draft.code_storage_value.is_some()
+            || database_draft.code_closest_ancestor_excluding.is_some()
         {
+            database_draft.finalized_runtime = None;
             database_draft.code_merkle_value = None;
             database_draft.code_storage_value = None;
+            database_draft.code_closest_ancestor_excluding = None;
             continue;
         }
 
@@ -207,23 +258,80 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         })
         .collect::<Vec<_>>();
 
-    let runtime_code_hint = match (
-        decoded.code_merkle_value,
-        decoded.code_storage_value,
-        decoded.code_closest_ancestor_excluding,
-    ) {
-        (Some(mv), Some(sv), Some(an)) => Some(DatabaseContentRuntimeCodeHint {
-            code: base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, sv)
-                .map_err(|_| ())?,
-            code_merkle_value: hex::decode(mv).map_err(|_| ())?,
-            closest_ancestor_excluding: an
-                .as_bytes()
+    let code_storage_value = decoded
+        .code_storage_value
+        .map(|sv| base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, sv))
+        .transpose()
+        .map_err(|_| ())?;
+    let code_merkle_value = decoded
+        .code_merkle_value
+        .map(hex::decode)
+        .transpose()
+        .map_err(|_| ())?;
+    let code_closest_ancestor_excluding = decoded
+        .code_closest_ancestor_excluding
+        .map(|an| {
+            an.as_bytes()
                 .iter()
                 .map(|char| Nibble::from_ascii_hex_digit(*char).ok_or(()))
-                .collect::<Result<Vec<Nibble>, ()>>()?,
+                .collect::<Result<Vec<Nibble>, ()>>()
+        })
+        .transpose()?;
+
+    let runtime_code_hint = match (
+        &code_merkle_value,
+        &code_storage_value,
+        &code_closest_ancestor_excluding,
+    ) {
+        (Some(mv), Some(sv), Some(an)) => Some(DatabaseContentRuntimeCodeHint {
+            code: sv.clone(),
+            code_merkle_value: mv.clone(),
+            closest_ancestor_excluding: an.clone(),
         }),
         // A combination of `Some` and `None` is technically invalid, but we simply ignore this
         // situation.
+        _ => None,
+    };
+
+    let finalized_runtime = match (&code_storage_value, decoded.finalized_runtime) {
+        (
+            Some(code_storage_value),
+            Some(SerdeFinalizedRuntime {
+                block_hash,
+                state_root,
+                heap_pages,
+            }),
+        ) if block_hash.len() == 64 && state_root.len() == 64 => {
+            let block_hash =
+                <[u8; 32]>::try_from(hex::decode(block_hash).map_err(|_| ())?).unwrap();
+            let state_root =
+                <[u8; 32]>::try_from(hex::decode(state_root).map_err(|_| ())?).unwrap();
+
+            let matches_chain_information = chain_information.as_ref().map_or(false, |ci| {
+                let ci = ci.as_ref();
+                ci.finalized_block_header.hash(block_number_bytes) == block_hash
+                    && *ci.finalized_block_header.state_root == state_root
+            });
+
+            if matches_chain_information {
+                Some(DatabaseContentFinalizedRuntime {
+                    code: code_storage_value.clone(),
+                    heap_pages: heap_pages
+                        .map(|heap_pages| {
+                            base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD_NO_PAD,
+                                heap_pages,
+                            )
+                        })
+                        .transpose()
+                        .map_err(|_| ())?,
+                    code_merkle_value,
+                    closest_ancestor_excluding: code_closest_ancestor_excluding,
+                })
+            } else {
+                None
+            }
+        }
         _ => None,
     };
 
@@ -232,6 +340,7 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         chain_information,
         known_nodes,
         runtime_code_hint,
+        finalized_runtime,
     })
 }
 
@@ -261,4 +370,96 @@ struct SerdeDatabase {
         skip_serializing_if = "Option::is_none"
     )]
     code_closest_ancestor_excluding: Option<String>,
+    #[serde(
+        rename = "finalizedRuntime",
+        default = "Default::default",
+        skip_serializing_if = "Option::is_none"
+    )]
+    finalized_runtime: Option<SerdeFinalizedRuntime>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SerdeFinalizedRuntime {
+    #[serde(rename = "blockHash")]
+    block_hash: String,
+    #[serde(rename = "stateRoot")]
+    state_root: String,
+    #[serde(
+        rename = "heapPages",
+        default = "Default::default",
+        skip_serializing_if = "Option::is_none"
+    )]
+    heap_pages: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn example_chain_information() -> chain::chain_information::ValidChainInformation {
+        let chain_spec = smoldot::chain_spec::ChainSpec::from_json_bytes(include_str!(
+            "../../lib/src/chain_spec/tests/example.json"
+        ))
+        .unwrap();
+        chain_spec.to_chain_information().unwrap().0
+    }
+
+    fn database_with_finalized_runtime(
+        chain_information: &chain::chain_information::ValidChainInformation,
+        block_hash: [u8; 32],
+        state_root: [u8; 32],
+    ) -> String {
+        format!(
+            r#"{{
+                "genesisHash":"{genesis_hash}",
+                "chain":{chain},
+                "nodes":{{}},
+                "runtimeCode":"AQID",
+                "finalizedRuntime":{{
+                    "blockHash":"{block_hash}",
+                    "stateRoot":"{state_root}",
+                    "heapPages":"BAU"
+                }}
+            }}"#,
+            genesis_hash = "00".repeat(32),
+            chain = finalized_serialize::encode_chain(chain_information, 4),
+            block_hash = hex::encode(block_hash),
+            state_root = hex::encode(state_root),
+        )
+    }
+
+    #[test]
+    fn test_decodes_block_bound_finalized_runtime_without_merkle_hint() {
+        let chain_information = example_chain_information();
+        let block_hash = chain_information.as_ref().finalized_block_header.hash(4);
+        let state_root = *chain_information.as_ref().finalized_block_header.state_root;
+
+        let database = decode_database(
+            &database_with_finalized_runtime(&chain_information, block_hash, state_root),
+            4,
+        )
+        .unwrap();
+
+        let finalized_runtime = database.finalized_runtime.unwrap();
+        assert_eq!(finalized_runtime.code, vec![1, 2, 3]);
+        assert_eq!(finalized_runtime.heap_pages, Some(vec![4, 5]));
+        assert!(finalized_runtime.code_merkle_value.is_none());
+        assert!(finalized_runtime.closest_ancestor_excluding.is_none());
+        assert!(database.runtime_code_hint.is_none());
+    }
+
+    #[test]
+    fn test_rejects_finalized_runtime_for_different_block() {
+        let chain_information = example_chain_information();
+        let block_hash = [1; 32];
+        let state_root = *chain_information.as_ref().finalized_block_header.state_root;
+
+        let database = decode_database(
+            &database_with_finalized_runtime(&chain_information, block_hash, state_root),
+            4,
+        )
+        .unwrap();
+
+        assert!(database.finalized_runtime.is_none());
+    }
 }

@@ -16,7 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{
-    BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground, paraheads,
+    BlockNotification, ConfigParachainFinalizedRuntime, FinalizedBlockRuntime, Notification,
+    SubscribeAll, ToBackground, paraheads,
 };
 use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 
@@ -53,6 +54,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     platform: TPlat,
     block_number_bytes: usize,
     restored_chain_information: Option<chain::chain_information::ValidChainInformation>,
+    restored_finalized_runtime: Option<ConfigParachainFinalizedRuntime>,
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
     parachain_id: u32,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
@@ -99,13 +101,46 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
 
     // Phase 2: Fetch the finalized runtime needed by runtime_service and, when required,
     // also determine Aura consensus parameters from that same finalized block.
+    let restored_finalized_runtime = restored_finalized_runtime.as_ref();
     let (effective_chain_info, finalized_runtime) = loop {
+        if !parachain_needs_consensus_bootstrap(&effective_chain_info) {
+            if let Some(restored_finalized_runtime) = restored_finalized_runtime {
+                match restored_finalized_runtime_from_snapshot(
+                    &platform,
+                    &log_target,
+                    restored_finalized_runtime,
+                ) {
+                    Ok(finalized_runtime) => {
+                        log!(
+                            &platform,
+                            Info,
+                            &log_target,
+                            format!(
+                                "Using restored finalized parachain runtime at block #{}",
+                                effective_chain_info.as_ref().finalized_block_header.number
+                            )
+                        );
+                        break (effective_chain_info, finalized_runtime);
+                    }
+                    Err(err) => {
+                        log!(
+                            &platform,
+                            Warn,
+                            &log_target,
+                            format!("Failed to use restored parachain finalized runtime: {err}")
+                        );
+                    }
+                }
+            }
+        }
+
         match bootstrap_parachain_consensus(
             &log_target,
             &platform,
             &network_service,
             &effective_chain_info,
             block_number_bytes,
+            restored_finalized_runtime,
         )
         .await
         {
@@ -1277,12 +1312,50 @@ struct BootstrappedParachainConsensus {
     finalized_runtime: FinalizedBlockRuntime,
 }
 
+fn restored_finalized_runtime_from_snapshot<TPlat: PlatformRef>(
+    platform: &TPlat,
+    log_target: &str,
+    runtime: &ConfigParachainFinalizedRuntime,
+) -> Result<FinalizedBlockRuntime, String> {
+    let storage_code = runtime.storage_code.clone();
+    let storage_heap_pages = runtime.storage_heap_pages.clone();
+    let heap_pages = executor::storage_heap_pages_to_value(storage_heap_pages.as_deref())
+        .map_err(|e| format!("Invalid restored :heappages value: {e}"))?;
+
+    let virtual_machine = executor::host::HostVmPrototype::new(executor::host::Config {
+        module: &storage_code,
+        heap_pages,
+        exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+        allow_unresolved_imports: true,
+    })
+    .map_err(|e| format!("Failed to compile restored runtime hint: {e}"))?;
+
+    log!(
+        platform,
+        Info,
+        log_target,
+        format!(
+            "Compiled restored parachain runtime hint ({} bytes)",
+            storage_code.len()
+        )
+    );
+
+    Ok(FinalizedBlockRuntime {
+        virtual_machine,
+        storage_code: Some(storage_code),
+        storage_heap_pages,
+        code_merkle_value: runtime.code_merkle_value.clone(),
+        closest_ancestor_excluding: runtime.closest_ancestor_excluding.clone(),
+    })
+}
+
 async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
+    restored_finalized_runtime: Option<&ConfigParachainFinalizedRuntime>,
 ) -> Result<BootstrappedParachainConsensus, String> {
     let ci_ref = chain_info.as_ref();
     let state_root = *ci_ref.finalized_block_header.state_root;
@@ -1318,69 +1391,89 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         }
     };
 
-    log!(
-        platform,
-        Info,
-        log_target,
-        format!("Downloading parachain runtime from peer {peer_id}")
-    );
+    let finalized_runtime = if let Some(restored_finalized_runtime) = restored_finalized_runtime {
+        log!(
+            platform,
+            Info,
+            log_target,
+            "Using block-bound restored parachain runtime for consensus bootstrap"
+        );
+        restored_finalized_runtime_from_snapshot(platform, log_target, restored_finalized_runtime)?
+    } else {
+        log!(
+            platform,
+            Info,
+            log_target,
+            format!("Downloading parachain runtime from peer {peer_id}")
+        );
 
-    // Download :code and :heappages.
-    let proof = network_service
-        .clone()
-        .storage_proof_request(
-            peer_id.clone(),
-            codec::StorageProofRequestConfig {
-                block_hash,
-                keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
-            },
-            Duration::from_secs(60),
-        )
-        .await
-        .map_err(|e| format!("Storage proof request failed: {e}"))?;
+        // Download :code and :heappages.
+        let proof = network_service
+            .clone()
+            .storage_proof_request(
+                peer_id.clone(),
+                codec::StorageProofRequestConfig {
+                    block_hash,
+                    keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
+                },
+                Duration::from_secs(60),
+            )
+            .await
+            .map_err(|e| format!("Storage proof request failed: {e}"))?;
 
-    let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-        proof: proof.decode().to_vec(),
-    })
-    .map_err(|e| format!("Failed to decode storage proof: {e}"))?;
+        let decoded_proof =
+            trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+                proof: proof.decode().to_vec(),
+            })
+            .map_err(|e| format!("Failed to decode storage proof: {e}"))?;
 
-    let (code, _) = decoded_proof
-        .storage_value(&state_root, b":code")
-        .map_err(|_| String::from("Proof doesn't contain :code"))?
-        .ok_or_else(|| String::from("Runtime :code not found in storage"))?;
-    let code = code.to_vec();
+        let (code, _) = decoded_proof
+            .storage_value(&state_root, b":code")
+            .map_err(|_| String::from("Proof doesn't contain :code"))?
+            .ok_or_else(|| String::from("Runtime :code not found in storage"))?;
+        let code = code.to_vec();
 
-    let heap_pages_raw = decoded_proof
-        .storage_value(&state_root, b":heappages")
-        .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
+        let heap_pages_raw = decoded_proof
+            .storage_value(&state_root, b":heappages")
+            .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
 
-    let heap_pages = executor::storage_heap_pages_to_value(heap_pages_raw.map(|(v, _)| v))
-        .map_err(|e| format!("Invalid :heappages value: {e}"))?;
-    let closest_ancestor_excluding = decoded_proof
-        .closest_ancestor_in_proof(
-            &state_root,
-            trie::bytes_to_nibbles(b":code".iter().copied()),
-        )
-        .map_err(|_| String::from("Proof missing :code closest ancestor"))?
-        .map(|ancestor| ancestor.collect::<Vec<_>>());
+        let heap_pages = executor::storage_heap_pages_to_value(heap_pages_raw.map(|(v, _)| v))
+            .map_err(|e| format!("Invalid :heappages value: {e}"))?;
+        let closest_ancestor_excluding = decoded_proof
+            .closest_ancestor_in_proof(
+                &state_root,
+                trie::bytes_to_nibbles(b":code".iter().copied()),
+            )
+            .map_err(|_| String::from("Proof missing :code closest ancestor"))?
+            .map(|ancestor| ancestor.collect::<Vec<_>>());
 
-    log!(
-        platform,
-        Info,
-        log_target,
-        format!(
-            "Downloaded parachain runtime ({} bytes), compiling...",
-            code.len()
-        )
-    );
+        log!(
+            platform,
+            Info,
+            log_target,
+            format!(
+                "Downloaded parachain runtime ({} bytes), compiling...",
+                code.len()
+            )
+        );
 
-    let vm = executor::host::HostVmPrototype::new(executor::host::Config {
-        module: &code,
-        heap_pages,
-        exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
-        allow_unresolved_imports: true,
-    })
-    .map_err(|e| format!("Failed to compile runtime: {e}"))?;
+        let vm = executor::host::HostVmPrototype::new(executor::host::Config {
+            module: &code,
+            heap_pages,
+            exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+            allow_unresolved_imports: true,
+        })
+        .map_err(|e| format!("Failed to compile runtime: {e}"))?;
+
+        FinalizedBlockRuntime {
+            virtual_machine: vm,
+            storage_code: Some(code),
+            storage_heap_pages: heap_pages_raw.map(|(value, _)| value.to_vec()),
+            code_merkle_value: None,
+            closest_ancestor_excluding,
+        }
+    };
+    let vm = finalized_runtime.virtual_machine.clone();
 
     // AuraApi_slot_duration
     let slot_duration = {
@@ -1477,13 +1570,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
 
     Ok(BootstrappedParachainConsensus {
         chain_info,
-        finalized_runtime: FinalizedBlockRuntime {
-            virtual_machine: vm,
-            storage_code: Some(code),
-            storage_heap_pages: heap_pages_raw.map(|(value, _)| value.to_vec()),
-            code_merkle_value: None,
-            closest_ancestor_excluding,
-        },
+        finalized_runtime,
     })
 }
 
