@@ -29,6 +29,9 @@ permissions: read-all
 
 jobs:
   build-push-docker-image:
+    # Docker image publishing is not supported at the moment.
+    # Note: add build-push-docker-image back to 'all-deploy` needs list if it is re-enabled.
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -284,7 +287,7 @@ jobs:
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [build-push-docker-image, docs-publish, npm-publish, deno-publish, crates-io-publish]
+    needs: [docs-publish, npm-publish, deno-publish, crates-io-publish]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success
