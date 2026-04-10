@@ -452,13 +452,14 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // is present in the chain spec, it is possible to start syncing at the finalized block
         // it describes.
         // At the same time, we deconstruct the database into `known_nodes`
-        // and `runtime_code_hint`.
+        // and runtime hints.
         let (
             chain_information,
             selected_database_chain_information,
             restored_database_chain_information,
             known_nodes,
             runtime_code_hint,
+            finalized_runtime,
         ) = {
             let checkpoint = chain_spec
                 .light_sync_state()
@@ -474,6 +475,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_information: Some(db_ci),
                         known_nodes,
                         runtime_code_hint,
+                        finalized_runtime,
                         ..
                     }),
                 ) if db_ci.as_ref().finalized_block_header.number
@@ -485,6 +487,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         Some(db_ci),
                         known_nodes,
                         runtime_code_hint,
+                        finalized_runtime,
                     )
                 }
 
@@ -496,6 +499,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_information: db_ci,
                         known_nodes,
                         runtime_code_hint,
+                        finalized_runtime,
                         ..
                     }),
                 ) => (
@@ -504,9 +508,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     db_ci,
                     known_nodes,
                     runtime_code_hint,
+                    finalized_runtime,
                 ),
                 (_, Some(Ok(checkpoint)), None) => {
-                    (Some(checkpoint), false, None, Vec::new(), None)
+                    (Some(checkpoint), false, None, Vec::new(), None, None)
                 }
 
                 // If neither the genesis chain information nor the checkpoint chain information
@@ -520,10 +525,18 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_information: db_ci,
                         known_nodes,
                         runtime_code_hint,
+                        finalized_runtime,
                         ..
                     }),
-                ) => (None, false, db_ci, known_nodes, runtime_code_hint),
-                (None, None, None) => (None, false, None, Vec::new(), None),
+                ) => (
+                    None,
+                    false,
+                    db_ci,
+                    known_nodes,
+                    runtime_code_hint,
+                    finalized_runtime,
+                ),
+                (None, None, None) => (None, false, None, Vec::new(), None, None),
 
                 // Use the genesis block if no checkpoint is available.
                 (
@@ -536,6 +549,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_information: db_ci,
                         known_nodes,
                         runtime_code_hint,
+                        finalized_runtime,
                         ..
                     }),
                 ) => (
@@ -544,6 +558,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     db_ci,
                     known_nodes,
                     runtime_code_hint,
+                    finalized_runtime,
                 ),
                 (
                     Some(genesis_ci),
@@ -552,7 +567,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
                     )),
                     None,
-                ) => (Some(genesis_ci), false, None, Vec::new(), None),
+                ) => (Some(genesis_ci), false, None, Vec::new(), None, None),
 
                 // If the checkpoint format is invalid, we return an error no matter whether the
                 // genesis chain information could be used.
@@ -740,9 +755,13 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             relay_chain,
                             para_id: *para_id,
                             restored_chain_information: restored_parachain_chain_information,
+                            finalized_runtime,
                         },
                         (None, Some(chain_information)) => {
-                            StartServicesChainTy::SubstrateCompatible { chain_information }
+                            StartServicesChainTy::SubstrateCompatible {
+                                chain_information,
+                                runtime_code_hint,
+                            }
                         }
                         (None, None) => {
                             // Checked above.
@@ -754,7 +773,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         log_name.clone(),
                         &self.platform,
                         &mut self.network_service,
-                        runtime_code_hint,
                         genesis_block_header,
                         usize::from(chain_spec.block_number_bytes()),
                         chain_spec.fork_id().map(|f| f.to_owned()),
@@ -1142,11 +1160,13 @@ pub enum AddChainError {
 enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
     SubstrateCompatible {
         chain_information: &'a chain::chain_information::ValidChainInformation,
+        runtime_code_hint: Option<database::DatabaseContentRuntimeCodeHint>,
     },
     Parachain {
         relay_chain: &'a ChainServices<TPlat>,
         para_id: u32,
         restored_chain_information: Option<&'a chain::chain_information::ValidChainInformation>,
+        finalized_runtime: Option<database::DatabaseContentFinalizedRuntime>,
     },
 }
 
@@ -1183,7 +1203,9 @@ fn network_service_best_block<TPlat: platform::PlatformRef>(
     block_number_bytes: usize,
 ) -> (u64, [u8; 32]) {
     match config {
-        StartServicesChainTy::SubstrateCompatible { chain_information } => (
+        StartServicesChainTy::SubstrateCompatible {
+            chain_information, ..
+        } => (
             chain_information.as_ref().finalized_block_header.number,
             chain_information
                 .as_ref()
@@ -1209,7 +1231,6 @@ fn start_services<TPlat: platform::PlatformRef>(
     log_name: String,
     platform: &TPlat,
     network_service: &mut Option<Arc<network_service::NetworkService<TPlat>>>,
-    runtime_code_hint: Option<database::DatabaseContentRuntimeCodeHint>,
     genesis_block_scale_encoded_header: Vec<u8>,
     block_number_bytes: usize,
     fork_id: Option<String>,
@@ -1231,11 +1252,12 @@ fn start_services<TPlat: platform::PlatformRef>(
         log_name: log_name.clone(),
         num_out_slots: 4,
         grandpa_protocol_finalized_block_height: match &config {
-            StartServicesChainTy::SubstrateCompatible { chain_information }
-                if matches!(
-                    chain_information.as_ref().finality,
-                    chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-                ) =>
+            StartServicesChainTy::SubstrateCompatible {
+                chain_information, ..
+            } if matches!(
+                chain_information.as_ref().finality,
+                chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
+            ) =>
             {
                 Some(chain_information.as_ref().finalized_block_header.number)
             }
@@ -1259,6 +1281,7 @@ fn start_services<TPlat: platform::PlatformRef>(
             relay_chain,
             para_id,
             restored_chain_information,
+            finalized_runtime,
         } => {
             // Chain is a parachain.
 
@@ -1277,6 +1300,14 @@ fn start_services<TPlat: platform::PlatformRef>(
                             relay_chain_sync: relay_chain.runtime_service.clone(),
                         },
                         restored_chain_information: restored_chain_information.cloned(),
+                        finalized_runtime: finalized_runtime.map(|runtime| {
+                            sync_service::ConfigParachainFinalizedRuntime {
+                                storage_code: runtime.code,
+                                storage_heap_pages: runtime.heap_pages,
+                                code_merkle_value: runtime.code_merkle_value,
+                                closest_ancestor_excluding: runtime.closest_ancestor_excluding,
+                            }
+                        }),
                     },
                 ),
             }));
@@ -1295,7 +1326,10 @@ fn start_services<TPlat: platform::PlatformRef>(
 
             (sync_service, runtime_service)
         }
-        StartServicesChainTy::SubstrateCompatible { chain_information } => {
+        StartServicesChainTy::SubstrateCompatible {
+            chain_information,
+            runtime_code_hint,
+        } => {
             // Chain is a Substrate-compatible non-parachain chain.
 
             // The sync service is leveraging the network service, downloads block headers,

@@ -114,6 +114,24 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
     /// When present, the parachain sync service can warm-start from this state instead of
     /// blocking on a fresh relay-chain finalization before it begins syncing.
     pub restored_chain_information: Option<chain::chain_information::ValidChainInformation>,
+
+    /// Finalized runtime restored from `database_content`.
+    ///
+    /// Unlike [`ConfigSubstrateCompatibleRuntimeCodeHint`], this is known to match
+    /// [`ConfigParachain::restored_chain_information`].
+    pub finalized_runtime: Option<ConfigParachainFinalizedRuntime>,
+}
+
+/// See [`ConfigParachain::finalized_runtime`].
+pub struct ConfigParachainFinalizedRuntime {
+    /// Storage value of the `:code` key.
+    pub storage_code: Vec<u8>,
+    /// Storage value of the `:heappages` key.
+    pub storage_heap_pages: Option<Vec<u8>>,
+    /// Merkle value of the `:code` key.
+    pub code_merkle_value: Option<Vec<u8>>,
+    /// Closest ancestor of the `:code` key except for `:code` itself.
+    pub closest_ancestor_excluding: Option<Vec<Nibble>>,
 }
 
 /// See [`ConfigParachain::relay_chain`].
@@ -157,6 +175,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 config.platform.clone(),
                 config.block_number_bytes,
                 config_parachain.restored_chain_information,
+                config_parachain.finalized_runtime,
                 config_parachain.relay_chain.relay_chain_sync.clone(),
                 config_parachain.relay_chain.para_id,
                 from_foreground,
