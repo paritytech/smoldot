@@ -195,7 +195,7 @@ jobs:
       - name: Upload package artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: package-${{ github.sha }}
+          name: npm-package-${{ github.sha }}
           path: ./wasm-node/javascript/*.tgz
       - name: Publish via npm_publish_automation
         uses: octokit/request-action@v2.x
@@ -204,7 +204,7 @@ jobs:
           route: POST /repos/paritytech/npm_publish_automation/actions/workflows/publish.yml/dispatches
           ref: main
           # Make sure to provide proper artifact_name, since this GH run produces multiple artifacts and npm_publish_automation must know, which one to use
-          inputs: '${{ format(''{{ "repo": "{0}", "run_id": "{1}", "artifact_name": "package-{2}" }}'', github.repository, github.run_id, github.sha) }}'
+          inputs: '${{ format(''{{ "repo": "{0}", "run_id": "{1}", "artifact_name": "npm-package-{2}" }}'', github.repository, github.run_id, github.sha) }}'
         env:
           GITHUB_TOKEN: ${{ secrets.NPM_PUBLISH_AUTOMATION_TOKEN }}
 
