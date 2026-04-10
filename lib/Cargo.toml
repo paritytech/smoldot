@@ -98,7 +98,7 @@ soketto = { version = "0.8.0", optional = true }
 [target.'cfg(any(all(target_arch = "x86_64", any(target_os = "windows", all(target_os = "linux", target_env = "gnu"), target_os = "macos")), all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"), all(target_arch = "s390x", target_os = "linux", target_env = "gnu")))'.dependencies]
 # `wasmtime` feature
 # Note that we have to enable more features than needed just in order to disable them, as wasmtime does trickeries such as <https://github.com/bytecodealliance/wasmtime/blob/9fd00a0aaf157c98a1c588e55c844ea27a81a3cf/crates/wasmtime/src/config.rs#L259-L264>
-wasmtime = { version = "36.0.6", default-features = false, features = ["async", "cranelift", "gc", "gc-null", "component-model", "threads"], optional = true }
+wasmtime = { version = "36.0.7", default-features = false, features = ["async", "cranelift", "gc", "gc-null", "component-model", "threads"], optional = true }
 
 [dev-dependencies]
 criterion = "0.5.1"
