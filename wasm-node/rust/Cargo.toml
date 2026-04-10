@@ -1,6 +1,6 @@
 [package]
 name = "smoldot-light-wasm"
-version = "2.0.40"
+version = "3.0.0"
 description = "Browser bindings to a light client for Substrate-based blockchains"
 authors.workspace = true
 license.workspace = true
