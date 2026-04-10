@@ -183,15 +183,22 @@ jobs:
           # Set to the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 18
       - uses: Swatinem/rust-cache@v2
-      - run: npm install
+
+      - name: Install
+        run: npm install
         working-directory: ./wasm-node/javascript
-      - run: npm pack
+
+      - name: Pack
+        run: npm pack
         working-directory: ./wasm-node/javascript
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: package
+          name: package-${{ github.sha }}
           path: ./wasm-node/javascript/*.tgz
-      - uses: octokit/request-action@v2.x
+      - name: Publish via npm_publish_automation
+        uses: octokit/request-action@v2.x
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         with:
           route: POST /repos/paritytech/npm_publish_automation/actions/workflows/publish.yml/dispatches
