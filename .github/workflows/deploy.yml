@@ -189,7 +189,7 @@ jobs:
         working-directory: ./wasm-node/javascript
       - uses: actions/upload-artifact@v4
         with:
-          name: package
+          name: smoldot
           path: ./wasm-node/javascript/*.tgz
       - uses: octokit/request-action@v2.x
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
