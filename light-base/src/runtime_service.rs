@@ -684,7 +684,6 @@ pub struct FinalizedRuntimeStorageMerkleValues {
     pub finalized_block_hash: [u8; 32],
     pub finalized_block_state_root_hash: [u8; 32],
     pub runtime_code: Option<Vec<u8>>,
-    pub heap_pages: Option<Vec<u8>>,
     pub code_merkle_value: Option<Vec<u8>>,
     pub closest_ancestor_excluding: Option<Vec<Nibble>>,
 }
@@ -1831,7 +1830,6 @@ async fn run_background<TPlat: PlatformRef>(
                             finalized_block_hash: finalized_block.hash,
                             finalized_block_state_root_hash: *finalized_block_header.state_root,
                             runtime_code: runtime.runtime_code.clone(),
-                            heap_pages: runtime.heap_pages.clone(),
                             code_merkle_value: runtime.code_merkle_value.clone(),
                             closest_ancestor_excluding: runtime.closest_ancestor_excluding.clone(),
                         })

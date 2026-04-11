@@ -1303,7 +1303,6 @@ fn start_services<TPlat: platform::PlatformRef>(
                         finalized_runtime: finalized_runtime.map(|runtime| {
                             sync_service::ConfigParachainFinalizedRuntime {
                                 storage_code: runtime.code,
-                                storage_heap_pages: runtime.heap_pages,
                                 code_merkle_value: runtime.code_merkle_value,
                                 closest_ancestor_excluding: runtime.closest_ancestor_excluding,
                             }

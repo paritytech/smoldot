@@ -126,12 +126,10 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
 pub struct ConfigParachainFinalizedRuntime {
     /// Storage value of the `:code` key.
     pub storage_code: Vec<u8>,
-    /// Storage value of the `:heappages` key.
-    pub storage_heap_pages: Option<Vec<u8>>,
     /// Merkle value of the `:code` key.
-    pub code_merkle_value: Option<Vec<u8>>,
+    pub code_merkle_value: Vec<u8>,
     /// Closest ancestor of the `:code` key except for `:code` itself.
-    pub closest_ancestor_excluding: Option<Vec<Nibble>>,
+    pub closest_ancestor_excluding: Vec<Nibble>,
 }
 
 /// See [`ConfigParachain::relay_chain`].

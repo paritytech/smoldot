@@ -84,9 +84,8 @@ pub struct DatabaseContentRuntimeCodeHint {
 #[derive(Debug, Clone)]
 pub struct DatabaseContentFinalizedRuntime {
     pub code: Vec<u8>,
-    pub heap_pages: Option<Vec<u8>>,
-    pub code_merkle_value: Option<Vec<u8>>,
-    pub closest_ancestor_excluding: Option<Vec<Nibble>>,
+    pub code_merkle_value: Vec<u8>,
+    pub closest_ancestor_excluding: Vec<Nibble>,
 }
 
 /// Serializes the finalized state of the chain, using the given services.
@@ -122,9 +121,6 @@ pub async fn encode_database<TPlat: platform::PlatformRef>(
         Some(SerdeFinalizedRuntime {
             block_hash: hex::encode(snapshot.finalized_block_hash),
             state_root: hex::encode(snapshot.finalized_block_state_root_hash),
-            heap_pages: snapshot.heap_pages.as_ref().map(|data| {
-                base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, data)
-            }),
         })
     });
 
@@ -293,13 +289,19 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         _ => None,
     };
 
-    let finalized_runtime = match (&code_storage_value, decoded.finalized_runtime) {
+    let finalized_runtime = match (
+        &code_storage_value,
+        &code_merkle_value,
+        &code_closest_ancestor_excluding,
+        decoded.finalized_runtime,
+    ) {
         (
             Some(code_storage_value),
+            Some(code_merkle_value),
+            Some(code_closest_ancestor_excluding),
             Some(SerdeFinalizedRuntime {
                 block_hash,
                 state_root,
-                heap_pages,
             }),
         ) if block_hash.len() == 64 && state_root.len() == 64 => {
             let block_hash =
@@ -316,17 +318,8 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
             if matches_chain_information {
                 Some(DatabaseContentFinalizedRuntime {
                     code: code_storage_value.clone(),
-                    heap_pages: heap_pages
-                        .map(|heap_pages| {
-                            base64::Engine::decode(
-                                &base64::engine::general_purpose::STANDARD_NO_PAD,
-                                heap_pages,
-                            )
-                        })
-                        .transpose()
-                        .map_err(|_| ())?,
-                    code_merkle_value,
-                    closest_ancestor_excluding: code_closest_ancestor_excluding,
+                    code_merkle_value: code_merkle_value.clone(),
+                    closest_ancestor_excluding: code_closest_ancestor_excluding.clone(),
                 })
             } else {
                 None
@@ -384,12 +377,6 @@ struct SerdeFinalizedRuntime {
     block_hash: String,
     #[serde(rename = "stateRoot")]
     state_root: String,
-    #[serde(
-        rename = "heapPages",
-        default = "Default::default",
-        skip_serializing_if = "Option::is_none"
-    )]
-    heap_pages: Option<String>,
 }
 
 #[cfg(test)]
@@ -408,7 +395,17 @@ mod tests {
         chain_information: &chain::chain_information::ValidChainInformation,
         block_hash: [u8; 32],
         state_root: [u8; 32],
+        include_runtime_hint: bool,
     ) -> String {
+        let runtime_hint = if include_runtime_hint {
+            r#"
+                ,"codeMerkleValue":"1111111111111111111111111111111111111111111111111111111111111111",
+                "codeClosestAncestor":"1234"
+            "#
+        } else {
+            ""
+        };
+
         format!(
             r#"{{
                 "genesisHash":"{genesis_hash}",
@@ -419,32 +416,48 @@ mod tests {
                     "blockHash":"{block_hash}",
                     "stateRoot":"{state_root}",
                     "heapPages":"BAU"
-                }}
+                }}{runtime_hint}
             }}"#,
             genesis_hash = "00".repeat(32),
             chain = finalized_serialize::encode_chain(chain_information, 4),
             block_hash = hex::encode(block_hash),
             state_root = hex::encode(state_root),
+            runtime_hint = runtime_hint,
         )
     }
 
     #[test]
-    fn test_decodes_block_bound_finalized_runtime_without_merkle_hint() {
+    fn test_decodes_block_bound_finalized_runtime_with_merkle_hint() {
         let chain_information = example_chain_information();
         let block_hash = chain_information.as_ref().finalized_block_header.hash(4);
         let state_root = *chain_information.as_ref().finalized_block_header.state_root;
 
         let database = decode_database(
-            &database_with_finalized_runtime(&chain_information, block_hash, state_root),
+            &database_with_finalized_runtime(&chain_information, block_hash, state_root, true),
             4,
         )
         .unwrap();
 
         let finalized_runtime = database.finalized_runtime.unwrap();
         assert_eq!(finalized_runtime.code, vec![1, 2, 3]);
-        assert_eq!(finalized_runtime.heap_pages, Some(vec![4, 5]));
-        assert!(finalized_runtime.code_merkle_value.is_none());
-        assert!(finalized_runtime.closest_ancestor_excluding.is_none());
+        assert_eq!(finalized_runtime.code_merkle_value, vec![0x11; 32]);
+        assert_eq!(finalized_runtime.closest_ancestor_excluding.len(), 4);
+        assert!(database.runtime_code_hint.is_some());
+    }
+
+    #[test]
+    fn test_rejects_finalized_runtime_without_merkle_hint() {
+        let chain_information = example_chain_information();
+        let block_hash = chain_information.as_ref().finalized_block_header.hash(4);
+        let state_root = *chain_information.as_ref().finalized_block_header.state_root;
+
+        let database = decode_database(
+            &database_with_finalized_runtime(&chain_information, block_hash, state_root, false),
+            4,
+        )
+        .unwrap();
+
+        assert!(database.finalized_runtime.is_none());
         assert!(database.runtime_code_hint.is_none());
     }
 
@@ -455,7 +468,7 @@ mod tests {
         let state_root = *chain_information.as_ref().finalized_block_header.state_root;
 
         let database = decode_database(
-            &database_with_finalized_runtime(&chain_information, block_hash, state_root),
+            &database_with_finalized_runtime(&chain_information, block_hash, state_root, true),
             4,
         )
         .unwrap();
