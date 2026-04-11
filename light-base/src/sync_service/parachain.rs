@@ -1336,10 +1336,6 @@ async fn restored_finalized_runtime_from_verified_hint<TPlat: PlatformRef>(
         return Err(String::from("Invalid restored :code closest ancestor hint"));
     }
 
-    let code_key_to_request =
-        trie::nibbles_to_bytes_truncate(runtime.closest_ancestor_excluding.iter().copied())
-            .collect::<Vec<_>>();
-
     log!(
         platform,
         Info,
@@ -1353,7 +1349,7 @@ async fn restored_finalized_runtime_from_verified_hint<TPlat: PlatformRef>(
             peer_id.clone(),
             codec::StorageProofRequestConfig {
                 block_hash,
-                keys: [code_key_to_request.as_slice(), &b":heappages"[..]].into_iter(),
+                keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
             },
             Duration::from_secs(60),
         )
@@ -1365,23 +1361,28 @@ async fn restored_finalized_runtime_from_verified_hint<TPlat: PlatformRef>(
     })
     .map_err(|e| format!("Failed to decode restored runtime hint proof: {e}"))?;
 
-    let next_nibble = code_nibbles[runtime.closest_ancestor_excluding.len()];
-    let code_node_info = decoded_proof
-        .trie_node_info(
-            &state_root,
-            runtime.closest_ancestor_excluding.iter().copied(),
-        )
-        .map_err(|_| String::from("Restored runtime hint proof missing :code ancestor"))?;
-    let Some(proof_code_merkle_value) = code_node_info.children.child(next_nibble).merkle_value()
-    else {
-        return Err(String::from(
-            "Restored runtime hint proof missing :code child merkle value",
-        ));
-    };
+    let (proof_storage_code, _) = decoded_proof
+        .storage_value(&state_root, b":code")
+        .map_err(|_| String::from("Restored runtime hint proof doesn't contain :code"))?
+        .ok_or_else(|| String::from("Restored runtime hint proof missing :code value"))?;
+    let proof_storage_code = proof_storage_code.to_vec();
+
+    if proof_storage_code != runtime.storage_code {
+        return Err(String::from("Restored runtime hint :code value mismatch"));
+    }
+
+    let (proof_code_merkle_value, proof_closest_ancestor_excluding) =
+        code_merkle_hint_from_proof(&decoded_proof, &state_root)?;
 
     if proof_code_merkle_value != runtime.code_merkle_value {
         return Err(String::from(
             "Restored runtime hint :code merkle value mismatch",
+        ));
+    }
+
+    if proof_closest_ancestor_excluding != runtime.closest_ancestor_excluding {
+        return Err(String::from(
+            "Restored runtime hint :code ancestor mismatch",
         ));
     }
 
@@ -1393,7 +1394,7 @@ async fn restored_finalized_runtime_from_verified_hint<TPlat: PlatformRef>(
     compile_finalized_runtime(
         platform,
         log_target,
-        runtime.storage_code,
+        proof_storage_code,
         storage_heap_pages,
         Some(runtime.code_merkle_value),
         Some(runtime.closest_ancestor_excluding),
@@ -1445,42 +1446,45 @@ async fn download_finalized_runtime_from_peer<TPlat: PlatformRef>(
         .storage_value(&state_root, b":heappages")
         .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
 
-    let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
-    let (code_merkle_value, closest_ancestor_excluding) = {
-        let closest_ancestor_excluding = decoded_proof
-            .closest_ancestor_in_proof(
-                &state_root,
-                code_nibbles.iter().take(code_nibbles.len() - 1).copied(),
-            )
-            .map_err(|_| String::from("Proof missing :code closest ancestor"))?
-            .map(|ancestor| ancestor.collect::<Vec<_>>())
-            .ok_or_else(|| String::from("Proof missing :code closest ancestor"))?;
-
-        let next_nibble = code_nibbles[closest_ancestor_excluding.len()];
-        let code_node_info = decoded_proof
-            .trie_node_info(&state_root, closest_ancestor_excluding.iter().copied())
-            .map_err(|_| String::from("Proof missing :code closest ancestor node"))?;
-        let code_merkle_value = code_node_info
-            .children
-            .child(next_nibble)
-            .merkle_value()
-            .ok_or_else(|| String::from("Proof missing :code child merkle value"))?;
-
-        (
-            Some(code_merkle_value.to_vec()),
-            Some(closest_ancestor_excluding),
-        )
-    };
+    let (code_merkle_value, closest_ancestor_excluding) =
+        code_merkle_hint_from_proof(&decoded_proof, &state_root)?;
 
     compile_finalized_runtime(
         platform,
         log_target,
         code,
         heap_pages_raw.map(|(value, _)| value.to_vec()),
-        code_merkle_value,
-        closest_ancestor_excluding,
+        Some(code_merkle_value),
+        Some(closest_ancestor_excluding),
         "downloaded",
     )
+}
+
+fn code_merkle_hint_from_proof(
+    decoded_proof: &trie::proof_decode::DecodedTrieProof<Vec<u8>>,
+    state_root: &[u8; 32],
+) -> Result<(Vec<u8>, Vec<trie::Nibble>), String> {
+    let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
+    let closest_ancestor_excluding = decoded_proof
+        .closest_ancestor_in_proof(
+            state_root,
+            code_nibbles.iter().take(code_nibbles.len() - 1).copied(),
+        )
+        .map_err(|_| String::from("Proof missing :code closest ancestor"))?
+        .map(|ancestor| ancestor.collect::<Vec<_>>())
+        .ok_or_else(|| String::from("Proof missing :code closest ancestor"))?;
+
+    let next_nibble = code_nibbles[closest_ancestor_excluding.len()];
+    let code_node_info = decoded_proof
+        .trie_node_info(state_root, closest_ancestor_excluding.iter().copied())
+        .map_err(|_| String::from("Proof missing :code closest ancestor node"))?;
+    let code_merkle_value = code_node_info
+        .children
+        .child(next_nibble)
+        .merkle_value()
+        .ok_or_else(|| String::from("Proof missing :code child merkle value"))?;
+
+    Ok((code_merkle_value.to_vec(), closest_ancestor_excluding))
 }
 
 async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
