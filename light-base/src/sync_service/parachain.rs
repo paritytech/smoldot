@@ -1445,20 +1445,39 @@ async fn download_finalized_runtime_from_peer<TPlat: PlatformRef>(
         .storage_value(&state_root, b":heappages")
         .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
 
-    let closest_ancestor_excluding = decoded_proof
-        .closest_ancestor_in_proof(
-            &state_root,
-            trie::bytes_to_nibbles(b":code".iter().copied()),
+    let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
+    let (code_merkle_value, closest_ancestor_excluding) = {
+        let closest_ancestor_excluding = decoded_proof
+            .closest_ancestor_in_proof(
+                &state_root,
+                code_nibbles.iter().take(code_nibbles.len() - 1).copied(),
+            )
+            .map_err(|_| String::from("Proof missing :code closest ancestor"))?
+            .map(|ancestor| ancestor.collect::<Vec<_>>())
+            .ok_or_else(|| String::from("Proof missing :code closest ancestor"))?;
+
+        let next_nibble = code_nibbles[closest_ancestor_excluding.len()];
+        let code_node_info = decoded_proof
+            .trie_node_info(&state_root, closest_ancestor_excluding.iter().copied())
+            .map_err(|_| String::from("Proof missing :code closest ancestor node"))?;
+        let code_merkle_value = code_node_info
+            .children
+            .child(next_nibble)
+            .merkle_value()
+            .ok_or_else(|| String::from("Proof missing :code child merkle value"))?;
+
+        (
+            Some(code_merkle_value.to_vec()),
+            Some(closest_ancestor_excluding),
         )
-        .map_err(|_| String::from("Proof missing :code closest ancestor"))?
-        .map(|ancestor| ancestor.collect::<Vec<_>>());
+    };
 
     compile_finalized_runtime(
         platform,
         log_target,
         code,
         heap_pages_raw.map(|(value, _)| value.to_vec()),
-        None,
+        code_merkle_value,
         closest_ancestor_excluding,
         "downloaded",
     )
