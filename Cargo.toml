@@ -12,7 +12,7 @@ members = [
 authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krieger1708@gmail.com>"]
 license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
 edition = "2024"
-repository = "https://github.com/smol-dot/smoldot"
+repository = "https://github.com/paritytech/smoldot"
 include = ["**/*.rs"]  # Only Rust files are included, as anything else might be a test fixture.
 
 [profile.dev]
