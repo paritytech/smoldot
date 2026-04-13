@@ -276,10 +276,6 @@ jobs:
         working-directory: ./light-base
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         continue-on-error: true
-      - run: cargo publish --no-verify
-        working-directory: ./full-node
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        continue-on-error: true
 
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
