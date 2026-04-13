@@ -2,6 +2,7 @@
 name = "smoldot-light"
 version = "1.0.0"
 description = "Browser bindings to a light client for Substrate-based blockchains"
+documentation = "https://docs.rs/smoldot-light"
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
