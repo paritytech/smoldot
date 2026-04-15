@@ -1263,24 +1263,27 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 None => {
                     if let (true, Some(warp_sync_request_id)) = (is_first_block, request.warp_sync)
                     {
-                        let Some(warp_sync) = self.warp_sync.as_mut() else {
-                            unreachable!()
-                        };
-                        // TODO: report source misbehaviour
-                        warp_sync.remove_request(warp_sync_request_id);
+                        // Responses can legitimately arrive after warp sync has transitioned
+                        // into the all-forks state machine. In that case the request is stale
+                        // and can be ignored.
+                        if let Some(warp_sync) = self.warp_sync.as_mut() {
+                            // TODO: report source misbehaviour
+                            warp_sync.remove_request(warp_sync_request_id);
+                        }
                     }
                     break ResponseOutcome::Queued;
                 }
             };
 
             if let (true, Some(warp_sync_request_id)) = (is_first_block, request.warp_sync) {
-                let Some(warp_sync) = self.warp_sync.as_mut() else {
-                    unreachable!()
-                };
-                warp_sync.body_download_response(
-                    warp_sync_request_id,
-                    block.scale_encoded_extrinsics.clone(), // TODO: clone?
-                );
+                // Responses can legitimately arrive after warp sync has transitioned into the
+                // all-forks state machine. In that case the request is stale and can be ignored.
+                if let Some(warp_sync) = self.warp_sync.as_mut() {
+                    warp_sync.body_download_response(
+                        warp_sync_request_id,
+                        block.scale_encoded_extrinsics.clone(), // TODO: clone?
+                    );
+                }
             }
 
             if let Some(blocks_append) = all_forks_blocks_append {
@@ -2639,6 +2642,39 @@ mod tests {
         let (mut sync, request_id) = sync_with_late_warp_sync_request();
 
         let (_user_data, outcome) = sync.call_proof_response(request_id, Vec::new());
+
+        assert!(matches!(outcome, ResponseOutcome::Queued));
+        assert!(sync.shared.requests.is_empty());
+        assert_eq!(sync.shared.sources[0].num_requests, 0);
+    }
+
+    #[test]
+    fn late_warp_sync_empty_blocks_response_is_ignored_after_transition() {
+        let (mut sync, request_id) = sync_with_late_warp_sync_request();
+
+        let (_user_data, outcome) = sync.blocks_request_response(
+            request_id,
+            core::iter::empty::<BlockRequestSuccessBlock<()>>(),
+        );
+
+        assert!(matches!(outcome, ResponseOutcome::Queued));
+        assert!(sync.shared.requests.is_empty());
+        assert_eq!(sync.shared.sources[0].num_requests, 0);
+    }
+
+    #[test]
+    fn late_warp_sync_block_body_response_is_ignored_after_transition() {
+        let (mut sync, request_id) = sync_with_late_warp_sync_request();
+
+        let (_user_data, outcome) = sync.blocks_request_response(
+            request_id,
+            core::iter::once(BlockRequestSuccessBlock {
+                scale_encoded_header: Vec::new(),
+                scale_encoded_justifications: Vec::new(),
+                scale_encoded_extrinsics: Vec::new(),
+                user_data: (),
+            }),
+        );
 
         assert!(matches!(outcome, ResponseOutcome::Queued));
         assert!(sync.shared.requests.is_empty());
