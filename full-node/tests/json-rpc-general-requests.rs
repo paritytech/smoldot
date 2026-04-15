@@ -556,7 +556,7 @@ fn system_name() {
             .unwrap();
         assert_eq!(
             serde_json::from_str::<String>(result_json).unwrap(),
-            "parity-smoldot-full-node"
+            "smoldot-full-node"
         );
     });
 }

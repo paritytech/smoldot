@@ -1,17 +1,14 @@
 [package]
-name = "parity-smoldot"
-version = "0.22.0"
+name = "smoldot"
+version = "1.0.0"
 description = "Primitives to build a client for Substrate-based blockchains"
-documentation = "https://docs.rs/parity-smoldot"
+documentation = "https://docs.rs/smoldot"
 keywords = ["blockchain", "peer-to-peer"]
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
 repository.workspace = true
 include.workspace = true
-
-[lib]
-name = "smoldot"
 
 [features]
 default = ["database-sqlite", "std", "wasmtime"]
