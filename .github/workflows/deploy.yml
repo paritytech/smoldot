@@ -29,6 +29,9 @@ permissions: read-all
 
 jobs:
   build-push-docker-image:
+    # Docker image publishing is not supported at the moment.
+    # Note: add build-push-docker-image back to 'all-deploy` needs list if it is re-enabled.
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -37,7 +40,7 @@ jobs:
     - uses: docker/setup-qemu-action@v3
     - uses: docker/setup-buildx-action@v3
     - uses: actions/checkout@v6
-    - uses: docker/login-action@v3 
+    - uses: docker/login-action@v3
       # This `if` adds an additional safety against accidental pushes.
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       with:
@@ -91,7 +94,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ./repo -> target
-      - run: cargo doc --verbose --all-features --no-deps --package parity-smoldot --package parity-smoldot-light --package parity-smoldot-full-node
+      - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light --package smoldot-full-node
         working-directory: ./repo
       - run: |
           mkdir -p ./doc
@@ -183,18 +186,30 @@ jobs:
           # Set to the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 18
       - uses: Swatinem/rust-cache@v2
-      - run: npm install
+
+      - name: Install
+        run: npm install
         working-directory: ./wasm-node/javascript
-      - run: npm publish --unsafe-perm --dry-run
+
+      - name: Pack
+        run: npm pack
         working-directory: ./wasm-node/javascript
-      - uses: JS-DevTools/npm-publish@v3
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        # Warning: this GitHub action doesn't seem to run prepublish scripts, hence
-        # the `npm publish --dry-run` done right above is important to ensure this.
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.NPM_TOKEN }}
-          package: ./wasm-node/javascript/package.json
-          access: public
+          name: npm-package-${{ github.sha }}
+          path: ./wasm-node/javascript/*.tgz
+      - name: Publish via npm_publish_automation
+        uses: octokit/request-action@v2.x
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        with:
+          route: POST /repos/paritytech/npm_publish_automation/actions/workflows/publish.yml/dispatches
+          ref: main
+          # Make sure to provide proper artifact_name, since this GH run produces multiple artifacts and npm_publish_automation must know, which one to use
+          inputs: '${{ format(''{{ "repo": "{0}", "run_id": "{1}", "artifact_name": "npm-package-{2}" }}'', github.repository, github.run_id, github.sha) }}'
+        env:
+          GITHUB_TOKEN: ${{ secrets.NPM_PUBLISH_AUTOMATION_TOKEN }}
 
   deno-publish:
     runs-on: ubuntu-latest
@@ -264,15 +279,11 @@ jobs:
         working-directory: ./light-base
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         continue-on-error: true
-      - run: cargo publish --no-verify
-        working-directory: ./full-node
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        continue-on-error: true
 
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [build-push-docker-image, docs-publish, npm-publish, deno-publish, crates-io-publish]
+    needs: [docs-publish, npm-publish, deno-publish, crates-io-publish]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success

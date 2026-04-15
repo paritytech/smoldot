@@ -1093,7 +1093,6 @@ pub enum SystemPeerRole {
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum StatementSubmitResult {
     New,
-    Known,
     Invalid { reason: String },
     InternalError { error: String },
 }
@@ -1488,12 +1487,6 @@ mod tests {
     fn statement_submit_result_serialization() {
         let new = super::StatementSubmitResult::New;
         assert_eq!(serde_json::to_string(&new).unwrap(), r#"{"status":"new"}"#);
-
-        let known = super::StatementSubmitResult::Known;
-        assert_eq!(
-            serde_json::to_string(&known).unwrap(),
-            r#"{"status":"known"}"#
-        );
 
         let invalid = super::StatementSubmitResult::Invalid {
             reason: "bad encoding".into(),

@@ -198,8 +198,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     .download_all_chain_information_storage_proofs,
                 code_trie_node_hint: config.code_trie_node_hint,
                 num_download_ahead_fragments: 128, // TODO: make configurable?
-                // TODO: make configurable?
-                warp_sync_minimum_gap: 32,
                 download_block_body: config.download_bodies,
             })
             .ok(),
@@ -997,7 +995,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }) = self.ready_to_transition.take()
         {
             let (Some(all_forks), Some(warp_sync)) =
-                (self.all_forks.as_mut(), self.warp_sync.as_mut())
+                (self.all_forks.as_mut(), self.warp_sync.take())
             else {
                 unreachable!()
             };

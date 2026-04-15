@@ -674,6 +674,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
         let statement_protocol_config = config.statement_protocol_config;
 
+        let max_seen_statements = statement_protocol_config
+            .as_ref()
+            .map(|c| c.max_seen_statements());
+
         // Start the services of the chain to add, or grab the services if they already exist.
         let (services, log_name) = match chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
@@ -937,6 +941,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 system_version: self.platform.client_version().into_owned(),
                 genesis_block_hash,
                 statement_protocol_config,
+                max_seen_statements,
             });
 
             Some(frontend)
