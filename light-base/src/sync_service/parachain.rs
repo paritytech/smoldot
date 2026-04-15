@@ -36,6 +36,11 @@ use smoldot::{
     trie,
 };
 
+/// Number of consecutive parachain-bootstrap failures tolerated before concluding that a
+/// restored finalized head is likely older than peers' pruning window and falling back to
+/// fetching a fresh finalized head from the relay chain.
+const MAX_RESTORED_BOOTSTRAP_FAILURES: u32 = 3;
+
 fn parachain_needs_consensus_bootstrap(
     chain_info: &chain::chain_information::ValidChainInformation,
 ) -> bool {
@@ -61,48 +66,49 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 ) {
     // Phase 1: Determine the finalized parachain head we should start from.
-    let effective_chain_info = if let Some(restored_chain_information) = restored_chain_information
-    {
-        log!(
-            &platform,
-            Info,
-            &log_target,
-            format!(
-                "Warm-starting parachain from restored database state at block #{}",
-                restored_chain_information
-                    .as_ref()
-                    .finalized_block_header
-                    .number
+    let (mut effective_chain_info, mut is_restored_head) =
+        if let Some(restored_chain_information) = restored_chain_information {
+            log!(
+                &platform,
+                Info,
+                &log_target,
+                format!(
+                    "Warm-starting parachain from restored database state at block #{}",
+                    restored_chain_information
+                        .as_ref()
+                        .finalized_block_header
+                        .number
+                )
+            );
+            (restored_chain_information, true)
+        } else {
+            let effective_chain_info = fetch_parachain_head_from_relay(
+                &log_target,
+                &platform,
+                &relay_chain_sync,
+                parachain_id,
+                block_number_bytes,
             )
-        );
-        restored_chain_information
-    } else {
-        let effective_chain_info = fetch_parachain_head_from_relay(
-            &log_target,
-            &platform,
-            &relay_chain_sync,
-            parachain_id,
-            block_number_bytes,
-        )
-        .await;
+            .await;
 
-        log!(
-            &platform,
-            Info,
-            &log_target,
-            format!(
-                "Fetched parachain finalized head from relay chain at block #{}",
-                effective_chain_info.as_ref().finalized_block_header.number
-            )
-        );
+            log!(
+                &platform,
+                Info,
+                &log_target,
+                format!(
+                    "Fetched parachain finalized head from relay chain at block #{}",
+                    effective_chain_info.as_ref().finalized_block_header.number
+                )
+            );
 
-        effective_chain_info
-    };
+            (effective_chain_info, false)
+        };
 
     // Phase 2: Fetch the finalized runtime needed by runtime_service and, when required,
     // also determine Aura consensus parameters from that same finalized block.
     let mut restored_finalized_runtime = restored_finalized_runtime;
-    let (effective_chain_info, finalized_runtime) = loop {
+    let mut consecutive_bootstrap_failures: u32 = 0;
+    let finalized_runtime = loop {
         match bootstrap_parachain_consensus(
             &log_target,
             &platform,
@@ -115,28 +121,61 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         {
             Ok(bootstrapped) => {
                 if parachain_needs_consensus_bootstrap(&effective_chain_info) {
-                    break (bootstrapped.chain_info, bootstrapped.finalized_runtime);
+                    effective_chain_info = bootstrapped.chain_info;
+                } else {
+                    log!(
+                        &platform,
+                        Info,
+                        &log_target,
+                        format!(
+                            "Using restored parachain consensus state at block #{}",
+                            effective_chain_info.as_ref().finalized_block_header.number
+                        )
+                    );
                 }
-
-                log!(
-                    &platform,
-                    Info,
-                    &log_target,
-                    format!(
-                        "Using restored parachain consensus state at block #{}",
-                        effective_chain_info.as_ref().finalized_block_header.number
-                    )
-                );
-                break (effective_chain_info, bootstrapped.finalized_runtime);
+                break bootstrapped.finalized_runtime;
             }
             Err(err) => {
+                consecutive_bootstrap_failures = consecutive_bootstrap_failures.saturating_add(1);
                 log!(
                     &platform,
                     Warn,
                     &log_target,
                     format!("Failed to bootstrap parachain consensus: {err}. Retrying in 5s...")
                 );
-                platform.sleep(Duration::from_secs(5)).await;
+
+                // If we started from a restored block and peers cannot serve proofs for it
+                // after a few attempts, the restored block is likely older than peers'
+                // pruning window. Discard the restored state and fall back to fetching a
+                // fresh finalized head from the relay chain.
+                if is_restored_head
+                    && consecutive_bootstrap_failures >= MAX_RESTORED_BOOTSTRAP_FAILURES
+                {
+                    log!(
+                        &platform,
+                        Warn,
+                        &log_target,
+                        format!(
+                            "Restored parachain head at block #{} could not be bootstrapped \
+                             after {} attempts. It may be older than peers' pruning window. \
+                             Falling back to fresh relay chain head.",
+                            effective_chain_info.as_ref().finalized_block_header.number,
+                            MAX_RESTORED_BOOTSTRAP_FAILURES,
+                        )
+                    );
+                    effective_chain_info = fetch_parachain_head_from_relay(
+                        &log_target,
+                        &platform,
+                        &relay_chain_sync,
+                        parachain_id,
+                        block_number_bytes,
+                    )
+                    .await;
+                    is_restored_head = false;
+                    consecutive_bootstrap_failures = 0;
+                } else {
+                    platform.sleep(Duration::from_secs(5)).await;
+                }
             }
         }
     };
