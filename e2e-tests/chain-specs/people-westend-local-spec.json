@@ -11,7 +11,7 @@
     "tokenDecimals": 12,
     "tokenSymbol": "UNIT"
   },
-  "relay_chain": "westend-local",
+  "relay_chain": "westend_local_testnet",
   "para_id": 1004,
   "codeSubstitutes": {},
   "genesis": {

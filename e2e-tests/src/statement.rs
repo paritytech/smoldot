@@ -22,11 +22,10 @@ pub fn test_keypair() -> ([u8; 32], [u8; 32]) {
 pub async fn subscribe_any(
     rpc: &RpcClient,
 ) -> Result<RpcSubscription<Value>, anyhow::Error> {
-    let filter = serde_json::json!({"type": "any"});
     let subscription = rpc
         .subscribe::<Value>(
             "statement_subscribeStatement",
-            rpc_params![filter],
+            rpc_params!["any"],
             "statement_unsubscribeStatement",
         )
         .await?;

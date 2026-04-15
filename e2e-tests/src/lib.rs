@@ -74,7 +74,7 @@ pub async fn spawn_network(
                 .with_default_args(vec![
                     "--force-authoring".into(),
                     "--enable-statement-store".into(),
-                    "-linfo,statement-store=trace,statement-gossip=trace".into(),
+                    "-linfo,statement-store=info,statement-gossip=info".into(),
                 ])
                 .with_collator(|n| n.with_name("collator-0"))
                 .with_collator(|n| n.with_name("collator-1"))
