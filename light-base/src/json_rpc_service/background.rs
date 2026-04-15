@@ -4474,18 +4474,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }) => {
                 // A `chainHead_call` operation has finished.
 
+                // The JSON-RPC client might have unfollowed the subscription or stopped
+                // the operation while this event was queued. In that case, drop the event.
                 let Some(subscription_info) =
                     me.chain_head_follow_subscriptions.get_mut(&subscription_id)
                 else {
-                    unreachable!()
+                    continue;
                 };
                 let Some(operation_info) = subscription_info
                     .operations_in_progress
                     .remove(&operation_id)
                 else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
+                    continue;
                 };
 
                 subscription_info.available_operation_slots += operation_info.occupied_slots;
@@ -4553,18 +4553,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }) => {
                 // A `chainHead_body` operation has finished.
 
+                // The JSON-RPC client might have unfollowed the subscription or stopped
+                // the operation while this event was queued. In that case, drop the event.
                 let Some(subscription_info) =
                     me.chain_head_follow_subscriptions.get_mut(&subscription_id)
                 else {
-                    unreachable!()
+                    continue;
                 };
                 let Some(operation_info) = subscription_info
                     .operations_in_progress
                     .remove(&operation_id)
                 else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
+                    continue;
                 };
 
                 subscription_info.available_operation_slots += operation_info.occupied_slots;
@@ -4716,16 +4716,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                 // TODO: generate a waitingForContinue here and wait for user to continue
 
-                // Re-queue the operation for the follow-up items.
-                let on_interrupt = me
-                    .chain_head_follow_subscriptions
-                    .get(&subscription_id)
-                    .unwrap_or_else(|| unreachable!())
-                    .operations_in_progress
-                    .get(&operation_id)
-                    .unwrap_or_else(|| unreachable!())
-                    .interrupt
-                    .listen();
+                // Re-queue the operation for the follow-up items. The JSON-RPC client
+                // might have unfollowed the subscription or stopped the operation while
+                // this event was queued. In that case, drop the event.
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get(&subscription_id)
+                else {
+                    continue;
+                };
+                let Some(operation_info) =
+                    subscription_info.operations_in_progress.get(&operation_id)
+                else {
+                    continue;
+                };
+                let on_interrupt = operation_info.interrupt.listen();
                 me.background_tasks.push(Box::pin(async move {
                     async {
                         on_interrupt.await;
@@ -4751,18 +4755,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }) => {
                 // A `chainHead_storage` operation has finished successfully.
 
+                // The JSON-RPC client might have unfollowed the subscription or stopped
+                // the operation while this event was queued. In that case, drop the event.
                 let Some(subscription_info) =
                     me.chain_head_follow_subscriptions.get_mut(&subscription_id)
                 else {
-                    unreachable!()
+                    continue;
                 };
                 let Some(operation_info) = subscription_info
                     .operations_in_progress
                     .remove(&operation_id)
                 else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
+                    continue;
                 };
 
                 subscription_info.available_operation_slots += operation_info.occupied_slots;
@@ -4788,18 +4792,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }) => {
                 // A `chainHead_storage` operation has finished failed.
 
+                // The JSON-RPC client might have unfollowed the subscription or stopped
+                // the operation while this event was queued. In that case, drop the event.
                 let Some(subscription_info) =
                     me.chain_head_follow_subscriptions.get_mut(&subscription_id)
                 else {
-                    unreachable!()
+                    continue;
                 };
                 let Some(operation_info) = subscription_info
                     .operations_in_progress
                     .remove(&operation_id)
                 else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
+                    continue;
                 };
 
                 subscription_info.available_operation_slots += operation_info.occupied_slots;
