@@ -575,9 +575,7 @@ mod tests {
     fn peer_state_ordering() {
         // The BTreeSet range queries rely on this ordering.
         assert!(PeerState::<u64>::Assignable < PeerState::Banned { expires: 0 });
-        assert!(
-            PeerState::<u64>::Banned { expires: 5 } < PeerState::Banned { expires: 7 }
-        );
+        assert!(PeerState::<u64>::Banned { expires: 5 } < PeerState::Banned { expires: 7 });
         assert!(PeerState::<u64>::Banned { expires: u64::MAX } < PeerState::Slot);
     }
 }

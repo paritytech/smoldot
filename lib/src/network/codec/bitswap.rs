@@ -474,9 +474,7 @@ mod tests {
         }
 
         let mut message = Vec::new();
-        for slice in
-            protobuf::message_tag_encode(1, core::iter::once(wantlist_inner.as_slice()))
-        {
+        for slice in protobuf::message_tag_encode(1, core::iter::once(wantlist_inner.as_slice())) {
             message.extend_from_slice(slice.as_ref());
         }
 
@@ -503,9 +501,7 @@ mod tests {
         }
 
         let mut message = Vec::new();
-        for slice in
-            protobuf::message_tag_encode(1, core::iter::once(wantlist_inner.as_slice()))
-        {
+        for slice in protobuf::message_tag_encode(1, core::iter::once(wantlist_inner.as_slice())) {
             message.extend_from_slice(slice.as_ref());
         }
 
@@ -528,8 +524,7 @@ mod tests {
 
         // Encode as blockPresences field (tag 4).
         let mut message = Vec::new();
-        for slice in protobuf::message_tag_encode(4, core::iter::once(presence.as_slice()))
-        {
+        for slice in protobuf::message_tag_encode(4, core::iter::once(presence.as_slice())) {
             message.extend_from_slice(slice.as_ref());
         }
 
@@ -548,8 +543,7 @@ mod tests {
         }
 
         let mut message = Vec::new();
-        for slice in protobuf::message_tag_encode(4, core::iter::once(presence.as_slice()))
-        {
+        for slice in protobuf::message_tag_encode(4, core::iter::once(presence.as_slice())) {
             message.extend_from_slice(slice.as_ref());
         }
 

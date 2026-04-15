@@ -874,10 +874,7 @@ fn bitswap_outbound_negotiation_success() {
     // Alice gets the outbound open result.
     let (_, event) = connections.run_until_event();
     match event {
-        either::Left(Event::BitswapOutOpenResult {
-            id,
-            result: Ok(()),
-        }) => {
+        either::Left(Event::BitswapOutOpenResult { id, result: Ok(()) }) => {
             assert_eq!(id, substream_id);
         }
         _ev => unreachable!("{:?}", _ev),
@@ -945,9 +942,7 @@ fn bitswap_send_and_receive_message() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Left(Event::BitswapOutOpenResult {
-            result: Ok(()), ..
-        }) => {}
+        either::Left(Event::BitswapOutOpenResult { result: Ok(()), .. }) => {}
         _ev => unreachable!("{:?}", _ev),
     }
 
@@ -996,9 +991,7 @@ fn bitswap_close_outbound_after_open() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Left(Event::BitswapOutOpenResult {
-            result: Ok(()), ..
-        }) => {}
+        either::Left(Event::BitswapOutOpenResult { result: Ok(()), .. }) => {}
         _ev => unreachable!("{:?}", _ev),
     }
 
@@ -1042,14 +1035,14 @@ fn bitswap_queued_bytes_tracking() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Left(Event::BitswapOutOpenResult {
-            result: Ok(()), ..
-        }) => {}
+        either::Left(Event::BitswapOutOpenResult { result: Ok(()), .. }) => {}
         _ev => unreachable!("{:?}", _ev),
     }
 
     assert_eq!(
-        connections.alice.bitswap_substream_queued_bytes(substream_id),
+        connections
+            .alice
+            .bitswap_substream_queued_bytes(substream_id),
         0
     );
 
@@ -1061,7 +1054,10 @@ fn bitswap_queued_bytes_tracking() {
 
     // Queued bytes should be > 0 (message + LEB128 length prefix).
     assert!(
-        connections.alice.bitswap_substream_queued_bytes(substream_id) > 0
+        connections
+            .alice
+            .bitswap_substream_queued_bytes(substream_id)
+            > 0
     );
 }
 
@@ -1092,9 +1088,7 @@ fn bitswap_multiple_messages() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Left(Event::BitswapOutOpenResult {
-            result: Ok(()), ..
-        }) => {}
+        either::Left(Event::BitswapOutOpenResult { result: Ok(()), .. }) => {}
         _ev => unreachable!("{:?}", _ev),
     }
 

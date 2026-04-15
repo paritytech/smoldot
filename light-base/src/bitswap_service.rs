@@ -269,9 +269,7 @@ mod tests {
 
     #[test]
     fn error_invalid_cid_maps_to_invalid_params() {
-        let err = BitswapGetError::InvalidCid(
-            Cid::from_str("not-a-cid").unwrap_err(),
-        );
+        let err = BitswapGetError::InvalidCid(Cid::from_str("not-a-cid").unwrap_err());
         let json = err.to_json_rpc_error("\"1\"");
         assert_eq!(extract_error_code(&json), -32602); // InvalidParams
         assert_eq!(extract_variant(&json), "InvalidCid");
