@@ -2,8 +2,23 @@
 
 ## Unreleased
 
+## 3.0.0 - 2026-04-10
+
+### Added
+
+- Implement basic statement-store support: statement distribution protocol, topic-based filtering, and JSON-RPC methods for submitting and subscribing to statements. ([#3127](https://github.com/paritytech/smoldot/pull/3127))
+
+### Changed
+
+- The repository has been migrated from `smol-dot/smoldot` to `paritytech/smoldot`.
+- Update some chain specifications to include genesis data. ([#2202](https://github.com/smol-dot/smoldot/pull/2202))
+
 ### Fixed
 
+- Fix elastic scaling support. ([#3141](https://github.com/paritytech/smoldot/pull/3141))
+- Fix a panic when importing stale block notifications after finalized blocks have been pruned. ([#3152](https://github.com/paritytech/smoldot/pull/3152))
+- Speed up loading from the database by fixing a 10s cooldown on runtime download that incorrectly triggered at startup. ([#3155](https://github.com/paritytech/smoldot/pull/3155))
+- Fix notifications substream close handling timeout. ([#2214](https://github.com/smol-dot/smoldot/pull/2214))
 - Fix execution proofs with inputs bigger than 1MiB failing due to protocol limits. Smoldot now uses storage-on-demand for large inputs. ([#2196](https://github.com/smol-dot/smoldot/pull/2196))
 
 ## 2.0.40 - 2025-12-02
