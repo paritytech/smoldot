@@ -26,9 +26,9 @@ on:
   workflow_dispatch:
     inputs:
       npm_tag:
-        description: 'npm distribution tag (e.g. "dev", "canary"). If empty, publishes as "latest".'
+        description: 'npm distribution tag (e.g. "dev", "canary"). Required to prevent accidental @latest publish.'
         type: string
-        required: false
+        required: true
 
 # TODO: improve the security of this module
 permissions: read-all
