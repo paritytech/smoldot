@@ -97,7 +97,7 @@ impl StatementProtocolConfig {
 impl Default for StatementProtocolConfig {
     fn default() -> Self {
         StatementProtocolConfig {
-            max_seen_statements: NonZeroUsize::new(512).expect("512 is not zero; qed"),
+            max_seen_statements: NonZeroUsize::new(4096).expect("4096 is not zero; qed"),
         }
     }
 }

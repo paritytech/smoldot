@@ -502,7 +502,7 @@ impl StatementSubscription {
         }
     }
 
-    fn should_deliver(&mut self, hash: &[u8; 32], statement: &codec::Statement) -> bool {
+    fn accept(&mut self, hash: &[u8; 32], statement: &codec::Statement) -> bool {
         if !self.topic_filter.matches(&statement.topics) {
             return false;
         }
@@ -791,7 +791,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     let matching: Vec<methods::HexString> = statements
                         .iter()
                         .filter_map(|(hash, s)| {
-                            if !sub.should_deliver(hash, s) {
+                            if !sub.accept(hash, s) {
                                 return None;
                             }
                             Some(methods::HexString(codec::encode_statement(s).expect(
