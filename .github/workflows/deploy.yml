@@ -94,7 +94,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ./repo -> target
-      - run: cargo doc --verbose --all-features --no-deps --package parity-smoldot --package parity-smoldot-light --package parity-smoldot-full-node
+      - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light --package smoldot-full-node
         working-directory: ./repo
       - run: |
           mkdir -p ./doc
@@ -277,10 +277,6 @@ jobs:
         continue-on-error: true
       - run: cargo publish --no-verify
         working-directory: ./light-base
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        continue-on-error: true
-      - run: cargo publish --no-verify
-        working-directory: ./full-node
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         continue-on-error: true
 
