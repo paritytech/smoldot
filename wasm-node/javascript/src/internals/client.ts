@@ -521,7 +521,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 if (statementStoreMaxSeenStatements > 0xffffffff) {
                     statementStoreMaxSeenStatements = 0xffffffff;
                 }
-                statementStoreFalsePositiveRate = options.statementStore.falsePositiveRate;
+                statementStoreFalsePositiveRate = options.statementStore.falsePositiveRate === undefined ? 0.01 : options.statementStore.falsePositiveRate;
                 if (statementStoreFalsePositiveRate <= 0.0 || statementStoreFalsePositiveRate >= 1.0 || isNaN(statementStoreFalsePositiveRate)) {
                     throw new AddChainError("Invalid value for `statementStore.falsePositiveRate`");
                 }

@@ -461,9 +461,13 @@ export interface AddChainOptions {
      * If set, enables the Statement Store protocol on this chain.
      *
      * `maxSeenStatements` is the maximum number of seen statements to cache. Defaults to 65536.
+     *
+     * `falsePositiveRate` is the bloom filter false positive rate used for topic affinity.
+     * Lower values reduce bandwidth from irrelevant statements but reveal more about
+     * subscription interests to peers. Defaults to 0.01 (1%).
      */
     statementStore?: {
         maxSeenStatements?: number,
-        falsePositiveRate: number,
+        falsePositiveRate?: number,
     }
 }
