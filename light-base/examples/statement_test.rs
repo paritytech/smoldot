@@ -96,6 +96,7 @@ fn main() {
                             core::num::NonZeroUsize::new(65536).unwrap(),
                             0.01,
                             rand::random(),
+                            core::time::Duration::from_secs(1),
                         ),
                     ),
                 })

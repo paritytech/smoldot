@@ -50,8 +50,7 @@ pub use super::affinity::AffinityFilter;
 #[derive(Debug, Clone)]
 pub enum StatementMessage {
     Statements(Vec<([u8; 32], Statement)>),
-    /// Light nodes send affinity filters to full nodes but never receive them.
-    /// This variant is used only for decoding in full-node contexts.
+    /// Light nodes send affinity filters to full nodes but don't expect to receive them.
     ExplicitTopicAffinity(AffinityFilter),
 }
 
