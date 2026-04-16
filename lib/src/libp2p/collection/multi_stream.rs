@@ -87,6 +87,14 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         notifications_in_close_acknowledgments:
             hashbrown::HashSet<established::SubstreamId, fnv::FnvBuildHasher>,
 
+        /// After a [`ConnectionToCoordinatorInner::BitswapInClose`] is emitted, an entry is
+        /// added to this set. If the coordinator sends a
+        /// [`CoordinatorToConnectionInner::CloseInBitswap`] for a substream in this set, the
+        /// close is silently discarded instead of being forwarded to the established connection.
+        // TODO: this works only because SubstreamIds aren't reused
+        bitswap_in_close_acknowledgments:
+            hashbrown::HashSet<established::SubstreamId, fnv::FnvBuildHasher>,
+
         /// Messages about inbound accept cancellations to send back.
         inbound_accept_cancel_events: VecDeque<established::SubstreamId>,
     },
@@ -200,6 +208,7 @@ where
                 outbound_substreams_map,
                 handshake_finished_message_to_send,
                 notifications_in_close_acknowledgments,
+                bitswap_in_close_acknowledgments,
                 inbound_accept_cancel_events,
                 ..
             } => {
@@ -325,8 +334,7 @@ where
                         Some(ConnectionToCoordinatorInner::BitswapIn { id, message })
                     }
                     Some(established::Event::BitswapInClose { id, outcome }) => {
-                        // TODO: Notifications protocol acknowledges close here. Might be not
-                        // relevant.
+                        bitswap_in_close_acknowledgments.insert(id);
                         Some(ConnectionToCoordinatorInner::BitswapInClose { id, outcome })
                     }
                     Some(established::Event::BitswapOutOpenResult { id, result }) => {
@@ -557,9 +565,15 @@ where
             }
             (
                 CoordinatorToConnectionInner::CloseInBitswap { substream_id },
-                MultiStreamConnectionTaskInner::Established { established, .. },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    bitswap_in_close_acknowledgments,
+                    ..
+                },
             ) => {
-                established.close_in_bitswap_substream(substream_id);
+                if !bitswap_in_close_acknowledgments.remove(&substream_id) {
+                    established.close_in_bitswap_substream(substream_id);
+                }
             }
             (
                 CoordinatorToConnectionInner::OpenOutBitswap {
@@ -1021,6 +1035,8 @@ where
                                 Default::default(),
                             ),
                             notifications_in_close_acknowledgments:
+                                hashbrown::HashSet::with_capacity_and_hasher(2, Default::default()),
+                            bitswap_in_close_acknowledgments:
                                 hashbrown::HashSet::with_capacity_and_hasher(2, Default::default()),
                             inbound_accept_cancel_events: VecDeque::with_capacity(2),
                         };
