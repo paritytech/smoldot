@@ -72,10 +72,9 @@ use smoldot::{
     network::{basic_peering_strategy, codec, service},
 };
 
-pub use codec::{AffinityFilter, CallProofRequestConfig, Role, StatementProtocolVersion};
-pub use service::{
-    ChainId, EncodedMerkleProof, PeerId, QueueNotificationError, SendTopicAffinityError,
-};
+pub use codec::{AffinityFilter, CallProofRequestConfig, Role};
+use service::SendTopicAffinityError;
+pub use service::{ChainId, EncodedMerkleProof, PeerId, QueueNotificationError};
 
 /// Configuration for the Statement Store protocol.
 #[derive(Debug, Clone)]
@@ -242,6 +241,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             next_recent_connection_restore: None,
             platform: config.platform.clone(),
             open_gossip_links: BTreeMap::new(),
+            v2_statement_peers: HashMap::with_capacity_and_hasher(4, Default::default()),
+            current_affinity_filter: HashMap::with_capacity_and_hasher(4, Default::default()),
             event_pending_send: None,
             event_senders: either::Left(Vec::new()),
             pending_new_subscriptions: Vec::new(),
@@ -623,23 +624,11 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
-    pub async fn send_topic_affinity(
-        &self,
-        target: &PeerId,
-        filter: AffinityFilter,
-    ) -> Result<(), SendTopicAffinityError> {
-        let (tx, rx) = oneshot::channel();
-
+    pub async fn update_topic_affinity(&self, filter: AffinityFilter) {
         self.messages_tx
-            .send(ToBackgroundChain::SendTopicAffinity {
-                target: target.clone(),
-                filter,
-                result: tx,
-            })
+            .send(ToBackgroundChain::UpdateTopicAffinity { filter })
             .await
             .unwrap();
-
-        rx.await.unwrap()
     }
 
     /// Marks the given peers as belonging to the given chain, and adds some addresses to these
@@ -737,10 +726,6 @@ pub enum Event {
     StatementsNotification {
         peer_id: PeerId,
         statements: Vec<([u8; 32], codec::Statement)>,
-    },
-    StatementProtocolConnected {
-        peer_id: PeerId,
-        version: StatementProtocolVersion,
     },
 }
 
@@ -905,10 +890,8 @@ enum ToBackgroundChain {
         statement: Vec<u8>,
         result: oneshot::Sender<BroadcastStatementResult>,
     },
-    SendTopicAffinity {
-        target: PeerId,
+    UpdateTopicAffinity {
         filter: AffinityFilter,
-        result: oneshot::Sender<Result<(), SendTopicAffinityError>>,
     },
     Discover {
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
@@ -968,6 +951,12 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// List of all open gossip links.
     // TODO: using this data structure unfortunately means that PeerIds are cloned a lot, maybe some user data in ChainNetwork is better? not sure
     open_gossip_links: BTreeMap<(ChainId, PeerId), OpenGossipLinkState>,
+
+    /// Connected peers using statement protocol V2, per chain.
+    v2_statement_peers: HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
+
+    /// Current topic affinity filter per chain, sent to V2 peers on connect.
+    current_affinity_filter: HashMap<ChainId, AffinityFilter, fnv::FnvBuildHasher>,
 
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
@@ -1465,6 +1454,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
                     debug_assert!(_was_in.is_some());
 
+                    if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                        peers.remove(&peer_id);
+                    }
+
                     debug_assert!(task.event_pending_send.is_none());
                     task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
                 }
@@ -1864,14 +1857,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::MessageForChain(
                 chain_id,
-                ToBackgroundChain::SendTopicAffinity {
-                    target,
-                    filter,
-                    result,
-                },
+                ToBackgroundChain::UpdateTopicAffinity { filter },
             ) => {
-                let r = task.network.send_topic_affinity(&target, chain_id, &filter);
-                let _ = result.send(r);
+                task.current_affinity_filter
+                    .insert(chain_id, filter.clone());
+                if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                    let mut to_remove = Vec::new();
+                    for peer_id in peers.iter() {
+                        if let Err(
+                            SendTopicAffinityError::NoConnection
+                            | SendTopicAffinityError::ProtocolV1,
+                        ) = task.network.send_topic_affinity(peer_id, chain_id, &filter)
+                        {
+                            to_remove.push(peer_id.clone());
+                        }
+                    }
+                    for peer_id in &to_remove {
+                        peers.remove(peer_id);
+                    }
+                }
             }
             WakeUpReason::MessageForChain(
                 chain_id,
@@ -2295,6 +2299,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         &peer_id,
                         service::GossipKind::ConsensusTransactions,
                     );
+                }
+
+                if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                    peers.remove(&peer_id);
                 }
 
                 debug_assert!(task.event_pending_send.is_none());
@@ -2794,11 +2802,26 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 version,
             }) => {
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send = Some((
-                    chain_id,
-                    Event::StatementProtocolConnected { peer_id, version },
-                ));
+                if matches!(version, codec::StatementProtocolVersion::V2) {
+                    task.v2_statement_peers
+                        .entry(chain_id)
+                        .or_insert_with(|| {
+                            HashSet::with_capacity_and_hasher(16, Default::default())
+                        })
+                        .insert(peer_id.clone());
+                    if let Some(filter) = task.current_affinity_filter.get(&chain_id) {
+                        if let Err(
+                            SendTopicAffinityError::NoConnection
+                            | SendTopicAffinityError::ProtocolV1,
+                        ) = task.network.send_topic_affinity(&peer_id, chain_id, filter)
+                        {
+                            task.v2_statement_peers
+                                .get_mut(&chain_id)
+                                .unwrap()
+                                .remove(&peer_id);
+                        }
+                    }
+                }
             }
             // TODO: we don't filter outbound statements yet
             WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived {

@@ -17,7 +17,7 @@
 
 use crate::{
     log,
-    network_service::{self, SendTopicAffinityError},
+    network_service,
     platform::PlatformRef,
     runtime_service, sync_service, transactions_service,
     util::{self, SipHasherBuild},
@@ -236,8 +236,6 @@ struct Background<TPlat: PlatformRef> {
 
     /// Active statement subscriptions. Maps subscription ID to subscription state.
     statement_subscriptions: hashbrown::HashMap<String, StatementSubscription, fnv::FnvBuildHasher>,
-
-    v2_statement_peers: hashbrown::HashSet<network_service::PeerId, fnv::FnvBuildHasher>,
 
     statement_affinity_stale: bool,
     next_statement_affinity_update: Option<Pin<Box<TPlat::Delay>>>,
@@ -647,7 +645,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
             16,
             Default::default(),
         ),
-        v2_statement_peers: hashbrown::HashSet::with_capacity_and_hasher(16, Default::default()),
         statement_affinity_stale: false,
         next_statement_affinity_update: None,
         last_statement_affinity_update: None,
@@ -686,13 +683,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
             NetworkStatementsReceived(Vec<([u8; 32], codec::Statement)>),
-            StatementPeerConnected {
-                peer_id: network_service::PeerId,
-                version: network_service::StatementProtocolVersion,
-            },
-            StatementPeerDisconnected {
-                peer_id: network_service::PeerId,
-            },
             MustSubscribeNetworkEvents,
             StatementAffinityUpdate,
         }
@@ -808,12 +798,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         network_service::Event::StatementsNotification { statements, .. } => {
                             return WakeUpReason::NetworkStatementsReceived(statements);
                         }
-                        network_service::Event::StatementProtocolConnected { peer_id, version } => {
-                            return WakeUpReason::StatementPeerConnected { peer_id, version };
-                        }
-                        network_service::Event::Disconnected { peer_id } => {
-                            return WakeUpReason::StatementPeerDisconnected { peer_id };
-                        }
                         _ => {}
                     }
                 }
@@ -847,75 +831,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.statement_affinity_stale = false;
                 me.last_statement_affinity_update = Some(me.platform.now());
 
-                if !me.v2_statement_peers.is_empty() {
-                    let combined_filter = build_combined_affinity_filter(
-                        &me.statement_subscriptions,
-                        me.statement_protocol_config
-                            .as_ref()
-                            .expect("V2 peers require statement protocol; qed"),
-                    );
-                    let mut peers_to_remove = Vec::new();
-                    for peer_id in me.v2_statement_peers.clone() {
-                        if let Err(
-                            SendTopicAffinityError::NoConnection
-                            | SendTopicAffinityError::ProtocolV1,
-                        ) = me
-                            .network_service
-                            .send_topic_affinity(&peer_id, combined_filter.clone())
-                            .await
-                        {
-                            log!(
-                                &me.platform,
-                                Debug,
-                                &me.log_target,
-                                format!("Removing stale v2 statement peer {}", peer_id)
-                            );
-                            peers_to_remove.push(peer_id);
-                        }
-                    }
-                    for peer_id in peers_to_remove {
-                        me.v2_statement_peers.remove(&peer_id);
-                    }
-                }
+                let combined_filter = build_combined_affinity_filter(
+                    &me.statement_subscriptions,
+                    me.statement_protocol_config
+                        .as_ref()
+                        .expect("statement affinity requires statement protocol; qed"),
+                );
+                me.network_service
+                    .update_topic_affinity(combined_filter)
+                    .await;
             }
 
             WakeUpReason::MustSubscribeNetworkEvents => {
                 debug_assert!(me.network_events_rx.is_none());
                 me.network_events_rx = Some(me.network_service.subscribe().await);
-            }
-
-            WakeUpReason::StatementPeerConnected { peer_id, version } => {
-                if matches!(version, network_service::StatementProtocolVersion::V2) {
-                    me.v2_statement_peers.insert(peer_id.clone());
-                    if !me.statement_subscriptions.is_empty() {
-                        let combined_filter = build_combined_affinity_filter(
-                            &me.statement_subscriptions,
-                            me.statement_protocol_config
-                                .as_ref()
-                                .expect("V2 peers require statement protocol; qed"),
-                        );
-                        if let Err(
-                            SendTopicAffinityError::NoConnection
-                            | SendTopicAffinityError::ProtocolV1,
-                        ) = me
-                            .network_service
-                            .send_topic_affinity(&peer_id, combined_filter)
-                            .await
-                        {
-                            log!(
-                                &me.platform,
-                                Debug,
-                                &me.log_target,
-                                format!("Removing stale v2 statement peer {}", peer_id)
-                            );
-                            me.v2_statement_peers.remove(&peer_id);
-                        }
-                    }
-                }
-            }
-
-            WakeUpReason::StatementPeerDisconnected { peer_id } => {
-                me.v2_statement_peers.remove(&peer_id);
             }
 
             WakeUpReason::NetworkStatementsReceived(statements) => {

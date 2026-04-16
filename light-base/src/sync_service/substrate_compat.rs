@@ -812,9 +812,6 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
 
             WakeUpReason::NetworkEvent(network_service::Event::StatementsNotification {
                 ..
-            })
-            | WakeUpReason::NetworkEvent(network_service::Event::StatementProtocolConnected {
-                ..
             }) => {
                 // Statement store protocol events are handled by the JSON-RPC service.
                 // The standalone sync service doesn't need to react to them.
