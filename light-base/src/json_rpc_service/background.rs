@@ -4467,6 +4467,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }))
             }
 
+            // NOTE: All chainHead operation-completion handlers below
+            // (ChainHeadCallOperationDone, ChainHeadBodyOperationDone,
+            // ChainHeadStorageOperationProgress) are race-tolerant: they
+            // `continue` if the subscription or operation has been removed.
+            // Background tasks emit events asynchronously via FuturesUnordered,
+            // so a client can call chainHead_v1_unfollow or
+            // chainHead_v1_stopOperation while an event is already queued.
+            // The same pattern is used by the subscription notification
+            // handlers above (ChainHeadSubscriptionWithRuntimeNotification
+            // etc.). When adding new chainHead event handlers, follow this
+            // pattern — do not assume the subscription/operation still exists.
             WakeUpReason::Event(Event::ChainHeadCallOperationDone {
                 subscription_id,
                 operation_id,
