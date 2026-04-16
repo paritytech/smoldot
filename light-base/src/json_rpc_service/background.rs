@@ -249,6 +249,27 @@ struct Background<TPlat: PlatformRef> {
     network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
 }
 
+impl<TPlat: PlatformRef> Background<TPlat> {
+    /// Marks the statement affinity as stale and schedules the next update.
+    /// If no update was ever sent, or the last update was more than
+    /// `STATEMENT_AFFINITY_UPDATE_INTERVAL` ago, the update fires immediately.
+    /// Otherwise, it fires after the remaining interval.
+    fn schedule_statement_affinity_update(&mut self) {
+        if self.statement_affinity_stale {
+            return;
+        }
+        self.statement_affinity_stale = true;
+        let delay = match &self.last_statement_affinity_update {
+            Some(last) => {
+                let elapsed = self.platform.now() - last.clone();
+                STATEMENT_AFFINITY_UPDATE_INTERVAL.saturating_sub(elapsed)
+            }
+            None => Duration::ZERO,
+        };
+        self.next_statement_affinity_update = Some(Box::pin(self.platform.sleep(delay)));
+    }
+}
+
 /// State of the subscription towards the runtime service.
 /// See [`Background::runtime_service_subscription`].
 enum RuntimeServiceSubscription<TPlat: PlatformRef> {
@@ -3023,19 +3044,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             StatementSubscription::new(filter, me.max_seen_statements),
                         );
 
-                        if !me.statement_affinity_stale {
-                            me.statement_affinity_stale = true;
-                            let delay = match &me.last_statement_affinity_update {
-                                Some(last) => {
-                                    let elapsed = me.platform.now() - last.clone();
-                                    STATEMENT_AFFINITY_UPDATE_INTERVAL.saturating_sub(elapsed)
-                                }
-                                None => Duration::ZERO,
-                            };
-                            me.next_statement_affinity_update = Some(Box::pin(
-                                me.platform.sleep(delay),
-                            ));
-                        }
+                        me.schedule_statement_affinity_update();
 
                         let _ = me
                             .responses_tx
@@ -3051,18 +3060,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::statement_unsubscribeStatement { subscription } => {
                         let existed = me.statement_subscriptions.remove(&subscription).is_some();
 
-                        if existed && !me.statement_affinity_stale {
-                            me.statement_affinity_stale = true;
-                            let delay = match &me.last_statement_affinity_update {
-                                Some(last) => {
-                                    let elapsed = me.platform.now() - last.clone();
-                                    STATEMENT_AFFINITY_UPDATE_INTERVAL.saturating_sub(elapsed)
-                                }
-                                None => Duration::ZERO,
-                            };
-                            me.next_statement_affinity_update = Some(Box::pin(
-                                me.platform.sleep(delay),
-                            ));
+                        if existed {
+                            me.schedule_statement_affinity_update();
                         }
 
                         let _ = me
