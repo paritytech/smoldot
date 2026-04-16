@@ -45,6 +45,7 @@ use base32::Alphabet;
 use blake2_rfc::blake2b::blake2b;
 use core::{fmt, str::FromStr};
 use sha2::{Digest as _, Sha256};
+use sha3::Keccak256;
 
 /// CID: IPFS Content Identifier.
 ///
@@ -153,6 +154,8 @@ impl CidPrefix {
 pub enum MultihashType {
     /// SHA-256 (code 0x12).
     Sha2_256 = 0x12,
+    /// Keccak-256 (draft code 0x1b).
+    Keccak256 = 0x1b,
     /// BLAKE2b-256 (code 0xb220).
     Blake2b256 = 0xb220,
 }
@@ -161,6 +164,7 @@ impl MultihashType {
     pub fn from_code(code: u64) -> Option<Self> {
         match code {
             0x12 => Some(MultihashType::Sha2_256),
+            0x1b => Some(MultihashType::Keccak256),
             0xb220 => Some(MultihashType::Blake2b256),
             _ => None,
         }
@@ -169,6 +173,7 @@ impl MultihashType {
     pub fn digest(&self, bytes: &[u8]) -> [u8; 32] {
         match self {
             MultihashType::Sha2_256 => Sha256::digest(bytes).into(),
+            MultihashType::Keccak256 => Keccak256::digest(bytes).into(),
             MultihashType::Blake2b256 => blake2b(32, &[], bytes)
                 .as_bytes()
                 .to_owned()
@@ -178,7 +183,7 @@ impl MultihashType {
     }
 
     pub fn digest_size(&self) -> usize {
-        // Both sha2-256 & blake2b-256 has 32-byte hash digests.
+        // All supported hash functions have 32-byte hash digests.
         32
     }
 }
