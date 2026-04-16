@@ -84,6 +84,7 @@ pub struct StatementProtocolConfig {
     max_seen_statements: NonZeroUsize,
     false_positive_rate: f64,
     bloom_seed: u128,
+    affinity_update_interval: Duration,
 }
 
 impl StatementProtocolConfig {
@@ -91,16 +92,19 @@ impl StatementProtocolConfig {
         max_seen_statements: NonZeroUsize,
         false_positive_rate: f64,
         bloom_seed: u128,
+        affinity_update_interval: Duration,
     ) -> Self {
         assert!(
             false_positive_rate.is_finite()
                 && false_positive_rate > 0.0
                 && false_positive_rate < 1.0
         );
+        assert!(!affinity_update_interval.is_zero());
         StatementProtocolConfig {
             max_seen_statements,
             false_positive_rate,
             bloom_seed,
+            affinity_update_interval,
         }
     }
 
@@ -114,6 +118,10 @@ impl StatementProtocolConfig {
 
     pub fn bloom_seed(&self) -> u128 {
         self.bloom_seed
+    }
+
+    pub fn affinity_update_interval(&self) -> Duration {
+        self.affinity_update_interval
     }
 }
 

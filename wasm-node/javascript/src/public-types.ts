@@ -465,9 +465,13 @@ export interface AddChainOptions {
      * `falsePositiveRate` is the bloom filter false positive rate used for topic affinity.
      * Lower values reduce bandwidth from irrelevant statements but reveal more about
      * subscription interests to peers. Defaults to 0.01 (1%).
+     *
+     * `affinityUpdateIntervalMs` is the debounce interval in milliseconds for sending
+     * affinity filter updates to peers after subscription changes. Defaults to 1000.
      */
     statementStore?: {
         maxSeenStatements?: number,
         falsePositiveRate?: number,
+        affinityUpdateIntervalMs?: number,
     }
 }

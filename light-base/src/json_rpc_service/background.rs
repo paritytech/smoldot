@@ -49,8 +49,6 @@ use smoldot::{
     trie::{minimize_proof, proof_decode},
 };
 
-const STATEMENT_AFFINITY_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
-
 /// Configuration for a JSON-RPC service.
 pub(super) struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
@@ -251,18 +249,23 @@ struct Background<TPlat: PlatformRef> {
 
 impl<TPlat: PlatformRef> Background<TPlat> {
     /// Marks the statement affinity as stale and schedules the next update.
-    /// If no update was ever sent, or the last update was more than
-    /// `STATEMENT_AFFINITY_UPDATE_INTERVAL` ago, the update fires immediately.
+    /// If no update was ever sent, or the last update was more than the configured
+    /// affinity update interval ago, the update fires immediately.
     /// Otherwise, it fires after the remaining interval.
     fn schedule_statement_affinity_update(&mut self) {
         if self.statement_affinity_stale {
             return;
         }
         self.statement_affinity_stale = true;
+        let interval = self
+            .statement_protocol_config
+            .as_ref()
+            .expect("affinity updates require statement protocol; qed")
+            .affinity_update_interval();
         let delay = match &self.last_statement_affinity_update {
             Some(last) => {
                 let elapsed = self.platform.now() - last.clone();
-                STATEMENT_AFFINITY_UPDATE_INTERVAL.saturating_sub(elapsed)
+                interval.saturating_sub(elapsed)
             }
             None => Duration::ZERO,
         };

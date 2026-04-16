@@ -31,7 +31,7 @@ use alloc::{
     vec::Vec,
 };
 use async_lock::Mutex;
-use core::{num::NonZero, pin::Pin, str, task};
+use core::{num::NonZero, pin::Pin, str, task, time::Duration};
 use futures_util::{Stream as _, StreamExt as _, stream};
 use smoldot_light::{HandleRpcError, platform::PlatformRef};
 
@@ -59,6 +59,7 @@ fn add_chain(
     potential_relay_chains: Box<[u8]>,
     statement_store_max_seen_statements: u32,
     statement_store_false_positive_rate: f64,
+    statement_store_affinity_update_interval_ms: u32,
 ) -> u32 {
     let mut client_lock = CLIENT.try_lock().unwrap();
 
@@ -143,7 +144,7 @@ fn add_chain(
                     .map(|max_seen| {
                         let mut seed_bytes = [0u8; 16];
                         smoldot_light::platform::PlatformRef::fill_random_bytes(&platform::PLATFORM_REF, &mut seed_bytes);
-                        smoldot_light::network_service::StatementProtocolConfig::new(max_seen, statement_store_false_positive_rate, u128::from_le_bytes(seed_bytes))
+                        smoldot_light::network_service::StatementProtocolConfig::new(max_seen, statement_store_false_positive_rate, u128::from_le_bytes(seed_bytes), Duration::from_millis(u64::from(statement_store_affinity_update_interval_ms)))
                     }),
                 }) {
                 Ok(c) => c,
