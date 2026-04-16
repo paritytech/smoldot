@@ -23,6 +23,12 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      npm_tag:
+        description: 'npm distribution tag (e.g. "dev", "canary"). Required to prevent accidental @latest publish.'
+        type: string
+        required: true
 
 # TODO: improve the security of this module
 permissions: read-all
@@ -202,12 +208,12 @@ jobs:
           path: ./wasm-node/javascript/*.tgz
       - name: Publish via npm_publish_automation
         uses: octokit/request-action@v2.x
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' }}
         with:
           route: POST /repos/paritytech/npm_publish_automation/actions/workflows/publish.yml/dispatches
           ref: main
           # Make sure to provide proper artifact_name, since this GH run produces multiple artifacts and npm_publish_automation must know, which one to use
-          inputs: '${{ format(''{{ "repo": "{0}", "run_id": "{1}", "artifact_name": "npm-package-{2}" }}'', github.repository, github.run_id, github.sha) }}'
+          inputs: '${{ format(''{{ "repo": "{0}", "run_id": "{1}", "artifact_name": "npm-package-{2}", "npm_tag": "{3}" }}'', github.repository, github.run_id, github.sha, inputs.npm_tag) }}'
         env:
           GITHUB_TOKEN: ${{ secrets.NPM_PUBLISH_AUTOMATION_TOKEN }}
 
