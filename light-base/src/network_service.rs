@@ -1383,6 +1383,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "chain-removed",
                     id = task.network[chain_id].log_name
                 );
+                task.v2_statement_peers.remove(&chain_id);
+                task.current_affinity_filter.remove(&chain_id);
                 task.network.remove_chain(chain_id).unwrap();
                 task.peering_strategy.remove_chain_peers(&chain_id);
             }
