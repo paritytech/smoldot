@@ -243,6 +243,7 @@ struct Background<TPlat: PlatformRef> {
 
     statement_affinity_stale: bool,
     next_statement_affinity_update: Option<Pin<Box<TPlat::Delay>>>,
+    last_statement_affinity_update: Option<TPlat::Instant>,
 
     /// Receiver for network events (statements from peers).
     network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
@@ -625,6 +626,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
         v2_statement_peers: hashbrown::HashSet::with_capacity_and_hasher(16, Default::default()),
         statement_affinity_stale: false,
         next_statement_affinity_update: None,
+        last_statement_affinity_update: None,
         network_events_rx: None,
         platform: config.platform,
     };
@@ -819,6 +821,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
             WakeUpReason::StatementAffinityUpdate => {
                 me.statement_affinity_stale = false;
+                me.last_statement_affinity_update = Some(me.platform.now());
 
                 if !me.v2_statement_peers.is_empty() {
                     let combined_filter = build_combined_affinity_filter(
@@ -3022,8 +3025,15 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         if !me.statement_affinity_stale {
                             me.statement_affinity_stale = true;
+                            let delay = match &me.last_statement_affinity_update {
+                                Some(last) => {
+                                    let elapsed = me.platform.now() - last.clone();
+                                    STATEMENT_AFFINITY_UPDATE_INTERVAL.saturating_sub(elapsed)
+                                }
+                                None => Duration::ZERO,
+                            };
                             me.next_statement_affinity_update = Some(Box::pin(
-                                me.platform.sleep(STATEMENT_AFFINITY_UPDATE_INTERVAL),
+                                me.platform.sleep(delay),
                             ));
                         }
 
@@ -3043,8 +3053,15 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         if existed && !me.statement_affinity_stale {
                             me.statement_affinity_stale = true;
+                            let delay = match &me.last_statement_affinity_update {
+                                Some(last) => {
+                                    let elapsed = me.platform.now() - last.clone();
+                                    STATEMENT_AFFINITY_UPDATE_INTERVAL.saturating_sub(elapsed)
+                                }
+                                None => Duration::ZERO,
+                            };
                             me.next_statement_affinity_update = Some(Box::pin(
-                                me.platform.sleep(STATEMENT_AFFINITY_UPDATE_INTERVAL),
+                                me.platform.sleep(delay),
                             ));
                         }
 
