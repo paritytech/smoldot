@@ -907,8 +907,6 @@ fn bitswap_outbound_rejected() {
         }) => {
             assert_eq!(id, substream_id);
         }
-        // Bob may also emit an InboundError before Alice sees the rejection.
-        either::Right(Event::InboundError(InboundError::NegotiationError(_))) => {}
         _ev => unreachable!("{:?}", _ev),
     }
 }
