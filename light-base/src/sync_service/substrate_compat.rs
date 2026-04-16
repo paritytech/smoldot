@@ -406,14 +406,22 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                                 }
                             )
                         );
-                        if let Some(sender_if_still_connected) = sender_if_still_connected {
-                            task.network_service
-                                .ban_and_disconnect(
-                                    sender_if_still_connected,
-                                    network_service::BanSeverity::High,
-                                    "bad-warp-sync-fragment",
-                                )
-                                .await;
+                        // BlockNumberNotIncrementing means the chain gap is too small
+                        // for warp sync to make progress — the peer's fragments don't
+                        // advance past our current position. This is legitimate on
+                        // short/fresh chains (e.g. zombienet) and is not misbehavior.
+                        // Banning the peer in this case stalls sync entirely when
+                        // there is only one peer available.
+                        if !matches!(err, all::VerifyFragmentError::BlockNumberNotIncrementing) {
+                            if let Some(sender_if_still_connected) = sender_if_still_connected {
+                                task.network_service
+                                    .ban_and_disconnect(
+                                        sender_if_still_connected,
+                                        network_service::BanSeverity::High,
+                                        "bad-warp-sync-fragment",
+                                    )
+                                    .await;
+                            }
                         }
                     }
                 }

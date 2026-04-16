@@ -1346,12 +1346,23 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         if self.warp_sync_fragments_download == Some(request_id) {
             self.warp_sync_fragments_download = None;
 
-            self.verify_queue.push_back(PendingVerify {
-                final_set_of_fragments,
-                downloaded_source: Some(rq_source_id),
-                fragments,
-                next_fragment_to_verify_index: 0,
-            });
+            // When the peer responds with zero fragments and indicates this is its
+            // final response, it means there are no GrandPa authority set changes
+            // between our current position and the peer's finalized block. This is
+            // legitimate on fresh/short chains (e.g. zombienet) where no authority
+            // rotation has occurred yet. Skip the queue push (which would just
+            // produce an EmptyProof error) and demote the source's finalized height
+            // so that desired_requests() does not re-select it for warp sync.
+            if fragments.is_empty() && final_set_of_fragments {
+                self.set_source_finality_state(rq_source_id, self.warped_header_number);
+            } else {
+                self.verify_queue.push_back(PendingVerify {
+                    final_set_of_fragments,
+                    downloaded_source: Some(rq_source_id),
+                    fragments,
+                    next_fragment_to_verify_index: 0,
+                });
+            }
         }
 
         let _was_removed = self

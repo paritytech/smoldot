@@ -2520,15 +2520,20 @@ impl SyncBackground {
                         );
                     }
                     Err(err) => {
-                        if let Some(sender) = &sender {
-                            self.network_service
-                                .ban_and_disconnect(
-                                    sender.clone(),
-                                    self.network_chain_id,
-                                    network_service::BanSeverity::High,
-                                    "bad-warp-sync-fragment",
-                                )
-                                .await;
+                        // BlockNumberNotIncrementing means the chain gap is too small
+                        // for warp sync to make progress. This is legitimate on
+                        // short/fresh chains (e.g. zombienet) and is not misbehavior.
+                        if !matches!(err, all::VerifyFragmentError::BlockNumberNotIncrementing) {
+                            if let Some(sender) = &sender {
+                                self.network_service
+                                    .ban_and_disconnect(
+                                        sender.clone(),
+                                        self.network_chain_id,
+                                        network_service::BanSeverity::High,
+                                        "bad-warp-sync-fragment",
+                                    )
+                                    .await;
+                            }
                         }
 
                         self.log_callback.log(
