@@ -16,8 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    log,
-    network_service,
+    log, network_service,
     platform::PlatformRef,
     runtime_service, sync_service, transactions_service,
     util::{self, SipHasherBuild},
