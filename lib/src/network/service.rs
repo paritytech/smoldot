@@ -3243,6 +3243,10 @@ where
                         .as_ref()
                         .unwrap_or_else(|| unreachable!());
 
+                    // The message is parsed here to ensure [`EncodedBitswapMessage`] contains
+                    // correct data. It will be parsed a second time when we actually handle the
+                    // message. The parsing is fast and parsing two times is better than allocating
+                    // 2 MiB and copying an owned parsed data there.
                     if let Err(err) = codec::decode_bitswap_message(&message) {
                         return Some(Event::ProtocolError {
                             error: ProtocolError::BadBitswapMessage(err),

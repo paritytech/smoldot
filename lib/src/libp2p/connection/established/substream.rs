@@ -1355,9 +1355,17 @@ where
                 outcome: Err(BitswapInClosedErr::SubstreamReset),
             }),
             SubstreamInner::BitswapInClosed => None,
-            SubstreamInner::BitswapOut { .. } => Some(Event::BitswapOutClose {
-                error: BitswapOutClosedErr::SubstreamReset,
-            }),
+            SubstreamInner::BitswapOut { negotiation, .. } => {
+                if negotiation.is_some() {
+                    Some(Event::BitswapOutOpenResult {
+                        result: Err(BitswapOutOpenErr::SubstreamReset),
+                    })
+                } else {
+                    Some(Event::BitswapOutClose {
+                        error: BitswapOutClosedErr::SubstreamReset,
+                    })
+                }
+            }
             SubstreamInner::BitswapOutClosed => None,
         }
     }

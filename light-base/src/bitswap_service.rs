@@ -335,11 +335,11 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
 }
 
 fn bitswap_have_message(cid: &Cid) -> Vec<u8> {
-    build_bitswap_message(iter::once(cid), WantType::Have, true, true)
+    build_bitswap_message(iter::once(cid), WantType::Have, true, false)
 }
 
 fn bitswap_block_message(cid: &Cid) -> Vec<u8> {
-    build_bitswap_message(iter::once(cid), WantType::Block, false, true)
+    build_bitswap_message(iter::once(cid), WantType::Block, false, false)
 }
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {

@@ -2345,6 +2345,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             "bitswap-slot-unassigned",
                             peer_id,
                             ?ban_duration,
+                            reason = "disconnect",
                         );
                     }
                     let _ = task
