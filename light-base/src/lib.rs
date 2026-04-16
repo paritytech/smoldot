@@ -96,6 +96,7 @@ use smoldot::{
     libp2p::{multiaddr, peer_id},
 };
 
+mod bitswap_service;
 mod database;
 mod json_rpc_service;
 mod runtime_service;
@@ -289,6 +290,7 @@ struct ChainServices<TPlat: platform::PlatformRef> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
+    bitswap_service: Arc<bitswap_service::BitswapService>,
 }
 
 impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
@@ -298,6 +300,7 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
             sync_service: self.sync_service.clone(),
             runtime_service: self.runtime_service.clone(),
             transactions_service: self.transactions_service.clone(),
+            bitswap_service: self.bitswap_service.clone(),
         }
     }
 }
@@ -933,6 +936,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 network_service: services.network_service.clone(),
                 transactions_service: services.transactions_service.clone(),
                 runtime_service: services.runtime_service.clone(),
+                bitswap_service: services.bitswap_service.clone(),
                 chain_name: chain_spec.name().to_owned(),
                 chain_ty: chain_spec.chain_type().to_owned(),
                 chain_is_live: chain_spec.has_live_network(),
@@ -1263,7 +1267,7 @@ fn start_services<TPlat: platform::PlatformRef>(
     // transaction will be submitted, the service itself is pretty low cost.
     let transactions_service = Arc::new(transactions_service::TransactionsService::new(
         transactions_service::Config {
-            log_name,
+            log_name: log_name.clone(),
             platform: platform.clone(),
             sync_service: sync_service.clone(),
             runtime_service: runtime_service.clone(),
@@ -1274,10 +1278,21 @@ fn start_services<TPlat: platform::PlatformRef>(
         },
     ));
 
+    // The Bitswap service fulfils `bitswap_v1_get(cid)` JSON-RPC requests by querying remote
+    // nodes for IPFS blocks.
+    let bitswap_service = Arc::new(bitswap_service::BitswapService::new(
+        bitswap_service::Config {
+            log_name,
+            platform: platform.clone(),
+            network_service: network_service_chain.clone(),
+        },
+    ));
+
     ChainServices {
         network_service: network_service_chain,
         runtime_service,
         sync_service,
         transactions_service,
+        bitswap_service,
     }
 }

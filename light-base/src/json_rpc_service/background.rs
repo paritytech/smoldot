@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    log, network_service,
+    bitswap_service, log, network_service,
     platform::PlatformRef,
     runtime_service, sync_service, transactions_service,
     util::{self, SipHasherBuild},
@@ -66,6 +66,9 @@ pub(super) struct Config<TPlat: PlatformRef> {
 
     /// Service that provides a ready-to-be-called runtime for the current best block.
     pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+
+    /// Service that fulfills IPFS CID requests.
+    pub bitswap_service: Arc<bitswap_service::BitswapService>,
 
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
@@ -133,6 +136,8 @@ struct Background<TPlat: PlatformRef> {
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     /// See [`Config::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
+    /// See [`Config::bitswap_service`].
+    bitswap_service: Arc<bitswap_service::BitswapService>,
 
     /// Tasks that are spawned by the service and running in the background.
     background_tasks: stream::FuturesUnordered<Pin<Box<dyn Future<Output = Event<TPlat>> + Send>>>,
@@ -502,6 +507,10 @@ enum Event<TPlat: PlatformRef> {
         block_hash: [u8; 32],
         result: Result<Vec<sync_service::StorageResultItem>, sync_service::StorageQueryError>,
     },
+    BitswapGetResult {
+        request_id_json: String,
+        result: Result<Vec<u8>, bitswap_service::BitswapGetError>,
+    },
 }
 
 struct TransactionWatch {
@@ -584,6 +593,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
         sync_service: config.sync_service.clone(),
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
+        bitswap_service: config.bitswap_service.clone(),
         background_tasks: stream::FuturesUnordered::new(),
         runtime_service_subscription: RuntimeServiceSubscription::NotCreated,
         all_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
@@ -976,7 +986,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::system_peers { .. }
                     | methods::MethodCall::system_properties { .. }
                     | methods::MethodCall::system_removeReservedPeer { .. }
-                    | methods::MethodCall::system_version { .. } => {
+                    | methods::MethodCall::system_version { .. }
+                    | methods::MethodCall::statement_submit { .. }
+                    | methods::MethodCall::statement_subscribeStatement { .. }
+                    | methods::MethodCall::statement_unsubscribeStatement { .. } => {
                         if !me.printed_legacy_json_rpc_warning {
                             me.printed_legacy_json_rpc_warning = true;
                             log!(
@@ -1020,9 +1033,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
                     | methods::MethodCall::sudo_network_unstable_unwatch { .. }
                     | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
-                    | methods::MethodCall::statement_submit { .. }
-                    | methods::MethodCall::statement_subscribeStatement { .. }
-                    | methods::MethodCall::statement_unsubscribeStatement { .. } => {}
+                    | methods::MethodCall::bitswap_v1_get { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -1143,6 +1154,30 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         // We don't cancel the task in `background_tasks` that will
                         // generate events about this transaction. Instead, the task will stop
                         // renewing itself the next time it generates a notification.
+                    }
+
+                    methods::MethodCall::bitswap_v1_get { cid } => {
+                        log!(
+                            &me.platform,
+                            Debug,
+                            &me.log_target,
+                            // TODO: only log `cid` if it validates, do not log raw RPC input.
+                            format!("Request for Bitswap CID {cid}")
+                        );
+
+                        me.background_tasks.push({
+                            let bitswap_service = me.bitswap_service.clone();
+                            let request_id_json = request_id_json.to_owned();
+
+                            Box::pin(async move {
+                                let result = bitswap_service.bitswap_get(cid).await;
+
+                                Event::BitswapGetResult {
+                                    request_id_json,
+                                    result,
+                                }
+                            })
+                        });
                     }
 
                     methods::MethodCall::chain_getBlock { hash } => {
@@ -2094,7 +2129,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
-                                    parse::ErrorResponse::InvalidParams,
+                                    parse::ErrorResponse::InvalidParams(None),
                                     None,
                                 ))
                                 .await;
@@ -2628,7 +2663,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         .responses_tx
                                         .send(parse::build_error_response(
                                             request_id_json,
-                                            parse::ErrorResponse::InvalidParams,
+                                            parse::ErrorResponse::InvalidParams(None),
                                             None,
                                         ))
                                         .await;
@@ -2756,7 +2791,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                             .responses_tx
                                             .send(parse::build_error_response(
                                                 request_id_json,
-                                                parse::ErrorResponse::InvalidParams,
+                                                parse::ErrorResponse::InvalidParams(None),
                                                 Some(
                                                     &serde_json::to_string(
                                                         "multiaddr doesn't end with /p2p",
@@ -2773,7 +2808,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
+                                        parse::ErrorResponse::InvalidParams(None),
                                         Some(
                                             &serde_json::to_string(
                                                 "multiaddr doesn't end with /p2p",
@@ -2788,7 +2823,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
+                                        parse::ErrorResponse::InvalidParams(None),
                                         Some(
                                             &serde_json::to_string(&err.to_string())
                                                 .unwrap_or_else(|_| unreachable!()),
@@ -2907,7 +2942,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
-                                    json_rpc::parse::ErrorResponse::InvalidParams,
+                                    json_rpc::parse::ErrorResponse::InvalidParams(None),
                                     None,
                                 ))
                                 .await;
@@ -5943,6 +5978,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 debug_assert!(me.legacy_api_storage_query_in_progress);
                 me.legacy_api_storage_query_in_progress = false;
                 // TODO: add a delay or something?
+            }
+
+            WakeUpReason::Event(Event::BitswapGetResult {
+                request_id_json,
+                result,
+            }) => {
+                let response = match result {
+                    Ok(block) => methods::Response::bitswap_v1_get(methods::HexString(block))
+                        .to_json_response(&request_id_json),
+                    Err(error) => error.to_json_rpc_error(&request_id_json),
+                };
+                let _ = me.responses_tx.send(response).await;
             }
 
             WakeUpReason::NotifyFinalizedHeads => {

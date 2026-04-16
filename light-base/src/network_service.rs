@@ -69,12 +69,14 @@ use smoldot::{
         multiaddr::{self, Multiaddr},
         peer_id,
     },
-    network::{basic_peering_strategy, codec, service},
+    network::{basic_peering_strategy, bitswap_peering_strategy, codec, service},
 };
 
 pub use codec::{AffinityFilter, CallProofRequestConfig, Role};
 use service::SendTopicAffinityError;
-pub use service::{ChainId, EncodedMerkleProof, PeerId, QueueNotificationError};
+pub use service::{
+    ChainId, EncodedMerkleProof, PeerId, QueueNotificationError, SendBitswapMessageError,
+};
 
 /// Configuration for the Statement Store protocol.
 #[derive(Debug, Clone)]
@@ -234,6 +236,16 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     chains_capacity: config.chains_capacity,
                 },
             ),
+            bitswap_peering_strategy: bitswap_peering_strategy::BitswapPeeringStrategy::new(
+                bitswap_peering_strategy::Config {
+                    randomness_seed: {
+                        let mut seed = [0; 32];
+                        config.platform.fill_random_bytes(&mut seed);
+                        seed
+                    },
+                    peers_capacity: 50, // TODO: hardcoded to the same value as `peering_strategy`.
+                },
+            ),
             network,
             connections_open_pool_size: config.connections_open_pool_size,
             connections_open_pool_restore_delay: config.connections_open_pool_restore_delay,
@@ -246,6 +258,9 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             event_pending_send: None,
             event_senders: either::Left(Vec::new()),
             pending_new_subscriptions: Vec::new(),
+            bitswap_event_pending_send: None,
+            bitswap_event_senders: either::Left(Vec::new()),
+            pending_new_bitswap_subscriptions: Vec::new(),
             important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
             main_messages_rx: Box::pin(main_messages_rx),
             messages_rx: stream::SelectAll::new(),
@@ -361,16 +376,37 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     /// If `None` is yielded and the [`NetworkService`] is still alive, you should call
     /// [`NetworkServiceChain::subscribe`] again to obtain a new `Receiver`.
     ///
-    /// # Panic
-    ///
-    /// Panics if the given [`ChainId`] is invalid.
-    ///
     // TODO: consider not killing the background until the channel is destroyed, as that would be a more sensical behaviour
     pub async fn subscribe(&self) -> async_channel::Receiver<Event> {
         let (tx, rx) = async_channel::bounded(128);
 
         self.messages_tx
             .send(ToBackgroundChain::Subscribe { sender: tx })
+            .await
+            .unwrap();
+
+        rx
+    }
+
+    /// Subscribes to the Bitswap events that happen on the network. Bitswap events subscription is
+    /// separate from other network service events, because Bitswap events are big and are not
+    /// needed by the most of subscribers.
+    ///
+    /// Note that this function is `async`, but it should return very quickly.
+    ///
+    /// The `Receiver` **must** be polled continuously. When the channel is full, the networking
+    /// connections will be back-pressured until the channel isn't full anymore.
+    ///
+    /// The `Receiver` never yields `None` unless the [`NetworkService`] crashes or is destroyed.
+    /// If `None` is yielded and the [`NetworkService`] is still alive, you should call
+    /// [`NetworkServiceChain::subscribe_bitswap`] again to obtain a new `Receiver`.
+    ///
+    // TODO: the last section of the doc seem to contradict itself.
+    pub async fn subscribe_bitswap(&self) -> async_channel::Receiver<BitswapEvent> {
+        let (tx, rx) = async_channel::bounded(128);
+
+        self.messages_tx
+            .send(ToBackgroundChain::SubscribeBitswap { sender: tx })
             .await
             .unwrap();
 
@@ -607,6 +643,51 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
+    /// Send Bitswap message to the given peer.
+    pub async fn send_bitswap_message(
+        &self,
+        target: PeerId,
+        message: Vec<u8>,
+    ) -> Result<(), SendBitswapMessageError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackgroundChain::SendBitswapMessage {
+                target,
+                message,
+                result: tx,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Broadcast Bitswap message to all [`service::ChainNetwork::established_bitswap_desired`]
+    /// peers.
+    ///
+    /// Returns the peers message was broadcast to or an error if the message cannot be sent
+    /// to at least one peer.
+    // TODO: better use a dedicated error type instead of reusing a lower-level
+    // `SendBitswapMessageErorr`.
+    pub async fn broadcast_bitswap_message(
+        &self,
+        message: Vec<u8>,
+    ) -> Result<Vec<PeerId>, SendBitswapMessageError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackgroundChain::BroadcastBitswapMessage {
+                message,
+                result: tx,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Broadcast a statement notification to all gossip-connected peers.
     pub async fn broadcast_statement(
         self: Arc<Self>,
         statement: Vec<u8>,
@@ -729,6 +810,17 @@ pub enum Event {
     },
 }
 
+/// Bitswap event that can be generated by the network service. Because Bitswap messages are big
+/// (up to 2 MiB) and can be delivered at high rate, we use a dedicated subscriber to not copy them
+/// to all network service subscribers.
+#[derive(Debug, Clone)]
+pub enum BitswapEvent {
+    BitswapMessage {
+        peer_id: PeerId,
+        message: service::EncodedBitswapMessage,
+    },
+}
+
 /// Error returned by [`NetworkServiceChain::blocks_request`].
 #[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum BlocksRequestError {
@@ -828,6 +920,9 @@ enum ToBackgroundChain {
     Subscribe {
         sender: async_channel::Sender<Event>,
     },
+    SubscribeBitswap {
+        sender: async_channel::Sender<BitswapEvent>,
+    },
     DisconnectAndBan {
         peer_id: PeerId,
         severity: BanSeverity,
@@ -886,6 +981,15 @@ enum ToBackgroundChain {
         is_best: bool,
         result: oneshot::Sender<Result<(), QueueNotificationError>>,
     },
+    SendBitswapMessage {
+        target: PeerId,
+        message: Vec<u8>,
+        result: oneshot::Sender<Result<(), SendBitswapMessageError>>,
+    },
+    BroadcastBitswapMessage {
+        message: Vec<u8>,
+        result: oneshot::Sender<Result<Vec<PeerId>, SendBitswapMessageError>>,
+    },
     BroadcastStatement {
         statement: Vec<u8>,
         result: oneshot::Sender<BroadcastStatementResult>,
@@ -934,6 +1038,9 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// All known peers and their addresses.
     peering_strategy: basic_peering_strategy::BasicPeeringStrategy<ChainId, TPlat::Instant>,
 
+    /// Bitswap slot assignment strategy.
+    bitswap_peering_strategy: bitswap_peering_strategy::BitswapPeeringStrategy<TPlat::Instant>,
+
     /// See [`Config::connections_open_pool_size`].
     connections_open_pool_size: u32,
 
@@ -965,6 +1072,9 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Event about to be sent on the senders of [`BackgroundTask::event_senders`].
     event_pending_send: Option<(ChainId, Event)>,
 
+    /// Bitswap event about to be sent on the senders of [`BackgroundTask::bitswap_event_senders`].
+    bitswap_event_pending_send: Option<BitswapEvent>,
+
     /// Sending events through the public API.
     ///
     /// Contains either senders, or a `Future` that is currently sending an event and will yield
@@ -978,6 +1088,25 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Whenever [`NetworkServiceChain::subscribe`] is called, the new sender is added to this list.
     /// Once [`BackgroundTask::event_senders`] is ready, we properly initialize these senders.
     pending_new_subscriptions: Vec<(ChainId, async_channel::Sender<Event>)>,
+
+    /// Sending Bitswap events through the public API. We use separate channels for Bitswap events,
+    /// because Bitswap messages are big and only few of event subscribers are interested in them.
+    ///
+    /// Contains either senders, or a `Future` that is currently sending an event and will yield
+    /// the senders back once it is finished.
+    ///
+    /// Note that compared to `event_senders`, `bitswap_event_senders` are not associated with
+    /// chains, because Bitswap messages coming from the network do not have the information about
+    /// what chain they are coming from.
+    bitswap_event_senders: either::Either<
+        Vec<async_channel::Sender<BitswapEvent>>,
+        Pin<Box<dyn Future<Output = Vec<async_channel::Sender<BitswapEvent>>> + Send>>,
+    >,
+
+    /// Whenever [`NetworkServiceChain::subscribe_bitswap`] is called, the new sender is added to
+    /// this list. Once [`BackgroundTask::bitswap_event_senders`] is ready, we properly initialize
+    /// these senders.
+    pending_new_bitswap_subscriptions: Vec<async_channel::Sender<BitswapEvent>>,
 
     main_messages_rx: Pin<Box<async_channel::Receiver<ToBackground<TPlat>>>>,
 
@@ -1059,9 +1188,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             MessageForChain(ChainId, ToBackgroundChain),
             NetworkEvent(service::Event<async_channel::Sender<service::CoordinatorToConnection>>),
             CanAssignSlot(PeerId, ChainId),
+            CanAssignBitswapSlot(PeerId),
             NextRecentConnectionRestore,
             CanStartConnect(PeerId),
             CanOpenGossip(PeerId, ChainId),
+            CanOpenBitswap(PeerId),
             MessageFromConnection {
                 connection_id: service::ConnectionId,
                 message: service::ConnectionToCoordinator,
@@ -1071,6 +1202,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 message: service::CoordinatorToConnection,
             },
             EventSendersReady,
+            BitswapEventSendersReady,
             StartDiscovery(ChainId),
         }
 
@@ -1100,7 +1232,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             };
             let service_event = async {
                 if let Some(event) = (task.event_pending_send.is_none()
-                    && task.pending_new_subscriptions.is_empty())
+                    && task.bitswap_event_pending_send.is_none()
+                    && task.pending_new_subscriptions.is_empty()
+                    && task.pending_new_bitswap_subscriptions.is_empty())
                 .then(|| task.network.next_event())
                 .flatten()
                 {
@@ -1126,6 +1260,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     x
                 } {
                     WakeUpReason::CanOpenGossip(peer_id, chain_id)
+                } else if let Some(peer_id) = {
+                    let x = task
+                        .network
+                        .connected_unopened_bitswap_desired()
+                        .choose(&mut task.randomness)
+                        .cloned();
+                    x
+                } {
+                    WakeUpReason::CanOpenBitswap(peer_id)
                 } else if let Some((connection_id, message)) =
                     task.network.pull_message_to_connection()
                 {
@@ -1167,6 +1310,23 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             }
                         }
 
+                        match task
+                            .bitswap_peering_strategy
+                            .pick_assignable_peer(&task.platform.now())
+                        {
+                            bitswap_peering_strategy::AssignablePeer::Assignable(peer_id) => {
+                                break 'search WakeUpReason::CanAssignBitswapSlot(peer_id.clone());
+                            }
+                            bitswap_peering_strategy::AssignablePeer::AllPeersBanned {
+                                next_unban,
+                            } => {
+                                if earlier_unban.as_ref().map_or(true, |b| b > next_unban) {
+                                    earlier_unban = Some(next_unban.clone());
+                                }
+                            }
+                            bitswap_peering_strategy::AssignablePeer::NoPeer => {}
+                        }
+
                         if let Some(earlier_unban) = earlier_unban {
                             task.platform.sleep_until(earlier_unban).await;
                         } else {
@@ -1205,6 +1365,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     future::pending().await
                 }
             };
+            let finished_sending_bitswap_event = async {
+                if let either::Right(bitswap_event_sending_future) = &mut task.bitswap_event_senders
+                {
+                    let bitswap_event_senders = bitswap_event_sending_future.await;
+                    task.bitswap_event_senders = either::Left(bitswap_event_senders);
+                    WakeUpReason::BitswapEventSendersReady
+                } else if task.bitswap_event_pending_send.is_some()
+                    || !task.pending_new_bitswap_subscriptions.is_empty()
+                {
+                    WakeUpReason::BitswapEventSendersReady
+                } else {
+                    future::pending().await
+                }
+            };
             let start_discovery = async {
                 let Some(mut next_discovery) = task.chains_by_next_discovery.first_entry() else {
                     future::pending().await
@@ -1220,6 +1394,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 .or(service_event)
                 .or(next_recent_connection_restore)
                 .or(finished_sending_event)
+                .or(finished_sending_bitswap_event)
                 .or(start_discovery)
                 .await
         };
@@ -1338,6 +1513,30 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }));
                 }
             }
+            WakeUpReason::BitswapEventSendersReady => {
+                // We made sure that the senders were ready before generating an event.
+                let either::Left(bitswap_event_senders) = &mut task.bitswap_event_senders else {
+                    unreachable!()
+                };
+
+                if let Some(event_to_dispatch) = task.bitswap_event_pending_send.take() {
+                    let mut bitswap_event_senders = mem::take(bitswap_event_senders);
+                    task.bitswap_event_senders = either::Right(Box::pin(async move {
+                        // Elements in `bitswap_event_senders` are removed one by one and
+                        // inserted back if the channel is still open.
+                        for index in (0..bitswap_event_senders.len()).rev() {
+                            let event_sender = bitswap_event_senders.swap_remove(index);
+                            if event_sender.send(event_to_dispatch.clone()).await.is_err() {
+                                continue;
+                            }
+                            bitswap_event_senders.push(event_sender);
+                        }
+                        bitswap_event_senders
+                    }));
+                } else if !task.pending_new_bitswap_subscriptions.is_empty() {
+                    bitswap_event_senders.append(&mut task.pending_new_bitswap_subscriptions);
+                }
+            }
             WakeUpReason::MessageFromConnection {
                 connection_id,
                 message,
@@ -1390,6 +1589,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::MessageForChain(chain_id, ToBackgroundChain::Subscribe { sender }) => {
                 task.pending_new_subscriptions.push((chain_id, sender));
+            }
+            WakeUpReason::MessageForChain(
+                _chain_id,
+                ToBackgroundChain::SubscribeBitswap { sender },
+            ) => {
+                task.pending_new_bitswap_subscriptions.push(sender);
             }
             WakeUpReason::MessageForChain(
                 chain_id,
@@ -1824,6 +2029,58 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 ));
             }
             WakeUpReason::MessageForChain(
+                _chain_id,
+                ToBackgroundChain::SendBitswapMessage {
+                    target,
+                    message,
+                    result,
+                },
+            ) => {
+                let _ = result.send(task.network.bitswap_send_message(&target, message));
+            }
+            WakeUpReason::MessageForChain(
+                _chain_id,
+                ToBackgroundChain::BroadcastBitswapMessage { message, result },
+            ) => {
+                let peers = task
+                    .network
+                    .established_bitswap_desired()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let results = peers
+                    .iter()
+                    .map(|peer| {
+                        (
+                            peer,
+                            task.network.bitswap_send_message(peer, message.clone()),
+                        )
+                    })
+                    .collect::<Vec<_>>(); // we must collect first to send all messages
+
+                let succeeded_peers = results
+                    .iter()
+                    .filter_map(|(peer, r)| r.is_ok().then(|| (*peer).clone()))
+                    .collect::<Vec<_>>();
+
+                // TODO: introspecting a third-party error type below doesn't seem good.
+                let r = if !succeeded_peers.is_empty() {
+                    Ok(succeeded_peers)
+                } else if results
+                    .iter()
+                    .any(|(_peer, r)| matches!(r, Err(SendBitswapMessageError::QueueFull)))
+                {
+                    // `QueueFull` has higher priority than `NoConnection` for possible
+                    // back-pressure in higher level code.
+                    Err(SendBitswapMessageError::QueueFull)
+                } else {
+                    // This is only emitted if all peers fail with `NoConnection` or there is no
+                    // peers at all.
+                    Err(SendBitswapMessageError::NoConnection)
+                };
+
+                let _ = result.send(r);
+            }
+            WakeUpReason::MessageForChain(
                 chain_id,
                 ToBackgroundChain::BroadcastStatement { statement, result },
             ) => {
@@ -2032,6 +2289,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         peer_id
                     );
                 }
+
+                task.bitswap_peering_strategy
+                    .increase_peer_connections(&peer_id);
             }
             WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
                 expected_peer_id: Some(_),
@@ -2094,9 +2354,34 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             chain = &task.network[chain_id].log_name,
                             peer_id,
                             ?ban_duration,
+                            // TODO: `reason` might be wrong, `handshake_finished` is not checked.
                             reason = "pre-handshake-disconnect"
                         );
                     }
+                }
+
+                if handshake_finished {
+                    task.network.bitswap_remove_desired(&peer_id);
+                    let what_happened = task
+                        .bitswap_peering_strategy
+                        .unassign_slot_and_ban(&peer_id, task.platform.now() + ban_duration);
+                    if matches!(
+                        what_happened,
+                        bitswap_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true },
+                    ) {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            "network",
+                            "bitswap-slot-unassigned",
+                            peer_id,
+                            ?ban_duration,
+                            reason = "disconnect",
+                        );
+                    }
+                    let _ = task
+                        .bitswap_peering_strategy
+                        .decrease_peer_connections(&peer_id);
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
@@ -2309,6 +2594,78 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
+            }
+            WakeUpReason::NetworkEvent(service::Event::BitswapConnected { peer_id }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-open-success",
+                    peer_id
+                );
+            }
+            WakeUpReason::NetworkEvent(service::Event::BitswapOpenFailed { peer_id, error }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-open-error",
+                    peer_id,
+                    ?error
+                );
+                let ban_duration = if error.is_protocol_not_available() {
+                    Duration::from_secs(600)
+                } else {
+                    Duration::from_secs(15)
+                };
+                if matches!(
+                    task.bitswap_peering_strategy
+                        .unassign_slot_and_ban(&peer_id, task.platform.now() + ban_duration,),
+                    bitswap_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true }
+                ) {
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "bitswap-slot-unassigned",
+                        peer_id,
+                        ?ban_duration,
+                        reason = "bitswap-open-failed"
+                    );
+                    task.network.bitswap_remove_desired(&peer_id);
+                }
+            }
+            WakeUpReason::NetworkEvent(service::Event::BitswapMessage { peer_id, message }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-message-received",
+                    peer_id
+                );
+                debug_assert!(task.bitswap_event_pending_send.is_none());
+                task.bitswap_event_pending_send =
+                    Some(BitswapEvent::BitswapMessage { peer_id, message });
+            }
+            WakeUpReason::NetworkEvent(service::Event::BitswapDisconnected { peer_id }) => {
+                log!(&task.platform, Debug, "network", "bitswap-closed", peer_id);
+                let ban_duration = Duration::from_secs(10);
+                if matches!(
+                    task.bitswap_peering_strategy
+                        .unassign_slot_and_ban(&peer_id, task.platform.now() + ban_duration,),
+                    bitswap_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true }
+                ) {
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "bitswap-slot-unassigned",
+                        peer_id,
+                        ?ban_duration,
+                        reason = "bitswap-closed"
+                    );
+                    task.network.bitswap_remove_desired(&peer_id);
+                }
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -2860,6 +3217,19 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     service::GossipKind::ConsensusTransactions,
                 );
             }
+            WakeUpReason::CanAssignBitswapSlot(peer_id) => {
+                task.bitswap_peering_strategy.assign_slot(&peer_id).unwrap();
+
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-slot-assigned",
+                    peer_id
+                );
+
+                task.network.bitswap_insert_desired(peer_id);
+            }
             WakeUpReason::NextRecentConnectionRestore => {
                 task.num_recent_connection_opening =
                     task.num_recent_connection_opening.saturating_sub(1);
@@ -3071,6 +3441,17 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "gossip-open-start",
                     chain = &task.network[chain_id].log_name,
                     peer_id,
+                );
+            }
+            WakeUpReason::CanOpenBitswap(peer_id) => {
+                task.network.bitswap_open(&peer_id).unwrap();
+
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-open-start",
+                    peer_id
                 );
             }
             WakeUpReason::MessageToConnection {

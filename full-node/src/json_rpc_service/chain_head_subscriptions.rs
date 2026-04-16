@@ -174,7 +174,7 @@ pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
                     };
 
                     if !pinned_blocks.contains(&hash.0) {
-                        request.fail(service::ErrorResponse::InvalidParams);
+                        request.fail(service::ErrorResponse::InvalidParams(None));
                         continue;
                     }
 

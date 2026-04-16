@@ -394,6 +394,7 @@ impl ClientMainTask {
                 | methods::MethodCall::author_rotateKeys { .. }
                 | methods::MethodCall::author_submitExtrinsic { .. }
                 | methods::MethodCall::babe_epochAuthorship { .. }
+                | methods::MethodCall::bitswap_v1_get { .. }
                 | methods::MethodCall::chain_getBlock { .. }
                 | methods::MethodCall::chain_getBlockHash { .. }
                 | methods::MethodCall::chain_getFinalizedHead { .. }
@@ -604,7 +605,7 @@ impl ClientMainTask {
                                 }
                                 _ => parse::build_error_response(
                                     request_id,
-                                    ErrorResponse::InvalidParams,
+                                    ErrorResponse::InvalidParams(None),
                                     None,
                                 ),
                             };

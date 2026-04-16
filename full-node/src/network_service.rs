@@ -2291,6 +2291,12 @@ async fn background_task(mut inner: Inner) {
             WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived {
                 ..
             }) => {}
+
+            // Bitswap events are not handled by the full node.
+            WakeUpReason::NetworkEvent(service::Event::BitswapConnected { .. })
+            | WakeUpReason::NetworkEvent(service::Event::BitswapOpenFailed { .. })
+            | WakeUpReason::NetworkEvent(service::Event::BitswapMessage { .. })
+            | WakeUpReason::NetworkEvent(service::Event::BitswapDisconnected { .. }) => {}
         }
     }
 }

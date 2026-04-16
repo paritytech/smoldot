@@ -417,6 +417,29 @@ where
                 // guarantee, it is safe to merge multiple failed pings into one.
                 Event::PingOutFailed
             }
+            substream::Event::BitswapOutOpenResult { result } => Event::BitswapOutOpenResult {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+                result: match result {
+                    Ok(r) => Ok(r),
+                    Err(err) => Err((err, substream_user_data.take().unwrap())),
+                },
+            },
+            substream::Event::BitswapOutClose { error } => Event::BitswapOutClose {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+                error,
+                user_data: substream_user_data.take().unwrap(),
+            },
+            substream::Event::BitswapInOpen => Event::BitswapInOpen {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+            },
+            substream::Event::BitswapIn { message } => Event::BitswapIn {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+                message,
+            },
+            substream::Event::BitswapInClose { outcome } => Event::BitswapInClose {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+                outcome,
+            },
         });
     }
 
@@ -523,6 +546,145 @@ where
         });
 
         SubstreamId(SubstreamIdInner::MultiStream(substream_id))
+    }
+
+    /// Opens an outgoing Bitswap substream.
+    ///
+    /// Bitswap messages can be sent ASAP and will be combined with multistream-select negotiation,
+    /// but multistream-select negotiation can still fail, most commonly meaning the remote
+    /// does not support the Bitswap protocol.
+    ///
+    /// This method only inserts the multistream-select negotioation into the connection object.
+    /// The negotiation will later be carried out through [`MultiStream::substream_read_write`].
+    ///
+    /// Assuming that the remote is using the same implementation, an [`Event::BitswapInOpen`]
+    /// will be generated on its side.
+    ///
+    pub fn open_bitswap_substream(&mut self, user_data: TSubUd) -> SubstreamId {
+        let substream_id = self.next_out_substream_id;
+        self.next_out_substream_id += 1;
+
+        self.desired_out_substreams.push_back(Substream {
+            id: substream_id,
+            inner: Some(substream::Substream::bitswap_out()),
+            user_data: Some(user_data),
+            framing: webrtc_framing::WebRtcFraming::new(),
+        });
+
+        SubstreamId(SubstreamIdInner::MultiStream(substream_id))
+    }
+
+    /// Queues a Bitswap message to be written out on the given substream.
+    ///
+    /// # About back-pressure
+    ///
+    /// This method unconditionally queues up data. You must be aware that the remote, however,
+    /// can decide to delay indefinitely the sending of that data, which can potentially lead to
+    /// an unbounded increase in memory.
+    ///
+    /// As such, you are encouraged to call this method only if the amount of queued data (as
+    /// determined by calling [`MultiStream::bitswap_substream_queued_bytes`]) is below a
+    /// certain threshold. If above, the Bitswap message should be silently discarded.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to an outbound Bitswap substream,
+    /// or if the Bitswap substream isn't in the appropriate state.
+    ///
+    pub fn write_bitswap_message_unbounded(&mut self, substream_id: SubstreamId, message: Vec<u8>) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get_mut(inner_substream_id)
+            .unwrap()
+            .inner
+            .as_mut()
+            .unwrap()
+            .write_bitswap_message_unbounded(message);
+    }
+
+    /// Returns the number of bytes waiting to be sent out on that substream.
+    ///
+    /// See the documentation of [`MultiStream::write_bitswap_message_unbounded`] for context.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to an outbound Bitswap substream,
+    /// or if the Bitswap substream isn't in the appropriate state.
+    ///
+    pub fn bitswap_substream_queued_bytes(&self, substream_id: SubstreamId) -> usize {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get(inner_substream_id)
+            .unwrap()
+            .inner
+            .as_ref()
+            .unwrap()
+            .bitswap_substream_queued_bytes()
+    }
+
+    /// Closes a Bitswap substream opened after a successful [`Event::BitswapOutOpenResult`].
+    ///
+    /// This can be done even when in the negotiation phase, in other words before the remote has
+    /// accepted/refused the substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to opened Bitswap substream.
+    ///
+    pub fn close_out_bitswap_substream(&mut self, substream_id: SubstreamId) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get_mut(inner_substream_id)
+            .unwrap()
+            .inner
+            .as_mut()
+            .unwrap()
+            .close_out_bitswap_substream();
+    }
+
+    /// Closes (strictly speaking, resets) an inbound Bitswap susbstream reported by
+    /// [`Event::BitswapInOpen`].
+    ///
+    /// This is used to limit the number of inbound Bitswap substreams per peer by discarding old
+    /// substreams.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to open inbound Bitswap substream.
+    ///
+    pub fn close_in_bitswap_substream(&mut self, substream_id: SubstreamId) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get_mut(inner_substream_id)
+            .unwrap()
+            .inner
+            .as_mut()
+            .unwrap()
+            .close_in_bitswap_substream();
     }
 
     /// Call after an [`Event::InboundNegotiated`] has been emitted in order to accept the protocol
