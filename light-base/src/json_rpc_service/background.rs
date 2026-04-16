@@ -89,6 +89,10 @@ pub(super) struct Config<TPlat: PlatformRef> {
 
     /// Hash of the genesis block of the chain.
     pub genesis_block_hash: [u8; 32],
+
+    /// Maximum number of seen statement hashes tracked per subscription for dedup.
+    /// `None` if the statement protocol is disabled.
+    pub max_seen_statements: Option<NonZero<usize>>,
 }
 
 /// Fields used to process JSON-RPC requests in the background.
@@ -225,9 +229,12 @@ struct Background<TPlat: PlatformRef> {
     state_get_keys_paged_cache:
         lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
 
-    /// Active statement subscriptions. Maps subscription ID to topic filter.
-    statement_subscriptions:
-        hashbrown::HashMap<String, smoldot::json_rpc::methods::TopicFilter, fnv::FnvBuildHasher>,
+    /// Maximum number of seen statement hashes tracked per subscription for dedup.
+    /// `None` if the statement protocol is disabled.
+    max_seen_statements: Option<NonZero<usize>>,
+
+    /// Active statement subscriptions. Maps subscription ID to subscription state.
+    statement_subscriptions: hashbrown::HashMap<String, StatementSubscription, fnv::FnvBuildHasher>,
 
     /// Receiver for network events (statements from peers).
     network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
@@ -490,6 +497,33 @@ enum TransactionWatchTy {
     NewApiWatch,
 }
 
+struct StatementSubscription {
+    topic_filter: methods::TopicFilter,
+    seen: Option<lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>>,
+}
+
+impl StatementSubscription {
+    fn new(topic_filter: methods::TopicFilter, max_seen: Option<NonZero<usize>>) -> Self {
+        Self {
+            topic_filter,
+            seen: max_seen
+                .map(|cap| lru::LruCache::with_hasher(cap, fnv::FnvBuildHasher::default())),
+        }
+    }
+
+    fn accept(&mut self, hash: &[u8; 32], statement: &codec::Statement) -> bool {
+        if !self.topic_filter.matches(&statement.topics) {
+            return false;
+        }
+        if let Some(seen) = &mut self.seen {
+            if seen.put(*hash, ()).is_some() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// See [`Background::state_get_keys_paged_cache`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct GetKeysPagedCacheKey {
@@ -579,6 +613,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
         ),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: false,
+        max_seen_statements: config.max_seen_statements,
         statement_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
             16,
             Default::default(),
@@ -617,7 +652,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             StartStorageSubscriptionsUpdates,
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
-            NetworkStatementsReceived(Vec<codec::Statement>),
+            NetworkStatementsReceived(Vec<([u8; 32], codec::Statement)>),
             MustSubscribeNetworkEvents,
         }
 
@@ -762,15 +797,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                 // TODO: O(n_statements * n_subscriptions * n_topics_in_filter * n_topics_in_statement) complexity.
                 // Create a reverse index `topic` -> `subscription` for adequate complexity.
-                for (sub_id, topic_filter) in &me.statement_subscriptions {
+                for (sub_id, sub) in me.statement_subscriptions.iter_mut() {
                     let matching: Vec<methods::HexString> = statements
                         .iter()
-                        .filter(|s| topic_filter.matches(&s.topics))
-                        .map(|s| {
-                            methods::HexString(
-                                codec::encode_statement(s)
-                                    .expect("re-encoding a decoded statement always succeeds; qed"),
-                            )
+                        .filter_map(|(hash, s)| {
+                            if !sub.accept(hash, s) {
+                                return None;
+                            }
+                            Some(methods::HexString(codec::encode_statement(s).expect(
+                                "re-encoding a decoded statement always succeeds; qed",
+                            )))
                         })
                         .collect();
 
@@ -2878,9 +2914,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .clone()
                                     .broadcast_statement(encoded.0)
                                     .await;
-                                if broadcasted.is_known {
-                                    methods::StatementSubmitResult::Known
-                                } else if broadcasted.total == 0 {
+                                if broadcasted.total == 0 {
                                     methods::StatementSubmitResult::InternalError {
                                         error: "No connected peers".into(),
                                     }
@@ -2905,8 +2939,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             hex::encode(id)
                         };
 
-                        me.statement_subscriptions
-                            .insert(subscription_id.clone(), filter);
+                        me.statement_subscriptions.insert(
+                            subscription_id.clone(),
+                            StatementSubscription::new(filter, me.max_seen_statements),
+                        );
 
                         let _ = me
                             .responses_tx

@@ -1,6 +1,6 @@
 [package]
-name = "parity-smoldot-full-node"
-version = "0.10.0"
+name = "smoldot-full-node"
+version = "0.9.1"
 description = "Substrate/Polkadot full node using smoldot"
 authors.workspace = true
 license.workspace = true
@@ -8,10 +8,6 @@ edition.workspace = true
 repository.workspace = true
 include.workspace = true
 default-run = "full-node"
-
-[lib]
-# The implementation uses a fully-qualified lib name. Keep it different from the crate name.
-name = "smoldot_full_node"
 
 [[bin]]
 name = "full-node"
@@ -41,6 +37,6 @@ serde_json = { version = "1.0.104", default-features = false, features = ["std"]
 siphasher = { version = "1.0.1", default-features = false }
 soketto = { version = "0.8.0", features = ["deflate"] }
 smol = "2.0.0"
-smoldot = { package = "parity-smoldot", version = "0.22.0", path = "../lib", default-features = false, features = ["database-sqlite", "std", "wasmtime"] }
+smoldot = { version = "1.0.0", path = "../lib", default-features = false, features = ["database-sqlite", "std", "wasmtime"] }
 terminal_size = "0.4.0"
 zeroize = { version = "1.7.0", default-features = false, features = ["alloc"] }
