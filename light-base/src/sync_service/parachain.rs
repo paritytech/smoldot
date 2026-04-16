@@ -16,7 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{
-    BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground, paraheads,
+    BlockNotification, ConfigParachainFinalizedRuntime, FinalizedBlockRuntime, Notification,
+    SubscribeAll, ToBackground, paraheads,
 };
 use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 
@@ -35,6 +36,20 @@ use smoldot::{
     trie,
 };
 
+/// Number of consecutive parachain-bootstrap failures tolerated before concluding that a
+/// restored finalized head is likely older than peers' pruning window and falling back to
+/// fetching a fresh finalized head from the relay chain.
+const MAX_RESTORED_BOOTSTRAP_FAILURES: u32 = 3;
+
+fn parachain_needs_consensus_bootstrap(
+    chain_info: &chain::chain_information::ValidChainInformation,
+) -> bool {
+    matches!(
+        chain_info.as_ref().consensus,
+        chain::chain_information::ChainInformationConsensusRef::Unknown
+    )
+}
+
 /// Starts a sync service background task to synchronize a parachain.
 ///
 /// This implementation uses AllSync for block sync with Aura consensus verification,
@@ -43,52 +58,124 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     log_target: String,
     platform: TPlat,
     block_number_bytes: usize,
+    restored_chain_information: Option<chain::chain_information::ValidChainInformation>,
+    restored_finalized_runtime: Option<ConfigParachainFinalizedRuntime>,
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
     parachain_id: u32,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 ) {
-    // Phase 1: Fetch the current finalized parachain head from the relay chain.
-    let effective_chain_info = fetch_parachain_head_from_relay(
-        &log_target,
-        &platform,
-        &relay_chain_sync,
-        parachain_id,
-        block_number_bytes,
-    )
-    .await;
+    // Phase 1: Determine the finalized parachain head we should start from.
+    let (mut effective_chain_info, mut is_restored_head) =
+        if let Some(restored_chain_information) = restored_chain_information {
+            log!(
+                &platform,
+                Info,
+                &log_target,
+                format!(
+                    "Warm-starting parachain from restored database state at block #{}",
+                    restored_chain_information
+                        .as_ref()
+                        .finalized_block_header
+                        .number
+                )
+            );
+            (restored_chain_information, true)
+        } else {
+            let effective_chain_info = fetch_parachain_head_from_relay(
+                &log_target,
+                &platform,
+                &relay_chain_sync,
+                parachain_id,
+                block_number_bytes,
+            )
+            .await;
 
-    log!(
-        &platform,
-        Info,
-        &log_target,
-        format!(
-            "Fetched parachain finalized head from relay chain at block #{}",
-            effective_chain_info.as_ref().finalized_block_header.number
-        )
-    );
+            log!(
+                &platform,
+                Info,
+                &log_target,
+                format!(
+                    "Fetched parachain finalized head from relay chain at block #{}",
+                    effective_chain_info.as_ref().finalized_block_header.number
+                )
+            );
 
-    // Phase 2: Download the parachain runtime from a P2P peer and determine Aura
-    // consensus parameters. Retries indefinitely until successful.
-    let effective_chain_info = loop {
+            (effective_chain_info, false)
+        };
+
+    // Phase 2: Fetch the finalized runtime needed by runtime_service and, when required,
+    // also determine Aura consensus parameters from that same finalized block.
+    let mut restored_finalized_runtime = restored_finalized_runtime;
+    let mut consecutive_bootstrap_failures: u32 = 0;
+    let finalized_runtime = loop {
         match bootstrap_parachain_consensus(
             &log_target,
             &platform,
             &network_service,
             &effective_chain_info,
             block_number_bytes,
+            restored_finalized_runtime.take(),
         )
         .await
         {
-            Ok(ci) => break ci,
+            Ok(bootstrapped) => {
+                if parachain_needs_consensus_bootstrap(&effective_chain_info) {
+                    effective_chain_info = bootstrapped.chain_info;
+                } else {
+                    log!(
+                        &platform,
+                        Info,
+                        &log_target,
+                        format!(
+                            "Using restored parachain consensus state at block #{}",
+                            effective_chain_info.as_ref().finalized_block_header.number
+                        )
+                    );
+                }
+                break bootstrapped.finalized_runtime;
+            }
             Err(err) => {
+                consecutive_bootstrap_failures = consecutive_bootstrap_failures.saturating_add(1);
                 log!(
                     &platform,
                     Warn,
                     &log_target,
                     format!("Failed to bootstrap parachain consensus: {err}. Retrying in 5s...")
                 );
-                platform.sleep(Duration::from_secs(5)).await;
+
+                // If we started from a restored block and peers cannot serve proofs for it
+                // after a few attempts, the restored block is likely older than peers'
+                // pruning window. Discard the restored state and fall back to fetching a
+                // fresh finalized head from the relay chain.
+                if is_restored_head
+                    && consecutive_bootstrap_failures >= MAX_RESTORED_BOOTSTRAP_FAILURES
+                {
+                    log!(
+                        &platform,
+                        Warn,
+                        &log_target,
+                        format!(
+                            "Restored parachain head at block #{} could not be bootstrapped \
+                             after {} attempts. It may be older than peers' pruning window. \
+                             Falling back to fresh relay chain head.",
+                            effective_chain_info.as_ref().finalized_block_header.number,
+                            MAX_RESTORED_BOOTSTRAP_FAILURES,
+                        )
+                    );
+                    effective_chain_info = fetch_parachain_head_from_relay(
+                        &log_target,
+                        &platform,
+                        &relay_chain_sync,
+                        parachain_id,
+                        block_number_bytes,
+                    )
+                    .await;
+                    is_restored_head = false;
+                    consecutive_bootstrap_failures = 0;
+                } else {
+                    platform.sleep(Duration::from_secs(5)).await;
+                }
             }
         }
     };
@@ -168,7 +255,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         paraheads_notifications: None,
         pending_parachain_finalization: None,
         network_up_to_date_best: true,
-        known_finalized_runtime: None,
+        known_finalized_runtime: Some(finalized_runtime),
         pending_requests: stream::FuturesUnordered::new(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         log_target,
@@ -1228,13 +1315,225 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
 }
 
 /// Downloads the parachain runtime from a P2P peer and determines Aura consensus parameters.
+struct BootstrappedParachainConsensus {
+    chain_info: chain::chain_information::ValidChainInformation,
+    finalized_runtime: FinalizedBlockRuntime,
+}
+
+fn compile_finalized_runtime<TPlat: PlatformRef>(
+    platform: &TPlat,
+    log_target: &str,
+    storage_code: Vec<u8>,
+    storage_heap_pages: Option<Vec<u8>>,
+    code_merkle_value: Option<Vec<u8>>,
+    closest_ancestor_excluding: Option<Vec<trie::Nibble>>,
+    source: &str,
+) -> Result<FinalizedBlockRuntime, String> {
+    let heap_pages = executor::storage_heap_pages_to_value(storage_heap_pages.as_deref())
+        .map_err(|e| format!("Invalid {source} :heappages value: {e}"))?;
+
+    let virtual_machine = executor::host::HostVmPrototype::new(executor::host::Config {
+        module: &storage_code,
+        heap_pages,
+        exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+        allow_unresolved_imports: true,
+    })
+    .map_err(|e| format!("Failed to compile {source} runtime: {e}"))?;
+
+    log!(
+        platform,
+        Info,
+        log_target,
+        format!(
+            "Compiled {source} parachain runtime ({} bytes)",
+            storage_code.len()
+        )
+    );
+
+    Ok(FinalizedBlockRuntime {
+        virtual_machine,
+        storage_code: Some(storage_code),
+        storage_heap_pages,
+        code_merkle_value,
+        closest_ancestor_excluding,
+    })
+}
+
+async fn restored_finalized_runtime_from_verified_hint<TPlat: PlatformRef>(
+    platform: &TPlat,
+    log_target: &str,
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    peer_id: &libp2p::PeerId,
+    block_hash: [u8; 32],
+    state_root: [u8; 32],
+    runtime: ConfigParachainFinalizedRuntime,
+) -> Result<FinalizedBlockRuntime, String> {
+    let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
+    if runtime.closest_ancestor_excluding.len() >= code_nibbles.len()
+        || !code_nibbles.starts_with(&runtime.closest_ancestor_excluding)
+    {
+        return Err(String::from("Invalid restored :code closest ancestor hint"));
+    }
+
+    log!(
+        platform,
+        Info,
+        log_target,
+        "Verifying block-bound restored parachain runtime hint"
+    );
+
+    let proof = network_service
+        .clone()
+        .storage_proof_request(
+            peer_id.clone(),
+            codec::StorageProofRequestConfig {
+                block_hash,
+                keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
+            },
+            Duration::from_secs(60),
+        )
+        .await
+        .map_err(|e| format!("Restored runtime hint proof request failed: {e}"))?;
+
+    let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+        proof: proof.decode().to_vec(),
+    })
+    .map_err(|e| format!("Failed to decode restored runtime hint proof: {e}"))?;
+
+    let (proof_storage_code, _) = decoded_proof
+        .storage_value(&state_root, b":code")
+        .map_err(|_| String::from("Restored runtime hint proof doesn't contain :code"))?
+        .ok_or_else(|| String::from("Restored runtime hint proof missing :code value"))?;
+    let proof_storage_code = proof_storage_code.to_vec();
+
+    if proof_storage_code != runtime.storage_code {
+        return Err(String::from("Restored runtime hint :code value mismatch"));
+    }
+
+    let (proof_code_merkle_value, proof_closest_ancestor_excluding) =
+        code_merkle_hint_from_proof(&decoded_proof, &state_root)?;
+
+    if proof_code_merkle_value != runtime.code_merkle_value {
+        return Err(String::from(
+            "Restored runtime hint :code merkle value mismatch",
+        ));
+    }
+
+    if proof_closest_ancestor_excluding != runtime.closest_ancestor_excluding {
+        return Err(String::from(
+            "Restored runtime hint :code ancestor mismatch",
+        ));
+    }
+
+    let storage_heap_pages = decoded_proof
+        .storage_value(&state_root, b":heappages")
+        .map_err(|_| String::from("Restored runtime hint proof doesn't contain :heappages"))?
+        .map(|(value, _)| value.to_vec());
+
+    compile_finalized_runtime(
+        platform,
+        log_target,
+        proof_storage_code,
+        storage_heap_pages,
+        Some(runtime.code_merkle_value),
+        Some(runtime.closest_ancestor_excluding),
+        "verified restored",
+    )
+}
+
+async fn download_finalized_runtime_from_peer<TPlat: PlatformRef>(
+    platform: &TPlat,
+    log_target: &str,
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    peer_id: &libp2p::PeerId,
+    block_hash: [u8; 32],
+    state_root: [u8; 32],
+) -> Result<FinalizedBlockRuntime, String> {
+    log!(
+        platform,
+        Info,
+        log_target,
+        format!("Downloading parachain runtime from peer {peer_id}")
+    );
+
+    // Download :code and :heappages.
+    let proof = network_service
+        .clone()
+        .storage_proof_request(
+            peer_id.clone(),
+            codec::StorageProofRequestConfig {
+                block_hash,
+                keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
+            },
+            Duration::from_secs(60),
+        )
+        .await
+        .map_err(|e| format!("Storage proof request failed: {e}"))?;
+
+    let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+        proof: proof.decode().to_vec(),
+    })
+    .map_err(|e| format!("Failed to decode storage proof: {e}"))?;
+
+    let (code, _) = decoded_proof
+        .storage_value(&state_root, b":code")
+        .map_err(|_| String::from("Proof doesn't contain :code"))?
+        .ok_or_else(|| String::from("Runtime :code not found in storage"))?;
+    let code = code.to_vec();
+
+    let heap_pages_raw = decoded_proof
+        .storage_value(&state_root, b":heappages")
+        .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
+
+    let (code_merkle_value, closest_ancestor_excluding) =
+        code_merkle_hint_from_proof(&decoded_proof, &state_root)?;
+
+    compile_finalized_runtime(
+        platform,
+        log_target,
+        code,
+        heap_pages_raw.map(|(value, _)| value.to_vec()),
+        Some(code_merkle_value),
+        Some(closest_ancestor_excluding),
+        "downloaded",
+    )
+}
+
+fn code_merkle_hint_from_proof(
+    decoded_proof: &trie::proof_decode::DecodedTrieProof<Vec<u8>>,
+    state_root: &[u8; 32],
+) -> Result<(Vec<u8>, Vec<trie::Nibble>), String> {
+    let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
+    let closest_ancestor_excluding = decoded_proof
+        .closest_ancestor_in_proof(
+            state_root,
+            code_nibbles.iter().take(code_nibbles.len() - 1).copied(),
+        )
+        .map_err(|_| String::from("Proof missing :code closest ancestor"))?
+        .map(|ancestor| ancestor.collect::<Vec<_>>())
+        .ok_or_else(|| String::from("Proof missing :code closest ancestor"))?;
+
+    let next_nibble = code_nibbles[closest_ancestor_excluding.len()];
+    let code_node_info = decoded_proof
+        .trie_node_info(state_root, closest_ancestor_excluding.iter().copied())
+        .map_err(|_| String::from("Proof missing :code closest ancestor node"))?;
+    let code_merkle_value = code_node_info
+        .children
+        .child(next_nibble)
+        .merkle_value()
+        .ok_or_else(|| String::from("Proof missing :code child merkle value"))?;
+
+    Ok((code_merkle_value.to_vec(), closest_ancestor_excluding))
+}
+
 async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
-) -> Result<chain::chain_information::ValidChainInformation, String> {
+    restored_finalized_runtime: Option<ConfigParachainFinalizedRuntime>,
+) -> Result<BootstrappedParachainConsensus, String> {
     let ci_ref = chain_info.as_ref();
     let state_root = *ci_ref.finalized_block_header.state_root;
     let block_hash = ci_ref.finalized_block_header.hash(block_number_bytes);
@@ -1269,63 +1568,63 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         }
     };
 
-    log!(
-        platform,
-        Info,
-        log_target,
-        format!("Downloading parachain runtime from peer {peer_id}")
-    );
-
-    // Download :code and :heappages.
-    let proof = network_service
-        .clone()
-        .storage_proof_request(
-            peer_id.clone(),
-            codec::StorageProofRequestConfig {
+    let finalized_runtime = match restored_finalized_runtime {
+        Some(restored_finalized_runtime) => {
+            match restored_finalized_runtime_from_verified_hint(
+                platform,
+                log_target,
+                network_service,
+                &peer_id,
                 block_hash,
-                keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
-            },
-            Duration::from_secs(60),
-        )
-        .await
-        .map_err(|e| format!("Storage proof request failed: {e}"))?;
+                state_root,
+                restored_finalized_runtime,
+            )
+            .await
+            {
+                Ok(finalized_runtime) => finalized_runtime,
+                Err(err) => {
+                    log!(
+                        platform,
+                        Warn,
+                        log_target,
+                        format!(
+                            "Failed to verify restored parachain runtime hint: {err}. \
+                            Falling back to peer download."
+                        )
+                    );
+                    download_finalized_runtime_from_peer(
+                        platform,
+                        log_target,
+                        network_service,
+                        &peer_id,
+                        block_hash,
+                        state_root,
+                    )
+                    .await?
+                }
+            }
+        }
+        None => {
+            download_finalized_runtime_from_peer(
+                platform,
+                log_target,
+                network_service,
+                &peer_id,
+                block_hash,
+                state_root,
+            )
+            .await?
+        }
+    };
 
-    let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-        proof: proof.decode().to_vec(),
-    })
-    .map_err(|e| format!("Failed to decode storage proof: {e}"))?;
+    if !parachain_needs_consensus_bootstrap(chain_info) {
+        return Ok(BootstrappedParachainConsensus {
+            chain_info: chain_info.clone(),
+            finalized_runtime,
+        });
+    };
 
-    let code = decoded_proof
-        .storage_value(&state_root, b":code")
-        .map_err(|_| String::from("Proof doesn't contain :code"))?
-        .ok_or_else(|| String::from("Runtime :code not found in storage"))?
-        .0
-        .to_vec();
-
-    let heap_pages_raw = decoded_proof
-        .storage_value(&state_root, b":heappages")
-        .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
-
-    let heap_pages = executor::storage_heap_pages_to_value(heap_pages_raw.map(|(v, _)| v))
-        .map_err(|e| format!("Invalid :heappages value: {e}"))?;
-
-    log!(
-        platform,
-        Info,
-        log_target,
-        format!(
-            "Downloaded parachain runtime ({} bytes), compiling...",
-            code.len()
-        )
-    );
-
-    let vm = executor::host::HostVmPrototype::new(executor::host::Config {
-        module: &code,
-        heap_pages,
-        exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
-        allow_unresolved_imports: true,
-    })
-    .map_err(|e| format!("Failed to compile runtime: {e}"))?;
+    let vm = finalized_runtime.virtual_machine.clone();
 
     // AuraApi_slot_duration
     let slot_duration = {
@@ -1384,8 +1683,12 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
             })
             .map_err(|e| format!("Failed to decode authorities call proof: {e}"))?;
 
-        let output =
-            run_single_runtime_call(vm, "AuraApi_authorities", &decoded_call_proof, &state_root)?;
+        let output = run_single_runtime_call(
+            vm.clone(),
+            "AuraApi_authorities",
+            &decoded_call_proof,
+            &state_root,
+        )?;
 
         header::AuraAuthoritiesIter::decode(&output)
             .map_err(|_| String::from("Failed to decode AuraApi_authorities output"))?
@@ -1413,8 +1716,13 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         finality: chain::chain_information::ChainInformationFinality::Outsourced,
     };
 
-    chain::chain_information::ValidChainInformation::try_from(new_chain_info)
-        .map_err(|e| format!("Invalid chain information: {e}"))
+    let chain_info = chain::chain_information::ValidChainInformation::try_from(new_chain_info)
+        .map_err(|e| format!("Invalid chain information: {e}"))?;
+
+    Ok(BootstrappedParachainConsensus {
+        chain_info,
+        finalized_runtime,
+    })
 }
 
 /// Runs a single runtime call, serving storage reads from the given proof.
@@ -1511,5 +1819,43 @@ fn run_single_runtime_call(
                 return Err(format!("{function_name}: forbidden offchain host function"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smoldot::chain_spec::ChainSpec;
+
+    fn unknown_parachain_chain_information() -> chain::chain_information::ValidChainInformation {
+        let known = known_chain_information();
+        chain::chain_information::ValidChainInformation::try_from(
+            chain::chain_information::ChainInformation {
+                finalized_block_header: Box::new(known.as_ref().finalized_block_header.into()),
+                consensus: chain::chain_information::ChainInformationConsensus::Unknown,
+                finality: chain::chain_information::ChainInformationFinality::Outsourced,
+            },
+        )
+        .unwrap()
+    }
+
+    fn known_chain_information() -> chain::chain_information::ValidChainInformation {
+        let chain_spec = ChainSpec::from_json_bytes(include_str!(
+            "../../../lib/src/chain_spec/tests/example.json"
+        ))
+        .unwrap();
+        chain_spec.to_chain_information().unwrap().0
+    }
+
+    #[test]
+    fn parachain_bootstrap_is_required_for_unknown_consensus() {
+        let chain_information = unknown_parachain_chain_information();
+        assert!(parachain_needs_consensus_bootstrap(&chain_information));
+    }
+
+    #[test]
+    fn parachain_bootstrap_is_skipped_for_restored_known_consensus() {
+        let chain_information = known_chain_information();
+        assert!(!parachain_needs_consensus_bootstrap(&chain_information));
     }
 }

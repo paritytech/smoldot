@@ -452,8 +452,15 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // is present in the chain spec, it is possible to start syncing at the finalized block
         // it describes.
         // At the same time, we deconstruct the database into `known_nodes`
-        // and `runtime_code_hint`.
-        let (chain_information, used_database_chain_information, known_nodes, runtime_code_hint) = {
+        // and runtime hints.
+        let (
+            chain_information,
+            selected_database_chain_information,
+            restored_database_chain_information,
+            known_nodes,
+            runtime_code_hint,
+            finalized_runtime,
+        ) = {
             let checkpoint = chain_spec
                 .light_sync_state()
                 .map(|s| s.to_chain_information());
@@ -468,12 +475,20 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_information: Some(db_ci),
                         known_nodes,
                         runtime_code_hint,
+                        finalized_runtime,
                         ..
                     }),
                 ) if db_ci.as_ref().finalized_block_header.number
                     >= checkpoint.as_ref().finalized_block_header.number =>
                 {
-                    (Some(db_ci), true, known_nodes, runtime_code_hint)
+                    (
+                        Some(db_ci.clone()),
+                        true,
+                        Some(db_ci),
+                        known_nodes,
+                        runtime_code_hint,
+                        finalized_runtime,
+                    )
                 }
 
                 // Otherwise, use the chain spec checkpoint.
@@ -481,12 +496,23 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     _,
                     Some(Ok(checkpoint)),
                     Some(database::DatabaseContent {
+                        chain_information: db_ci,
                         known_nodes,
                         runtime_code_hint,
+                        finalized_runtime,
                         ..
                     }),
-                ) => (Some(checkpoint), false, known_nodes, runtime_code_hint),
-                (_, Some(Ok(checkpoint)), None) => (Some(checkpoint), false, Vec::new(), None),
+                ) => (
+                    Some(checkpoint),
+                    false,
+                    db_ci,
+                    known_nodes,
+                    runtime_code_hint,
+                    finalized_runtime,
+                ),
+                (_, Some(Ok(checkpoint)), None) => {
+                    (Some(checkpoint), false, None, Vec::new(), None, None)
+                }
 
                 // If neither the genesis chain information nor the checkpoint chain information
                 // is available, we could in principle use the database, but for API reasons we
@@ -496,12 +522,21 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     None,
                     None,
                     Some(database::DatabaseContent {
+                        chain_information: db_ci,
                         known_nodes,
                         runtime_code_hint,
+                        finalized_runtime,
                         ..
                     }),
-                ) => (None, false, known_nodes, runtime_code_hint),
-                (None, None, None) => (None, false, Vec::new(), None),
+                ) => (
+                    None,
+                    false,
+                    db_ci,
+                    known_nodes,
+                    runtime_code_hint,
+                    finalized_runtime,
+                ),
+                (None, None, None) => (None, false, None, Vec::new(), None, None),
 
                 // Use the genesis block if no checkpoint is available.
                 (
@@ -511,11 +546,20 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
                     )),
                     Some(database::DatabaseContent {
+                        chain_information: db_ci,
                         known_nodes,
                         runtime_code_hint,
+                        finalized_runtime,
                         ..
                     }),
-                ) => (Some(genesis_ci), false, known_nodes, runtime_code_hint),
+                ) => (
+                    Some(genesis_ci),
+                    false,
+                    db_ci,
+                    known_nodes,
+                    runtime_code_hint,
+                    finalized_runtime,
+                ),
                 (
                     Some(genesis_ci),
                     None
@@ -523,7 +567,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
                     )),
                     None,
-                ) => (Some(genesis_ci), false, Vec::new(), None),
+                ) => (Some(genesis_ci), false, None, Vec::new(), None, None),
 
                 // If the checkpoint format is invalid, we return an error no matter whether the
                 // genesis chain information could be used.
@@ -633,6 +677,9 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 )
             });
 
+        let restored_parachain_chain_information =
+            initial_parachain_chain_information(restored_database_chain_information.as_ref());
+
         // Determinate the name under which the chain will be identified in the logs.
         // Because the chain spec is untrusted input, we must transform the `id` to remove all
         // weird characters.
@@ -707,9 +754,14 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         (Some((relay_chain, para_id, _)), _) => StartServicesChainTy::Parachain {
                             relay_chain,
                             para_id: *para_id,
+                            restored_chain_information: restored_parachain_chain_information,
+                            finalized_runtime,
                         },
                         (None, Some(chain_information)) => {
-                            StartServicesChainTy::SubstrateCompatible { chain_information }
+                            StartServicesChainTy::SubstrateCompatible {
+                                chain_information,
+                                runtime_code_hint,
+                            }
                         }
                         (None, None) => {
                             // Checked above.
@@ -721,7 +773,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         log_name.clone(),
                         &self.platform,
                         &mut self.network_service,
-                        runtime_code_hint,
                         genesis_block_header,
                         usize::from(chain_spec.block_number_bytes()),
                         chain_spec.fork_id().map(|f| f.to_owned()),
@@ -759,7 +810,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             log_name,
                             chain_spec.name(),
                             HashDisplay(&genesis_block_hash),
-                            if used_database_chain_information {
+                            if selected_database_chain_information {
                                 "Database"
                             } else {
                                 "Chain specification"
@@ -1109,11 +1160,67 @@ pub enum AddChainError {
 enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
     SubstrateCompatible {
         chain_information: &'a chain::chain_information::ValidChainInformation,
+        runtime_code_hint: Option<database::DatabaseContentRuntimeCodeHint>,
     },
     Parachain {
         relay_chain: &'a ChainServices<TPlat>,
         para_id: u32,
+        restored_chain_information: Option<&'a chain::chain_information::ValidChainInformation>,
+        finalized_runtime: Option<database::DatabaseContentFinalizedRuntime>,
     },
+}
+
+fn initial_parachain_chain_information<'a>(
+    database_chain_information: Option<&'a chain::chain_information::ValidChainInformation>,
+) -> Option<&'a chain::chain_information::ValidChainInformation> {
+    database_chain_information
+}
+
+fn parachain_network_best_block(
+    restored_chain_information: Option<&chain::chain_information::ValidChainInformation>,
+    genesis_block_scale_encoded_header: &[u8],
+    block_number_bytes: usize,
+) -> (u64, [u8; 32]) {
+    if let Some(chain_information) = restored_chain_information {
+        (
+            chain_information.as_ref().finalized_block_header.number,
+            chain_information
+                .as_ref()
+                .finalized_block_header
+                .hash(block_number_bytes),
+        )
+    } else {
+        (
+            0,
+            header::hash_from_scale_encoded_header(genesis_block_scale_encoded_header),
+        )
+    }
+}
+
+fn network_service_best_block<TPlat: platform::PlatformRef>(
+    config: &StartServicesChainTy<'_, TPlat>,
+    genesis_block_scale_encoded_header: &[u8],
+    block_number_bytes: usize,
+) -> (u64, [u8; 32]) {
+    match config {
+        StartServicesChainTy::SubstrateCompatible {
+            chain_information, ..
+        } => (
+            chain_information.as_ref().finalized_block_header.number,
+            chain_information
+                .as_ref()
+                .finalized_block_header
+                .hash(block_number_bytes),
+        ),
+        StartServicesChainTy::Parachain {
+            restored_chain_information,
+            ..
+        } => parachain_network_best_block(
+            *restored_chain_information,
+            genesis_block_scale_encoded_header,
+            block_number_bytes,
+        ),
+    }
 }
 
 /// Starts all the services of the client.
@@ -1124,7 +1231,6 @@ fn start_services<TPlat: platform::PlatformRef>(
     log_name: String,
     platform: &TPlat,
     network_service: &mut Option<Arc<network_service::NetworkService<TPlat>>>,
-    runtime_code_hint: Option<database::DatabaseContentRuntimeCodeHint>,
     genesis_block_scale_encoded_header: Vec<u8>,
     block_number_bytes: usize,
     fork_id: Option<String>,
@@ -1146,11 +1252,12 @@ fn start_services<TPlat: platform::PlatformRef>(
         log_name: log_name.clone(),
         num_out_slots: 4,
         grandpa_protocol_finalized_block_height: match &config {
-            StartServicesChainTy::SubstrateCompatible { chain_information }
-                if matches!(
-                    chain_information.as_ref().finality,
-                    chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-                ) =>
+            StartServicesChainTy::SubstrateCompatible {
+                chain_information, ..
+            } if matches!(
+                chain_information.as_ref().finality,
+                chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
+            ) =>
             {
                 Some(chain_information.as_ref().finalized_block_header.number)
             }
@@ -1159,19 +1266,11 @@ fn start_services<TPlat: platform::PlatformRef>(
         genesis_block_hash: header::hash_from_scale_encoded_header(
             &genesis_block_scale_encoded_header,
         ),
-        best_block: match &config {
-            StartServicesChainTy::SubstrateCompatible { chain_information } => (
-                chain_information.as_ref().finalized_block_header.number,
-                chain_information
-                    .as_ref()
-                    .finalized_block_header
-                    .hash(block_number_bytes),
-            ),
-            _ => (
-                0,
-                header::hash_from_scale_encoded_header(&genesis_block_scale_encoded_header),
-            ),
-        },
+        best_block: network_service_best_block(
+            &config,
+            &genesis_block_scale_encoded_header,
+            block_number_bytes,
+        ),
         fork_id,
         block_number_bytes,
         statement_protocol_config,
@@ -1181,6 +1280,8 @@ fn start_services<TPlat: platform::PlatformRef>(
         StartServicesChainTy::Parachain {
             relay_chain,
             para_id,
+            restored_chain_information,
+            finalized_runtime,
         } => {
             // Chain is a parachain.
 
@@ -1198,6 +1299,14 @@ fn start_services<TPlat: platform::PlatformRef>(
                             para_id,
                             relay_chain_sync: relay_chain.runtime_service.clone(),
                         },
+                        restored_chain_information: restored_chain_information.cloned(),
+                        finalized_runtime: finalized_runtime.map(|runtime| {
+                            sync_service::ConfigParachainFinalizedRuntime {
+                                storage_code: runtime.code,
+                                code_merkle_value: runtime.code_merkle_value,
+                                closest_ancestor_excluding: runtime.closest_ancestor_excluding,
+                            }
+                        }),
                     },
                 ),
             }));
@@ -1216,7 +1325,10 @@ fn start_services<TPlat: platform::PlatformRef>(
 
             (sync_service, runtime_service)
         }
-        StartServicesChainTy::SubstrateCompatible { chain_information } => {
+        StartServicesChainTy::SubstrateCompatible {
+            chain_information,
+            runtime_code_hint,
+        } => {
             // Chain is a Substrate-compatible non-parachain chain.
 
             // The sync service is leveraging the network service, downloads block headers,
@@ -1279,5 +1391,73 @@ fn start_services<TPlat: platform::PlatformRef>(
         runtime_service,
         sync_service,
         transactions_service,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn example_chain_information() -> chain::chain_information::ValidChainInformation {
+        let chain_spec = chain_spec::ChainSpec::from_json_bytes(include_str!(
+            "../../lib/src/chain_spec/tests/example.json"
+        ))
+        .unwrap();
+        chain_spec.to_chain_information().unwrap().0
+    }
+
+    #[test]
+    fn initial_parachain_chain_information_only_uses_database_state() {
+        let chain_information = example_chain_information();
+
+        assert!(initial_parachain_chain_information(None).is_none());
+
+        let restored = initial_parachain_chain_information(Some(&chain_information)).unwrap();
+        assert_eq!(
+            restored.as_ref().finalized_block_header.number,
+            chain_information.as_ref().finalized_block_header.number
+        );
+    }
+
+    #[test]
+    fn initial_parachain_chain_information_keeps_database_state_even_if_checkpoint_wins() {
+        let database_chain_information = example_chain_information();
+
+        let restored =
+            initial_parachain_chain_information(Some(&database_chain_information)).unwrap();
+        assert_eq!(
+            restored.as_ref().finalized_block_header.number,
+            database_chain_information
+                .as_ref()
+                .finalized_block_header
+                .number
+        );
+    }
+
+    #[test]
+    fn parachain_network_best_block_prefers_restored_chain_information() {
+        let chain_information = example_chain_information();
+        let genesis_header = chain_information
+            .as_ref()
+            .finalized_block_header
+            .scale_encoding_vec(4);
+
+        let cold_best_block = parachain_network_best_block(None, &genesis_header, 4);
+        assert_eq!(cold_best_block.0, 0);
+        assert_eq!(
+            cold_best_block.1,
+            header::hash_from_scale_encoded_header(&genesis_header)
+        );
+
+        let warm_best_block =
+            parachain_network_best_block(Some(&chain_information), &genesis_header, 4);
+        assert_eq!(
+            warm_best_block.0,
+            chain_information.as_ref().finalized_block_header.number
+        );
+        assert_eq!(
+            warm_best_block.1,
+            chain_information.as_ref().finalized_block_header.hash(4)
+        );
     }
 }

@@ -67,6 +67,8 @@
     "buildModules": "tsc -p tsconfig-mjs.json && tsc -p tsconfig-cjs.json && bash fix-package-type.sh",
     "prepack": "node prepare.mjs --release && rm -rf ./dist && npm run buildModules",
     "build": "node prepare.mjs --release && rm -rf ./dist && npm run buildModules",
+    "probe:parachain-restart": "node ./scripts/parachain-finalized-database-probe.mjs",
+    "probe:parachain-restart:bench": "node ./scripts/parachain-finalized-database-benchmark.mjs",
     "start": "node prepare.mjs --debug && rm -rf ./dist && npm run buildModules && node demo/demo.mjs",
     "test": "node prepare.mjs --debug && rm -rf ./dist && npm run buildModules && deno run ./dist/mjs/index-deno.js && ava --timeout=2m --concurrency 2 --no-worker-threads",
     "doc": "node prepare.mjs --debug && typedoc --basePath ./src --out ./dist/doc --treatWarningsAsErrors ./src/index-browser.ts"

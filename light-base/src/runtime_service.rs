@@ -239,7 +239,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     // TODO: this function has a bad API but is hopefully temporary
     pub async fn finalized_runtime_storage_merkle_values(
         &self,
-    ) -> Option<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<Nibble>>)> {
+    ) -> Option<FinalizedRuntimeStorageMerkleValues> {
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
@@ -679,6 +679,15 @@ pub enum RuntimeError {
     Build(executor::host::NewErr),
 }
 
+/// Storage values and block identity for the runtime of the finalized block.
+pub struct FinalizedRuntimeStorageMerkleValues {
+    pub finalized_block_hash: [u8; 32],
+    pub finalized_block_state_root_hash: [u8; 32],
+    pub runtime_code: Option<Vec<u8>>,
+    pub code_merkle_value: Option<Vec<u8>>,
+    pub closest_ancestor_excluding: Option<Vec<Nibble>>,
+}
+
 /// Error potentially returned by [`RuntimeService::compile_and_pin_runtime`].
 #[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum CompileAndPinRuntimeError {
@@ -698,8 +707,7 @@ enum ToBackground<TPlat: PlatformRef> {
         closest_ancestor_excluding: Option<Vec<Nibble>>,
     },
     FinalizedRuntimeStorageMerkleValues {
-        // TODO: overcomplicated
-        result_tx: oneshot::Sender<Option<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<Nibble>>)>>,
+        result_tx: oneshot::Sender<Option<FinalizedRuntimeStorageMerkleValues>>,
     },
     IsNearHeadOfChainHeuristic {
         result_tx: oneshot::Sender<bool>,
@@ -1805,13 +1813,26 @@ async fn run_background<TPlat: PlatformRef>(
                 );
 
                 let _ = result_tx.send(
-                    if let Tree::FinalizedBlockRuntimeKnown { tree, .. } = &background.tree {
+                    if let Tree::FinalizedBlockRuntimeKnown {
+                        tree,
+                        finalized_block,
+                        ..
+                    } = &background.tree
+                    {
                         let runtime = &tree.output_finalized_async_user_data();
-                        Some((
-                            runtime.runtime_code.clone(),
-                            runtime.code_merkle_value.clone(),
-                            runtime.closest_ancestor_excluding.clone(),
-                        ))
+                        let finalized_block_header = header::decode(
+                            &finalized_block.scale_encoded_header,
+                            background.sync_service.block_number_bytes(),
+                        )
+                        .unwrap();
+
+                        Some(FinalizedRuntimeStorageMerkleValues {
+                            finalized_block_hash: finalized_block.hash,
+                            finalized_block_state_root_hash: *finalized_block_header.state_root,
+                            runtime_code: runtime.runtime_code.clone(),
+                            code_merkle_value: runtime.code_merkle_value.clone(),
+                            closest_ancestor_excluding: runtime.closest_ancestor_excluding.clone(),
+                        })
                     } else {
                         None
                     },
