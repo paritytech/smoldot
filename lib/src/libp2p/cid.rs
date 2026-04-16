@@ -407,6 +407,20 @@ mod tests {
     }
 
     #[test]
+    fn cid_from_str() {
+        let cid = Cid::from_str("bafk2bzacecjiwibwnfb6fl6rd26a5lrokoutx4lxut6pgw6mmtkqg4comxrae")
+            .unwrap();
+        let decoded = decode_cid(cid.as_ref()).unwrap();
+        assert_eq!(decoded.codec, 0x55);
+        assert_eq!(decoded.mh_type, MultihashType::Blake2b256);
+        assert_eq!(
+            Vec::from(decoded.digest),
+            hex::decode("928b20366943e2afd11ebc0eae2e53a93bf177a4fcf35bcc64d503704e65e202")
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn cid_prefix_from_bytes_valid() {
         let prefix = CidPrefix::from_bytes(sample_prefix_bytes()).unwrap();
         assert_eq!(prefix.multihash_type(), MultihashType::Sha2_256);
@@ -476,6 +490,4 @@ mod tests {
         assert_eq!(prefix.multihash_type(), MultihashType::Blake2b256);
         assert_eq!(prefix.0, vec![0x01, 0x55, 0xa0, 0xe4, 0x02, 0x20]);
     }
-
-    // TODO: test `from_str`.
 }
