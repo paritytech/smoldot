@@ -797,7 +797,7 @@ async fn run_background<TPlat: PlatformRef>(
         let tree = {
             let mut tree = async_tree::AsyncTree::new(async_tree::Config {
                 finalized_async_user_data: None,
-                retry_after_failed: Duration::from_secs(10),
+                retry_after_failed: Duration::from_secs(4),
                 blocks_capacity: 32,
             });
             let node_index = tree.input_insert_block(
@@ -941,17 +941,15 @@ async fn run_background<TPlat: PlatformRef>(
                 loop {
                     // There might be a new runtime download to start.
                     // Don't download more than 2 runtimes at a time.
-                    // When the finalized block runtime is unknown, don't try to download
-                    // it independently. The sync service will provide it either through
-                    // warp sync (via subscribe_all after subscription reset) or through
-                    // the initial subscription. Downloading here would fail because peers
-                    // might not be connected yet, hitting a 10-second retry delay.
-                    let wait = if num_runtime_downloads < 2 && finalized_block_known {
+                    let wait = if num_runtime_downloads < 2 {
+                        // Grab what to download. If there's nothing more to download, do nothing.
                         let async_op = match &mut background.tree {
                             Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
                                 tree.next_necessary_async_op(&background.platform.now())
                             }
-                            Tree::FinalizedBlockRuntimeUnknown { .. } => unreachable!(),
+                            Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                                tree.next_necessary_async_op(&background.platform.now())
+                            }
                         };
 
                         match async_op {
@@ -1430,7 +1428,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 let mut tree =
                                     async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
                                         finalized_async_user_data: runtime,
-                                        retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
+                                        retry_after_failed: Duration::from_secs(4), // TODO: hardcoded
                                         blocks_capacity: 32,
                                     });
 
@@ -1478,7 +1476,7 @@ async fn run_background<TPlat: PlatformRef>(
                             tree: {
                                 let mut tree = async_tree::AsyncTree::new(async_tree::Config {
                                     finalized_async_user_data: None,
-                                    retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
+                                    retry_after_failed: Duration::from_secs(4), // TODO: hardcoded
                                     blocks_capacity: 32,
                                 });
                                 let node_index = tree.input_insert_block(
