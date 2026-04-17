@@ -941,15 +941,17 @@ async fn run_background<TPlat: PlatformRef>(
                 loop {
                     // There might be a new runtime download to start.
                     // Don't download more than 2 runtimes at a time.
-                    let wait = if num_runtime_downloads < 2 {
-                        // Grab what to download. If there's nothing more to download, do nothing.
+                    // When the finalized block runtime is unknown, don't try to download
+                    // it independently. The sync service will provide it either through
+                    // warp sync (via subscribe_all after subscription reset) or through
+                    // the initial subscription. Downloading here would fail because peers
+                    // might not be connected yet, hitting a 10-second retry delay.
+                    let wait = if num_runtime_downloads < 2 && finalized_block_known {
                         let async_op = match &mut background.tree {
                             Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
                                 tree.next_necessary_async_op(&background.platform.now())
                             }
-                            Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                tree.next_necessary_async_op(&background.platform.now())
-                            }
+                            Tree::FinalizedBlockRuntimeUnknown { .. } => unreachable!(),
                         };
 
                         match async_op {
@@ -2491,13 +2493,15 @@ async fn run_background<TPlat: PlatformRef>(
                         let parent_index = if new_block.parent_hash == finalized_block.hash {
                             None
                         } else {
-                            Some(
-                                // TODO: O(n)
-                                tree.input_output_iter_unordered()
-                                    .find(|block| block.user_data.hash == new_block.parent_hash)
-                                    .unwrap()
-                                    .id,
-                            )
+                            match tree
+                                .input_output_iter_unordered()
+                                .find(|block| block.user_data.hash == new_block.parent_hash)
+                            {
+                                Some(block) => Some(block.id),
+                                // Parent already pruned by finalization; block is
+                                // on a stale fork and can be silently discarded.
+                                None => continue,
+                            }
                         };
 
                         tree.input_insert_block(
@@ -2520,11 +2524,13 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                     Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
                         // TODO: O(n)
-                        let parent_index = tree
+                        let parent_index = match tree
                             .input_output_iter_unordered()
                             .find(|block| block.user_data.hash == new_block.parent_hash)
-                            .unwrap()
-                            .id;
+                        {
+                            Some(block) => block.id,
+                            None => continue,
+                        };
                         tree.input_insert_block(
                             Block {
                                 hash: header::hash_from_scale_encoded_header(

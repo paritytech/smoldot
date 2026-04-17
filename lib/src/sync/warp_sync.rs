@@ -148,17 +148,6 @@ pub struct Config {
     /// risk of wasting more bandwidth in case the downloaded fragments need to be thrown away.
     pub num_download_ahead_fragments: usize,
 
-    /// If the height of the current local finalized block is `N`, the warp sync state machine
-    /// will not attempt to warp sync to blocks whose height inferior or equal to `N + k` where
-    /// `k` is the value in this field.
-    ///
-    /// Because warp syncing is a relatively expensive process, it is not worth performing it
-    /// between two blocks that are too close to each other.
-    ///
-    /// The ideal value of this field depends on the block production rate and the time it takes
-    /// to answer requests.
-    pub warp_sync_minimum_gap: usize,
-
     /// If `true`, the body of the warp sync target will be downloaded before the warp sync
     /// finishes.
     /// Determines whether [`RuntimeInformation::finalized_body`] is `Some`.
@@ -245,7 +234,6 @@ pub fn start_warp_sync<TSrc, TRq>(
         verified_chain_information: config.start_chain_information,
         code_trie_node_hint: config.code_trie_node_hint,
         num_download_ahead_fragments: config.num_download_ahead_fragments,
-        warp_sync_minimum_gap: config.warp_sync_minimum_gap,
         block_number_bytes: config.block_number_bytes,
         download_all_chain_information_storage_proofs: config
             .download_all_chain_information_storage_proofs,
@@ -345,8 +333,6 @@ pub struct WarpSync<TSrc, TRq> {
     verified_chain_information: ValidChainInformation,
     /// See [`Config::num_download_ahead_fragments`].
     num_download_ahead_fragments: usize,
-    /// See [`Config::warp_sync_minimum_gap`].
-    warp_sync_minimum_gap: usize,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
     /// See [`Config::download_all_chain_information_storage_proofs`].
@@ -836,16 +822,9 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                             .map(|header| header.number)
                     })
                     .unwrap_or(Some(self.warped_header_number));
-                let warp_sync_minimum_gap = self.warp_sync_minimum_gap;
-
                 if let Some(verify_queue_tail_block_number) = verify_queue_tail_block_number {
-                    // Combine the request with every single available source.
                     either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
-                        if src.finalized_block_height
-                            <= verify_queue_tail_block_number.saturating_add(
-                                u64::try_from(warp_sync_minimum_gap).unwrap_or(u64::MAX),
-                            )
-                        {
+                        if src.finalized_block_height <= verify_queue_tail_block_number {
                             return None;
                         }
 

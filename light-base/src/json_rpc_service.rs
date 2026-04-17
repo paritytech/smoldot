@@ -118,6 +118,13 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Hash of the genesis block of the chain.
     pub genesis_block_hash: [u8; 32],
+
+    /// Statement protocol configuration. `None` if the statement protocol is disabled.
+    pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+
+    /// Maximum number of seen statement hashes tracked per subscription for dedup.
+    /// `None` if the statement protocol is disabled.
+    pub max_seen_statements: Option<NonZero<usize>>,
 }
 
 /// Creates a new JSON-RPC service with the given configuration.
@@ -157,6 +164,8 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
                 system_name: config.system_name,
                 system_version: config.system_version,
                 genesis_block_hash: config.genesis_block_hash,
+                statement_protocol_config: config.statement_protocol_config,
+                max_seen_statements: config.max_seen_statements,
             },
             requests_rx,
             responses_tx,

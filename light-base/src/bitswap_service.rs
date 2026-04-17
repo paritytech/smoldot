@@ -248,90 +248,6 @@ impl From<SendBitswapMessageError> for BitswapGetError {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Parse the error code from the JSON-RPC error response string.
-    fn extract_error_code(json: &str) -> i64 {
-        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
-        parsed["error"]["code"].as_i64().unwrap()
-    }
-
-    /// Parse the data.variant field from the JSON-RPC error response string.
-    fn extract_variant(json: &str) -> String {
-        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
-        parsed["error"]["data"]["variant"]
-            .as_str()
-            .unwrap()
-            .to_owned()
-    }
-
-    #[test]
-    fn error_invalid_cid_maps_to_invalid_params() {
-        let err = BitswapGetError::InvalidCid(Cid::from_str("not-a-cid").unwrap_err());
-        let json = err.to_json_rpc_error("\"1\"");
-        assert_eq!(extract_error_code(&json), -32602); // InvalidParams
-        assert_eq!(extract_variant(&json), "InvalidCid");
-    }
-
-    #[test]
-    fn error_not_found_maps_to_fail() {
-        let json = BitswapGetError::NotFound.to_json_rpc_error("\"1\"");
-        assert_eq!(extract_error_code(&json), -32810); // Fail
-        assert_eq!(extract_variant(&json), "NotFound");
-    }
-
-    #[test]
-    fn error_block_request_failed_maps_to_fail_retry() {
-        let json = BitswapGetError::BlockRequestFailed.to_json_rpc_error("\"1\"");
-        assert_eq!(extract_error_code(&json), -32811); // FailRetry
-        assert_eq!(extract_variant(&json), "BlockRequestFailed");
-    }
-
-    #[test]
-    fn error_timeout_maps_to_fail_retry() {
-        let json = BitswapGetError::Timeout.to_json_rpc_error("\"1\"");
-        assert_eq!(extract_error_code(&json), -32811); // FailRetry
-        assert_eq!(extract_variant(&json), "Timeout");
-    }
-
-    #[test]
-    fn error_queue_full_maps_to_fail_retry_backoff() {
-        let json = BitswapGetError::QueueFull.to_json_rpc_error("\"1\"");
-        assert_eq!(extract_error_code(&json), -32812); // FailRetryBackoff
-        assert_eq!(extract_variant(&json), "QueueFull");
-    }
-
-    #[test]
-    fn error_no_peers_maps_to_fail_retry_backoff() {
-        let json = BitswapGetError::NoPeers.to_json_rpc_error("\"1\"");
-        assert_eq!(extract_error_code(&json), -32812); // FailRetryBackoff
-        assert_eq!(extract_variant(&json), "NoPeers");
-    }
-
-    #[test]
-    fn error_response_is_valid_jsonrpc() {
-        let json = BitswapGetError::NotFound.to_json_rpc_error("42");
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["jsonrpc"], "2.0");
-        assert_eq!(parsed["id"], 42);
-        assert!(parsed["error"]["message"].is_string());
-    }
-
-    #[test]
-    fn from_send_error_no_connection() {
-        let err: BitswapGetError = SendBitswapMessageError::NoConnection.into();
-        assert!(matches!(err, BitswapGetError::NoPeers));
-    }
-
-    #[test]
-    fn from_send_error_queue_full() {
-        let err: BitswapGetError = SendBitswapMessageError::QueueFull.into();
-        assert!(matches!(err, BitswapGetError::QueueFull));
-    }
-}
-
 enum ToBackground {
     BitswapBlock {
         cid: Cid,
@@ -419,11 +335,11 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
 }
 
 fn bitswap_have_message(cid: &Cid) -> Vec<u8> {
-    build_bitswap_message(iter::once(cid), WantType::Have, true, true)
+    build_bitswap_message(iter::once(cid), WantType::Have, true, false)
 }
 
 fn bitswap_block_message(cid: &Cid) -> Vec<u8> {
-    build_bitswap_message(iter::once(cid), WantType::Block, false, true)
+    build_bitswap_message(iter::once(cid), WantType::Block, false, false)
 }
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
@@ -762,5 +678,89 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse the error code from the JSON-RPC error response string.
+    fn extract_error_code(json: &str) -> i64 {
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        parsed["error"]["code"].as_i64().unwrap()
+    }
+
+    /// Parse the data.variant field from the JSON-RPC error response string.
+    fn extract_variant(json: &str) -> String {
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        parsed["error"]["data"]["variant"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[test]
+    fn error_invalid_cid_maps_to_invalid_params() {
+        let err = BitswapGetError::InvalidCid(Cid::from_str("not-a-cid").unwrap_err());
+        let json = err.to_json_rpc_error("\"1\"");
+        assert_eq!(extract_error_code(&json), -32602); // InvalidParams
+        assert_eq!(extract_variant(&json), "InvalidCid");
+    }
+
+    #[test]
+    fn error_not_found_maps_to_fail() {
+        let json = BitswapGetError::NotFound.to_json_rpc_error("\"1\"");
+        assert_eq!(extract_error_code(&json), -32810); // Fail
+        assert_eq!(extract_variant(&json), "NotFound");
+    }
+
+    #[test]
+    fn error_block_request_failed_maps_to_fail_retry() {
+        let json = BitswapGetError::BlockRequestFailed.to_json_rpc_error("\"1\"");
+        assert_eq!(extract_error_code(&json), -32811); // FailRetry
+        assert_eq!(extract_variant(&json), "BlockRequestFailed");
+    }
+
+    #[test]
+    fn error_timeout_maps_to_fail_retry() {
+        let json = BitswapGetError::Timeout.to_json_rpc_error("\"1\"");
+        assert_eq!(extract_error_code(&json), -32811); // FailRetry
+        assert_eq!(extract_variant(&json), "Timeout");
+    }
+
+    #[test]
+    fn error_queue_full_maps_to_fail_retry_backoff() {
+        let json = BitswapGetError::QueueFull.to_json_rpc_error("\"1\"");
+        assert_eq!(extract_error_code(&json), -32812); // FailRetryBackoff
+        assert_eq!(extract_variant(&json), "QueueFull");
+    }
+
+    #[test]
+    fn error_no_peers_maps_to_fail_retry_backoff() {
+        let json = BitswapGetError::NoPeers.to_json_rpc_error("\"1\"");
+        assert_eq!(extract_error_code(&json), -32812); // FailRetryBackoff
+        assert_eq!(extract_variant(&json), "NoPeers");
+    }
+
+    #[test]
+    fn error_response_is_valid_jsonrpc() {
+        let json = BitswapGetError::NotFound.to_json_rpc_error("42");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["id"], 42);
+        assert!(parsed["error"]["message"].is_string());
+    }
+
+    #[test]
+    fn from_send_error_no_connection() {
+        let err: BitswapGetError = SendBitswapMessageError::NoConnection.into();
+        assert!(matches!(err, BitswapGetError::NoPeers));
+    }
+
+    #[test]
+    fn from_send_error_queue_full() {
+        let err: BitswapGetError = SendBitswapMessageError::QueueFull.into();
+        assert!(matches!(err, BitswapGetError::QueueFull));
     }
 }

@@ -22,9 +22,16 @@
 use alloc::{borrow::Cow, string::String};
 use core::{fmt, iter};
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StatementProtocolVersion {
+    V1,
+    V2,
+}
+
 // Implementation note: each protocol goes into a different sub-module whose content is
 // re-exported here.
 
+mod affinity;
 mod bitswap;
 mod block_announces;
 mod block_request;
@@ -36,6 +43,7 @@ mod state_request;
 mod statement;
 mod storage_call_proof;
 
+pub use self::affinity::{AffinityFilter, DecodeAffinityFilterError};
 pub use self::bitswap::*;
 pub use self::block_announces::*;
 pub use self::block_request::*;
@@ -88,6 +96,7 @@ pub enum ProtocolName<'a> {
     Statement {
         genesis_hash: [u8; 32],
         fork_id: Option<&'a str>,
+        version: StatementProtocolVersion,
     },
 }
 
@@ -150,7 +159,13 @@ pub fn encode_protocol_name(protocol: ProtocolName) -> impl Iterator<Item = impl
         ProtocolName::Statement {
             genesis_hash,
             fork_id,
+            version: StatementProtocolVersion::V1,
         } => (genesis_hash, fork_id, "statement/1"),
+        ProtocolName::Statement {
+            genesis_hash,
+            fork_id,
+            version: StatementProtocolVersion::V2,
+        } => (genesis_hash, fork_id, "statement/2"),
     };
 
     let genesis_hash = hex::encode(genesis_hash);
@@ -254,7 +269,8 @@ enum ProtocolTy {
     Kad,
     SyncWarp,
     State,
-    Statement,
+    StatementV1,
+    StatementV2,
 }
 
 fn protocol_ty(name: &str) -> nom::IResult<&str, ProtocolTy> {
@@ -276,8 +292,11 @@ fn protocol_ty(name: &str) -> nom::IResult<&str, ProtocolTy> {
                 ProtocolTy::SyncWarp
             }),
             nom::combinator::map(nom::bytes::complete::tag("state/2"), |_| ProtocolTy::State),
+            nom::combinator::map(nom::bytes::complete::tag("statement/2"), |_| {
+                ProtocolTy::StatementV2
+            }),
             nom::combinator::map(nom::bytes::complete::tag("statement/1"), |_| {
-                ProtocolTy::Statement
+                ProtocolTy::StatementV1
             }),
         )),
         name,
@@ -322,9 +341,15 @@ fn protocol_ty_to_real_protocol(
             genesis_hash,
             fork_id,
         },
-        ProtocolTy::Statement => ProtocolName::Statement {
+        ProtocolTy::StatementV1 => ProtocolName::Statement {
             genesis_hash,
             fork_id,
+            version: StatementProtocolVersion::V1,
+        },
+        ProtocolTy::StatementV2 => ProtocolName::Statement {
+            genesis_hash,
+            fork_id,
+            version: StatementProtocolVersion::V2,
         },
     }
 }
@@ -349,9 +374,41 @@ mod tests {
 
         assert!(matches!(
             decoded,
-            ProtocolName::Statement { genesis_hash, fork_id: None }
+            ProtocolName::Statement { genesis_hash, fork_id: None, version: StatementProtocolVersion::V1 }
             if hex::encode(genesis_hash) == "fccae9f32db7eedb8310800252752bf649e2e3661a9260f784b3579ce14933af"
         ));
+    }
+
+    #[test]
+    fn statement_protocol_name_roundtrip() {
+        let genesis_hash = [0xab; 32];
+
+        for (version, suffix) in [
+            (StatementProtocolVersion::V1, "/statement/1"),
+            (StatementProtocolVersion::V2, "/statement/2"),
+        ] {
+            let protocol = ProtocolName::Statement {
+                genesis_hash,
+                fork_id: None,
+                version,
+            };
+
+            let encoded = encode_to_string(protocol);
+            assert!(encoded.ends_with(suffix));
+
+            let decoded = decode_protocol_name(&encoded).unwrap();
+            let ProtocolName::Statement {
+                genesis_hash: gh,
+                fork_id: None,
+                version: v,
+            } = decoded
+            else {
+                panic!("Expected Statement protocol");
+            };
+
+            assert_eq!(gh, genesis_hash);
+            assert_eq!(v, version);
+        }
     }
 
     #[test]
@@ -360,6 +417,7 @@ mod tests {
         let protocol = ProtocolName::Statement {
             genesis_hash,
             fork_id: Some("polkadot"),
+            version: StatementProtocolVersion::V1,
         };
 
         let encoded = encode_to_string(protocol);
@@ -367,7 +425,7 @@ mod tests {
 
         assert!(matches!(
             decoded,
-            ProtocolName::Statement { genesis_hash: gh, fork_id: Some("polkadot") }
+            ProtocolName::Statement { genesis_hash: gh, fork_id: Some("polkadot"), version: StatementProtocolVersion::V1 }
             if gh == genesis_hash
         ));
     }

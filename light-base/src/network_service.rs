@@ -72,7 +72,8 @@ use smoldot::{
     network::{basic_peering_strategy, bitswap_peering_strategy, codec, service},
 };
 
-pub use codec::{CallProofRequestConfig, Role};
+pub use codec::{AffinityFilter, CallProofRequestConfig, Role};
+use service::SendTopicAffinityError;
 pub use service::{
     ChainId, EncodedMerkleProof, PeerId, QueueNotificationError, SendBitswapMessageError,
 };
@@ -80,26 +81,48 @@ pub use service::{
 /// Configuration for the Statement Store protocol.
 #[derive(Debug, Clone)]
 pub struct StatementProtocolConfig {
+    /// Per-subscription LRU cache size used for deduplicating delivered statements.
     max_seen_statements: NonZeroUsize,
+    false_positive_rate: f64,
+    bloom_seed: u128,
+    affinity_update_interval: Duration,
 }
 
 impl StatementProtocolConfig {
-    pub fn new(max_seen_statements: NonZeroUsize) -> Self {
+    pub fn new(
+        max_seen_statements: NonZeroUsize,
+        false_positive_rate: f64,
+        bloom_seed: u128,
+        affinity_update_interval: Duration,
+    ) -> Self {
+        assert!(
+            false_positive_rate.is_finite()
+                && false_positive_rate > 0.0
+                && false_positive_rate < 1.0
+        );
+        assert!(!affinity_update_interval.is_zero());
         StatementProtocolConfig {
             max_seen_statements,
+            false_positive_rate,
+            bloom_seed,
+            affinity_update_interval,
         }
     }
 
     pub fn max_seen_statements(&self) -> NonZeroUsize {
         self.max_seen_statements
     }
-}
 
-impl Default for StatementProtocolConfig {
-    fn default() -> Self {
-        StatementProtocolConfig {
-            max_seen_statements: NonZeroUsize::new(65536).expect("65536 is not zero; qed"),
-        }
+    pub fn false_positive_rate(&self) -> f64 {
+        self.false_positive_rate
+    }
+
+    pub fn bloom_seed(&self) -> u128 {
+        self.bloom_seed
+    }
+
+    pub fn affinity_update_interval(&self) -> Duration {
+        self.affinity_update_interval
     }
 }
 
@@ -230,6 +253,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             next_recent_connection_restore: None,
             platform: config.platform.clone(),
             open_gossip_links: BTreeMap::new(),
+            v2_statement_peers: HashMap::with_capacity_and_hasher(4, Default::default()),
+            current_affinity_filter: HashMap::with_capacity_and_hasher(4, Default::default()),
             event_pending_send: None,
             event_senders: either::Left(Vec::new()),
             pending_new_subscriptions: Vec::new(),
@@ -271,16 +296,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
         // TODO: this code is hacky because we don't want to make `add_chain` async at the moment, because it's not convenient for lib.rs
         self.platform.spawn_task("add-chain-message-send".into(), {
-            let seen_statements =
-                config
-                    .statement_protocol_config
-                    .as_ref()
-                    .map(|spc: &StatementProtocolConfig| {
-                        lru::LruCache::with_hasher(
-                            spc.max_seen_statements(),
-                            fnv::FnvBuildHasher::default(),
-                        )
-                    });
             let config = service::ChainConfig {
                 grandpa_protocol_config: config.grandpa_protocol_finalized_block_height.map(
                     |commit_finalized_height| service::GrandpaState {
@@ -304,7 +319,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     num_references: NonZero::<usize>::new(1).unwrap(),
                     next_discovery_period: Duration::from_secs(2),
                     next_discovery_when: self.platform.now(),
-                    seen_statements,
                 },
             };
 
@@ -691,6 +705,13 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
+    pub async fn update_topic_affinity(&self, filter: AffinityFilter) {
+        self.messages_tx
+            .send(ToBackgroundChain::UpdateTopicAffinity { filter })
+            .await
+            .unwrap();
+    }
+
     /// Marks the given peers as belonging to the given chain, and adds some addresses to these
     /// peers to the address book.
     ///
@@ -755,7 +776,6 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
 pub struct BroadcastStatementResult {
     pub sent: usize,
     pub total: usize,
-    pub is_known: bool,
 }
 
 /// Event that can happen on the network service.
@@ -786,7 +806,7 @@ pub enum Event {
     /// Received a statement notification from the network.
     StatementsNotification {
         peer_id: PeerId,
-        statements: Vec<codec::Statement>,
+        statements: Vec<([u8; 32], codec::Statement)>,
     },
 }
 
@@ -974,6 +994,9 @@ enum ToBackgroundChain {
         statement: Vec<u8>,
         result: oneshot::Sender<BroadcastStatementResult>,
     },
+    UpdateTopicAffinity {
+        filter: AffinityFilter,
+    },
     Discover {
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
         important_nodes: bool,
@@ -1035,6 +1058,12 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// List of all open gossip links.
     // TODO: using this data structure unfortunately means that PeerIds are cloned a lot, maybe some user data in ChainNetwork is better? not sure
     open_gossip_links: BTreeMap<(ChainId, PeerId), OpenGossipLinkState>,
+
+    /// Connected peers using statement protocol V2, per chain.
+    v2_statement_peers: HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
+
+    /// Current topic affinity filter per chain, sent to V2 peers on connect.
+    current_affinity_filter: HashMap<ChainId, AffinityFilter, fnv::FnvBuildHasher>,
 
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
@@ -1137,8 +1166,6 @@ struct Chain<TPlat: PlatformRef> {
     /// After [`Chain::next_discovery_when`] is reached, the following discovery happens after
     /// the given duration.
     next_discovery_period: Duration,
-
-    seen_statements: Option<lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>>,
 }
 
 #[derive(Clone)]
@@ -1555,6 +1582,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "chain-removed",
                     id = task.network[chain_id].log_name
                 );
+                task.v2_statement_peers.remove(&chain_id);
+                task.current_affinity_filter.remove(&chain_id);
                 task.network.remove_chain(chain_id).unwrap();
                 task.peering_strategy.remove_chain_peers(&chain_id);
             }
@@ -1631,6 +1660,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
                     debug_assert!(_was_in.is_some());
+
+                    if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                        peers.remove(&peer_id);
+                    }
 
                     debug_assert!(task.event_pending_send.is_none());
                     task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
@@ -2051,59 +2084,57 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 ToBackgroundChain::BroadcastStatement { statement, result },
             ) => {
-                let is_known =
-                    task.network[chain_id]
-                        .seen_statements
-                        .as_mut()
-                        .map_or(false, |cache| {
-                            let hash = codec::statement_hash(&statement);
-                            let already_known = cache.contains(&hash);
-                            cache.push(hash, ());
-                            already_known
-                        });
+                let peers_to_send = task
+                    .network
+                    .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
+                    .cloned()
+                    .collect::<Vec<_>>();
 
-                let (sent, total) = if is_known {
-                    (0, 0)
-                } else {
-                    let peers_to_send = task
+                let total = peers_to_send.len();
+                let mut sent = 0;
+                for peer in &peers_to_send {
+                    if task
                         .network
-                        .gossip_connected_peers(
-                            chain_id,
-                            service::GossipKind::ConsensusTransactions,
-                        )
-                        .cloned()
-                        .collect::<Vec<_>>();
-
-                    let total = peers_to_send.len();
-                    let mut sent = 0;
-                    for peer in &peers_to_send {
-                        if task
-                            .network
-                            .gossip_send_statement(peer, chain_id, statement.clone())
-                            .is_ok()
-                        {
-                            sent += 1;
-                        }
+                        .gossip_send_statement(peer, chain_id, statement.clone())
+                        .is_ok()
+                    {
+                        sent += 1;
                     }
+                }
 
-                    log!(
-                        &task.platform,
-                        Debug,
-                        "network",
-                        "statement-broadcast",
-                        chain = task.network[chain_id].log_name,
-                        sent,
-                        total,
-                    );
-
-                    (sent, total)
-                };
-
-                let _ = result.send(BroadcastStatementResult {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "statement-broadcast",
+                    chain = task.network[chain_id].log_name,
                     sent,
                     total,
-                    is_known,
-                });
+                );
+
+                let _ = result.send(BroadcastStatementResult { sent, total });
+            }
+            WakeUpReason::MessageForChain(
+                chain_id,
+                ToBackgroundChain::UpdateTopicAffinity { filter },
+            ) => {
+                task.current_affinity_filter
+                    .insert(chain_id, filter.clone());
+                if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                    let mut to_remove = Vec::new();
+                    for peer_id in peers.iter() {
+                        if let Err(
+                            SendTopicAffinityError::NoConnection
+                            | SendTopicAffinityError::ProtocolV1,
+                        ) = task.network.send_topic_affinity(peer_id, chain_id, &filter)
+                        {
+                            to_remove.push(peer_id.clone());
+                        }
+                    }
+                    for peer_id in &to_remove {
+                        peers.remove(peer_id);
+                    }
+                }
             }
             WakeUpReason::MessageForChain(
                 chain_id,
@@ -2345,6 +2376,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             "bitswap-slot-unassigned",
                             peer_id,
                             ?ban_duration,
+                            reason = "disconnect",
                         );
                     }
                     let _ = task
@@ -2554,6 +2586,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         &peer_id,
                         service::GossipKind::ConsensusTransactions,
                     );
+                }
+
+                if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                    peers.remove(&peer_id);
                 }
 
                 debug_assert!(task.event_pending_send.is_none());
@@ -3108,22 +3144,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 debug_assert!(task.event_pending_send.is_none());
 
-                let chain = &mut task.network[chain_id];
-                let non_duplicates: Vec<codec::Statement> = statements
-                    .into_iter()
-                    .filter_map(|(hash, statement)| {
-                        let Some(cache) = &mut chain.seen_statements else {
-                            return Some(statement);
-                        };
-                        if cache.contains(&hash) {
-                            return None;
-                        }
-                        cache.push(hash, ());
-                        Some(statement)
-                    })
-                    .collect();
-
-                if non_duplicates.is_empty() {
+                if statements.is_empty() {
                     continue;
                 }
 
@@ -3131,10 +3152,40 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     chain_id,
                     Event::StatementsNotification {
                         peer_id,
-                        statements: non_duplicates,
+                        statements,
                     },
                 ));
             }
+            WakeUpReason::NetworkEvent(service::Event::StatementProtocolConnected {
+                peer_id,
+                chain_id,
+                version,
+            }) => {
+                if matches!(version, codec::StatementProtocolVersion::V2) {
+                    task.v2_statement_peers
+                        .entry(chain_id)
+                        .or_insert_with(|| {
+                            HashSet::with_capacity_and_hasher(16, Default::default())
+                        })
+                        .insert(peer_id.clone());
+                    if let Some(filter) = task.current_affinity_filter.get(&chain_id) {
+                        if let Err(
+                            SendTopicAffinityError::NoConnection
+                            | SendTopicAffinityError::ProtocolV1,
+                        ) = task.network.send_topic_affinity(&peer_id, chain_id, filter)
+                        {
+                            task.v2_statement_peers
+                                .get_mut(&chain_id)
+                                .unwrap()
+                                .remove(&peer_id);
+                        }
+                    }
+                }
+            }
+            // TODO: we don't filter outbound statements yet
+            WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived {
+                ..
+            }) => {}
             WakeUpReason::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 // TODO: handle properly?
                 log!(

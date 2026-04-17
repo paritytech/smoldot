@@ -1126,6 +1126,10 @@ where
     /// Close inbound Bitswap substream. Because Bitswap protocol doesn't specify a way to signal
     /// remote about a desire to close an inbound substream, this in fact resets the substream.
     ///
+    /// Unlike Notifications, Bitswap in substreams do not have `SubstreamState::RequestedClosing`,
+    /// and are instantly removed. This affects the race condition resolution between the
+    /// coordinator and connection task for Bitswap in substreams.
+    ///
     /// This is used to limit the number of inbound Bitswap substreams remote has opened with us.
     ///
     /// This function generates a message destined to the connection. Use
@@ -1992,10 +1996,18 @@ where
                         continue;
                     }
 
-                    let substream_id = *self
+                    let substream_id = match self
                         .ingoing_bitswap_substreams_by_connection
                         .get(&(connection_id, inner_substream_id))
-                        .unwrap();
+                    {
+                        Some(&id) => id,
+                        None => {
+                            // It is possible that the coordinator has already removed this
+                            // substream via `close_in_bitswap()` while a `BitswapIn` message
+                            // was in flight. Silently discard the message.
+                            continue;
+                        }
+                    };
 
                     Event::BitswapIn {
                         substream_id,
@@ -2014,17 +2026,39 @@ where
                         continue;
                     }
 
-                    let substream_id = self
+                    match self
                         .ingoing_bitswap_substreams_by_connection
                         .remove(&(connection_id, inner_substream_id))
-                        .unwrap();
-                    self.ingoing_bitswap_substreams
-                        .remove(&substream_id)
-                        .unwrap();
+                    {
+                        Some(substream_id) => {
+                            self.ingoing_bitswap_substreams
+                                .remove(&substream_id)
+                                .unwrap();
 
-                    Event::BitswapInClose {
-                        substream_id,
-                        outcome: outcome.map_err(BitswapInClosedErr::Substream),
+                            // As documented, we must acknowledge the reception of the
+                            // event by sending back a `CloseInBitswap`, provided that
+                            // no such message has been sent beforehand (i.e.,
+                            // `close_in_bitswap()` hasn't been called).
+                            self.messages_to_connections.push_back((
+                                connection_id,
+                                CoordinatorToConnectionInner::CloseInBitswap {
+                                    substream_id: inner_substream_id,
+                                },
+                            ));
+
+                            Event::BitswapInClose {
+                                substream_id,
+                                outcome: outcome.map_err(BitswapInClosedErr::Substream),
+                            }
+                        }
+                        None => {
+                            // The coordinator has already removed this substream via
+                            // `close_in_bitswap()`. The `CloseInBitswap` message sent
+                            // by `close_in_bitswap()` will serve as the acknowledgment
+                            // consumed by the connection task's
+                            // `bitswap_in_close_acknowledgments`.
+                            continue;
+                        }
                     }
                 }
                 ConnectionToCoordinatorInner::BitswapOutOpenResult {
@@ -2256,8 +2290,10 @@ enum ConnectionToCoordinatorInner {
         message: Vec<u8>,
     },
     /// Remote has closed the inbound Bitswap substream with us, or the substream error occurred.
-    /// Unlike `NotificationsInClose`, we don't need to acknowledge this event.
-    // TODO: may be we need an acknowledgement mechanism like Notifications?
+    ///
+    /// In order to avoid race conditions, this must always be acknowledged by sending back a
+    /// [`CoordinatorToConnectionInner::CloseInBitswap`] message if no such message was
+    /// sent in the past (i.e., if `close_in_bitswap()` hasn't already been called).
     BitswapInClose {
         /// Inner substream ID.
         id: established::SubstreamId,

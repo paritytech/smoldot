@@ -1173,11 +1173,13 @@ where
                 if let Some(sz) = next_message_size {
                     match read_write.incoming_bytes_take(sz) {
                         Ok(Some(msg)) => {
+                            read_write.wake_up_asap();
                             message = Some(msg);
                             next_message_size = None;
                         }
                         Ok(None) => {}
                         Err(read_write::IncomingBytesTakeError::ReadClosed) => {
+                            read_write.wake_up_asap();
                             return (
                                 Some(SubstreamInner::BitswapInClosed),
                                 Some(Event::BitswapInClose {
@@ -1191,6 +1193,7 @@ where
                         Ok(Some(sz)) => next_message_size = Some(sz),
                         Ok(None) => {}
                         Err(err) => {
+                            read_write.wake_up_asap();
                             return (
                                 Some(SubstreamInner::BitswapInClosed),
                                 Some(Event::BitswapInClose {
@@ -1355,9 +1358,17 @@ where
                 outcome: Err(BitswapInClosedErr::SubstreamReset),
             }),
             SubstreamInner::BitswapInClosed => None,
-            SubstreamInner::BitswapOut { .. } => Some(Event::BitswapOutClose {
-                error: BitswapOutClosedErr::SubstreamReset,
-            }),
+            SubstreamInner::BitswapOut { negotiation, .. } => {
+                if negotiation.is_some() {
+                    Some(Event::BitswapOutOpenResult {
+                        result: Err(BitswapOutOpenErr::SubstreamReset),
+                    })
+                } else {
+                    Some(Event::BitswapOutClose {
+                        error: BitswapOutClosedErr::SubstreamReset,
+                    })
+                }
+            }
             SubstreamInner::BitswapOutClosed => None,
         }
     }

@@ -96,6 +96,13 @@ enum SingleStreamConnectionTaskInner<TNow> {
         /// list, or closes a substream in this list, the acceptance/refusal/closing is dismissed.
         notifications_in_close_acknowledgments: VecDeque<established::SubstreamId>,
 
+        /// After a [`ConnectionToCoordinatorInner::BitswapInClose`] is emitted, an entry is
+        /// added to this list. If the coordinator sends a
+        /// [`CoordinatorToConnectionInner::CloseInBitswap`] for a substream in this list, the
+        /// close is silently discarded instead of being forwarded to the established connection.
+        // TODO: this works only because SubstreamIds aren't reused
+        bitswap_in_close_acknowledgments: VecDeque<established::SubstreamId>,
+
         /// After a `NotificationsInOpenCancel` is emitted by the connection, an
         /// entry is added to this list. If the coordinator accepts or refuses a substream in this
         /// list, the acceptance/refusal is dismissed.
@@ -357,9 +364,20 @@ where
             }
             (
                 CoordinatorToConnectionInner::CloseInBitswap { substream_id },
-                SingleStreamConnectionTaskInner::Established { established, .. },
+                SingleStreamConnectionTaskInner::Established {
+                    established,
+                    bitswap_in_close_acknowledgments,
+                    ..
+                },
             ) => {
-                established.close_in_bitswap_substream(substream_id);
+                if let Some(idx) = bitswap_in_close_acknowledgments
+                    .iter()
+                    .position(|s| *s == substream_id)
+                {
+                    bitswap_in_close_acknowledgments.remove(idx);
+                } else {
+                    established.close_in_bitswap_substream(substream_id);
+                }
             }
             (
                 CoordinatorToConnectionInner::OpenOutBitswap {
@@ -660,6 +678,7 @@ where
                 established,
                 mut outbound_substreams_map,
                 mut notifications_in_close_acknowledgments,
+                mut bitswap_in_close_acknowledgments,
                 mut inbound_negotiated_cancel_acknowledgments,
             } => match established.read_write(read_write) {
                 Ok((connection, event)) => {
@@ -809,8 +828,7 @@ where
                                 .push_back(ConnectionToCoordinatorInner::BitswapIn { id, message });
                         }
                         Some(established::Event::BitswapInClose { id, outcome }) => {
-                            // TODO: do we need a close acknowledgement mechanism similar to
-                            // Notifications?
+                            bitswap_in_close_acknowledgments.push_back(id);
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::BitswapInClose { id, outcome },
                             );
@@ -873,6 +891,7 @@ where
                         established: connection,
                         outbound_substreams_map,
                         notifications_in_close_acknowledgments,
+                        bitswap_in_close_acknowledgments,
                         inbound_negotiated_cancel_acknowledgments,
                     };
                 }
@@ -990,6 +1009,7 @@ where
                                         Default::default(),
                                     ), // TODO: capacity?
                                 notifications_in_close_acknowledgments: VecDeque::with_capacity(4),
+                                bitswap_in_close_acknowledgments: VecDeque::with_capacity(4),
                                 inbound_negotiated_cancel_acknowledgments:
                                     hashbrown::HashSet::with_capacity_and_hasher(
                                         2,

@@ -198,8 +198,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     .download_all_chain_information_storage_proofs,
                 code_trie_node_hint: config.code_trie_node_hint,
                 num_download_ahead_fragments: 128, // TODO: make configurable?
-                // TODO: make configurable?
-                warp_sync_minimum_gap: 32,
                 download_block_body: config.download_bodies,
             })
             .ok(),
@@ -305,6 +303,41 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         };
 
         all_forks.finalized_block_hash()
+    }
+
+    /// Updates the finalized block to the given `block_hash`.
+    ///
+    /// This should be used when the finality is outsourced.
+    pub fn set_finalized_block(
+        &mut self,
+        block_hash: &[u8; 32],
+    ) -> Result<SetFinalizedBlockResult<TBl>, SetFinalizedBlockError> {
+        let Some(all_forks) = self.all_forks.as_mut() else {
+            unreachable!()
+        };
+
+        let result = all_forks
+            .set_finalized_block(block_hash)
+            .map_err(|_| SetFinalizedBlockError::UnknownBlock)?;
+
+        Ok(SetFinalizedBlockResult {
+            finalized_blocks: result
+                .finalized_blocks
+                .into_iter()
+                .map(|b| Block {
+                    header: b.scale_encoded_header,
+                    block_hash: b.block_hash,
+                    // Should be always `Some`.
+                    user_data: b.user_data.unwrap(),
+                })
+                .collect(),
+            pruned_blocks: result
+                .pruned_blocks
+                .into_iter()
+                .map(|b| b.block_hash)
+                .collect(),
+            updates_best_block: result.updates_best_block,
+        })
     }
 
     /// Returns the header of the best block.
@@ -737,7 +770,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 num_blocks,
                 request_headers: true,
                 request_bodies,
-                request_justification: true,
+                request_justification: _,
             } if request_bodies || !self.shared.download_bodies => {
                 let Some(all_forks) = &mut self.all_forks else {
                     unreachable!()
@@ -962,7 +995,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }) = self.ready_to_transition.take()
         {
             let (Some(all_forks), Some(warp_sync)) =
-                (self.all_forks.as_mut(), self.warp_sync.as_mut())
+                (self.all_forks.as_mut(), self.warp_sync.take())
             else {
                 unreachable!()
             };
@@ -2290,6 +2323,22 @@ pub enum FinalityProofVerifyOutcome<TBl> {
     JustificationError(JustificationVerifyError),
     /// Problem while verifying GrandPa commit.
     GrandpaCommitError(CommitVerifyError),
+}
+
+/// Returned by [`AllSync::set_finalized_block`].
+pub struct SetFinalizedBlockResult<TBl> {
+    /// The finalized blocks.
+    pub finalized_blocks: Vec<Block<TBl>>,
+    /// The blocks that got pruned while finalizing.
+    pub pruned_blocks: Vec<[u8; 32]>,
+    /// Is set to `true`, if the best block changed.
+    pub updates_best_block: bool,
+}
+
+/// Potential error returned by [`AllSync::set_finalized_block`].
+#[derive(Debug, derive_more::Display)]
+pub enum SetFinalizedBlockError {
+    UnknownBlock,
 }
 
 pub struct WarpSyncFragmentVerify<TRq, TSrc, TBl> {

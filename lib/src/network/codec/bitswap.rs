@@ -325,11 +325,13 @@ pub fn decode_bitswap_message(
     let payload = parsed
         .payload
         .into_iter()
-        .map(|b| Block {
-            prefix: b.prefix.unwrap_or(&[]),
-            data: b.data.unwrap_or(&[]),
+        .map(|b| {
+            Ok(Block {
+                prefix: b.prefix.ok_or(DecodeBitswapMessageError::MissingPrefix)?,
+                data: b.data.ok_or(DecodeBitswapMessageError::MissingData)?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let block_presences = parsed
         .block_presences
@@ -367,6 +369,12 @@ pub enum DecodeBitswapMessageError {
     /// Invalid block presence type value.
     #[display("Invalid block presence type")]
     InvalidPresenceType,
+    /// Missing CID prefix in payload.
+    #[display("Missing CID prefix in payload")]
+    MissingPrefix,
+    /// Missing block data in payload.
+    #[display("Missing block data in payload")]
+    MissingData,
 }
 
 #[cfg(test)]
