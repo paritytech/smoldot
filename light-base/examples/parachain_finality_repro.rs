@@ -136,7 +136,9 @@ fn main() {
     println!();
     println!("Subscriptions:");
     println!("  Relay:     chain_subscribeNewHeads, chain_subscribeFinalizedHeads");
-    println!("  Parachain: chain_subscribeNewHeads, chain_subscribeFinalizedHeads, chainHead_v1_follow");
+    println!(
+        "  Parachain: chain_subscribeNewHeads, chain_subscribeFinalizedHeads, chainHead_v1_follow"
+    );
     println!();
     println!("Waiting for peers and sync...");
     println!();
@@ -203,8 +205,12 @@ fn main() {
                 };
                 println!("[{elapsed_secs:6.1}s] [SUB] {label} confirmed (sub_id={sub_id})");
                 match source {
-                    "relay" => { relay_sub_map.insert(sub_id, label); }
-                    "para" => { para_sub_map.insert(sub_id, label); }
+                    "relay" => {
+                        relay_sub_map.insert(sub_id, label);
+                    }
+                    "para" => {
+                        para_sub_map.insert(sub_id, label);
+                    }
                     _ => {}
                 }
                 continue;
@@ -253,8 +259,7 @@ fn main() {
             let number_hex = parsed["params"]["result"]["number"]
                 .as_str()
                 .unwrap_or("0x0");
-            let number =
-                u64::from_str_radix(number_hex.trim_start_matches("0x"), 16).unwrap_or(0);
+            let number = u64::from_str_radix(number_hex.trim_start_matches("0x"), 16).unwrap_or(0);
 
             let label = match source {
                 "relay" => relay_sub_map.get(&sub_id).copied().unwrap_or("relay_?"),
@@ -348,9 +353,7 @@ fn main() {
             println!("VERDICT: BUG REPRODUCED");
             println!("  Relay finality is healthy ({relay_fin_count} events).");
             if para_legacy_dead {
-                println!(
-                    "  Parachain legacy API completely dead (0 best, 0 finalized events)."
-                );
+                println!("  Parachain legacy API completely dead (0 best, 0 finalized events).");
                 println!(
                     "  Root cause: runtime_service stuck in FinalizedBlockRuntimeUnknown state."
                 );
@@ -382,7 +385,9 @@ fn main() {
         } else {
             println!("VERDICT: INCONCLUSIVE");
             println!("  Could not gather enough data. Network connectivity issues?");
-            println!("  relay_fin_count={relay_fin_count}, para_best_count={para_best_count}, para_fin_count={para_fin_count}, follow_best_count={follow_best_count}, follow_fin_count={follow_fin_count}");
+            println!(
+                "  relay_fin_count={relay_fin_count}, para_best_count={para_best_count}, para_fin_count={para_fin_count}, follow_best_count={follow_best_count}, follow_fin_count={follow_fin_count}"
+            );
             std::process::exit(2);
         }
     });
