@@ -1,0 +1,39 @@
+{
+  "name": "Paseo Asset Hub",
+  "id": "asset-hub-paseo",
+  "chainType": "Live",
+  "bootNodes": [
+    "/dns/asset-hub-paseo-bootnode.turboflakes.io/tcp/30330/p2p/12D3KooWJzfVkdDnKfn2hQ1c3ysrbmReTjVKrEBHkdwgZThbB1BM",
+    "/dns/asset-hub-paseo.bootnode.amforc.com/tcp/30333/wss/p2p/12D3KooWERfFUg8UFPCakzTFkktdRYeG2cD3A9ga1DfynbPdYqGL",
+    "/dns/asset-hub-paseo.bootnode.amforc.com/tcp/30345/p2p/12D3KooWERfFUg8UFPCakzTFkktdRYeG2cD3A9ga1DfynbPdYqGL",
+    "/dns/asset-hub-paseo-boot-ng.dwellir.com/tcp/443/wss/p2p/12D3KooWGoC9CdpY8T5bgf6PqKgry2DjCxaqQS7R9WdQ8rVMeEMg",
+    "/dns/asset-hub-paseo-boot-ng.dwellir.com/tcp/30357/p2p/12D3KooWGoC9CdpY8T5bgf6PqKgry2DjCxaqQS7R9WdQ8rVMeEMg",
+    "/dns/boot.gatotech.network/tcp/33410/p2p/12D3KooWS94imuEGq76dNBJb11hDKhx4UrJ8gG7hrgaeDRzDEcGG",
+    "/dns/boot.gatotech.network/tcp/35410/wss/p2p/12D3KooWS94imuEGq76dNBJb11hDKhx4UrJ8gG7hrgaeDRzDEcGG",
+    "/dns/boot-node.helikon.io/tcp/10120/p2p/12D3KooWKrg6Qb2HhTc3onfkgsNbRU72RjNDm96Xh2E7sWso5LZT",
+    "/dns/boot-node.helikon.io/tcp/10122/wss/p2p/12D3KooWKrg6Qb2HhTc3onfkgsNbRU72RjNDm96Xh2E7sWso5LZT",
+    "/dns/boot.metaspan.io/tcp/36092/p2p/12D3KooWHdtFsjicVWecmiRrc8XLc3A6iLLKKfUwjZXu5mtg1k3w",
+    "/dns/boot.metaspan.io/tcp/36096/wss/p2p/12D3KooWHdtFsjicVWecmiRrc8XLc3A6iLLKKfUwjZXu5mtg1k3w",
+    "/dns/assethub-paseo-bootnode.radiumblock.com/tcp/30333/p2p/12D3KooWP8aNgAjkYzH1QuwLjYyNqfpWkJkFRgdtUuey9KzEJciq",
+    "/dns/assethub-paseo-bootnode.radiumblock.com/tcp/30336/wss/p2p/12D3KooWP8aNgAjkYzH1QuwLjYyNqfpWkJkFRgdtUuey9KzEJciq",
+    "/dns/asset-hub-paseo.boot.rotko.net/tcp/34011/p2p/12D3KooWLzC336hvwY7Vyjdwc8VMMMyqnwph1UXMoi1LEbw8RiHj",
+    "/dns/asset-hub-paseo.boot.rotko.net/tcp/30435/wss/p2p/12D3KooWLzC336hvwY7Vyjdwc8VMMMyqnwph1UXMoi1LEbw8RiHj",
+    "/dns/boot.stake.plus/tcp/44333/p2p/12D3KooWSaDfEuvzA8xFyPvDaptCJn2WYUz1f1QFtTiwk4MpnHVo",
+    "/dns/boot.stake.plus/tcp/44333/wss/p2p/12D3KooWSaDfEuvzA8xFyPvDaptCJn2WYUz1f1QFtTiwk4MpnHVo",
+    "/dns/asset-hub-paseo-bootnode.turboflakes.io/tcp/30330/p2p/12D3KooWJzfVkdDnKfn2hQ1c3ysrbmReTjVKrEBHkdwgZThbB1BM",
+    "/dns/asset-hub-paseo-bootnode.turboflakes.io/tcp/30430/wss/p2p/12D3KooWJzfVkdDnKfn2hQ1c3ysrbmReTjVKrEBHkdwgZThbB1BM"
+  ],
+  "telemetryEndpoints": null,
+  "protocolId": null,
+  "properties": {
+    "ss58Format": 0,
+    "tokenDecimals": 10,
+    "tokenSymbol": "PAS"
+  },
+  "relay_chain": "paseo",
+  "para_id": 1000,
+  "codeSubstitutes": {},
+  "genesis": {
+    "stateRootHash": "0xe24abb446f9aa757610fedc53cc631536f3b456a927a1ab1b9018ea2df3c925d"
+  }
+}

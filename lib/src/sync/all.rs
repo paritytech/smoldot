@@ -1048,8 +1048,17 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 self.shared.sources[outer_source_id.0].all_forks = new_inner_source_id;
             }
 
+            // Warp sync is finished and has been consumed above. Clear stale
+            // warp-sync source IDs so that `add_request` doesn't see an
+            // inconsistency between `self.warp_sync` (now `None`) and
+            // `source.warp_sync` (still `Some`).
+            for (_, source) in self.shared.sources.iter_mut() {
+                source.warp_sync = None;
+            }
+
             for (_, request) in self.shared.requests.iter_mut() {
                 request.all_forks = None;
+                request.warp_sync = None;
             }
 
             self.all_forks = Some(new_all_forks);
