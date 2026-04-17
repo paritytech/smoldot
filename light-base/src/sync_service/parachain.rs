@@ -70,7 +70,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
 
     // Phase 2: Download the parachain runtime from a P2P peer and determine Aura
     // consensus parameters. Retries indefinitely until successful.
-    let effective_chain_info = loop {
+    let (effective_chain_info, finalized_runtime) = loop {
         match bootstrap_parachain_consensus(
             &log_target,
             &platform,
@@ -80,7 +80,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         )
         .await
         {
-            Ok(ci) => break ci,
+            Ok(b) => break (b.chain_info, b.finalized_runtime),
             Err(err) => {
                 log!(
                     &platform,
@@ -168,7 +168,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         paraheads_notifications: None,
         pending_parachain_finalization: None,
         network_up_to_date_best: true,
-        known_finalized_runtime: None,
+        known_finalized_runtime: Some(finalized_runtime),
         pending_requests: stream::FuturesUnordered::new(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         log_target,
@@ -1227,6 +1227,11 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
     }
 }
 
+struct BootstrappedParachain {
+    chain_info: chain::chain_information::ValidChainInformation,
+    finalized_runtime: FinalizedBlockRuntime,
+}
+
 /// Downloads the parachain runtime from a P2P peer and determines Aura consensus parameters.
 async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     log_target: &str,
@@ -1234,7 +1239,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
-) -> Result<chain::chain_information::ValidChainInformation, String> {
+) -> Result<BootstrappedParachain, String> {
     let ci_ref = chain_info.as_ref();
     let state_root = *ci_ref.finalized_block_header.state_root;
     let block_hash = ci_ref.finalized_block_header.hash(block_number_bytes);
@@ -1306,7 +1311,9 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         .storage_value(&state_root, b":heappages")
         .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
 
-    let heap_pages = executor::storage_heap_pages_to_value(heap_pages_raw.map(|(v, _)| v))
+    let storage_heap_pages = heap_pages_raw.map(|(v, _)| v.to_vec());
+
+    let heap_pages = executor::storage_heap_pages_to_value(storage_heap_pages.as_deref())
         .map_err(|e| format!("Invalid :heappages value: {e}"))?;
 
     log!(
@@ -1384,8 +1391,12 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
             })
             .map_err(|e| format!("Failed to decode authorities call proof: {e}"))?;
 
-        let output =
-            run_single_runtime_call(vm, "AuraApi_authorities", &decoded_call_proof, &state_root)?;
+        let output = run_single_runtime_call(
+            vm.clone(),
+            "AuraApi_authorities",
+            &decoded_call_proof,
+            &state_root,
+        )?;
 
         header::AuraAuthoritiesIter::decode(&output)
             .map_err(|_| String::from("Failed to decode AuraApi_authorities output"))?
@@ -1413,8 +1424,19 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         finality: chain::chain_information::ChainInformationFinality::Outsourced,
     };
 
-    chain::chain_information::ValidChainInformation::try_from(new_chain_info)
-        .map_err(|e| format!("Invalid chain information: {e}"))
+    let chain_info = chain::chain_information::ValidChainInformation::try_from(new_chain_info)
+        .map_err(|e| format!("Invalid chain information: {e}"))?;
+
+    Ok(BootstrappedParachain {
+        chain_info,
+        finalized_runtime: FinalizedBlockRuntime {
+            virtual_machine: vm,
+            storage_code: Some(code),
+            storage_heap_pages,
+            code_merkle_value: None,
+            closest_ancestor_excluding: None,
+        },
+    })
 }
 
 /// Runs a single runtime call, serving storage reads from the given proof.
