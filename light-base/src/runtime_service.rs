@@ -797,7 +797,7 @@ async fn run_background<TPlat: PlatformRef>(
         let tree = {
             let mut tree = async_tree::AsyncTree::new(async_tree::Config {
                 finalized_async_user_data: None,
-                retry_after_failed: Duration::from_secs(10),
+                retry_after_failed: Duration::from_secs(4),
                 blocks_capacity: 32,
             });
             let node_index = tree.input_insert_block(
@@ -1475,7 +1475,7 @@ async fn run_background<TPlat: PlatformRef>(
                             tree: {
                                 let mut tree = async_tree::AsyncTree::new(async_tree::Config {
                                     finalized_async_user_data: None,
-                                    retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
+                                    retry_after_failed: Duration::from_secs(4),
                                     blocks_capacity: 32,
                                 });
                                 let node_index = tree.input_insert_block(
