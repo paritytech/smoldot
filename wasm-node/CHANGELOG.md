@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 3.1.0 - 2026-04-17
+
+### Added
+
+- Implement Bitswap protocol and `bitswap_v1_get` JSON-RPC method. ([#3148](https://github.com/paritytech/smoldot/pull/3148))
+- Implement explicit topic affinity for the statement distribution protocol V2 using bloom filters. The `falsePositiveRate` and `bloomSeed` options are now configurable per chain. ([#3151](https://github.com/paritytech/smoldot/pull/3151))
+
+### Changed
+
+- Statement deduplication has been moved from the network layer to per-subscription LRU caches in the JSON-RPC layer, so new subscriptions now receive statements already delivered to previous subscriptions. ([#3163](https://github.com/paritytech/smoldot/pull/3163))
+- Reduce the runtime download retry delay from 10s to 4s. ([#3207](https://github.com/paritytech/smoldot/pull/3207))
+- Revert the database loading speed-up from 3.0.0 ([#3155](https://github.com/paritytech/smoldot/pull/3155)) due to regressions. ([#3205](https://github.com/paritytech/smoldot/pull/3205))
+
 ## 3.0.0 - 2026-04-10
 
 ### Added
