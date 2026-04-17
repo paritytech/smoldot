@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, CrashError, SmoldotBytecode } from '../public-types.js';
+import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, CrashError, SmoldotBytecode, SyncProgress } from '../public-types.js';
 import * as instance from './local-instance.js';
 import * as remote from './remote-instance.js';
 
@@ -257,6 +257,12 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             // Callbacks woken up when a JSON-RPC response is ready or when the chain is destroyed
             // or when the instance crashes.
             jsonRpcResponsesPromises: (() => void)[],
+            // User-supplied callback for sync progress events; absent when
+            // the consumer didn't pass `onSyncProgress`. We hold it here
+            // rather than closing over it at addChain time because the
+            // event arrives on the instance-event path, not on the promise
+            // returned by addChain.
+            onSyncProgress?: (progress: SyncProgress) => void,
         }>,
     } = {
         instance: { status: "not-created" },
@@ -335,6 +341,27 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 const callbacks = state.chains.get(event.chainId)!.jsonRpcResponsesPromises;
                 while (callbacks.length !== 0) {
                     (callbacks.shift()!)();
+                }
+                break;
+            }
+            case "sync-progress": {
+                // Parse and forward to the user callback. JSON shape is
+                // defined by `sync_progress_to_json` in wasm-node/rust.
+                //
+                // Both the JSON parse and the user callback invocation
+                // are isolated: a malformed payload or a throwing user
+                // callback must never bubble out and take down the
+                // shared event-dispatch loop for the whole client.
+                const chain = state.chains.get(event.chainId);
+                if (!chain || !chain.onSyncProgress)
+                    break;
+                try {
+                    const parsed = JSON.parse(event.json) as SyncProgress;
+                    chain.onSyncProgress(parsed);
+                } catch {
+                    // Malformed JSON from the Rust side is a smoldot
+                    // bug; a throwing user callback is a consumer bug.
+                    // Either way, dropping is the only safe response.
                 }
                 break;
             }
@@ -561,7 +588,8 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             const chainId = outcome.chainId;
 
             state.chains.set(chainId, {
-                jsonRpcResponsesPromises: new Array()
+                jsonRpcResponsesPromises: new Array(),
+                onSyncProgress: options.onSyncProgress,
             });
 
             const newChain: Chain = {

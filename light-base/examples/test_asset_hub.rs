@@ -44,6 +44,7 @@ fn main() {
             database_content: "",
             user_data: (),
             statement_protocol_config: None,
+            on_sync_progress: None,
         })
         .unwrap();
 
@@ -62,6 +63,7 @@ fn main() {
             database_content: "",
             user_data: (),
             statement_protocol_config: None,
+            on_sync_progress: None,
         })
         .unwrap();
 

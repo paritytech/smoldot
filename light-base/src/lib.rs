@@ -108,6 +108,7 @@ pub mod network_service;
 pub mod platform;
 
 pub use json_rpc_service::HandleRpcError;
+pub use sync_service::{SyncProgress, SyncProgressCallback};
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
@@ -146,6 +147,17 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
 
     /// If `Some`, enables the statement store networking protocol.
     pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+
+    /// Optional callback invoked on sync progress transitions. See
+    /// [`sync_service::SyncProgress`] for the event shape.
+    ///
+    /// The callback runs synchronously from the internal sync task — it
+    /// MUST NOT block. Offload anything non-trivial to another task.
+    ///
+    /// Intended use is UI loading/progress indication. The callback is
+    /// invoked whenever the sync phase or its inner counters change; for
+    /// a warp-sync this can be tens to hundreds of times per chain.
+    pub on_sync_progress: Option<SyncProgressCallback>,
 }
 
 /// See [`AddChainConfig::json_rpc`].
@@ -676,6 +688,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         let statement_protocol_config = config.statement_protocol_config;
+        let on_sync_progress = config.on_sync_progress;
 
         let max_seen_statements = statement_protocol_config
             .as_ref()
@@ -730,6 +743,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         config,
                         network_identify_agent_version,
                         statement_protocol_config.clone(),
+                        on_sync_progress.clone(),
                     )
                 };
 
@@ -1135,6 +1149,7 @@ fn start_services<TPlat: platform::PlatformRef>(
     config: StartServicesChainTy<'_, TPlat>,
     network_identify_agent_version: String,
     statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+    on_sync_progress: Option<sync_service::SyncProgressCallback>,
 ) -> ChainServices<TPlat> {
     let network_service = network_service.get_or_insert_with(|| {
         network_service::NetworkService::new(network_service::Config {
@@ -1204,6 +1219,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                         },
                     },
                 ),
+                on_sync_progress: on_sync_progress.clone(),
             }));
 
             // The runtime service follows the runtime of the best block of the chain,
@@ -1243,6 +1259,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                         }),
                     },
                 ),
+                on_sync_progress: on_sync_progress.clone(),
             }));
 
             // The runtime service follows the runtime of the best block of the chain,

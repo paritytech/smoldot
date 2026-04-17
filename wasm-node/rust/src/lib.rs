@@ -146,6 +146,21 @@ fn add_chain(
                         smoldot_light::platform::PlatformRef::fill_random_bytes(&platform::PLATFORM_REF, &mut seed_bytes);
                         smoldot_light::network_service::StatementProtocolConfig::new(max_seen, statement_store_false_positive_rate, u128::from_le_bytes(seed_bytes), Duration::from_millis(u64::from(statement_store_affinity_update_interval_ms)))
                     }),
+                    // Serialize each SyncProgress transition to JSON and
+                    // hand it to the JS host via `bindings::on_sync_progress`.
+                    // JSON is used because the event is small, infrequent,
+                    // and the JS side already parses JSON-RPC responses
+                    // out of wasm memory — no new wire format needed.
+                    on_sync_progress: Some(smoldot_light::SyncProgressCallback::new(
+                        move |progress| {
+                            let json = sync_progress_to_json(progress);
+                            bindings::on_sync_progress(
+                                outer_chain_id_u32,
+                                u32::try_from(json.as_bytes().as_ptr().addr()).unwrap(),
+                                u32::try_from(json.as_bytes().len()).unwrap(),
+                            );
+                        },
+                    )),
                 }) {
                 Ok(c) => c,
                 Err(error) => {
@@ -192,6 +207,30 @@ fn add_chain(
     );
 
     outer_chain_id_u32
+}
+
+/// Serialize a [`smoldot_light::sync_service::SyncProgress`] into the
+/// JSON wire format shared with the JS host. The format mirrors the
+/// public TypeScript `SyncProgress` discriminated union:
+///
+///   `{ "type": "warp-sync", "verified": N }`
+///   `{ "type": "chain-sync", "current": C, "target": T }`
+///   `{ "type": "in-sync" }`
+///
+/// Hand-rolled rather than using `serde_json` to avoid pulling in a
+/// serde dependency for the wasm binary for a tiny hot-path payload.
+fn sync_progress_to_json(p: &smoldot_light::SyncProgress) -> String {
+    match p {
+        smoldot_light::SyncProgress::WarpSync { verified } => {
+            format!("{{\"type\":\"warp-sync\",\"verified\":{verified}}}")
+        }
+        smoldot_light::SyncProgress::ChainSync { current, target } => {
+            format!(
+                "{{\"type\":\"chain-sync\",\"current\":{current},\"target\":{target}}}"
+            )
+        }
+        smoldot_light::SyncProgress::InSync => "{\"type\":\"in-sync\"}".to_string(),
+    }
 }
 
 fn remove_chain(chain_id: u32) {

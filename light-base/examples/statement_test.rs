@@ -71,6 +71,7 @@ fn main() {
                         core::time::Duration::from_secs(1),
                     ),
                 ),
+                on_sync_progress: None,
             })
             .unwrap();
 
@@ -99,6 +100,7 @@ fn main() {
                             core::time::Duration::from_secs(1),
                         ),
                     ),
+                    on_sync_progress: None,
                 })
                 .unwrap();
 

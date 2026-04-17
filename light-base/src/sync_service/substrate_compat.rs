@@ -17,7 +17,7 @@
 
 use super::{
     BlockNotification, ConfigSubstrateCompatibleRuntimeCodeHint, FinalizedBlockRuntime,
-    Notification, SubscribeAll, ToBackground,
+    Notification, SubscribeAll, SyncProgress, SyncProgressCallback, ToBackground,
 };
 use crate::{log, network_service, platform::PlatformRef, util};
 
@@ -51,6 +51,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
     runtime_code_hint: Option<ConfigSubstrateCompatibleRuntimeCodeHint>,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+    on_sync_progress: Option<SyncProgressCallback>,
 ) {
     let mut task = Task {
         sync: Some(all::AllSync::new(all::Config {
@@ -116,6 +117,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             }),
         ),
         platform,
+        on_sync_progress,
+        last_emitted_progress: None,
     };
 
     // Main loop of the syncing logic.
@@ -128,6 +131,20 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
     loop {
         // Yield at every loop in order to provide better tasks granularity.
         futures_lite::future::yield_now().await;
+
+        // Emit a sync-progress event to the user callback when the
+        // derived phase or its inner counters have changed since the
+        // last emission. The loop ticks frequently; most iterations
+        // will be a no-op because the derived value is unchanged.
+        if let Some(cb) = task.on_sync_progress.as_ref() {
+            if let Some(sync) = task.sync.as_ref() {
+                let current = derive_sync_progress(sync);
+                if task.last_emitted_progress.as_ref() != Some(&current) {
+                    cb.emit(&current);
+                    task.last_emitted_progress = Some(current);
+                }
+            }
+        }
 
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.
@@ -1451,6 +1468,33 @@ struct Task<TPlat: PlatformRef> {
     pending_requests: stream::FuturesUnordered<
         future::BoxFuture<'static, (all::RequestId, Result<RequestOutcome, future::Aborted>)>,
     >,
+
+    /// User callback for sync progress events. Invoked whenever the
+    /// computed [`SyncProgress`] differs from [`Task::last_emitted_progress`].
+    on_sync_progress: Option<SyncProgressCallback>,
+
+    /// The last [`SyncProgress`] value passed to `on_sync_progress`.
+    /// Used to dedupe identical emissions — the loop ticks frequently
+    /// and most iterations don't change the user-visible phase.
+    last_emitted_progress: Option<SyncProgress>,
+}
+
+/// Derive the current [`SyncProgress`] from the [`all::AllSync`] state
+/// machine. The classification is deliberately coarse; fine-grained
+/// progress during the `ChainSync` phase would require tracking the
+/// network's best block independently, which is out of scope for this
+/// change.
+fn derive_sync_progress<TRq, TSrc, TBl>(sync: &all::AllSync<TRq, TSrc, TBl>) -> SyncProgress {
+    if let Some(verified) = sync.warp_sync_verified_fragments() {
+        return SyncProgress::WarpSync { verified };
+    }
+    if sync.is_near_head_of_chain_heuristic() {
+        return SyncProgress::InSync;
+    }
+    SyncProgress::ChainSync {
+        current: sync.finalized_block_number(),
+        target: sync.best_block_number(),
+    }
 }
 
 enum RequestOutcome {

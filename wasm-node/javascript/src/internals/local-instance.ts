@@ -71,7 +71,13 @@ export type Event =
     { ty: "connection-stream-open", connectionId: number } |
     { ty: "connection-stream-reset", connectionId: number, streamId: number } |
     { ty: "stream-send", connectionId: number, streamId?: number, data: Array<Uint8Array> } |
-    { ty: "stream-send-close", connectionId: number, streamId?: number };
+    { ty: "stream-send-close", connectionId: number, streamId?: number } |
+    // Sync progress event for a chain. `json` is the UTF-8 JSON string
+    // emitted by the Rust side, shape defined in `public-types.ts#SyncProgress`.
+    // Kept as a raw string here to avoid parsing on the worker thread
+    // before the event is forwarded to the main thread — the client layer
+    // parses once at the consumer.
+    { ty: "sync-progress", chainId: number, json: string };
 
 export type ParsedMultiaddr =
     { ty: "tcp", hostname: string, port: number } |
@@ -411,6 +417,14 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 
         current_task_exit: () => {
             state.currentTask = null;
+        },
+
+        on_sync_progress: (chainId: number, jsonPtr: number, jsonLen: number) => {
+            chainId >>>= 0;
+            jsonPtr >>>= 0;
+            jsonLen >>>= 0;
+            const json = buffer.utf8BytesToString(new Uint8Array(state.instance!.exports.memory.buffer), jsonPtr, jsonLen);
+            eventCallback({ ty: "sync-progress", chainId, json });
         }
     };
 

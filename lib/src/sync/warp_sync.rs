@@ -251,6 +251,7 @@ pub fn start_warp_sync<TSrc, TRq>(
         } else {
             BodyDownload::NotNeeded
         },
+        total_verified_fragments: 0,
     })
 }
 
@@ -357,6 +358,14 @@ pub struct WarpSync<TSrc, TRq> {
     /// For each call required by the chain information builder, whether it has been downloaded yet.
     runtime_calls:
         hashbrown::HashMap<chain_information::build::RuntimeCall, CallProof, fnv::FnvBuildHasher>,
+    /// Cumulative count of GrandPa warp-sync fragments that have been
+    /// successfully verified. Incremented in the verification hot path
+    /// (see the `VerifyWarpSyncFragment::verify` success branch).
+    /// Exposed to API users via [`WarpSync::verified_fragments`] for UI
+    /// progress indicators; this is the only meaningful monotonic
+    /// progress signal available during warp sync, since the total
+    /// fragment count is not known up front.
+    total_verified_fragments: u64,
 }
 
 /// See [`WarpSync::sources`].
@@ -573,6 +582,17 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 self.body_download = BodyDownload::NotStarted;
             }
         }
+    }
+
+    /// Cumulative number of GrandPa warp-sync fragments that have been
+    /// successfully verified since this [`WarpSync`] was constructed.
+    ///
+    /// Monotonic; only increases. Intended for UI progress indication.
+    /// The total fragment count of the warp sync chain is not known up
+    /// front, so callers should treat this as a cumulative counter
+    /// rather than a ratio.
+    pub fn verified_fragments(&self) -> u64 {
+        self.total_verified_fragments
     }
 
     /// Returns the current status of the warp syncing.
@@ -1701,6 +1721,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
 
         // Verification of the fragment has succeeded 🎉. We can now update `self`.
         fragments_to_verify.next_fragment_to_verify_index += 1;
+        self.inner.total_verified_fragments += 1;
         self.inner.warped_header_number = fragment_decoded_header.number;
         self.inner.warped_header_state_root = *fragment_decoded_header.state_root;
         self.inner.warped_header_extrinsics_root = *fragment_decoded_header.extrinsics_root;
