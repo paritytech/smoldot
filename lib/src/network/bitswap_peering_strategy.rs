@@ -358,3 +358,224 @@ pub enum UnassignSlotAndBan {
         had_slot: bool,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::libp2p::peer_id::PublicKey;
+
+    fn make_peer(n: u8) -> PeerId {
+        PeerId::from_public_key(&PublicKey::Ed25519([n; 32]))
+    }
+
+    fn new_strategy() -> BitswapPeeringStrategy<u64> {
+        BitswapPeeringStrategy::new(Config {
+            randomness_seed: [0; 32],
+            peers_capacity: 0,
+        })
+    }
+
+    #[test]
+    fn new_strategy_is_empty() {
+        let mut s = new_strategy();
+        assert!(matches!(s.pick_assignable_peer(&0), AssignablePeer::NoPeer));
+    }
+
+    #[test]
+    fn increase_adds_peer() {
+        let mut s = new_strategy();
+        let peer = make_peer(1);
+        s.increase_peer_connections(&peer);
+        assert!(matches!(
+            s.pick_assignable_peer(&0),
+            AssignablePeer::Assignable(_)
+        ));
+    }
+
+    #[test]
+    fn increase_twice_same_peer() {
+        let mut s = new_strategy();
+        let peer = make_peer(1);
+        s.increase_peer_connections(&peer);
+        s.increase_peer_connections(&peer);
+        // One decrease should not remove the peer.
+        s.decrease_peer_connections(&peer).unwrap();
+        assert!(matches!(
+            s.pick_assignable_peer(&0),
+            AssignablePeer::Assignable(_)
+        ));
+    }
+
+    #[test]
+    fn decrease_unknown_peer_errors() {
+        let mut s = new_strategy();
+        let peer = make_peer(1);
+        assert!(matches!(
+            s.decrease_peer_connections(&peer),
+            Err(DecreasePeerConnectionsError::UnknownPeer)
+        ));
+    }
+
+    #[test]
+    fn decrease_to_zero_removes_peer() {
+        let mut s = new_strategy();
+        let peer = make_peer(1);
+        s.increase_peer_connections(&peer);
+        s.decrease_peer_connections(&peer).unwrap();
+        assert!(matches!(s.pick_assignable_peer(&0), AssignablePeer::NoPeer));
+    }
+
+    #[test]
+    fn assign_slot() {
+        let mut s = new_strategy();
+        let peer = make_peer(1);
+        s.increase_peer_connections(&peer);
+        s.assign_slot(&peer).unwrap();
+        // Slotted peer should not be returned as assignable.
+        assert!(matches!(s.pick_assignable_peer(&0), AssignablePeer::NoPeer));
+    }
+
+    #[test]
+    fn assign_slot_unknown_peer_errors() {
+        let mut s = new_strategy();
+        let peer = make_peer(1);
+        assert!(matches!(
+            s.assign_slot(&peer),
+            Err(AssignSlotError::UnknownPeer)
+        ));
+    }
+
+    #[test]
+    fn unassign_slot_and_ban_with_slot() {
+        let mut s = new_strategy();
+        let peer = make_peer(1);
+        s.increase_peer_connections(&peer);
+        s.assign_slot(&peer).unwrap();
+        assert!(matches!(
+            s.unassign_slot_and_ban(&peer, 100),
+            UnassignSlotAndBan::Banned { had_slot: true }
+        ));
+    }
+
+    #[test]
+    fn ban_assignable_peer() {
+        let mut s = new_strategy();
+        let peer = make_peer(1);
+        s.increase_peer_connections(&peer);
+        assert!(matches!(
+            s.unassign_slot_and_ban(&peer, 100),
+            UnassignSlotAndBan::Banned { had_slot: false }
+        ));
+    }
+
+    #[test]
+    fn ban_unknown_peer() {
+        let mut s = new_strategy();
+        let peer = make_peer(1);
+        assert!(matches!(
+            s.unassign_slot_and_ban(&peer, 100),
+            UnassignSlotAndBan::UnknownPeer
+        ));
+    }
+
+    #[test]
+    fn ban_extension_keeps_longer_ban() {
+        let mut s = new_strategy();
+        let peer = make_peer(1);
+        s.increase_peer_connections(&peer);
+        s.unassign_slot_and_ban(&peer, 200);
+        // Shorter ban should not reduce the existing ban.
+        s.unassign_slot_and_ban(&peer, 100);
+        // Peer should still be banned at time 150 (original ban was until 200).
+        assert!(matches!(
+            s.pick_assignable_peer(&150),
+            AssignablePeer::AllPeersBanned { .. }
+        ));
+    }
+
+    #[test]
+    fn ban_extension_extends_shorter_ban() {
+        let mut s = new_strategy();
+        let peer = make_peer(1);
+        s.increase_peer_connections(&peer);
+        s.unassign_slot_and_ban(&peer, 100);
+        // Longer ban should extend.
+        s.unassign_slot_and_ban(&peer, 200);
+        // Peer should still be banned at time 150.
+        assert!(matches!(
+            s.pick_assignable_peer(&150),
+            AssignablePeer::AllPeersBanned { .. }
+        ));
+    }
+
+    #[test]
+    fn banned_peer_not_picked() {
+        let mut s = new_strategy();
+        let peer = make_peer(1);
+        s.increase_peer_connections(&peer);
+        s.unassign_slot_and_ban(&peer, 100);
+        // Before ban expires, peer should not be assignable.
+        assert!(matches!(
+            s.pick_assignable_peer(&50),
+            AssignablePeer::AllPeersBanned { .. }
+        ));
+    }
+
+    #[test]
+    fn banned_peer_picked_after_expiry() {
+        let mut s = new_strategy();
+        let peer = make_peer(1);
+        s.increase_peer_connections(&peer);
+        s.unassign_slot_and_ban(&peer, 100);
+        // At or after ban expiry, peer should be assignable.
+        assert!(matches!(
+            s.pick_assignable_peer(&100),
+            AssignablePeer::Assignable(_)
+        ));
+    }
+
+    #[test]
+    fn all_peers_banned_returns_next_unban() {
+        let mut s = new_strategy();
+        let peer1 = make_peer(1);
+        let peer2 = make_peer(2);
+        s.increase_peer_connections(&peer1);
+        s.increase_peer_connections(&peer2);
+        s.unassign_slot_and_ban(&peer1, 200);
+        s.unassign_slot_and_ban(&peer2, 300);
+        match s.pick_assignable_peer(&150) {
+            AssignablePeer::AllPeersBanned { next_unban } => {
+                assert_eq!(*next_unban, 200);
+            }
+            _ => panic!("expected AllPeersBanned"),
+        }
+    }
+
+    #[test]
+    fn multiple_peers_picks_only_assignable() {
+        let mut s = new_strategy();
+        let peer1 = make_peer(1);
+        let peer2 = make_peer(2);
+        let peer3 = make_peer(3);
+        s.increase_peer_connections(&peer1);
+        s.increase_peer_connections(&peer2);
+        s.increase_peer_connections(&peer3);
+
+        // Ban peer1, assign slot to peer2 — only peer3 should be pickable.
+        s.unassign_slot_and_ban(&peer1, 1000);
+        s.assign_slot(&peer2).unwrap();
+
+        match s.pick_assignable_peer(&0) {
+            AssignablePeer::Assignable(p) => assert_eq!(*p, peer3),
+            _ => panic!("expected Assignable(peer3)"),
+        }
+    }
+
+    #[test]
+    fn peer_state_ordering() {
+        // The BTreeSet range queries rely on this ordering.
+        assert!(PeerState::<u64>::Assignable < PeerState::Banned { expires: 0 });
+        assert!(PeerState::<u64>::Banned { expires: 5 } < PeerState::Banned { expires: 7 });
+        assert!(PeerState::<u64>::Banned { expires: u64::MAX } < PeerState::Slot);
+    }
+}

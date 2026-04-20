@@ -458,4 +458,177 @@ mod tests {
         assert!(decoded.payload.is_empty());
         assert!(decoded.block_presences.is_empty());
     }
+
+    #[test]
+    fn decode_garbage_bytes() {
+        assert!(matches!(
+            decode_bitswap_message(&[0xFF, 0xFE, 0xFD, 0xFC]),
+            Err(DecodeBitswapMessageError::ProtobufDecode)
+        ));
+    }
+
+    #[test]
+    fn decode_wantlist_entry_missing_cid() {
+        // Build a wantlist entry without CID (only priority field).
+        let mut entry = Vec::new();
+        for slice in protobuf::uint32_tag_encode(2, 1) {
+            entry.extend_from_slice(slice.as_ref());
+        }
+
+        // Wrap entry in wantlist entries (tag 1) then wantlist message (tag 1).
+        let mut wantlist_inner = Vec::new();
+        for slice in protobuf::message_tag_encode(1, core::iter::once(entry.as_slice())) {
+            wantlist_inner.extend_from_slice(slice.as_ref());
+        }
+
+        let mut message = Vec::new();
+        for slice in protobuf::message_tag_encode(1, core::iter::once(wantlist_inner.as_slice())) {
+            message.extend_from_slice(slice.as_ref());
+        }
+
+        assert!(matches!(
+            decode_bitswap_message(&message),
+            Err(DecodeBitswapMessageError::MissingCid)
+        ));
+    }
+
+    #[test]
+    fn decode_invalid_want_type() {
+        // Build a wantlist entry with CID but invalid want_type = 99.
+        let mut entry = Vec::new();
+        for slice in protobuf::bytes_tag_encode(1, &[1u8; 32]) {
+            entry.extend_from_slice(slice.as_ref());
+        }
+        for slice in protobuf::enum_tag_encode(4, 99) {
+            entry.extend_from_slice(slice.as_ref());
+        }
+
+        let mut wantlist_inner = Vec::new();
+        for slice in protobuf::message_tag_encode(1, core::iter::once(entry.as_slice())) {
+            wantlist_inner.extend_from_slice(slice.as_ref());
+        }
+
+        let mut message = Vec::new();
+        for slice in protobuf::message_tag_encode(1, core::iter::once(wantlist_inner.as_slice())) {
+            message.extend_from_slice(slice.as_ref());
+        }
+
+        assert!(matches!(
+            decode_bitswap_message(&message),
+            Err(DecodeBitswapMessageError::InvalidWantType)
+        ));
+    }
+
+    #[test]
+    fn decode_invalid_presence_type() {
+        // Build a block presence entry with CID but invalid presence_type = 5.
+        let mut presence = Vec::new();
+        for slice in protobuf::bytes_tag_encode(1, &[1u8; 32]) {
+            presence.extend_from_slice(slice.as_ref());
+        }
+        for slice in protobuf::enum_tag_encode(2, 5) {
+            presence.extend_from_slice(slice.as_ref());
+        }
+
+        // Encode as blockPresences field (tag 4).
+        let mut message = Vec::new();
+        for slice in protobuf::message_tag_encode(4, core::iter::once(presence.as_slice())) {
+            message.extend_from_slice(slice.as_ref());
+        }
+
+        assert!(matches!(
+            decode_bitswap_message(&message),
+            Err(DecodeBitswapMessageError::InvalidPresenceType)
+        ));
+    }
+
+    #[test]
+    fn decode_presence_missing_cid() {
+        // Build a block presence with only presence_type, no CID.
+        let mut presence = Vec::new();
+        for slice in protobuf::enum_tag_encode(2, 0) {
+            presence.extend_from_slice(slice.as_ref());
+        }
+
+        let mut message = Vec::new();
+        for slice in protobuf::message_tag_encode(4, core::iter::once(presence.as_slice())) {
+            message.extend_from_slice(slice.as_ref());
+        }
+
+        assert!(matches!(
+            decode_bitswap_message(&message),
+            Err(DecodeBitswapMessageError::MissingCid)
+        ));
+    }
+
+    #[test]
+    fn encode_default_fields_roundtrip() {
+        // WantType::Block and send_dont_have=false are defaults — they get elided
+        // during encoding. Verify decoding still produces correct defaults.
+        let cids = vec![[0xAA_u8; 32]];
+        let encoded = build_bitswap_message(cids.iter(), WantType::Block, false, false);
+        let decoded = decode_bitswap_message(&encoded).unwrap();
+        let wantlist = decoded.wantlist.unwrap();
+
+        assert_eq!(wantlist.entries[0].want_type, WantType::Block);
+        assert!(!wantlist.entries[0].send_dont_have);
+        assert!(!wantlist.entries[0].cancel);
+        assert_eq!(wantlist.entries[0].priority, 1);
+        assert!(!wantlist.full);
+    }
+
+    #[test]
+    fn decode_message_with_pending_bytes() {
+        // Build a message with only pending_bytes (tag 5) set.
+        let mut message = Vec::new();
+        for slice in protobuf::uint32_tag_encode(5, 42) {
+            message.extend_from_slice(slice.as_ref());
+        }
+
+        let decoded = decode_bitswap_message(&message).unwrap();
+        assert_eq!(decoded.pending_bytes, 42);
+        assert!(decoded.wantlist.is_none());
+    }
+
+    #[test]
+    fn encode_empty_cid_list() {
+        let cids: Vec<[u8; 32]> = vec![];
+        let encoded = build_bitswap_message(cids.iter(), WantType::Block, false, false);
+        let decoded = decode_bitswap_message(&encoded).unwrap();
+        // Empty wantlist with no entries produces a wantlist with empty entries vec.
+        if let Some(wantlist) = &decoded.wantlist {
+            assert!(wantlist.entries.is_empty());
+        }
+    }
+
+    #[test]
+    fn roundtrip_single_cid() {
+        let cids = vec![[0xBB_u8; 32]];
+        let encoded = build_bitswap_message(cids.iter(), WantType::Have, true, true);
+        let decoded = decode_bitswap_message(&encoded).unwrap();
+        let wantlist = decoded.wantlist.unwrap();
+
+        assert_eq!(wantlist.entries.len(), 1);
+        assert_eq!(wantlist.entries[0].cid, &[0xBB_u8; 32]);
+        assert_eq!(wantlist.entries[0].want_type, WantType::Have);
+        assert!(wantlist.entries[0].send_dont_have);
+        assert!(wantlist.full);
+    }
+
+    #[test]
+    fn decode_blocks_legacy_field() {
+        // Build a message with blocks_legacy (tag 2) — raw bytes field.
+        let mut message = Vec::new();
+        for slice in protobuf::bytes_tag_encode(2, &[1u8, 2, 3, 4]) {
+            message.extend_from_slice(slice.as_ref());
+        }
+        for slice in protobuf::bytes_tag_encode(2, &[5u8, 6]) {
+            message.extend_from_slice(slice.as_ref());
+        }
+
+        let decoded = decode_bitswap_message(&message).unwrap();
+        assert_eq!(decoded.blocks_legacy.len(), 2);
+        assert_eq!(decoded.blocks_legacy[0], &[1, 2, 3, 4]);
+        assert_eq!(decoded.blocks_legacy[1], &[5, 6]);
+    }
 }
