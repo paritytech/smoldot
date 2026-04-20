@@ -53,36 +53,19 @@ pub use network_service::Role;
 /// Progress events emitted during chain synchronization.
 ///
 /// See [`crate::AddChainConfig::on_sync_progress`].
-///
-/// This is a discriminated union rather than a merged `{ verified, total }`
-/// shape because smoldot does not know the total number of warp-sync
-/// fragments up front — it is discovered as fragments arrive. Each
-/// variant carries only what is genuinely known at that phase.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SyncProgress {
-    /// Warp-sync is in progress. `verified` is the cumulative number of
-    /// GrandPa authority-set justification fragments that have been
-    /// verified so far.
+    /// Warp-sync in progress. `verified` is the cumulative number of
+    /// GrandPa fragments verified so far.
     WarpSync { verified: u64 },
-    /// Warp-sync has finished and the client is now applying blocks
-    /// forward from the warp-sync target until it reaches the chain
-    /// head. `current` is the last finalized block the light client
-    /// has locally; `target` is the light client's current best block.
-    /// Both numbers are local knowledge; `target` is monotonic but not
-    /// guaranteed to equal the network head (no independent source of
-    /// "network best" is consulted here).
+    /// Post-warp-sync catch-up. `current` is the last locally-finalized
+    /// block number; `target` is the current best block number.
     ChainSync { current: u64, target: u64 },
-    /// The light client is at (or effectively at) the chain head and
-    /// keeping up with new finalized blocks.
+    /// The light client is at (or effectively at) the chain head.
     InSync,
 }
 
-/// Wrapper around a [`SyncProgress`] callback that implements [`fmt::Debug`]
-/// so it can be embedded in structs that derive `Debug` (the bare `dyn Fn`
-/// trait object does not).
-///
-/// Clone is an `Arc::clone` on the underlying pointer — callbacks are
-/// shared, not duplicated.
+/// Wrapper around a [`SyncProgress`] callback that implements [`fmt::Debug`].
 #[derive(Clone)]
 pub struct SyncProgressCallback {
     inner: Arc<dyn Fn(&SyncProgress) + Send + Sync>,
@@ -90,11 +73,6 @@ pub struct SyncProgressCallback {
 
 impl SyncProgressCallback {
     /// Constructs a [`SyncProgressCallback`] from any closure.
-    ///
-    /// The callback receives `&SyncProgress` by reference so that the
-    /// `smoldot-light` internals do not need to clone the event on the
-    /// hot path. [`SyncProgress`] is `Copy`, so consumers that want an
-    /// owned value can simply dereference.
     pub fn new<F: Fn(&SyncProgress) + Send + Sync + 'static>(callback: F) -> Self {
         Self {
             inner: Arc::new(callback),
@@ -134,12 +112,10 @@ pub struct Config<TPlat: PlatformRef> {
     /// Extra fields depending on whether the chain is a parachain.
     pub chain_type: ConfigChainType<TPlat>,
 
-    /// Optional callback invoked when the sync service's [`SyncProgress`]
-    /// state changes. Fired on meaningful transitions only (not on a
-    /// timer). Called synchronously from the sync task — the callback
-    /// MUST NOT block or perform heavy work; offload to another task if
-    /// needed. May be invoked repeatedly with the same variant when its
-    /// inner numeric fields change.
+    /// Optional callback invoked when [`SyncProgress`] changes.
+    ///
+    /// Called synchronously from the sync task. Must not block; offload
+    /// heavy work to another task.
     pub on_sync_progress: Option<SyncProgressCallback>,
 }
 

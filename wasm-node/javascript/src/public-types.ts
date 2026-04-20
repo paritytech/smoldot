@@ -476,34 +476,21 @@ export interface AddChainOptions {
     }
 
     /**
-     * Optional callback invoked on sync progress transitions for this
-     * chain. See {@link SyncProgress} for the event shape.
+     * Optional callback invoked on sync progress transitions for this chain.
+     * See {@link SyncProgress} for the event shape.
      *
-     * The callback is fired once when the sync phase changes, and
-     * additionally each time the inner counters of a phase update
-     * (for example, on each verified warp-sync fragment).
-     *
-     * Intended use is UI loading/progress indicators. Historically the
-     * only way to observe warp-sync progress was by parsing smoldot's
-     * log stream, but smoldot's release build is silent about fragment
-     * counts at every log level — this callback is the first supported
-     * API for observing them.
-     *
-     * The callback should not throw; a throwing callback is caught and
-     * the event is dropped so that one misbehaving consumer cannot
-     * take down the shared event-dispatch loop.
+     * Fires on each phase change and on each counter update within a phase.
+     * Must not throw; a throwing callback is silently caught to protect the
+     * shared event-dispatch loop.
      */
     onSyncProgress?: (progress: SyncProgress) => void,
 }
 
 /**
- * Discriminated union of sync progress events emitted via
- * {@link AddChainOptions.onSyncProgress}.
+ * Sync progress events emitted via {@link AddChainOptions.onSyncProgress}.
  *
- * Uses a discriminated union rather than a merged `{ verified, total }`
- * shape because smoldot does not know the total warp-sync fragment
- * count up front — it is discovered as warp sync proceeds. Each variant
- * carries only what is actually known at that phase.
+ * The total warp-sync fragment count is not known up front, so no `total`
+ * field is provided.
  */
 export type SyncProgress =
     | { type: "warp-sync", verified: number }

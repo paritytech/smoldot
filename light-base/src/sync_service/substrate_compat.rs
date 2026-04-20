@@ -132,10 +132,6 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         // Yield at every loop in order to provide better tasks granularity.
         futures_lite::future::yield_now().await;
 
-        // Emit a sync-progress event to the user callback when the
-        // derived phase or its inner counters have changed since the
-        // last emission. The loop ticks frequently; most iterations
-        // will be a no-op because the derived value is unchanged.
         if let Some(cb) = task.on_sync_progress.as_ref() {
             if let Some(sync) = task.sync.as_ref() {
                 let current = derive_sync_progress(sync);
@@ -1469,21 +1465,14 @@ struct Task<TPlat: PlatformRef> {
         future::BoxFuture<'static, (all::RequestId, Result<RequestOutcome, future::Aborted>)>,
     >,
 
-    /// User callback for sync progress events. Invoked whenever the
-    /// computed [`SyncProgress`] differs from [`Task::last_emitted_progress`].
+    /// User callback for sync progress events.
     on_sync_progress: Option<SyncProgressCallback>,
 
-    /// The last [`SyncProgress`] value passed to `on_sync_progress`.
-    /// Used to dedupe identical emissions — the loop ticks frequently
-    /// and most iterations don't change the user-visible phase.
+    /// Last value passed to `on_sync_progress`; used to skip unchanged emissions.
     last_emitted_progress: Option<SyncProgress>,
 }
 
-/// Derive the current [`SyncProgress`] from the [`all::AllSync`] state
-/// machine. The classification is deliberately coarse; fine-grained
-/// progress during the `ChainSync` phase would require tracking the
-/// network's best block independently, which is out of scope for this
-/// change.
+/// Derives the current [`SyncProgress`] from the [`all::AllSync`] state machine.
 fn derive_sync_progress<TRq, TSrc, TBl>(sync: &all::AllSync<TRq, TSrc, TBl>) -> SyncProgress {
     if let Some(verified) = sync.warp_sync_verified_fragments() {
         return SyncProgress::WarpSync { verified };

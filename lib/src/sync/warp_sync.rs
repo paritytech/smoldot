@@ -372,13 +372,7 @@ pub struct WarpSync<TSrc, TRq> {
     /// For each call required by the chain information builder, whether it has been downloaded yet.
     runtime_calls:
         hashbrown::HashMap<chain_information::build::RuntimeCall, CallProof, fnv::FnvBuildHasher>,
-    /// Cumulative count of GrandPa warp-sync fragments that have been
-    /// successfully verified. Incremented in the verification hot path
-    /// (see the `VerifyWarpSyncFragment::verify` success branch).
-    /// Exposed to API users via [`WarpSync::verified_fragments`] for UI
-    /// progress indicators; this is the only meaningful monotonic
-    /// progress signal available during warp sync, since the total
-    /// fragment count is not known up front.
+    /// Cumulative count of GrandPa warp-sync fragments successfully verified.
     total_verified_fragments: u64,
 }
 
@@ -598,13 +592,10 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         }
     }
 
-    /// Cumulative number of GrandPa warp-sync fragments that have been
-    /// successfully verified since this [`WarpSync`] was constructed.
+    /// Cumulative number of GrandPa warp-sync fragments successfully verified.
     ///
-    /// Monotonic; only increases. Intended for UI progress indication.
-    /// The total fragment count of the warp sync chain is not known up
-    /// front, so callers should treat this as a cumulative counter
-    /// rather than a ratio.
+    /// The total fragment count is not known up front, so this is a
+    /// monotonically-increasing counter rather than a fraction.
     pub fn verified_fragments(&self) -> u64 {
         self.total_verified_fragments
     }

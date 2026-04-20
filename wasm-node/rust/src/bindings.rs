@@ -318,20 +318,13 @@ unsafe extern "C" {
     /// Only one task can be currently executing at any time.
     pub safe fn current_task_exit();
 
-    /// Reports a sync-progress state transition for the given chain.
+    /// Reports a sync-progress transition for the given chain.
     ///
-    /// `chain_id` is the user-level chain identifier. `json_ptr` and
-    /// `json_len` point to a UTF-8 JSON payload in WebAssembly memory
-    /// describing the current [`smoldot_light::SyncProgress`]
-    /// state. Shape is one of:
+    /// `json_ptr`/`json_len` point to a UTF-8 JSON string in Wasm memory:
     ///
     /// - `{ "type": "warp-sync", "verified": <u64> }`
     /// - `{ "type": "chain-sync", "current": <u64>, "target": <u64> }`
     /// - `{ "type": "in-sync" }`
-    ///
-    /// The host is expected to relay this payload to the user's
-    /// `onSyncProgress` callback (if any was configured when the chain
-    /// was added).
     pub safe fn on_sync_progress(chain_id: u32, json_ptr: u32, json_len: u32);
 }
 

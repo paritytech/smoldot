@@ -243,11 +243,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         all_forks.as_chain_information()
     }
 
-    /// Cumulative count of warp-sync fragments verified so far, if warp
-    /// sync is still in progress. Returns `None` once warp sync has
-    /// transitioned to all-forks mode.
+    /// Returns the cumulative count of verified warp-sync fragments, or `None`
+    /// if warp sync has completed.
     ///
-    /// See [`warp_sync::WarpSync::verified_fragments`] for details.
+    /// See [`warp_sync::WarpSync::verified_fragments`].
     pub fn warp_sync_verified_fragments(&self) -> Option<u64> {
         self.warp_sync.as_ref().map(|ws| ws.verified_fragments())
     }

@@ -148,15 +148,10 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// If `Some`, enables the statement store networking protocol.
     pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
 
-    /// Optional callback invoked on sync progress transitions. See
+    /// Optional callback invoked when sync progress changes. See
     /// [`sync_service::SyncProgress`] for the event shape.
     ///
-    /// The callback runs synchronously from the internal sync task — it
-    /// MUST NOT block. Offload anything non-trivial to another task.
-    ///
-    /// Intended use is UI loading/progress indication. The callback is
-    /// invoked whenever the sync phase or its inner counters change; for
-    /// a warp-sync this can be tens to hundreds of times per chain.
+    /// Called synchronously from the sync task. Must not block.
     pub on_sync_progress: Option<SyncProgressCallback>,
 }
 

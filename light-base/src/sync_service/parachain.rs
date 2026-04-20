@@ -48,13 +48,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 ) {
-    // NOTE: `Config::on_sync_progress` is deliberately not plumbed into
-    // the parachain task. Parachain sync uses the `paraheads` service
-    // over an already-warp-synced relay chain; there is no local warp
-    // sync here and the meaning of `InSync` ("caught up to latest
-    // relay-confirmed para head" vs. "caught up to the network best")
-    // is a design call best made with upstream input. A follow-up PR
-    // can wire emission here once those semantics are settled.
+    // `Config::on_sync_progress` is not wired here; parachain sync semantics
+    // differ from relay-chain warp sync and are deferred to a follow-up.
+
     // Phase 1: Fetch the current finalized parachain head from the relay chain.
     let effective_chain_info = fetch_parachain_head_from_relay(
         &log_target,
