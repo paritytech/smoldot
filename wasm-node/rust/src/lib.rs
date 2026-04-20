@@ -209,7 +209,7 @@ fn add_chain(
     outer_chain_id_u32
 }
 
-/// Serialize a [`smoldot_light::sync_service::SyncProgress`] into the
+/// Serialize a [`smoldot_light::SyncProgress`] into the
 /// JSON wire format shared with the JS host. The format mirrors the
 /// public TypeScript `SyncProgress` discriminated union:
 ///
@@ -225,9 +225,7 @@ fn sync_progress_to_json(p: &smoldot_light::SyncProgress) -> String {
             format!("{{\"type\":\"warp-sync\",\"verified\":{verified}}}")
         }
         smoldot_light::SyncProgress::ChainSync { current, target } => {
-            format!(
-                "{{\"type\":\"chain-sync\",\"current\":{current},\"target\":{target}}}"
-            )
+            format!("{{\"type\":\"chain-sync\",\"current\":{current},\"target\":{target}}}")
         }
         smoldot_light::SyncProgress::InSync => "{\"type\":\"in-sync\"}".to_string(),
     }

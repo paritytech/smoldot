@@ -52,7 +52,7 @@ pub use network_service::Role;
 
 /// Progress events emitted during chain synchronization.
 ///
-/// See [`Config::on_sync_progress`].
+/// See [`crate::AddChainConfig::on_sync_progress`].
 ///
 /// This is a discriminated union rather than a merged `{ verified, total }`
 /// shape because smoldot does not know the total number of warp-sync

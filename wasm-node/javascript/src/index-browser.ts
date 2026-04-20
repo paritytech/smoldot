@@ -33,7 +33,8 @@ export {
     CrashError,
     JsonRpcDisabledError,
     QueueFullError,
-    LogCallback
+    LogCallback,
+    SyncProgress
 } from './public-types.js';
 
 /**

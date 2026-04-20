@@ -322,7 +322,7 @@ unsafe extern "C" {
     ///
     /// `chain_id` is the user-level chain identifier. `json_ptr` and
     /// `json_len` point to a UTF-8 JSON payload in WebAssembly memory
-    /// describing the current [`smoldot_light::sync_service::SyncProgress`]
+    /// describing the current [`smoldot_light::SyncProgress`]
     /// state. Shape is one of:
     ///
     /// - `{ "type": "warp-sync", "verified": <u64> }`
