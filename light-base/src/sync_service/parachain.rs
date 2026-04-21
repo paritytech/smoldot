@@ -1117,6 +1117,11 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
         .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
         .await;
 
+    // Try the already-finalized block first before waiting for new notifications.
+    // On warm restart the relay chain may already be synced, so there's no reason
+    // to wait for the next finalization round.
+    let mut try_initial_finalized = true;
+
     log!(
         platform,
         Info,
@@ -1125,20 +1130,27 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
     );
 
     loop {
-        let finalized_hash = loop {
-            match subscription.new_blocks.next().await {
-                Some(runtime_service::Notification::Finalized { hash, .. }) => {
-                    break hash;
-                }
-                Some(_) => continue,
-                None => {
-                    // Subscription died. Re-subscribe.
-                    subscription = relay_chain_sync
-                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
-                        .await;
-                    break header::hash_from_scale_encoded_header(
-                        &subscription.finalized_block_scale_encoded_header,
-                    );
+        let finalized_hash = if try_initial_finalized {
+            try_initial_finalized = false;
+            header::hash_from_scale_encoded_header(
+                &subscription.finalized_block_scale_encoded_header,
+            )
+        } else {
+            loop {
+                match subscription.new_blocks.next().await {
+                    Some(runtime_service::Notification::Finalized { hash, .. }) => {
+                        break hash;
+                    }
+                    Some(_) => continue,
+                    None => {
+                        // Subscription died. Re-subscribe.
+                        subscription = relay_chain_sync
+                            .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
+                            .await;
+                        break header::hash_from_scale_encoded_header(
+                            &subscription.finalized_block_scale_encoded_header,
+                        );
+                    }
                 }
             }
         };
