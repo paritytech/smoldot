@@ -1335,7 +1335,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     .map_err(|e| format!("Failed to compile runtime: {e}"))?;
 
     // AuraApi_slot_duration
-    let slot_duration = {
+    let (slot_duration, vm) = {
         let call_proof = network_service
             .clone()
             .call_proof_request(
@@ -1356,21 +1356,22 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
             })
             .map_err(|e| format!("Failed to decode slot_duration call proof: {e}"))?;
 
-        let output = run_single_runtime_call(
-            vm.clone(),
+        let (output, vm) = run_single_runtime_call(
+            vm,
             "AuraApi_slot_duration",
             &decoded_call_proof,
             &state_root,
         )?;
 
-        <[u8; 8]>::try_from(output.as_slice())
+        let duration = <[u8; 8]>::try_from(output.as_slice())
             .ok()
             .and_then(|b| NonZero::<u64>::new(u64::from_le_bytes(b)))
-            .ok_or_else(|| String::from("Failed to decode AuraApi_slot_duration output"))?
+            .ok_or_else(|| String::from("Failed to decode AuraApi_slot_duration output"))?;
+        (duration, vm)
     };
 
     // AuraApi_authorities
-    let authorities = {
+    let (authorities, vm) = {
         let call_proof = network_service
             .clone()
             .call_proof_request(
@@ -1391,17 +1392,14 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
             })
             .map_err(|e| format!("Failed to decode authorities call proof: {e}"))?;
 
-        let output = run_single_runtime_call(
-            vm.clone(),
-            "AuraApi_authorities",
-            &decoded_call_proof,
-            &state_root,
-        )?;
+        let (output, vm) =
+            run_single_runtime_call(vm, "AuraApi_authorities", &decoded_call_proof, &state_root)?;
 
-        header::AuraAuthoritiesIter::decode(&output)
+        let auths = header::AuraAuthoritiesIter::decode(&output)
             .map_err(|_| String::from("Failed to decode AuraApi_authorities output"))?
             .map(header::AuraAuthority::from)
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (auths, vm)
     };
 
     log!(
@@ -1433,6 +1431,10 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
             virtual_machine: vm,
             storage_code: Some(code),
             storage_heap_pages,
+            // Not available from the bootstrap storage proof. `None` is safe:
+            // the runtime service treats these as optimization hints for detecting
+            // runtime changes. `None` causes a full re-download on the next
+            // `RuntimeEnvironmentUpdated` digest, which is correct for cold start.
             code_merkle_value: None,
             closest_ancestor_excluding: None,
         },
@@ -1440,12 +1442,13 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
 }
 
 /// Runs a single runtime call, serving storage reads from the given proof.
+/// Returns the call output and the VM prototype, which can be reused for subsequent calls.
 fn run_single_runtime_call(
     vm: executor::host::HostVmPrototype,
     function_name: &str,
     proof: &trie::proof_decode::DecodedTrieProof<Vec<u8>>,
     state_root: &[u8; 32],
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, executor::host::HostVmPrototype), String> {
     let mut call = executor::runtime_call::run(executor::runtime_call::Config {
         virtual_machine: vm,
         function_to_call: function_name,
@@ -1462,7 +1465,8 @@ fn run_single_runtime_call(
         match call {
             executor::runtime_call::RuntimeCall::Finished(Ok(success)) => {
                 let output = success.virtual_machine.value().as_ref().to_vec();
-                return Ok(output);
+                let vm = success.virtual_machine.into_prototype();
+                return Ok((output, vm));
             }
             executor::runtime_call::RuntimeCall::Finished(Err(err)) => {
                 return Err(format!("{function_name} execution error: {}", err.detail));
