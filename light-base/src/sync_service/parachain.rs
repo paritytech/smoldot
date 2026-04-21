@@ -1431,10 +1431,9 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
             virtual_machine: vm,
             storage_code: Some(code),
             storage_heap_pages,
-            // Not available from the bootstrap storage proof. `None` is safe:
-            // the runtime service treats these as optimization hints for detecting
-            // runtime changes. `None` causes a full re-download on the next
-            // `RuntimeEnvironmentUpdated` digest, which is correct for cold start.
+            // Only consumed by the warp-sync fast path (relay chains); the parachain
+            // sync path has no hint field and drops it. Can be extracted from
+            // `decoded_proof` via `closest_descendant_merkle_value` if ever needed.
             code_merkle_value: None,
             closest_ancestor_excluding: None,
         },
