@@ -67,9 +67,6 @@ pub struct DatabaseContent {
 /// See [`DatabaseContent::runtime_code_hint`].
 #[derive(Debug, Clone)]
 pub struct DatabaseContentRuntimeCodeHint {
-    /// Storage value of the `:code` trie node corresponding to
-    /// [`DatabaseContentRuntimeCodeHint::code_merkle_value`].
-    pub code: Vec<u8>,
     /// Merkle value of the `:code` trie node in the storage main trie.
     pub code_merkle_value: Vec<u8>,
     /// Closest ancestor of the `:code` key except for `:code` itself.
@@ -88,7 +85,7 @@ pub async fn encode_database<TPlat: platform::PlatformRef>(
     genesis_block_hash: &[u8; 32],
     max_size: usize,
 ) -> String {
-    let (code_storage_value, code_merkle_value, code_closest_ancestor_excluding) = runtime_service
+    let (_code_storage_value, code_merkle_value, code_closest_ancestor_excluding) = runtime_service
         .finalized_runtime_storage_merkle_values()
         .await
         .unwrap_or((None, None, None));
@@ -111,11 +108,7 @@ pub async fn encode_database<TPlat: platform::PlatformRef>(
             })
             .collect(),
         code_merkle_value: code_merkle_value.map(hex::encode),
-        // While it might seem like a good idea to compress the runtime code, in practice it is
-        // normally already zstd-compressed, and additional compressing shouldn't improve the size.
-        code_storage_value: code_storage_value.map(|data| {
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, data)
-        }),
+        code_storage_value: None,
         code_closest_ancestor_excluding: code_closest_ancestor_excluding.map(|key| {
             key.iter()
                 .map(|nibble| format!("{:x}", nibble))
@@ -209,12 +202,9 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
 
     let runtime_code_hint = match (
         decoded.code_merkle_value,
-        decoded.code_storage_value,
         decoded.code_closest_ancestor_excluding,
     ) {
-        (Some(mv), Some(sv), Some(an)) => Some(DatabaseContentRuntimeCodeHint {
-            code: base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, sv)
-                .map_err(|_| ())?,
+        (Some(mv), Some(an)) => Some(DatabaseContentRuntimeCodeHint {
             code_merkle_value: hex::decode(mv).map_err(|_| ())?,
             closest_ancestor_excluding: an
                 .as_bytes()
@@ -222,8 +212,6 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
                 .map(|char| Nibble::from_ascii_hex_digit(*char).ok_or(()))
                 .collect::<Result<Vec<Nibble>, ()>>()?,
         }),
-        // A combination of `Some` and `None` is technically invalid, but we simply ignore this
-        // situation.
         _ => None,
     };
 
@@ -261,4 +249,87 @@ struct SerdeDatabase {
         skip_serializing_if = "Option::is_none"
     )]
     code_closest_ancestor_excluding: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_db_json_with_code(code_size: usize) -> String {
+        let fake_code = vec![0x42u8; code_size];
+        let code_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, &fake_code);
+        let merkle_hex = hex::encode([0xAAu8; 32]);
+        format!(
+            r#"{{"genesisHash":"{}","nodes":{{}},"runtimeCode":"{}","codeMerkleValue":"{}","codeClosestAncestor":"3a"}}"#,
+            hex::encode([0u8; 32]),
+            code_b64,
+            merkle_hex,
+        )
+    }
+
+    fn make_db_json_without_code() -> String {
+        let merkle_hex = hex::encode([0xAAu8; 32]);
+        format!(
+            r#"{{"genesisHash":"{}","nodes":{{}},"codeMerkleValue":"{}","codeClosestAncestor":"3a"}}"#,
+            hex::encode([0u8; 32]),
+            merkle_hex,
+        )
+    }
+
+    #[test]
+    fn decode_db_without_code_is_fast() {
+        let db = make_db_json_without_code();
+        assert!(db.len() < 300);
+
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            let result = decode_database(&db, 4);
+            assert!(result.is_ok());
+            let content = result.unwrap();
+            assert!(content.runtime_code_hint.is_some());
+        }
+        let elapsed = start.elapsed();
+        // 100 decodes of a small DB should take well under 100ms.
+        assert!(
+            elapsed.as_millis() < 100,
+            "100 decodes took {elapsed:?}, expected < 100ms"
+        );
+    }
+
+    #[test]
+    fn decode_db_with_legacy_code_field_still_works() {
+        // Old databases contain a runtimeCode field. decode_database must still
+        // accept them (backwards compatibility), but the code field is ignored.
+        let db = make_db_json_with_code(2_000_000);
+        assert!(db.len() > 2_000_000);
+
+        let result = decode_database(&db, 4);
+        assert!(result.is_ok());
+        let content = result.unwrap();
+        // The hint is present (merkle value + ancestor were in the JSON).
+        assert!(content.runtime_code_hint.is_some());
+        let hint = content.runtime_code_hint.unwrap();
+        assert_eq!(hint.code_merkle_value, vec![0xAAu8; 32]);
+    }
+
+    #[test]
+    fn new_encode_omits_runtime_code() {
+        // Verify that SerdeDatabase with code_storage_value: None serializes
+        // without the runtimeCode field.
+        let db = SerdeDatabase {
+            genesis_hash: hex::encode([0u8; 32]),
+            chain: None,
+            nodes: Default::default(),
+            code_merkle_value: Some(hex::encode([0xBBu8; 32])),
+            code_storage_value: None,
+            code_closest_ancestor_excluding: Some("3a".to_owned()),
+        };
+        let json = serde_json::to_string(&db).unwrap();
+        assert!(!json.contains("runtimeCode"));
+        assert!(json.contains("codeMerkleValue"));
+        assert!(json.contains("codeClosestAncestor"));
+        // DB without code should be tiny.
+        assert!(json.len() < 300);
+    }
 }

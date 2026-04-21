@@ -455,8 +455,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // is present in the chain spec, it is possible to start syncing at the finalized block
         // it describes.
         // At the same time, we deconstruct the database into `known_nodes`
-        // and `runtime_code_hint`.
-        let (chain_information, used_database_chain_information, known_nodes, runtime_code_hint) = {
+        let (chain_information, used_database_chain_information, known_nodes) = {
             let checkpoint = chain_spec
                 .light_sync_state()
                 .map(|s| s.to_chain_information());
@@ -470,13 +469,12 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     Some(database::DatabaseContent {
                         chain_information: Some(db_ci),
                         known_nodes,
-                        runtime_code_hint,
                         ..
                     }),
                 ) if db_ci.as_ref().finalized_block_header.number
                     >= checkpoint.as_ref().finalized_block_header.number =>
                 {
-                    (Some(db_ci), true, known_nodes, runtime_code_hint)
+                    (Some(db_ci), true, known_nodes)
                 }
 
                 // Otherwise, use the chain spec checkpoint.
@@ -485,11 +483,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     Some(Ok(checkpoint)),
                     Some(database::DatabaseContent {
                         known_nodes,
-                        runtime_code_hint,
                         ..
                     }),
-                ) => (Some(checkpoint), false, known_nodes, runtime_code_hint),
-                (_, Some(Ok(checkpoint)), None) => (Some(checkpoint), false, Vec::new(), None),
+                ) => (Some(checkpoint), false, known_nodes),
+                (_, Some(Ok(checkpoint)), None) => (Some(checkpoint), false, Vec::new()),
 
                 // If neither the genesis chain information nor the checkpoint chain information
                 // is available, we could in principle use the database, but for API reasons we
@@ -500,11 +497,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     None,
                     Some(database::DatabaseContent {
                         known_nodes,
-                        runtime_code_hint,
                         ..
                     }),
-                ) => (None, false, known_nodes, runtime_code_hint),
-                (None, None, None) => (None, false, Vec::new(), None),
+                ) => (None, false, known_nodes),
+                (None, None, None) => (None, false, Vec::new()),
 
                 // Use the genesis block if no checkpoint is available.
                 (
@@ -515,10 +511,9 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     )),
                     Some(database::DatabaseContent {
                         known_nodes,
-                        runtime_code_hint,
                         ..
                     }),
-                ) => (Some(genesis_ci), false, known_nodes, runtime_code_hint),
+                ) => (Some(genesis_ci), false, known_nodes),
                 (
                     Some(genesis_ci),
                     None
@@ -526,7 +521,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
                     )),
                     None,
-                ) => (Some(genesis_ci), false, Vec::new(), None),
+                ) => (Some(genesis_ci), false, Vec::new()),
 
                 // If the checkpoint format is invalid, we return an error no matter whether the
                 // genesis chain information could be used.
@@ -723,7 +718,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         log_name.clone(),
                         &self.platform,
                         &mut self.network_service,
-                        runtime_code_hint,
                         genesis_block_header,
                         usize::from(chain_spec.block_number_bytes()),
                         chain_spec.fork_id().map(|f| f.to_owned()),
@@ -1128,7 +1122,6 @@ fn start_services<TPlat: platform::PlatformRef>(
     log_name: String,
     platform: &TPlat,
     network_service: &mut Option<Arc<network_service::NetworkService<TPlat>>>,
-    runtime_code_hint: Option<database::DatabaseContentRuntimeCodeHint>,
     genesis_block_scale_encoded_header: Vec<u8>,
     block_number_bytes: usize,
     fork_id: Option<String>,
@@ -1234,13 +1227,6 @@ fn start_services<TPlat: platform::PlatformRef>(
                 chain_type: sync_service::ConfigChainType::SubstrateCompatible(
                     sync_service::ConfigSubstrateCompatible {
                         chain_information: chain_information.clone(),
-                        runtime_code_hint: runtime_code_hint.map(|hint| {
-                            sync_service::ConfigSubstrateCompatibleRuntimeCodeHint {
-                                storage_value: hint.code,
-                                merkle_value: hint.code_merkle_value,
-                                closest_ancestor_excluding: hint.closest_ancestor_excluding,
-                            }
-                        }),
                     },
                 ),
             }));

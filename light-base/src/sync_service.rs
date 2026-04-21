@@ -83,25 +83,6 @@ pub enum ConfigChainType<TPlat: PlatformRef> {
 pub struct ConfigSubstrateCompatible {
     /// State of the finalized chain.
     pub chain_information: chain::chain_information::ValidChainInformation,
-
-    /// Known valid Merkle value and storage value combination for the `:code` key.
-    ///
-    /// If provided, the warp syncing algorithm will first fetch the Merkle value of `:code`, and
-    /// if it matches the Merkle value provided in the hint, use the storage value in the hint
-    /// instead of downloading it. If the hint doesn't match, an extra round-trip will be needed,
-    /// but if the hint matches it saves a big download.
-    pub runtime_code_hint: Option<ConfigSubstrateCompatibleRuntimeCodeHint>,
-}
-
-/// See [`ConfigSubstrateCompatible::runtime_code_hint`].
-pub struct ConfigSubstrateCompatibleRuntimeCodeHint {
-    /// Storage value of the `:code` trie node corresponding to
-    /// [`ConfigSubstrateCompatibleRuntimeCodeHint::merkle_value`].
-    pub storage_value: Vec<u8>,
-    /// Merkle value of the `:code` trie node in the storage main trie.
-    pub merkle_value: Vec<u8>,
-    /// Closest ancestor of the `:code` key except for `:code` itself.
-    pub closest_ancestor_excluding: Vec<Nibble>,
 }
 
 /// See [`ConfigChainType::Parachain`].
@@ -161,7 +142,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     config.platform.clone(),
                     config_substrate_compat.chain_information,
                     config.block_number_bytes,
-                    config_substrate_compat.runtime_code_hint,
                     from_foreground,
                     config.network_service.clone(),
                 ))
