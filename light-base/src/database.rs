@@ -332,4 +332,90 @@ mod tests {
         // DB without code should be tiny.
         assert!(json.len() < 300);
     }
+
+    #[test]
+    fn decode_with_code_much_slower_than_without() {
+        // Demonstrates the performance problem: decoding a database with a 2 MiB
+        // base64-encoded runtime code blob is orders of magnitude slower than
+        // decoding one without it.
+        let db_with_code = make_db_json_with_code(2_000_000);
+        let db_without_code = make_db_json_without_code();
+
+        assert!(
+            db_with_code.len() > 2_600_000,
+            "DB with 2 MiB code should be >2.6 MB (base64 overhead), got {}",
+            db_with_code.len()
+        );
+        assert!(
+            db_without_code.len() < 300,
+            "DB without code should be <300 bytes, got {}",
+            db_without_code.len()
+        );
+
+        let iterations = 10;
+
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let _ = decode_database(&db_with_code, 4).unwrap();
+        }
+        let with_code_elapsed = start.elapsed();
+
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let _ = decode_database(&db_without_code, 4).unwrap();
+        }
+        let without_code_elapsed = start.elapsed();
+
+        // The database with code should be at least 10x slower to decode.
+        // In practice it's 100-1000x slower (native) or more (Wasm).
+        let ratio = with_code_elapsed.as_nanos() / without_code_elapsed.as_nanos().max(1);
+        assert!(
+            ratio >= 10,
+            "Expected decode with 2 MiB code to be >=10x slower than without. \
+             With code: {:?}, without: {:?}, ratio: {}x",
+            with_code_elapsed,
+            without_code_elapsed,
+            ratio,
+        );
+
+        eprintln!(
+            "decode_database benchmark ({iterations} iterations):\n  \
+             with 2 MiB code:    {:?} ({:.1}ms/iter, JSON size: {} bytes)\n  \
+             without code:       {:?} ({:.1}ms/iter, JSON size: {} bytes)\n  \
+             ratio: {}x slower with code",
+            with_code_elapsed,
+            with_code_elapsed.as_secs_f64() / iterations as f64 * 1000.0,
+            db_with_code.len(),
+            without_code_elapsed,
+            without_code_elapsed.as_secs_f64() / iterations as f64 * 1000.0,
+            db_without_code.len(),
+            ratio,
+        );
+    }
+
+    #[test]
+    fn database_size_comparison() {
+        // Documents the database size impact of storing runtime code.
+        let db_with_code = make_db_json_with_code(2_000_000);
+        let db_without_code = make_db_json_without_code();
+
+        let size_with = db_with_code.len();
+        let size_without = db_without_code.len();
+        let reduction_pct = (1.0 - size_without as f64 / size_with as f64) * 100.0;
+
+        eprintln!(
+            "Database size comparison:\n  \
+             with 2 MiB runtime code: {} bytes ({:.1} MB)\n  \
+             without runtime code:    {} bytes ({:.1} KB)\n  \
+             reduction: {:.1}%",
+            size_with,
+            size_with as f64 / 1_000_000.0,
+            size_without,
+            size_without as f64 / 1_000.0,
+            reduction_pct,
+        );
+
+        // The database without code should be <0.1% of the size with code.
+        assert!(size_without * 1000 < size_with);
+    }
 }
