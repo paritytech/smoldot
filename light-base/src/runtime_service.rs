@@ -2810,12 +2810,26 @@ async fn run_background<TPlat: PlatformRef>(
                     );
                 }
 
-                match &mut background.tree {
-                    Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
-                        tree.async_op_failure(async_op_id, &background.platform.now());
+                if error.is_no_peers() {
+                    // No peers available yet — use a short retry (200ms) instead of
+                    // the full 4s cooldown. Peers typically connect within milliseconds.
+                    let short_retry = background.platform.now() + Duration::from_millis(200);
+                    match &mut background.tree {
+                        Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                            tree.async_op_failure_retry_at(async_op_id, &short_retry);
+                        }
+                        Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                            tree.async_op_failure_retry_at(async_op_id, &short_retry);
+                        }
                     }
-                    Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                        tree.async_op_failure(async_op_id, &background.platform.now());
+                } else {
+                    match &mut background.tree {
+                        Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                            tree.async_op_failure(async_op_id, &background.platform.now());
+                        }
+                        Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                            tree.async_op_failure(async_op_id, &background.platform.now());
+                        }
                     }
                 }
             }
@@ -2832,6 +2846,13 @@ enum RuntimeDownloadError {
 }
 
 impl RuntimeDownloadError {
+    fn is_no_peers(&self) -> bool {
+        match self {
+            RuntimeDownloadError::StorageQuery(err) => err.is_no_peers(),
+            RuntimeDownloadError::InvalidHeader(_) => false,
+        }
+    }
+
     /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
     /// issue.
     fn is_network_problem(&self) -> bool {
