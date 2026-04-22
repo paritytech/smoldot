@@ -1819,3 +1819,107 @@ fn run_single_runtime_call(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::default::DefaultPlatform;
+
+    /// A real Polkadot runtime embedded for integration testing.
+    const TEST_RUNTIME_WASM: &[u8] =
+        include_bytes!("../../../lib/src/executor/vm/test-polkadot-runtime-v9160.wasm");
+
+    /// Exercises the same spawn_task + oneshot pattern used in start_parachain to
+    /// pre-compile cached WASM. Proves the compiled VM is delivered correctly.
+    #[test]
+    fn precompile_via_spawn_task_delivers_valid_vm() {
+        let platform = DefaultPlatform::new("test".to_string(), "0.1".to_string());
+
+        let (tx, rx) = futures_channel::oneshot::channel();
+        let code = TEST_RUNTIME_WASM.to_vec();
+        platform.spawn_task("precompile-test".into(), async move {
+            let result = (|| {
+                let heap_pages =
+                    executor::storage_heap_pages_to_value(None).map_err(|e| format!("{e}"))?;
+                executor::host::HostVmPrototype::new(executor::host::Config {
+                    module: &code,
+                    heap_pages,
+                    exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+                    allow_unresolved_imports: true,
+                })
+                .map_err(|e| format!("{e}"))
+            })();
+            let _ = tx.send(result);
+        });
+
+        let vm_result = smol::block_on(rx).expect("sender not dropped");
+        let vm = vm_result.expect("compilation should succeed");
+        // The test WASM embeds a runtime version — verify it parsed correctly.
+        let _version = vm.runtime_version();
+    }
+
+    /// When the sender is dropped without sending (simulating a cancelled or panicked
+    /// task), the receiver must yield an error — the warm-start caller maps this to a
+    /// fallback into cold bootstrap.
+    #[test]
+    fn dropped_sender_yields_cancellation_error() {
+        let (tx, rx) =
+            futures_channel::oneshot::channel::<Result<executor::host::HostVmPrototype, String>>();
+        drop(tx);
+        let err = smol::block_on(rx);
+        assert!(err.is_err(), "dropped sender should produce Canceled error");
+    }
+
+    /// Compilation failure (garbage bytes) is delivered as Ok(Err(...)) through the
+    /// oneshot, not a panic — proving the error propagation path.
+    #[test]
+    fn invalid_wasm_returns_error_via_oneshot() {
+        let platform = DefaultPlatform::new("test".to_string(), "0.1".to_string());
+
+        let (tx, rx) = futures_channel::oneshot::channel();
+        let garbage = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        platform.spawn_task("precompile-bad".into(), async move {
+            let result = (|| {
+                let heap_pages =
+                    executor::storage_heap_pages_to_value(None).map_err(|e| format!("{e}"))?;
+                executor::host::HostVmPrototype::new(executor::host::Config {
+                    module: &garbage,
+                    heap_pages,
+                    exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+                    allow_unresolved_imports: true,
+                })
+                .map_err(|e| format!("{e}"))
+            })();
+            let _ = tx.send(result);
+        });
+
+        let channel_result = smol::block_on(rx).expect("sender should not be dropped");
+        assert!(
+            channel_result.is_err(),
+            "garbage WASM should produce a compilation error"
+        );
+    }
+
+    /// Proves the double-? unwrap pattern used in try_warm_start_from_cached_code works
+    /// correctly for both error cases: cancelled channel and compilation failure.
+    #[test]
+    fn double_question_mark_pattern() {
+        // Case 1: Channel cancelled → outer Err
+        let (tx, rx) = futures_channel::oneshot::channel::<Result<(), String>>();
+        drop(tx);
+        let result: Result<(), String> = smol::block_on(async {
+            rx.await
+                .map_err(|_| String::from("Pre-compilation task was cancelled"))?
+        });
+        assert_eq!(result.unwrap_err(), "Pre-compilation task was cancelled");
+
+        // Case 2: Compilation error → inner Err
+        let (tx, rx) = futures_channel::oneshot::channel::<Result<(), String>>();
+        tx.send(Err("bad wasm".into())).unwrap();
+        let result: Result<(), String> = smol::block_on(async {
+            rx.await
+                .map_err(|_| String::from("Pre-compilation task was cancelled"))?
+        });
+        assert_eq!(result.unwrap_err(), "bad wasm");
+    }
+}
