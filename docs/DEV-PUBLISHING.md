@@ -21,11 +21,11 @@ Manual npm publish for testing. **Never moves `latest`.** No version commit need
 
 | Input | Published version | Dist-tag |
 |---|---|---|
-| `suffix = smoke` | `<next-patch>-dev.<YYYYMMDD>.smoke.<N>` | `dev-<YYYYMMDD>-smoke` |
-| blank | `<next-patch>-dev.<YYYYMMDD>.<N>` | `dev-<YYYYMMDD>` |
+| `suffix = smoke` | `<next-patch>-dev-<YYYYMMDD>-smoke.<N>` | `dev-<YYYYMMDD>-smoke` |
+| blank | `<next-patch>-dev-<YYYYMMDD>.<N>` | `dev-<YYYYMMDD>` |
 
 Example, dispatched 2026-04-22 while stable is `3.1.1`, suffix `smoke`:
-- Version: `3.1.2-dev.20260422.smoke.0`
+- Version: `3.1.2-dev-20260422-smoke.0`
 - Dist-tag: `dev-20260422-smoke`
 
 Rules of thumb:
@@ -36,8 +36,8 @@ Rules of thumb:
 ## Install
 
 ```sh
-npm install smoldot@dev-20260422-smoke            # follow the tag (moves)
-npm install smoldot@3.1.2-dev.20260422.smoke.0    # pin to exact (immutable)
+npm install smoldot@dev-20260422-smoke           # follow the tag (moves)
+npm install smoldot@3.1.2-dev-20260422-smoke.0   # pin to exact (immutable)
 ```
 
 Full release flow: see [`RELEASING.md`](./RELEASING.md).

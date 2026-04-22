@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       npm_tag_suffix:
-        description: 'Optional suffix for the dev dist-tag. Non-empty → tag "dev-<YYYYMMDD>-<suffix>", version "<next-patch>-dev.<YYYYMMDD>.<suffix>.<N>". Empty → tag "dev-<YYYYMMDD>", version "<next-patch>-dev.<YYYYMMDD>.<N>". Version always bumps patch (never minor/major). Cannot produce "latest". Allowed suffix chars: [A-Za-z0-9-].'
+        description: 'Optional suffix for the dev dist-tag. Non-empty → tag "dev-<YYYYMMDD>-<suffix>", version "<next-patch>-dev-<YYYYMMDD>-<suffix>.<N>". Empty → tag "dev-<YYYYMMDD>", version "<next-patch>-dev-<YYYYMMDD>.<N>". Version always bumps patch (never minor/major). Cannot produce "latest". Allowed suffix chars: [A-Za-z0-9-].'
         type: string
         required: false
         default: ''
@@ -220,15 +220,15 @@ jobs:
 
           DATE=$(date -u +%Y%m%d)
 
-          # Branch prefix/tag on empty suffix to keep versions semver-valid
-          # (empty prerelease identifiers would fail semver).
+          # Build the "dev[-<suffix>]" portion once, shared by version and tag.
           if [[ -z "$SUFFIX" ]]; then
-            PREFIX="${NEXT}-dev.${DATE}"
             TAG="dev-${DATE}"
           else
-            PREFIX="${NEXT}-dev.${DATE}.${SUFFIX}"
             TAG="dev-${DATE}-${SUFFIX}"
           fi
+          # Version's first prerelease identifier is the tag; "." + numeric N
+          # is a second identifier so that N sorts numerically.
+          PREFIX="${NEXT}-${TAG}"
           MAX_N=$(
             npm view --json smoldot versions 2>/dev/null \
               | jq -r '.[]' \

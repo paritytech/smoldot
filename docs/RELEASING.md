@@ -275,10 +275,10 @@ dispatches to `npm_publish_automation`. Nothing is committed back to git.
 
 - **Version** always bumps patch — never minor or major
 - **With suffix** (e.g. `test123`):
-  - Version: `<next-patch>-dev.<YYYYMMDD>.<suffix>.<N>` → `3.1.2-dev.20260422.test123.0`
+  - Version: `<next-patch>-dev-<YYYYMMDD>-<suffix>.<N>` → `3.1.2-dev-20260422-test123.0`
   - Dist-tag: `dev-<YYYYMMDD>-<suffix>` → `dev-20260422-test123`
 - **Without suffix** (blank):
-  - Version: `<next-patch>-dev.<YYYYMMDD>.<N>` → `3.1.2-dev.20260422.0`
+  - Version: `<next-patch>-dev-<YYYYMMDD>.<N>` → `3.1.2-dev-20260422.0`
   - Dist-tag: `dev-<YYYYMMDD>` → `dev-20260422`
 - **`N` counter** auto-increments. The workflow queries `npm view --json
   smoldot versions` for prior publishes matching the prefix and uses
@@ -288,7 +288,7 @@ dispatches to `npm_publish_automation`. Nothing is committed back to git.
 
 ```sh
 npm install smoldot@dev-20260422-test123   # by dist-tag (moves with each publish)
-npm install smoldot@3.1.2-dev.20260422.test123.0   # by exact version (immutable)
+npm install smoldot@3.1.2-dev-20260422-test123.0   # by exact version (immutable)
 ```
 
 **Every dispatch gets a fresh version.** `N` is derived from npm state, not
