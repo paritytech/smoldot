@@ -1278,81 +1278,125 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         platform,
         Info,
         log_target,
-        format!("Downloading parachain runtime from peer {peer_id}")
+        format!("Downloading parachain runtime and Aura proofs from peer {peer_id}")
     );
 
-    // Download :code and :heappages.
-    let proof = network_service
-        .clone()
-        .storage_proof_request(
-            peer_id.clone(),
-            codec::StorageProofRequestConfig {
-                block_hash,
-                keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
-            },
-            Duration::from_secs(60),
-        )
-        .await
-        .map_err(|e| format!("Storage proof request failed: {e}"))?;
+    // Fire all three P2P requests in parallel. The storage proof branch includes
+    // decoding and WASM compilation, which overlaps with the Aura proof downloads.
+    let storage_and_compile_fut = {
+        let network_service = network_service.clone();
+        let peer_id = peer_id.clone();
+        async move {
+            let proof = network_service
+                .storage_proof_request(
+                    peer_id,
+                    codec::StorageProofRequestConfig {
+                        block_hash,
+                        keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
+                    },
+                    Duration::from_secs(60),
+                )
+                .await
+                .map_err(|e| format!("Storage proof request failed: {e}"))?;
 
-    let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-        proof: proof.decode().to_vec(),
-    })
-    .map_err(|e| format!("Failed to decode storage proof: {e}"))?;
+            let decoded_proof =
+                trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+                    proof: proof.decode().to_vec(),
+                })
+                .map_err(|e| format!("Failed to decode storage proof: {e}"))?;
 
-    let code = decoded_proof
-        .storage_value(&state_root, b":code")
-        .map_err(|_| String::from("Proof doesn't contain :code"))?
-        .ok_or_else(|| String::from("Runtime :code not found in storage"))?
-        .0
-        .to_vec();
+            let code = decoded_proof
+                .storage_value(&state_root, b":code")
+                .map_err(|_| String::from("Proof doesn't contain :code"))?
+                .ok_or_else(|| String::from("Runtime :code not found in storage"))?
+                .0
+                .to_vec();
 
-    let heap_pages_raw = decoded_proof
-        .storage_value(&state_root, b":heappages")
-        .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
+            let heap_pages_raw = decoded_proof
+                .storage_value(&state_root, b":heappages")
+                .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
 
-    let storage_heap_pages = heap_pages_raw.map(|(v, _)| v.to_vec());
+            let storage_heap_pages = heap_pages_raw.map(|(v, _)| v.to_vec());
 
-    let heap_pages = executor::storage_heap_pages_to_value(storage_heap_pages.as_deref())
-        .map_err(|e| format!("Invalid :heappages value: {e}"))?;
+            let heap_pages = executor::storage_heap_pages_to_value(storage_heap_pages.as_deref())
+                .map_err(|e| format!("Invalid :heappages value: {e}"))?;
+
+            let vm = executor::host::HostVmPrototype::new(executor::host::Config {
+                module: &code,
+                heap_pages,
+                exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+                allow_unresolved_imports: true,
+            })
+            .map_err(|e| format!("Failed to compile runtime: {e}"))?;
+
+            Ok::<_, String>((vm, code, storage_heap_pages))
+        }
+    };
+
+    let slot_duration_proof_fut = {
+        let network_service = network_service.clone();
+        let peer_id = peer_id.clone();
+        async move {
+            network_service
+                .call_proof_request(
+                    peer_id,
+                    codec::CallProofRequestConfig {
+                        block_hash,
+                        method: Cow::Borrowed("AuraApi_slot_duration"),
+                        parameter_vectored: iter::empty::<Vec<u8>>(),
+                    },
+                    Duration::from_secs(16),
+                )
+                .await
+                .map_err(|e| format!("AuraApi_slot_duration call proof request failed: {e}"))
+        }
+    };
+
+    let authorities_proof_fut = {
+        let network_service = network_service.clone();
+        let peer_id = peer_id.clone();
+        async move {
+            network_service
+                .call_proof_request(
+                    peer_id,
+                    codec::CallProofRequestConfig {
+                        block_hash,
+                        method: Cow::Borrowed("AuraApi_authorities"),
+                        parameter_vectored: iter::empty::<Vec<u8>>(),
+                    },
+                    Duration::from_secs(16),
+                )
+                .await
+                .map_err(|e| format!("AuraApi_authorities call proof request failed: {e}"))
+        }
+    };
+
+    let (compile_result, slot_duration_proof_result, authorities_proof_result) = future::join3(
+        storage_and_compile_fut,
+        slot_duration_proof_fut,
+        authorities_proof_fut,
+    )
+    .await;
+
+    let (vm, code, storage_heap_pages) = compile_result?;
+    let slot_duration_raw_proof = slot_duration_proof_result?;
+    let authorities_raw_proof = authorities_proof_result?;
 
     log!(
         platform,
         Info,
         log_target,
         format!(
-            "Downloaded parachain runtime ({} bytes), compiling...",
+            "Compiled parachain runtime ({} bytes), executing Aura calls...",
             code.len()
         )
     );
 
-    let vm = executor::host::HostVmPrototype::new(executor::host::Config {
-        module: &code,
-        heap_pages,
-        exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
-        allow_unresolved_imports: true,
-    })
-    .map_err(|e| format!("Failed to compile runtime: {e}"))?;
-
-    // AuraApi_slot_duration
+    // Execute AuraApi_slot_duration against the compiled VM.
     let (slot_duration, vm) = {
-        let call_proof = network_service
-            .clone()
-            .call_proof_request(
-                peer_id.clone(),
-                codec::CallProofRequestConfig {
-                    block_hash,
-                    method: Cow::Borrowed("AuraApi_slot_duration"),
-                    parameter_vectored: iter::empty::<Vec<u8>>(),
-                },
-                Duration::from_secs(16),
-            )
-            .await
-            .map_err(|e| format!("AuraApi_slot_duration call proof request failed: {e}"))?;
-
         let decoded_call_proof =
             trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-                proof: call_proof.decode().to_vec(),
+                proof: slot_duration_raw_proof.decode().to_vec(),
             })
             .map_err(|e| format!("Failed to decode slot_duration call proof: {e}"))?;
 
@@ -1370,25 +1414,11 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         (duration, vm)
     };
 
-    // AuraApi_authorities
+    // Execute AuraApi_authorities against the compiled VM.
     let (authorities, vm) = {
-        let call_proof = network_service
-            .clone()
-            .call_proof_request(
-                peer_id,
-                codec::CallProofRequestConfig {
-                    block_hash,
-                    method: Cow::Borrowed("AuraApi_authorities"),
-                    parameter_vectored: iter::empty::<Vec<u8>>(),
-                },
-                Duration::from_secs(16),
-            )
-            .await
-            .map_err(|e| format!("AuraApi_authorities call proof request failed: {e}"))?;
-
         let decoded_call_proof =
             trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-                proof: call_proof.decode().to_vec(),
+                proof: authorities_raw_proof.decode().to_vec(),
             })
             .map_err(|e| format!("Failed to decode authorities call proof: {e}"))?;
 
