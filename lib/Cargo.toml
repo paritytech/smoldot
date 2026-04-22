@@ -1,6 +1,6 @@
 [package]
 name = "smoldot"
-version = "1.0.0"
+version = "1.1.0"
 description = "Primitives to build a client for Substrate-based blockchains"
 documentation = "https://docs.rs/smoldot"
 keywords = ["blockchain", "peer-to-peer"]
@@ -38,6 +38,7 @@ wasmtime = [
 arrayvec = { version = "0.7.6", default-features = false }
 async-lock = { version = "3.0.0", default-features = false }
 atomic-take = { version = "1.1.0" }
+base32 = { version = "0.5.1", default-features = false }
 base64 = { version = "0.22.0", default-features = false, features = ["alloc"] }
 bip39 = { version = "2.0.0", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
@@ -48,6 +49,7 @@ derive_more = { version = "2.0", default-features = false, features = ["full"] }
 ed25519-zebra = { version = "4.1.0", default-features = false, features = ["alloc"] }
 either = { version = "1.9.0", default-features = false }
 event-listener = { version = "5.3.0", default-features = false }
+fastbloom = { version = "0.17", default-features = false }
 fnv = { version = "1.0.7", default-features = false }
 futures-lite = { version = "2.3.0", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.16.0", default-features = false, features = ["raw-entry", "serde"] }   # TODO: remove serde feature

@@ -64,7 +64,12 @@ fn main() {
                 database_content: "",
                 user_data: (),
                 statement_protocol_config: Some(
-                    smoldot_light::network_service::StatementProtocolConfig::default(),
+                    smoldot_light::network_service::StatementProtocolConfig::new(
+                        core::num::NonZeroUsize::new(65536).unwrap(),
+                        0.01,
+                        rand::random(),
+                        core::time::Duration::from_secs(1),
+                    ),
                 ),
             })
             .unwrap();
@@ -87,7 +92,12 @@ fn main() {
                     database_content: "",
                     user_data: (),
                     statement_protocol_config: Some(
-                        smoldot_light::network_service::StatementProtocolConfig::default(),
+                        smoldot_light::network_service::StatementProtocolConfig::new(
+                            core::num::NonZeroUsize::new(65536).unwrap(),
+                            0.01,
+                            rand::random(),
+                            core::time::Duration::from_secs(1),
+                        ),
                     ),
                 })
                 .unwrap();

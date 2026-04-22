@@ -40,7 +40,7 @@
 mod background;
 
 use crate::{
-    log, network_service, platform::PlatformRef, runtime_service, sync_service,
+    bitswap_service, log, network_service, platform::PlatformRef, runtime_service, sync_service,
     transactions_service,
 };
 
@@ -96,6 +96,9 @@ pub struct Config<TPlat: PlatformRef> {
     /// Service that provides a ready-to-be-called runtime for the current best block.
     pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
+    /// Service that fulfills IPFS CID requests.
+    pub bitswap_service: Arc<bitswap_service::BitswapService>,
+
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
     /// Type of chain, as found in the chain specification.
@@ -115,6 +118,13 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Hash of the genesis block of the chain.
     pub genesis_block_hash: [u8; 32],
+
+    /// Statement protocol configuration. `None` if the statement protocol is disabled.
+    pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+
+    /// Maximum number of seen statement hashes tracked per subscription for dedup.
+    /// `None` if the statement protocol is disabled.
+    pub max_seen_statements: Option<NonZero<usize>>,
 }
 
 /// Creates a new JSON-RPC service with the given configuration.
@@ -146,6 +156,7 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
                 sync_service: config.sync_service,
                 transactions_service: config.transactions_service,
                 runtime_service: config.runtime_service,
+                bitswap_service: config.bitswap_service,
                 chain_name: config.chain_name,
                 chain_ty: config.chain_ty,
                 chain_properties_json: config.chain_properties_json,
@@ -153,6 +164,8 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
                 system_name: config.system_name,
                 system_version: config.system_version,
                 genesis_block_hash: config.genesis_block_hash,
+                statement_protocol_config: config.statement_protocol_config,
+                max_seen_statements: config.max_seen_statements,
             },
             requests_rx,
             responses_tx,

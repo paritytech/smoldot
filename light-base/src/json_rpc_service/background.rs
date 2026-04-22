@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    log, network_service,
+    bitswap_service, log, network_service,
     platform::PlatformRef,
     runtime_service, sync_service, transactions_service,
     util::{self, SipHasherBuild},
@@ -67,6 +67,9 @@ pub(super) struct Config<TPlat: PlatformRef> {
     /// Service that provides a ready-to-be-called runtime for the current best block.
     pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
+    /// Service that fulfills IPFS CID requests.
+    pub bitswap_service: Arc<bitswap_service::BitswapService>,
+
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
     /// Type of chain, as found in the chain specification.
@@ -86,6 +89,13 @@ pub(super) struct Config<TPlat: PlatformRef> {
 
     /// Hash of the genesis block of the chain.
     pub genesis_block_hash: [u8; 32],
+
+    /// Statement protocol configuration. `None` if the statement protocol is disabled.
+    pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+
+    /// Maximum number of seen statement hashes tracked per subscription for dedup.
+    /// `None` if the statement protocol is disabled.
+    pub max_seen_statements: Option<NonZero<usize>>,
 }
 
 /// Fields used to process JSON-RPC requests in the background.
@@ -116,6 +126,8 @@ struct Background<TPlat: PlatformRef> {
     /// Randomness used for various purposes, such as generating subscription IDs.
     randomness: ChaCha20Rng,
 
+    statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     /// See [`Config::sync_service`].
@@ -124,6 +136,8 @@ struct Background<TPlat: PlatformRef> {
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     /// See [`Config::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
+    /// See [`Config::bitswap_service`].
+    bitswap_service: Arc<bitswap_service::BitswapService>,
 
     /// Tasks that are spawned by the service and running in the background.
     background_tasks: stream::FuturesUnordered<Pin<Box<dyn Future<Output = Event<TPlat>> + Send>>>,
@@ -220,12 +234,45 @@ struct Background<TPlat: PlatformRef> {
     state_get_keys_paged_cache:
         lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
 
-    /// Active statement subscriptions. Maps subscription ID to topic filter.
-    statement_subscriptions:
-        hashbrown::HashMap<String, smoldot::json_rpc::methods::TopicFilter, fnv::FnvBuildHasher>,
+    /// Maximum number of seen statement hashes tracked per subscription for dedup.
+    /// `None` if the statement protocol is disabled.
+    max_seen_statements: Option<NonZero<usize>>,
+
+    /// Active statement subscriptions. Maps subscription ID to subscription state.
+    statement_subscriptions: hashbrown::HashMap<String, StatementSubscription, fnv::FnvBuildHasher>,
+
+    statement_affinity_stale: bool,
+    next_statement_affinity_update: Option<Pin<Box<TPlat::Delay>>>,
+    last_statement_affinity_update: Option<TPlat::Instant>,
 
     /// Receiver for network events (statements from peers).
     network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
+}
+
+impl<TPlat: PlatformRef> Background<TPlat> {
+    /// Marks the statement affinity as stale and schedules the next update.
+    /// If no update was ever sent, or the last update was more than the configured
+    /// affinity update interval ago, the update fires immediately.
+    /// Otherwise, it fires after the remaining interval.
+    fn schedule_statement_affinity_update(&mut self) {
+        if self.statement_affinity_stale {
+            return;
+        }
+        self.statement_affinity_stale = true;
+        let interval = self
+            .statement_protocol_config
+            .as_ref()
+            .expect("affinity updates require statement protocol; qed")
+            .affinity_update_interval();
+        let delay = match &self.last_statement_affinity_update {
+            Some(last) => {
+                let elapsed = self.platform.now() - last.clone();
+                interval.saturating_sub(elapsed)
+            }
+            None => Duration::ZERO,
+        };
+        self.next_statement_affinity_update = Some(Box::pin(self.platform.sleep(delay)));
+    }
 }
 
 /// State of the subscription towards the runtime service.
@@ -460,6 +507,10 @@ enum Event<TPlat: PlatformRef> {
         block_hash: [u8; 32],
         result: Result<Vec<sync_service::StorageResultItem>, sync_service::StorageQueryError>,
     },
+    BitswapGetResult {
+        request_id_json: String,
+        result: Result<Vec<u8>, bitswap_service::BitswapGetError>,
+    },
 }
 
 struct TransactionWatch {
@@ -479,6 +530,33 @@ enum TransactionWatchTy {
     },
     /// `transactionWatch_v1_submitAndWatch`.
     NewApiWatch,
+}
+
+struct StatementSubscription {
+    topic_filter: methods::TopicFilter,
+    seen: Option<lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>>,
+}
+
+impl StatementSubscription {
+    fn new(topic_filter: methods::TopicFilter, max_seen: Option<NonZero<usize>>) -> Self {
+        Self {
+            topic_filter,
+            seen: max_seen
+                .map(|cap| lru::LruCache::with_hasher(cap, fnv::FnvBuildHasher::default())),
+        }
+    }
+
+    fn accept(&mut self, hash: &[u8; 32], statement: &codec::Statement) -> bool {
+        if !self.topic_filter.matches(&statement.topics) {
+            return false;
+        }
+        if let Some(seen) = &mut self.seen {
+            if seen.put(*hash, ()).is_some() {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// See [`Background::state_get_keys_paged_cache`].
@@ -509,11 +587,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
             config.platform.fill_random_bytes(&mut seed);
             seed
         }),
+        statement_protocol_config: config.statement_protocol_config,
         next_garbage_collection: Box::pin(config.platform.sleep(Duration::new(0, 0))),
         network_service: config.network_service.clone(),
         sync_service: config.sync_service.clone(),
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
+        bitswap_service: config.bitswap_service.clone(),
         background_tasks: stream::FuturesUnordered::new(),
         runtime_service_subscription: RuntimeServiceSubscription::NotCreated,
         all_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
@@ -569,10 +649,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
         ),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: false,
+        max_seen_statements: config.max_seen_statements,
         statement_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
             16,
             Default::default(),
         ),
+        statement_affinity_stale: false,
+        next_statement_affinity_update: None,
+        last_statement_affinity_update: None,
         network_events_rx: None,
         platform: config.platform,
     };
@@ -607,8 +691,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
             StartStorageSubscriptionsUpdates,
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
-            NetworkStatementsReceived(Vec<codec::Statement>),
+            NetworkStatementsReceived(Vec<([u8; 32], codec::Statement)>),
             MustSubscribeNetworkEvents,
+            StatementAffinityUpdate,
         }
 
         // Wait until there is something to do.
@@ -701,6 +786,15 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 WakeUpReason::GarbageCollection
             })
             .or(async {
+                if let Some(delay) = &mut me.next_statement_affinity_update {
+                    delay.await;
+                } else {
+                    future::pending().await
+                }
+                me.next_statement_affinity_update = None;
+                WakeUpReason::StatementAffinityUpdate
+            })
+            .or(async {
                 let Some(rx) = &me.network_events_rx else {
                     return WakeUpReason::MustSubscribeNetworkEvents;
                 };
@@ -709,9 +803,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         me.network_events_rx = None;
                         return WakeUpReason::MustSubscribeNetworkEvents;
                     };
-                    if let network_service::Event::StatementsNotification { statements, .. } = event
-                    {
-                        return WakeUpReason::NetworkStatementsReceived(statements);
+                    match event {
+                        network_service::Event::StatementsNotification { statements, .. } => {
+                            return WakeUpReason::NetworkStatementsReceived(statements);
+                        }
+                        _ => {}
                     }
                 }
             })
@@ -740,6 +836,21 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.block_runtimes_pending.shrink_to_fit();
             }
 
+            WakeUpReason::StatementAffinityUpdate => {
+                me.statement_affinity_stale = false;
+                me.last_statement_affinity_update = Some(me.platform.now());
+
+                let combined_filter = build_combined_affinity_filter(
+                    &me.statement_subscriptions,
+                    me.statement_protocol_config
+                        .as_ref()
+                        .expect("statement affinity requires statement protocol; qed"),
+                );
+                me.network_service
+                    .update_topic_affinity(combined_filter)
+                    .await;
+            }
+
             WakeUpReason::MustSubscribeNetworkEvents => {
                 debug_assert!(me.network_events_rx.is_none());
                 me.network_events_rx = Some(me.network_service.subscribe().await);
@@ -752,15 +863,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                 // TODO: O(n_statements * n_subscriptions * n_topics_in_filter * n_topics_in_statement) complexity.
                 // Create a reverse index `topic` -> `subscription` for adequate complexity.
-                for (sub_id, topic_filter) in &me.statement_subscriptions {
+                for (sub_id, sub) in me.statement_subscriptions.iter_mut() {
                     let matching: Vec<methods::HexString> = statements
                         .iter()
-                        .filter(|s| topic_filter.matches(&s.topics))
-                        .map(|s| {
-                            methods::HexString(
-                                codec::encode_statement(s)
-                                    .expect("re-encoding a decoded statement always succeeds; qed"),
-                            )
+                        .filter_map(|(hash, s)| {
+                            if !sub.accept(hash, s) {
+                                return None;
+                            }
+                            Some(methods::HexString(codec::encode_statement(s).expect(
+                                "re-encoding a decoded statement always succeeds; qed",
+                            )))
                         })
                         .collect();
 
@@ -874,7 +986,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::system_peers { .. }
                     | methods::MethodCall::system_properties { .. }
                     | methods::MethodCall::system_removeReservedPeer { .. }
-                    | methods::MethodCall::system_version { .. } => {
+                    | methods::MethodCall::system_version { .. }
+                    | methods::MethodCall::statement_submit { .. }
+                    | methods::MethodCall::statement_subscribeStatement { .. }
+                    | methods::MethodCall::statement_unsubscribeStatement { .. } => {
                         if !me.printed_legacy_json_rpc_warning {
                             me.printed_legacy_json_rpc_warning = true;
                             log!(
@@ -918,9 +1033,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
                     | methods::MethodCall::sudo_network_unstable_unwatch { .. }
                     | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
-                    | methods::MethodCall::statement_submit { .. }
-                    | methods::MethodCall::statement_subscribeStatement { .. }
-                    | methods::MethodCall::statement_unsubscribeStatement { .. } => {}
+                    | methods::MethodCall::bitswap_v1_get { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -1041,6 +1154,30 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         // We don't cancel the task in `background_tasks` that will
                         // generate events about this transaction. Instead, the task will stop
                         // renewing itself the next time it generates a notification.
+                    }
+
+                    methods::MethodCall::bitswap_v1_get { cid } => {
+                        log!(
+                            &me.platform,
+                            Debug,
+                            &me.log_target,
+                            // TODO: only log `cid` if it validates, do not log raw RPC input.
+                            format!("Request for Bitswap CID {cid}")
+                        );
+
+                        me.background_tasks.push({
+                            let bitswap_service = me.bitswap_service.clone();
+                            let request_id_json = request_id_json.to_owned();
+
+                            Box::pin(async move {
+                                let result = bitswap_service.bitswap_get(cid).await;
+
+                                Event::BitswapGetResult {
+                                    request_id_json,
+                                    result,
+                                }
+                            })
+                        });
                     }
 
                     methods::MethodCall::chain_getBlock { hash } => {
@@ -1992,7 +2129,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
-                                    parse::ErrorResponse::InvalidParams,
+                                    parse::ErrorResponse::InvalidParams(None),
                                     None,
                                 ))
                                 .await;
@@ -2526,7 +2663,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         .responses_tx
                                         .send(parse::build_error_response(
                                             request_id_json,
-                                            parse::ErrorResponse::InvalidParams,
+                                            parse::ErrorResponse::InvalidParams(None),
                                             None,
                                         ))
                                         .await;
@@ -2654,7 +2791,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                             .responses_tx
                                             .send(parse::build_error_response(
                                                 request_id_json,
-                                                parse::ErrorResponse::InvalidParams,
+                                                parse::ErrorResponse::InvalidParams(None),
                                                 Some(
                                                     &serde_json::to_string(
                                                         "multiaddr doesn't end with /p2p",
@@ -2671,7 +2808,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
+                                        parse::ErrorResponse::InvalidParams(None),
                                         Some(
                                             &serde_json::to_string(
                                                 "multiaddr doesn't end with /p2p",
@@ -2686,7 +2823,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
+                                        parse::ErrorResponse::InvalidParams(None),
                                         Some(
                                             &serde_json::to_string(&err.to_string())
                                                 .unwrap_or_else(|_| unreachable!()),
@@ -2805,7 +2942,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
-                                    json_rpc::parse::ErrorResponse::InvalidParams,
+                                    json_rpc::parse::ErrorResponse::InvalidParams(None),
                                     None,
                                 ))
                                 .await;
@@ -2843,9 +2980,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .clone()
                                     .broadcast_statement(encoded.0)
                                     .await;
-                                if broadcasted.is_known {
-                                    methods::StatementSubmitResult::Known
-                                } else if broadcasted.total == 0 {
+                                if broadcasted.total == 0 {
                                     methods::StatementSubmitResult::InternalError {
                                         error: "No connected peers".into(),
                                     }
@@ -2870,8 +3005,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             hex::encode(id)
                         };
 
-                        me.statement_subscriptions
-                            .insert(subscription_id.clone(), filter);
+                        me.statement_subscriptions.insert(
+                            subscription_id.clone(),
+                            StatementSubscription::new(filter, me.max_seen_statements),
+                        );
+
+                        me.schedule_statement_affinity_update();
 
                         let _ = me
                             .responses_tx
@@ -2886,6 +3025,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                     methods::MethodCall::statement_unsubscribeStatement { subscription } => {
                         let existed = me.statement_subscriptions.remove(&subscription).is_some();
+
+                        if existed {
+                            me.schedule_statement_affinity_update();
+                        }
+
                         let _ = me
                             .responses_tx
                             .send(
@@ -4438,18 +4582,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }) => {
                 // A `chainHead_call` operation has finished.
 
+                // The JSON-RPC client might have unfollowed the subscription or stopped
+                // the operation while this event was queued. In that case, drop the event.
                 let Some(subscription_info) =
                     me.chain_head_follow_subscriptions.get_mut(&subscription_id)
                 else {
-                    unreachable!()
+                    continue;
                 };
                 let Some(operation_info) = subscription_info
                     .operations_in_progress
                     .remove(&operation_id)
                 else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
+                    continue;
                 };
 
                 subscription_info.available_operation_slots += operation_info.occupied_slots;
@@ -4517,18 +4661,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }) => {
                 // A `chainHead_body` operation has finished.
 
+                // The JSON-RPC client might have unfollowed the subscription or stopped
+                // the operation while this event was queued. In that case, drop the event.
                 let Some(subscription_info) =
                     me.chain_head_follow_subscriptions.get_mut(&subscription_id)
                 else {
-                    unreachable!()
+                    continue;
                 };
                 let Some(operation_info) = subscription_info
                     .operations_in_progress
                     .remove(&operation_id)
                 else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
+                    continue;
                 };
 
                 subscription_info.available_operation_slots += operation_info.occupied_slots;
@@ -4680,16 +4824,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                 // TODO: generate a waitingForContinue here and wait for user to continue
 
-                // Re-queue the operation for the follow-up items.
-                let on_interrupt = me
-                    .chain_head_follow_subscriptions
-                    .get(&subscription_id)
-                    .unwrap_or_else(|| unreachable!())
-                    .operations_in_progress
-                    .get(&operation_id)
-                    .unwrap_or_else(|| unreachable!())
-                    .interrupt
-                    .listen();
+                // Re-queue the operation for the follow-up items. The JSON-RPC client
+                // might have unfollowed the subscription or stopped the operation while
+                // this event was queued. In that case, drop the event.
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get(&subscription_id)
+                else {
+                    continue;
+                };
+                let Some(operation_info) =
+                    subscription_info.operations_in_progress.get(&operation_id)
+                else {
+                    continue;
+                };
+                let on_interrupt = operation_info.interrupt.listen();
                 me.background_tasks.push(Box::pin(async move {
                     async {
                         on_interrupt.await;
@@ -4715,18 +4863,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }) => {
                 // A `chainHead_storage` operation has finished successfully.
 
+                // The JSON-RPC client might have unfollowed the subscription or stopped
+                // the operation while this event was queued. In that case, drop the event.
                 let Some(subscription_info) =
                     me.chain_head_follow_subscriptions.get_mut(&subscription_id)
                 else {
-                    unreachable!()
+                    continue;
                 };
                 let Some(operation_info) = subscription_info
                     .operations_in_progress
                     .remove(&operation_id)
                 else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
+                    continue;
                 };
 
                 subscription_info.available_operation_slots += operation_info.occupied_slots;
@@ -4752,18 +4900,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }) => {
                 // A `chainHead_storage` operation has finished failed.
 
+                // The JSON-RPC client might have unfollowed the subscription or stopped
+                // the operation while this event was queued. In that case, drop the event.
                 let Some(subscription_info) =
                     me.chain_head_follow_subscriptions.get_mut(&subscription_id)
                 else {
-                    unreachable!()
+                    continue;
                 };
                 let Some(operation_info) = subscription_info
                     .operations_in_progress
                     .remove(&operation_id)
                 else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
+                    continue;
                 };
 
                 subscription_info.available_operation_slots += operation_info.occupied_slots;
@@ -5836,6 +5984,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // TODO: add a delay or something?
             }
 
+            WakeUpReason::Event(Event::BitswapGetResult {
+                request_id_json,
+                result,
+            }) => {
+                let response = match result {
+                    Ok(block) => methods::Response::bitswap_v1_get(methods::HexString(block))
+                        .to_json_response(&request_id_json),
+                    Err(error) => error.to_json_rpc_error(&request_id_json),
+                };
+                let _ = me.responses_tx.send(response).await;
+            }
+
             WakeUpReason::NotifyFinalizedHeads => {
                 // All `chain_subscribeFinalizedHeads` subscriptions must be notified of the
                 // latest finalized block.
@@ -6017,4 +6177,30 @@ fn convert_runtime_version(
             .map(|api| (methods::HexString(api.name_hash.to_vec()), api.version))
             .collect(),
     }
+}
+
+fn build_combined_affinity_filter(
+    subscriptions: &hashbrown::HashMap<String, StatementSubscription, fnv::FnvBuildHasher>,
+    config: &network_service::StatementProtocolConfig,
+) -> network_service::AffinityFilter {
+    use smoldot::json_rpc::methods::TopicFilter;
+
+    let mut all_topics: Vec<&[u8; 32]> = Vec::new();
+
+    for sub in subscriptions.values() {
+        match &sub.topic_filter {
+            TopicFilter::Any => {
+                return network_service::AffinityFilter::match_all(config.bloom_seed());
+            }
+            TopicFilter::MatchAll(topics) | TopicFilter::MatchAny(topics) => {
+                all_topics.extend(topics.iter());
+            }
+        }
+    }
+
+    network_service::AffinityFilter::from_topics(
+        all_topics.into_iter(),
+        config.bloom_seed(),
+        config.false_positive_rate(),
+    )
 }

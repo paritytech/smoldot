@@ -45,6 +45,15 @@ const PROOF_ED25519: u8 = 1;
 const PROOF_SECP256K1_ECDSA: u8 = 2;
 const PROOF_ON_CHAIN: u8 = 3;
 
+pub use super::affinity::AffinityFilter;
+
+#[derive(Debug, Clone)]
+pub enum StatementMessage {
+    Statements(Vec<([u8; 32], Statement)>),
+    /// Light nodes send affinity filters to full nodes but don't expect to receive them.
+    ExplicitTopicAffinity(AffinityFilter),
+}
+
 /// Statement topic (32 bytes).
 pub type Topic = [u8; 32];
 
@@ -195,6 +204,65 @@ pub enum EncodeStatementError {
         /// Maximum allowed topics.
         max: usize,
     },
+}
+
+const V2_TAG_STATEMENTS: u8 = 0x00;
+const V2_TAG_AFFINITY: u8 = 0x01;
+
+pub fn decode_statement_message(
+    bytes: &[u8],
+) -> Result<StatementMessage, DecodeStatementMessageError> {
+    if bytes.is_empty() {
+        return Err(DecodeStatementMessageError::Empty);
+    }
+
+    match bytes[0] {
+        V2_TAG_STATEMENTS => {
+            let stmts = decode_statement_notification(&bytes[1..])
+                .map_err(DecodeStatementMessageError::InvalidStatements)?;
+            Ok(StatementMessage::Statements(stmts))
+        }
+        V2_TAG_AFFINITY => {
+            let filter = AffinityFilter::decode(&bytes[1..])
+                .map_err(|_| DecodeStatementMessageError::InvalidBloomFilter)?;
+            Ok(StatementMessage::ExplicitTopicAffinity(filter))
+        }
+        other => Err(DecodeStatementMessageError::UnknownVariant(other)),
+    }
+}
+
+pub fn encode_statements_message(statements: &[&[u8]]) -> Vec<u8> {
+    let tag_len = 1;
+    let max_compact_len = 5;
+    let total_len: usize = statements.iter().map(|s| s.len()).sum();
+    let mut out = Vec::with_capacity(tag_len + max_compact_len + total_len);
+    out.push(V2_TAG_STATEMENTS);
+    out.extend_from_slice(crate::util::encode_scale_compact_usize(statements.len()).as_ref());
+    for stmt in statements {
+        out.extend_from_slice(stmt);
+    }
+    out
+}
+
+pub fn encode_topic_affinity_message(filter: &AffinityFilter) -> Vec<u8> {
+    let tag_len = 1;
+    let encoded = filter.encode_to_vec();
+    let mut out = Vec::with_capacity(tag_len + encoded.len());
+    out.push(V2_TAG_AFFINITY);
+    out.extend_from_slice(&encoded);
+    out
+}
+
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+pub enum DecodeStatementMessageError {
+    #[display("Empty V2 statement message")]
+    Empty,
+    #[display("Unknown V2 statement message variant: {_0}")]
+    UnknownVariant(#[error(not(source))] u8),
+    #[display("Invalid bloom filter in affinity message")]
+    InvalidBloomFilter,
+    #[display("Invalid statements in V2 message: {_0}")]
+    InvalidStatements(DecodeStatementNotificationError),
 }
 
 /// Encodes a single statement.
@@ -521,13 +589,78 @@ mod tests {
 
     #[test]
     fn reject_out_of_order_fields() {
+        // Expiry then DecryptionKey
         let mut encoded = vec![8u8]; // Compact(2)
         encoded.push(FIELD_EXPIRY);
         encoded.extend_from_slice(&42u64.to_le_bytes());
         encoded.push(FIELD_DECRYPTION_KEY);
         encoded.extend_from_slice(&[0u8; 32]);
+        assert!(decode_statement(&encoded).is_err());
 
-        assert!(statement_parser(&encoded).is_err());
+        // Duplicate expiry
+        let mut dup_expiry = vec![8u8]; // Compact(2)
+        dup_expiry.push(FIELD_EXPIRY);
+        dup_expiry.extend_from_slice(&1u64.to_le_bytes());
+        dup_expiry.push(FIELD_EXPIRY);
+        dup_expiry.extend_from_slice(&2u64.to_le_bytes());
+        assert!(decode_statement(&dup_expiry).is_err());
+
+        // Duplicate data
+        let mut dup_data = vec![8u8]; // Compact(2)
+        dup_data.push(FIELD_DATA);
+        dup_data.extend_from_slice(crate::util::encode_scale_compact_usize(1).as_ref());
+        dup_data.push(1u8);
+        dup_data.push(FIELD_DATA);
+        dup_data.extend_from_slice(crate::util::encode_scale_compact_usize(1).as_ref());
+        dup_data.push(2u8);
+        assert!(decode_statement(&dup_data).is_err());
+
+        // Duplicate topic1
+        let mut dup_topic = vec![16u8]; // Compact(4)
+        dup_topic.push(FIELD_EXPIRY);
+        dup_topic.extend_from_slice(&999u64.to_le_bytes());
+        dup_topic.push(FIELD_TOPIC_START);
+        dup_topic.extend_from_slice(&[0x01; 32]);
+        dup_topic.push(FIELD_TOPIC_START);
+        dup_topic.extend_from_slice(&[0x01; 32]);
+        dup_topic.push(FIELD_TOPIC_START + 1);
+        dup_topic.extend_from_slice(&[0x02; 32]);
+        assert!(decode_statement(&dup_topic).is_err());
+
+        // Topic before expiry
+        let mut topic_before = vec![8u8]; // Compact(2)
+        topic_before.push(FIELD_TOPIC_START);
+        topic_before.extend_from_slice(&[0x01; 32]);
+        topic_before.push(FIELD_EXPIRY);
+        topic_before.extend_from_slice(&999u64.to_le_bytes());
+        assert!(decode_statement(&topic_before).is_err());
+
+        // Data before expiry
+        let mut data_before = vec![8u8]; // Compact(2)
+        data_before.push(FIELD_DATA);
+        data_before.extend_from_slice(crate::util::encode_scale_compact_usize(1).as_ref());
+        data_before.push(1u8);
+        data_before.push(FIELD_EXPIRY);
+        data_before.extend_from_slice(&42u64.to_le_bytes());
+        assert!(decode_statement(&data_before).is_err());
+
+        // Channel before expiry
+        let mut channel_before = vec![8u8]; // Compact(2)
+        channel_before.push(FIELD_CHANNEL);
+        channel_before.extend_from_slice(&[0u8; 32]);
+        channel_before.push(FIELD_EXPIRY);
+        channel_before.extend_from_slice(&1u64.to_le_bytes());
+        assert!(decode_statement(&channel_before).is_err());
+
+        // Topic2 before Topic1
+        let mut topic2_before = vec![12u8]; // Compact(3)
+        topic2_before.push(FIELD_EXPIRY);
+        topic2_before.extend_from_slice(&1u64.to_le_bytes());
+        topic2_before.push(FIELD_TOPIC_START + 1);
+        topic2_before.extend_from_slice(&[0x01; 32]);
+        topic2_before.push(FIELD_TOPIC_START);
+        topic2_before.extend_from_slice(&[0x02; 32]);
+        assert!(decode_statement(&topic2_before).is_err());
     }
 
     #[test]
@@ -572,13 +705,89 @@ mod tests {
 
     #[test]
     fn reject_unknown_field_tag() {
-        let mut encoded = vec![8u8];
-        encoded.push(2);
+        // Tag 9 after valid expiry
+        let mut encoded = vec![8u8]; // Compact(2)
+        encoded.push(FIELD_EXPIRY);
         encoded.extend_from_slice(&42u64.to_le_bytes());
         encoded.push(9); // Unknown tag
         encoded.extend_from_slice(&[0u8; 32]);
+        assert!(decode_statement(&encoded).is_err());
 
-        assert!(statement_parser(&encoded).is_err());
+        // Tag 255 as first field
+        let mut tag_255 = vec![4u8]; // Compact(1)
+        tag_255.push(255);
+        tag_255.extend_from_slice(&[0u8; 32]);
+        assert!(decode_statement(&tag_255).is_err());
+
+        // Invalid proof variant byte (99 instead of 0-3)
+        let valid = encode_statement(&Statement {
+            proof: Some(Proof::OnChain {
+                who: [0u8; 32],
+                block_hash: [0u8; 32],
+                event_index: 0,
+            }),
+            decryption_key: None,
+            expiry: 42,
+            channel: None,
+            topics: Vec::new(),
+            data: None,
+        })
+        .unwrap();
+        assert!(decode_statement(&valid).is_ok());
+        let mut invalid_proof = valid.clone();
+        invalid_proof[2] = 99;
+        assert!(decode_statement(&invalid_proof).is_err());
+
+        // Inflated field count: claim 5 fields but only provide 1
+        let mut inflated = encode_statement(&Statement {
+            proof: None,
+            decryption_key: None,
+            expiry: 42,
+            channel: None,
+            topics: Vec::new(),
+            data: None,
+        })
+        .unwrap();
+        inflated[0] = 5 << 2; // compact(5)
+        assert!(decode_statement(&inflated).is_err());
+    }
+
+    #[test]
+    fn reject_truncated_payloads() {
+        // Empty bytes
+        assert!(decode_statement(&[]).is_err());
+
+        // Truncated to just the compact length prefix
+        let valid = encode_statement(&Statement {
+            proof: None,
+            decryption_key: None,
+            expiry: 42,
+            channel: None,
+            topics: Vec::new(),
+            data: None,
+        })
+        .unwrap();
+        assert!(decode_statement(&valid[..1]).is_err());
+
+        // Truncated expiry payload (3 of 8 bytes)
+        assert!(decode_statement(&valid[..5]).is_err());
+
+        // Truncated proof payload
+        let with_proof = encode_statement(&Statement {
+            proof: Some(Proof::OnChain {
+                who: [0u8; 32],
+                block_hash: [0u8; 32],
+                event_index: 0,
+            }),
+            decryption_key: None,
+            expiry: 42,
+            channel: None,
+            topics: Vec::new(),
+            data: None,
+        })
+        .unwrap();
+        assert!(decode_statement(&with_proof).is_ok());
+        assert!(decode_statement(&with_proof[..6]).is_err());
     }
 
     #[test]
@@ -613,5 +822,182 @@ mod tests {
         assert_eq!(decoded.channel, Some([0xcc; 32]));
 
         assert_eq!(encode_statement(&decoded).unwrap(), bytes);
+
+        // Ed25519 proof: signature=[0xAA; 64], signer=[0xBB; 32], expiry=1000, data=[1,2,3]
+        // Generated by polkadot-sdk's Statement::encode()
+        let ed25519_bytes = hex::decode(
+            "0c0001aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\
+            aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\
+            bbbbbbbbbbbbbbbbbbbbbbbbbbb02e803000000000000080c010203",
+        )
+        .unwrap();
+
+        let (remaining, decoded) = statement_parser(&ed25519_bytes).unwrap();
+        assert!(remaining.is_empty());
+        assert!(matches!(
+            decoded.proof,
+            Some(Proof::Ed25519 { signature, signer })
+            if signature == [0xAA; 64] && signer == [0xBB; 32]
+        ));
+        assert_eq!(decoded.expiry, 1000);
+        assert_eq!(decoded.data.as_deref(), Some([1, 2, 3].as_slice()));
+        assert_eq!(encode_statement(&decoded).unwrap(), ed25519_bytes);
+
+        // Secp256k1Ecdsa proof: signature=[0x77; 65], signer=[0x88; 33], expiry=500
+        // Generated by polkadot-sdk's Statement::encode()
+        let secp_bytes = hex::decode(
+            "0800027777777777777777777777777777777777777777777777777777777777777777777777777777777\
+            77777777777777777777777777777777777777777777777777788888888888888888888888888888888888\
+            888888888888888888888888888888802f401000000000000",
+        )
+        .unwrap();
+
+        let (remaining, decoded) = statement_parser(&secp_bytes).unwrap();
+        assert!(remaining.is_empty());
+        assert!(matches!(
+            decoded.proof,
+            Some(Proof::Secp256k1Ecdsa { signature, signer })
+            if signature == [0x77; 65] && signer == [0x88; 33]
+        ));
+        assert_eq!(decoded.expiry, 500);
+        assert!(decoded.data.is_none());
+        assert_eq!(encode_statement(&decoded).unwrap(), secp_bytes);
+    }
+
+    #[test]
+    fn v2_statements_roundtrip() {
+        let statement1 = Statement {
+            proof: None,
+            decryption_key: None,
+            expiry: 100,
+            channel: None,
+            topics: Vec::new(),
+            data: Some(b"test1".to_vec()),
+        };
+        let statement2 = Statement {
+            proof: None,
+            decryption_key: None,
+            expiry: 200,
+            channel: None,
+            topics: Vec::new(),
+            data: Some(b"test2".to_vec()),
+        };
+
+        let encoded1 = encode_statement(&statement1).unwrap();
+        let encoded2 = encode_statement(&statement2).unwrap();
+
+        let statements: Vec<&[u8]> = vec![&encoded1, &encoded2];
+        let v2_encoded = encode_statements_message(&statements);
+
+        let decoded = decode_statement_message(&v2_encoded).unwrap();
+
+        match decoded {
+            StatementMessage::Statements(stmts) => {
+                assert_eq!(stmts.len(), 2);
+                assert_eq!(stmts[0].1, statement1);
+                assert_eq!(stmts[1].1, statement2);
+            }
+            _ => panic!("Expected Statements variant"),
+        }
+    }
+
+    #[test]
+    fn v2_statements_encoding_snapshot() {
+        let statement = Statement {
+            proof: Some(Proof::OnChain {
+                who: [42u8; 32],
+                block_hash: [24u8; 32],
+                event_index: 66,
+            }),
+            decryption_key: Some([0xde; 32]),
+            expiry: 999,
+            channel: Some([0xcc; 32]),
+            topics: vec![[0x01; 32], [0x02; 32]],
+            data: Some(vec![55, 99]),
+        };
+
+        let stmt_bytes = encode_statement(&statement).unwrap();
+        let v2_encoded = encode_statements_message(&[&stmt_bytes]);
+
+        let digest: [u8; 32] = blake2_rfc::blake2b::blake2b(32, &[], &v2_encoded)
+            .as_bytes()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            digest,
+            [
+                44, 71, 235, 73, 238, 115, 6, 15, 128, 174, 159, 216, 166, 76, 26, 101, 28, 143,
+                88, 21, 22, 128, 169, 62, 180, 19, 164, 234, 174, 210, 81, 105
+            ],
+            "blake2_256 digest must match polkadot-sdk snapshot"
+        );
+
+        let decoded = decode_statement_message(&v2_encoded).unwrap();
+        match decoded {
+            StatementMessage::Statements(stmts) => {
+                assert_eq!(stmts.len(), 1);
+                assert_eq!(stmts[0].1, statement);
+            }
+            _ => panic!("Expected Statements variant"),
+        }
+    }
+
+    #[test]
+    fn decode_message_empty() {
+        assert!(matches!(
+            decode_statement_message(&[]),
+            Err(DecodeStatementMessageError::Empty)
+        ));
+    }
+
+    #[test]
+    fn decode_message_unknown_variant() {
+        assert!(matches!(
+            decode_statement_message(&[0xFF]),
+            Err(DecodeStatementMessageError::UnknownVariant(0xFF))
+        ));
+    }
+
+    #[test]
+    fn decode_message_invalid_bloom() {
+        assert!(matches!(
+            decode_statement_message(&[0x01, 0xFF]),
+            Err(DecodeStatementMessageError::InvalidBloomFilter)
+        ));
+    }
+
+    #[test]
+    fn v2_affinity_encoding_snapshot() {
+        let topic1 = [0x01u8; 32];
+        let topic2 = [0x02u8; 32];
+        let topic3 = [0x03u8; 32];
+
+        let mut filter = AffinityFilter::new(0x5EED_5EED_5EED_5EED, 0.01, 2);
+        filter.insert(&topic1);
+        filter.insert(&topic2);
+
+        let encoded = encode_topic_affinity_message(&filter);
+
+        let digest: [u8; 32] = blake2_rfc::blake2b::blake2b(32, &[], &encoded)
+            .as_bytes()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            digest,
+            [
+                82, 59, 251, 163, 43, 156, 130, 249, 35, 214, 187, 99, 4, 105, 179, 131, 42, 117,
+                191, 57, 160, 243, 233, 20, 204, 239, 62, 120, 55, 5, 234, 62
+            ],
+            "blake2_256 digest must match polkadot-sdk snapshot"
+        );
+
+        let decoded = decode_statement_message(&encoded).unwrap();
+        let StatementMessage::ExplicitTopicAffinity(af) = decoded else {
+            panic!("Expected ExplicitTopicAffinity variant");
+        };
+
+        assert!(af.contains(&topic1));
+        assert!(af.contains(&topic2));
+        assert!(!af.contains(&topic3));
     }
 }

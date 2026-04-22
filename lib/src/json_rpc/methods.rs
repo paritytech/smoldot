@@ -174,7 +174,9 @@ impl<'a> MethodError<'a> {
                 MethodError::InvalidParametersFormat { .. }
                 | MethodError::TooManyParameters { .. }
                 | MethodError::InvalidParameter { .. }
-                | MethodError::MissingParameters { .. } => parse::ErrorResponse::InvalidParams,
+                | MethodError::MissingParameters { .. } => {
+                    parse::ErrorResponse::InvalidParams(None)
+                }
             },
             None,
         )
@@ -522,12 +524,16 @@ define_methods! {
     transactionWatch_v1_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
     transactionWatch_v1_unwatch(subscription: Cow<'a, str>) -> (),
 
+    /// Request a data chunk by its CID from one of the connected peers that have it.
+    bitswap_v1_get(cid: String) -> HexString,
+
     // These functions are a custom addition in smoldot. As of the writing of this comment, there
     // is no plan to standardize them. See <https://github.com/paritytech/smoldot/issues/2245> and
     // <https://github.com/paritytech/smoldot/issues/2456>.
     sudo_network_unstable_watch() -> Cow<'a, str>,
     sudo_network_unstable_unwatch(subscription: Cow<'a, str>) -> (),
     chainHead_unstable_finalizedDatabase(#[rename = "maxSizeBytes"] max_size_bytes: Option<u64>) -> Cow<'a, str>,
+
 }
 
 define_methods! {
@@ -1093,7 +1099,6 @@ pub enum SystemPeerRole {
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum StatementSubmitResult {
     New,
-    Known,
     Invalid { reason: String },
     InternalError { error: String },
 }
@@ -1488,12 +1493,6 @@ mod tests {
     fn statement_submit_result_serialization() {
         let new = super::StatementSubmitResult::New;
         assert_eq!(serde_json::to_string(&new).unwrap(), r#"{"status":"new"}"#);
-
-        let known = super::StatementSubmitResult::Known;
-        assert_eq!(
-            serde_json::to_string(&known).unwrap(),
-            r#"{"status":"known"}"#
-        );
 
         let invalid = super::StatementSubmitResult::Invalid {
             reason: "bad encoding".into(),

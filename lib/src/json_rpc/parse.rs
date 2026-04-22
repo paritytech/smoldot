@@ -282,9 +282,9 @@ pub fn build_error_response(
             SerdeErrorCode::MethodNotFound,
             "The method does not exist / is not available.",
         ),
-        ErrorResponse::InvalidParams => (
+        ErrorResponse::InvalidParams(msg) => (
             SerdeErrorCode::InvalidParams,
-            "Invalid method parameter(s).",
+            msg.unwrap_or("Invalid method parameter(s)."),
         ),
         ErrorResponse::InternalError => (SerdeErrorCode::InternalError, "Internal JSON-RPC error."),
         ErrorResponse::ServerError(n, msg) => {
@@ -322,7 +322,8 @@ pub enum ErrorResponse<'a> {
     MethodNotFound,
 
     /// Invalid method parameter(s).
-    InvalidParams,
+    /// Optionally contains a custom message.
+    InvalidParams(Option<&'a str>),
 
     /// Internal JSON-RPC error.
     InternalError,

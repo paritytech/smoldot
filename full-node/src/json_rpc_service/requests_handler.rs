@@ -196,7 +196,7 @@ pub fn spawn_requests_handler(config: Config) {
                         // accepted by Substrate.
                         // See <https://github.com/paritytech/polkadot-sdk/blob/61be78c621ab2fa390cd3bfc79c8307431d0ea90/substrate/client/rpc/src/state/mod.rs#L238>.
                         if count > 1000 {
-                            request.fail(service::ErrorResponse::InvalidParams);
+                            request.fail(service::ErrorResponse::InvalidParams(None));
                             continue;
                         }
 
@@ -282,7 +282,7 @@ pub fn spawn_requests_handler(config: Config) {
                             | Err(database_thread::StorageAccessError::UnknownBlock) => {
                                 // Note that it is unclear how the function should behave in
                                 // that situation.
-                                request.fail(service::ErrorResponse::InvalidParams);
+                                request.fail(service::ErrorResponse::InvalidParams(None));
                             }
                             Err(database_thread::StorageAccessError::Corrupted(_)) => {
                                 request.fail(service::ErrorResponse::InternalError);
@@ -593,7 +593,7 @@ pub fn spawn_requests_handler(config: Config) {
                             | Err(database_thread::StorageAccessError::UnknownBlock) => {
                                 // Note that it is unclear how the function should behave in
                                 // that situation.
-                                request.fail(service::ErrorResponse::InvalidParams);
+                                request.fail(service::ErrorResponse::InvalidParams(None));
                             }
                             Err(database_thread::StorageAccessError::Corrupted(_)) => {
                                 request.fail(service::ErrorResponse::InternalError);

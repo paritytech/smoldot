@@ -18,7 +18,8 @@
 #![cfg(test)]
 
 use super::{
-    Config, Event, InboundError, InboundTy, NotificationsOutErr, RequestError, SingleStream,
+    BitswapOutOpenErr, Config, Event, InboundError, InboundTy, NotificationsOutErr, RequestError,
+    SingleStream,
 };
 use crate::libp2p::read_write::ReadWrite;
 use core::{cmp, mem, time::Duration};
@@ -830,3 +831,289 @@ fn outbound_substream_close_demanded() {
 }
 
 // TODO: more tests
+
+fn default_config() -> Config<Duration> {
+    Config {
+        first_out_ping: Duration::new(60, 0),
+        max_inbound_substreams: 64,
+        substreams_capacity: 16,
+        max_protocol_name_len: 128,
+        ping_interval: Duration::from_secs(20),
+        ping_protocol: "ping".to_owned(),
+        ping_timeout: Duration::from_secs(20),
+        randomness_seed: [0; 32],
+    }
+}
+
+#[test]
+fn bitswap_outbound_negotiation_success() {
+    let config = default_config();
+    let mut connections = perform_handshake(256, 256, config.clone(), config);
+
+    let substream_id = connections.alice.open_bitswap_substream(());
+
+    // Bob receives the inbound negotiation.
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "/ipfs/bitswap/1.2.0");
+            connections.bob.accept_inbound(id, InboundTy::Bitswap, ());
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    // Bob reports the inbound Bitswap substream opened.
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::BitswapInOpen { .. }) => {}
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    // Alice gets the outbound open result.
+    let (_, event) = connections.run_until_event();
+    match event {
+        either::Left(Event::BitswapOutOpenResult { id, result: Ok(()) }) => {
+            assert_eq!(id, substream_id);
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+}
+
+#[test]
+fn bitswap_outbound_rejected() {
+    let config = default_config();
+    let mut connections = perform_handshake(256, 256, config.clone(), config);
+
+    let substream_id = connections.alice.open_bitswap_substream(());
+
+    // Bob rejects the inbound negotiation.
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::InboundNegotiated { id, .. }) => {
+            connections.bob.reject_inbound(id);
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    // Alice gets ProtocolNotAvailable.
+    let (_, event) = connections.run_until_event();
+    match event {
+        either::Left(Event::BitswapOutOpenResult {
+            id,
+            result: Err((BitswapOutOpenErr::ProtocolNotAvailable, _)),
+        }) => {
+            assert_eq!(id, substream_id);
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+}
+
+#[test]
+fn bitswap_send_and_receive_message() {
+    let config = default_config();
+    let mut connections = perform_handshake(4096, 4096, config.clone(), config);
+
+    let substream_id = connections.alice.open_bitswap_substream(());
+
+    // Bob accepts.
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::InboundNegotiated { id, .. }) => {
+            connections.bob.accept_inbound(id, InboundTy::Bitswap, ());
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    // Drain BitswapInOpen event on Bob's side.
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::BitswapInOpen { .. }) => {}
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    // Drain BitswapOutOpenResult on Alice's side.
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Left(Event::BitswapOutOpenResult { result: Ok(()), .. }) => {}
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    // Alice sends a Bitswap message.
+    let message = b"test bitswap message payload".to_vec();
+    connections
+        .alice
+        .write_bitswap_message_unbounded(substream_id, message.clone());
+
+    // Bob receives the message.
+    let (_, event) = connections.run_until_event();
+    match event {
+        either::Right(Event::BitswapIn {
+            message: received, ..
+        }) => {
+            assert_eq!(received, message);
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+}
+
+#[test]
+fn bitswap_close_outbound_after_open() {
+    let config = default_config();
+    let mut connections = perform_handshake(4096, 4096, config.clone(), config);
+
+    let substream_id = connections.alice.open_bitswap_substream(());
+
+    // Bob accepts.
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::InboundNegotiated { id, .. }) => {
+            connections.bob.accept_inbound(id, InboundTy::Bitswap, ());
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::BitswapInOpen { .. }) => {}
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Left(Event::BitswapOutOpenResult { result: Ok(()), .. }) => {}
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    // Alice closes the outbound substream.
+    connections.alice.close_out_bitswap_substream(substream_id);
+
+    // Bob should see the inbound close (as an error, since Bitswap has no graceful close).
+    let (_, event) = connections.run_until_event();
+    match event {
+        either::Right(Event::BitswapInClose {
+            outcome: Err(_), ..
+        }) => {}
+        _ev => unreachable!("{:?}", _ev),
+    }
+}
+
+#[test]
+fn bitswap_queued_bytes_tracking() {
+    let config = default_config();
+    let mut connections = perform_handshake(4096, 4096, config.clone(), config);
+
+    let substream_id = connections.alice.open_bitswap_substream(());
+
+    // Bob accepts.
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::InboundNegotiated { id, .. }) => {
+            connections.bob.accept_inbound(id, InboundTy::Bitswap, ());
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::BitswapInOpen { .. }) => {}
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Left(Event::BitswapOutOpenResult { result: Ok(()), .. }) => {}
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    assert_eq!(
+        connections
+            .alice
+            .bitswap_substream_queued_bytes(substream_id),
+        0
+    );
+
+    // Queue a message and verify bytes are tracked.
+    let message = vec![0u8; 100];
+    connections
+        .alice
+        .write_bitswap_message_unbounded(substream_id, message);
+
+    // Queued bytes should be > 0 (message + LEB128 length prefix).
+    assert!(
+        connections
+            .alice
+            .bitswap_substream_queued_bytes(substream_id)
+            > 0
+    );
+}
+
+#[test]
+fn bitswap_multiple_messages() {
+    let config = default_config();
+    let mut connections = perform_handshake(8192, 8192, config.clone(), config);
+
+    let substream_id = connections.alice.open_bitswap_substream(());
+
+    // Bob accepts.
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::InboundNegotiated { id, .. }) => {
+            connections.bob.accept_inbound(id, InboundTy::Bitswap, ());
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::BitswapInOpen { .. }) => {}
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Left(Event::BitswapOutOpenResult { result: Ok(()), .. }) => {}
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    // Send multiple messages.
+    let messages = vec![
+        b"message one".to_vec(),
+        b"message two".to_vec(),
+        b"message three".to_vec(),
+    ];
+    for msg in &messages {
+        connections
+            .alice
+            .write_bitswap_message_unbounded(substream_id, msg.clone());
+    }
+
+    // Receive all messages (order preserved).
+    let mut received = Vec::new();
+    for _ in 0..messages.len() {
+        let (connections_update, event) = connections.run_until_event();
+        connections = connections_update;
+        match event {
+            either::Right(Event::BitswapIn { message, .. }) => {
+                received.push(message);
+            }
+            _ev => unreachable!("{:?}", _ev),
+        }
+    }
+
+    assert_eq!(received, messages);
+}
