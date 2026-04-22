@@ -7,15 +7,22 @@ Runbook for cutting a release of the smoldot **npm package** and the Rust crates
 
 ## 0. What a release actually ships
 
-A single release commit on `main` drives four outputs:
+`deploy.yml` runs on **every** push to `main`, but only a version-bumping push
+produces new published artifacts. Non-bumping pushes are idempotent: npm
+rejects duplicate versions, `crates-io-publish` absorbs the "already uploaded"
+error (`continue-on-error: true`), and the Deno tag is created only if
+missing. So the release is effectively keyed on the version bump, not the
+merge itself.
 
-| Output | Trigger | Job in `.github/workflows/deploy.yml` |
-|---|---|---|
-| npm package `smoldot` | push to `main` | `npm-publish` (dispatches `paritytech/npm_publish_automation`) |
-| Deno git-tag `light-js-deno-v<npm>` | push to `main` | `deno-publish` (creates tag if missing) |
-| crates.io `smoldot` | push to `main` | `crates-io-publish` (runs `cargo publish --no-verify`; `continue-on-error: true`) |
-| crates.io `smoldot-light` | push to `main` | `crates-io-publish` (same) |
-| Docs (gh-pages) | push to `main` | `docs-publish` |
+A version-bumping release commit drives four outputs:
+
+| Output | Job in `.github/workflows/deploy.yml` |
+|---|---|
+| npm package `smoldot` | `npm-publish` (dispatches `paritytech/npm_publish_automation`) |
+| Deno git-tag `light-js-deno-v<npm>` | `deno-publish` (creates tag if missing) |
+| crates.io `smoldot` | `crates-io-publish` (runs `cargo publish --no-verify`; `continue-on-error: true`) |
+| crates.io `smoldot-light` | `crates-io-publish` (same) |
+| Docs (gh-pages) | `docs-publish` (force-pushes fresh tree every run, regardless of version) |
 
 Three git tags are created **manually** on the release commit after merge:
 `npm-smoldot-v<X.Y.Z>`, `smoldot-v<A.B.C>`, `smoldot-light-v<A.B.C>`. Create
@@ -258,7 +265,7 @@ cut a new release.
 for non-`latest` publishes (`dev`, `canary`, etc.). The commit's
 `package.json` version must not already exist on npm.
 
-## Appendix B — Files for automation
+## Appendix B — Files for future automation
 
 - Version reads: `wasm-node/javascript/package.json` (`.version`),
   `lib/Cargo.toml`, `light-base/Cargo.toml`, `wasm-node/rust/Cargo.toml`
