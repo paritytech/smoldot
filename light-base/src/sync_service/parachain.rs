@@ -49,20 +49,16 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     saved_runtime_code: Option<Vec<u8>>,
 ) {
-    // If we have cached runtime code, kick off compilation in a background task immediately
-    // so it runs concurrently with Phase 1's relay-chain network I/O (~200-300 ms overlap).
-    // The code bytes are cloned because the background task needs ownership while the
-    // original is kept for `FinalizedBlockRuntime::storage_code` later.
-    let warm_start_state = if let Some(code) = saved_runtime_code {
+    // Pre-compile cached runtime in a background task so it overlaps with Phase 1.
+    let precompile_rx = if let Some(code) = saved_runtime_code {
         let (tx, rx) = oneshot::channel();
-        let code_for_task = code.clone();
         let task_name = format!("{log_target}-precompile-runtime");
         log!(
             &platform,
             Info,
             &log_target,
             format!(
-                "Spawning background task to pre-compile cached parachain runtime ({} bytes)",
+                "Pre-compiling cached parachain runtime ({} bytes)",
                 code.len()
             )
         );
@@ -70,25 +66,23 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             let result = (|| {
                 let heap_pages = executor::storage_heap_pages_to_value(None)
                     .map_err(|e| format!("Failed to derive default heap pages: {e}"))?;
-                executor::host::HostVmPrototype::new(executor::host::Config {
-                    module: &code_for_task,
+                let vm = executor::host::HostVmPrototype::new(executor::host::Config {
+                    module: &code,
                     heap_pages,
                     exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
                     allow_unresolved_imports: true,
                 })
-                .map_err(|e| format!("Failed to compile cached runtime: {e}"))
+                .map_err(|e| format!("Failed to compile cached runtime: {e}"))?;
+                Ok((vm, code))
             })();
-            // Ignore send errors: the receiver may have been dropped if warm start was
-            // abandoned before the task result was consumed.
             let _ = tx.send(result);
         });
-        Some((code, rx))
+        Some(rx)
     } else {
         None
     };
 
     // Phase 1: Fetch the current finalized parachain head from the relay chain.
-    // Runs concurrently with the pre-compilation task spawned above.
     let effective_chain_info = fetch_parachain_head_from_relay(
         &log_target,
         &platform,
@@ -109,60 +103,53 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     );
 
     // Phase 2: Bootstrap Aura consensus parameters.
-    //
-    // If the database contains saved runtime code, attempt a warm start: use the pre-compiled
-    // VM (already compiled during Phase 1's network I/O) and verify it by running lightweight
-    // Aura call proofs (~few KB each). This skips the ~2 MiB `:code` + `:heappages` P2P
-    // storage download on warm restart. On any failure, fall back to the cold bootstrap loop.
-    let (effective_chain_info, finalized_runtime) =
-        if let Some((code, precompiled)) = warm_start_state {
-            match try_warm_start_from_cached_code(
-                &log_target,
-                &platform,
-                &network_service,
-                &effective_chain_info,
-                block_number_bytes,
-                precompiled,
-                code,
-            )
-            .await
-            {
-                Ok(b) => {
-                    log!(
-                        &platform,
-                        Info,
-                        &log_target,
-                        "Warm-started parachain consensus from cached runtime code"
-                    );
-                    (b.chain_info, b.finalized_runtime)
-                }
-                Err(err) => {
-                    log!(
-                        &platform,
-                        Warn,
-                        &log_target,
-                        format!("Warm start failed ({err}), falling back to cold bootstrap...")
-                    );
-                    cold_bootstrap_loop(
-                        &log_target,
-                        &platform,
-                        &network_service,
-                        &effective_chain_info,
-                        block_number_bytes,
-                    )
-                    .await
-                }
+    let (effective_chain_info, finalized_runtime) = if let Some(precompiled) = precompile_rx {
+        match try_warm_start_from_cached_code(
+            &log_target,
+            &platform,
+            &network_service,
+            &effective_chain_info,
+            block_number_bytes,
+            precompiled,
+        )
+        .await
+        {
+            Ok(b) => {
+                log!(
+                    &platform,
+                    Info,
+                    &log_target,
+                    "Warm-started parachain consensus from cached runtime code"
+                );
+                (b.chain_info, b.finalized_runtime)
             }
-        } else {
-            cold_bootstrap_loop(
-                &log_target,
-                &platform,
-                &network_service,
-                &effective_chain_info,
-                block_number_bytes,
-            )
-            .await
-        };
+            Err(err) => {
+                log!(
+                    &platform,
+                    Warn,
+                    &log_target,
+                    format!("Warm start failed ({err}), falling back to cold bootstrap...")
+                );
+                cold_bootstrap_loop(
+                    &log_target,
+                    &platform,
+                    &network_service,
+                    &effective_chain_info,
+                    block_number_bytes,
+                )
+                .await
+            }
+        }
+    } else {
+        cold_bootstrap_loop(
+            &log_target,
+            &platform,
+            &network_service,
+            &effective_chain_info,
+            block_number_bytes,
+        )
+        .await
+    };
 
     // Phase 3: Spawn the paraheads background service that tracks relay chain
     // finalization and reports finalized parachain blocks.
@@ -1226,19 +1213,24 @@ async fn try_warm_start_from_cached_code<TPlat: PlatformRef>(
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
-    precompiled: oneshot::Receiver<Result<executor::host::HostVmPrototype, String>>,
-    code: Vec<u8>,
+    precompiled: oneshot::Receiver<Result<(executor::host::HostVmPrototype, Vec<u8>), String>>,
 ) -> Result<BootstrappedParachain, String> {
     let ci_ref = chain_info.as_ref();
     let state_root = *ci_ref.finalized_block_header.state_root;
     let block_hash = ci_ref.finalized_block_header.hash(block_number_bytes);
+
+    // Await the pre-compiled VM before doing anything else — if compilation failed,
+    // bail out immediately without wasting time waiting for a peer.
+    let (vm, code) = precompiled
+        .await
+        .map_err(|_| String::from("Pre-compilation task was cancelled"))??;
 
     log!(
         platform,
         Info,
         log_target,
         format!(
-            "Attempting warm start for parachain block #{} ({}) using {} bytes of cached runtime",
+            "Warm start for parachain block #{} ({}), compiled {} bytes",
             ci_ref.finalized_block_header.number,
             HashDisplay(&block_hash),
             code.len()
@@ -1262,14 +1254,6 @@ async fn try_warm_start_from_cached_code<TPlat: PlatformRef>(
             }
         }
     };
-
-    // Await the pre-compiled VM from the background task that ran during Phase 1.
-    // In the common case compilation already finished; if not, we wait here briefly.
-    // The outer `?` handles a dropped sender (task panicked or was cancelled);
-    // the inner `?` propagates any compilation error from the background task.
-    let vm = precompiled
-        .await
-        .map_err(|_| String::from("Pre-compilation task was cancelled"))??;
 
     // Fetch AuraApi_slot_duration call proof (~few KB).
     let (slot_duration, vm) = {
@@ -1829,8 +1813,6 @@ mod tests {
     const TEST_RUNTIME_WASM: &[u8] =
         include_bytes!("../../../lib/src/executor/vm/test-polkadot-runtime-v9160.wasm");
 
-    /// Exercises the same spawn_task + oneshot pattern used in start_parachain to
-    /// pre-compile cached WASM. Proves the compiled VM is delivered correctly.
     #[test]
     fn precompile_via_spawn_task_delivers_valid_vm() {
         let platform = DefaultPlatform::new("test".to_string(), "0.1".to_string());
@@ -1838,40 +1820,38 @@ mod tests {
         let (tx, rx) = futures_channel::oneshot::channel();
         let code = TEST_RUNTIME_WASM.to_vec();
         platform.spawn_task("precompile-test".into(), async move {
-            let result = (|| {
+            let result: Result<(executor::host::HostVmPrototype, Vec<u8>), String> = (|| {
                 let heap_pages =
                     executor::storage_heap_pages_to_value(None).map_err(|e| format!("{e}"))?;
-                executor::host::HostVmPrototype::new(executor::host::Config {
+                let vm = executor::host::HostVmPrototype::new(executor::host::Config {
                     module: &code,
                     heap_pages,
                     exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
                     allow_unresolved_imports: true,
                 })
-                .map_err(|e| format!("{e}"))
-            })();
+                .map_err(|e| format!("{e}"))?;
+                Ok((vm, code))
+            })(
+            );
             let _ = tx.send(result);
         });
 
-        let vm_result = smol::block_on(rx).expect("sender not dropped");
-        let vm = vm_result.expect("compilation should succeed");
-        // The test WASM embeds a runtime version — verify it parsed correctly.
+        let (vm, code) = smol::block_on(rx)
+            .expect("sender not dropped")
+            .expect("compilation should succeed");
         let _version = vm.runtime_version();
+        assert_eq!(code.len(), TEST_RUNTIME_WASM.len());
     }
 
-    /// When the sender is dropped without sending (simulating a cancelled or panicked
-    /// task), the receiver must yield an error — the warm-start caller maps this to a
-    /// fallback into cold bootstrap.
     #[test]
     fn dropped_sender_yields_cancellation_error() {
-        let (tx, rx) =
-            futures_channel::oneshot::channel::<Result<executor::host::HostVmPrototype, String>>();
+        let (tx, rx) = futures_channel::oneshot::channel::<
+            Result<(executor::host::HostVmPrototype, Vec<u8>), String>,
+        >();
         drop(tx);
-        let err = smol::block_on(rx);
-        assert!(err.is_err(), "dropped sender should produce Canceled error");
+        assert!(smol::block_on(rx).is_err());
     }
 
-    /// Compilation failure (garbage bytes) is delivered as Ok(Err(...)) through the
-    /// oneshot, not a panic — proving the error propagation path.
     #[test]
     fn invalid_wasm_returns_error_via_oneshot() {
         let platform = DefaultPlatform::new("test".to_string(), "0.1".to_string());
@@ -1879,47 +1859,24 @@ mod tests {
         let (tx, rx) = futures_channel::oneshot::channel();
         let garbage = vec![0xDE, 0xAD, 0xBE, 0xEF];
         platform.spawn_task("precompile-bad".into(), async move {
-            let result = (|| {
+            let result: Result<(executor::host::HostVmPrototype, Vec<u8>), String> = (|| {
                 let heap_pages =
                     executor::storage_heap_pages_to_value(None).map_err(|e| format!("{e}"))?;
-                executor::host::HostVmPrototype::new(executor::host::Config {
+                let vm = executor::host::HostVmPrototype::new(executor::host::Config {
                     module: &garbage,
                     heap_pages,
                     exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
                     allow_unresolved_imports: true,
                 })
-                .map_err(|e| format!("{e}"))
-            })();
+                .map_err(|e| format!("{e}"))?;
+                Ok((vm, garbage))
+            })(
+            );
             let _ = tx.send(result);
         });
 
-        let channel_result = smol::block_on(rx).expect("sender should not be dropped");
-        assert!(
-            channel_result.is_err(),
-            "garbage WASM should produce a compilation error"
-        );
-    }
-
-    /// Proves the double-? unwrap pattern used in try_warm_start_from_cached_code works
-    /// correctly for both error cases: cancelled channel and compilation failure.
-    #[test]
-    fn double_question_mark_pattern() {
-        // Case 1: Channel cancelled → outer Err
-        let (tx, rx) = futures_channel::oneshot::channel::<Result<(), String>>();
-        drop(tx);
-        let result: Result<(), String> = smol::block_on(async {
-            rx.await
-                .map_err(|_| String::from("Pre-compilation task was cancelled"))?
-        });
-        assert_eq!(result.unwrap_err(), "Pre-compilation task was cancelled");
-
-        // Case 2: Compilation error → inner Err
-        let (tx, rx) = futures_channel::oneshot::channel::<Result<(), String>>();
-        tx.send(Err("bad wasm".into())).unwrap();
-        let result: Result<(), String> = smol::block_on(async {
-            rx.await
-                .map_err(|_| String::from("Pre-compilation task was cancelled"))?
-        });
-        assert_eq!(result.unwrap_err(), "bad wasm");
+        let channel_result: Result<(executor::host::HostVmPrototype, Vec<u8>), String> =
+            smol::block_on(rx).expect("sender should not be dropped");
+        assert!(channel_result.is_err());
     }
 }
