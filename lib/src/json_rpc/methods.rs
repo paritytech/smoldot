@@ -516,6 +516,7 @@ define_methods! {
     chainSpec_v1_properties() -> Box<serde_json::value::RawValue>,
 
     sudo_unstable_p2pDiscover(multiaddr: Cow<'a, str>) -> (),
+    sudo_unstable_syncStatus() -> SyncStatus,
     sudo_unstable_version() -> Cow<'a, str>,
 
     transaction_v1_broadcast(transaction: HexString) -> Cow<'a, str>,
@@ -1069,6 +1070,14 @@ pub struct SystemHealth {
 pub struct ReadProof {
     pub at: HashHexString,
     pub proof: Vec<HexString>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncStatus {
+    #[serde(rename = "currentBlock")]
+    pub current_block: u64,
+    #[serde(rename = "highestBlock")]
+    pub highest_block: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

@@ -1025,6 +1025,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::chainSpec_v1_properties { .. }
                     | methods::MethodCall::rpc_methods { .. }
                     | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
+                    | methods::MethodCall::sudo_unstable_syncStatus { .. }
                     | methods::MethodCall::sudo_unstable_version { .. }
                     | methods::MethodCall::transaction_v1_broadcast { .. }
                     | methods::MethodCall::transaction_v1_stop { .. }
@@ -2832,6 +2833,46 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .await;
                             }
                         }
+                    }
+
+                    methods::MethodCall::sudo_unstable_syncStatus {} => {
+                        let current_block = if let RuntimeServiceSubscription::Active {
+                            current_best_block,
+                            pinned_blocks,
+                            ..
+                        } = &me.runtime_service_subscription
+                        {
+                            pinned_blocks.get(current_best_block).and_then(|b| {
+                                header::decode(
+                                    &b.scale_encoded_header,
+                                    me.sync_service.block_number_bytes(),
+                                )
+                                .ok()
+                                .map(|h| h.number)
+                            })
+                        } else {
+                            None
+                        }
+                        .unwrap_or(0);
+
+                        let highest_block = me
+                            .sync_service
+                            .syncing_peers()
+                            .await
+                            .map(|(_, _, best_number, _)| best_number)
+                            .max()
+                            .unwrap_or(current_block);
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::sudo_unstable_syncStatus(methods::SyncStatus {
+                                    current_block,
+                                    highest_block,
+                                })
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
 
                     methods::MethodCall::sudo_unstable_version {} => {

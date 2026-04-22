@@ -440,6 +440,7 @@ impl ClientMainTask {
                 | methods::MethodCall::chainSpec_v1_properties { .. }
                 | methods::MethodCall::rpc_methods { .. }
                 | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
+                | methods::MethodCall::sudo_unstable_syncStatus { .. }
                 | methods::MethodCall::sudo_unstable_version { .. }
                 | methods::MethodCall::chainHead_v1_body { .. }
                 | methods::MethodCall::chainHead_v1_call { .. }

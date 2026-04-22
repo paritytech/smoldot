@@ -642,6 +642,16 @@ pub fn spawn_requests_handler(config: Config) {
                         ));
                     }
 
+                    methods::MethodCall::sudo_unstable_syncStatus {} => {
+                        let sync_state = config.consensus_service.sync_state().await;
+                        request.respond(methods::Response::sudo_unstable_syncStatus(
+                            methods::SyncStatus {
+                                current_block: sync_state.best_block_number,
+                                highest_block: sync_state.best_block_number,
+                            },
+                        ));
+                    }
+
                     _ => request.fail(service::ErrorResponse::ServerError(
                         -32000,
                         "Not implemented in smoldot yet",
