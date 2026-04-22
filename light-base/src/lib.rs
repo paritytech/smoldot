@@ -456,7 +456,13 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // it describes.
         // At the same time, we deconstruct the database into `known_nodes`,
         // `runtime_code_hint`, and `saved_runtime_code`.
-        let (chain_information, used_database_chain_information, known_nodes, runtime_code_hint, saved_runtime_code) = {
+        let (
+            chain_information,
+            used_database_chain_information,
+            known_nodes,
+            runtime_code_hint,
+            saved_runtime_code,
+        ) = {
             let checkpoint = chain_spec
                 .light_sync_state()
                 .map(|s| s.to_chain_information());
@@ -477,7 +483,13 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 ) if db_ci.as_ref().finalized_block_header.number
                     >= checkpoint.as_ref().finalized_block_header.number =>
                 {
-                    (Some(db_ci), true, known_nodes, runtime_code_hint, runtime_code)
+                    (
+                        Some(db_ci),
+                        true,
+                        known_nodes,
+                        runtime_code_hint,
+                        runtime_code,
+                    )
                 }
 
                 // Otherwise, use the chain spec checkpoint.
@@ -490,8 +502,16 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         runtime_code,
                         ..
                     }),
-                ) => (Some(checkpoint), false, known_nodes, runtime_code_hint, runtime_code),
-                (_, Some(Ok(checkpoint)), None) => (Some(checkpoint), false, Vec::new(), None, None),
+                ) => (
+                    Some(checkpoint),
+                    false,
+                    known_nodes,
+                    runtime_code_hint,
+                    runtime_code,
+                ),
+                (_, Some(Ok(checkpoint)), None) => {
+                    (Some(checkpoint), false, Vec::new(), None, None)
+                }
 
                 // If neither the genesis chain information nor the checkpoint chain information
                 // is available, we could in principle use the database, but for API reasons we
@@ -522,7 +542,13 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         runtime_code,
                         ..
                     }),
-                ) => (Some(genesis_ci), false, known_nodes, runtime_code_hint, runtime_code),
+                ) => (
+                    Some(genesis_ci),
+                    false,
+                    known_nodes,
+                    runtime_code_hint,
+                    runtime_code,
+                ),
                 (
                     Some(genesis_ci),
                     None

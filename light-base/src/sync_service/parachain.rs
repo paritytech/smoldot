@@ -75,40 +75,53 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     // code locally and verify it by running lightweight Aura call proofs (~few KB each).
     // This skips the ~2 MiB `:code` + `:heappages` P2P storage download on warm restart.
     // On any failure, fall back to the cold bootstrap loop which downloads from peers.
-    let (effective_chain_info, finalized_runtime) =
-        if let Some(code) = saved_runtime_code {
-            match try_warm_start_from_cached_code(
-                &log_target,
-                &platform,
-                &network_service,
-                &effective_chain_info,
-                block_number_bytes,
-                code,
-            )
-            .await
-            {
-                Ok(b) => {
-                    log!(
-                        &platform,
-                        Info,
-                        &log_target,
-                        "Warm-started parachain consensus from cached runtime code"
-                    );
-                    (b.chain_info, b.finalized_runtime)
-                }
-                Err(err) => {
-                    log!(
-                        &platform,
-                        Warn,
-                        &log_target,
-                        format!("Warm start failed ({err}), falling back to cold bootstrap...")
-                    );
-                    cold_bootstrap_loop(&log_target, &platform, &network_service, &effective_chain_info, block_number_bytes).await
-                }
+    let (effective_chain_info, finalized_runtime) = if let Some(code) = saved_runtime_code {
+        match try_warm_start_from_cached_code(
+            &log_target,
+            &platform,
+            &network_service,
+            &effective_chain_info,
+            block_number_bytes,
+            code,
+        )
+        .await
+        {
+            Ok(b) => {
+                log!(
+                    &platform,
+                    Info,
+                    &log_target,
+                    "Warm-started parachain consensus from cached runtime code"
+                );
+                (b.chain_info, b.finalized_runtime)
             }
-        } else {
-            cold_bootstrap_loop(&log_target, &platform, &network_service, &effective_chain_info, block_number_bytes).await
-        };
+            Err(err) => {
+                log!(
+                    &platform,
+                    Warn,
+                    &log_target,
+                    format!("Warm start failed ({err}), falling back to cold bootstrap...")
+                );
+                cold_bootstrap_loop(
+                    &log_target,
+                    &platform,
+                    &network_service,
+                    &effective_chain_info,
+                    block_number_bytes,
+                )
+                .await
+            }
+        }
+    } else {
+        cold_bootstrap_loop(
+            &log_target,
+            &platform,
+            &network_service,
+            &effective_chain_info,
+            block_number_bytes,
+        )
+        .await
+    };
 
     // Phase 3: Spawn the paraheads background service that tracks relay chain
     // finalization and reports finalized parachain blocks.
