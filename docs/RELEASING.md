@@ -291,9 +291,12 @@ npm install smoldot@dev-20260422-test123   # by dist-tag (moves with each publis
 npm install smoldot@3.1.2-dev.20260422.test123.0   # by exact version (immutable)
 ```
 
-**Reruns are idempotent.** Re-running the same workflow run (via the UI's
-"Re-run jobs") produces the same VERSION; the automation's collision check
-skips the publish with a warning. Fresh dispatches produce fresh versions.
+**Every dispatch gets a fresh version.** `N` is derived from npm state, not
+from a workflow-run counter, so any dispatch (fresh or "Re-run jobs" after a
+successful publish) queries npm and publishes `N+1`. To publish new code,
+push your commits and dispatch again. Reruns reuse the same version *only* if
+the first attempt failed before reaching the publish step (nothing on npm
+yet) — in which case the next dispatch computes the same `N` and retries.
 
 **Why the dist-tag can't be `latest`.** The final dist-tag always starts with
 `dev-<YYYYMMDD>`. Suffix validation rejects anything outside `[A-Za-z0-9-]`.
