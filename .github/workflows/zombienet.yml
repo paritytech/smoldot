@@ -24,7 +24,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '18'
 
       - name: Cache cargo registry + e2e-tests target
         uses: actions/cache@v4
@@ -35,19 +35,13 @@ jobs:
             e2e-tests/target
           key: e2e-cargo-${{ hashFiles('e2e-tests/Cargo.lock', 'lib/Cargo.toml') }}
 
-      - name: Cache smoldot JS bundle
-        uses: actions/cache@v4
-        with:
-          path: |
-            wasm-node/javascript/node_modules
-            wasm-node/javascript/dist
-          key: smoldot-js-${{ hashFiles('wasm-node/javascript/package-lock.json', 'lib/src/**', 'wasm-node/rust/src/**') }}
+      - name: Install smoldot JS deps
+        run: npm ci
+        working-directory: wasm-node/javascript
 
-      - name: Cache e2e-tests JS deps
-        uses: actions/cache@v4
-        with:
-          path: e2e-tests/js/node_modules
-          key: e2e-js-${{ hashFiles('e2e-tests/js/package-lock.json') }}
+      - name: Install e2e-tests JS deps
+        run: npm ci
+        working-directory: e2e-tests/js
 
       - name: Pre-pull zombienet node images
         run: |
