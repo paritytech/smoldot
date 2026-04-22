@@ -1,0 +1,71 @@
+name: zombienet-e2e
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  # Bump in sync with e2e-tests/chain-specs/people-westend-local-spec.json if the runtime diverges.
+  POLKADOT_IMAGE: docker.io/parity/polkadot:polkadot-stable2603
+  CUMULUS_IMAGE: docker.io/parity/polkadot-parachain:polkadot-stable2603
+
+jobs:
+  light-node-submission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache cargo registry + e2e-tests target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            e2e-tests/target
+          key: e2e-cargo-${{ hashFiles('e2e-tests/Cargo.lock', 'lib/Cargo.toml') }}
+
+      - name: Cache smoldot JS bundle
+        uses: actions/cache@v4
+        with:
+          path: |
+            wasm-node/javascript/node_modules
+            wasm-node/javascript/dist
+          key: smoldot-js-${{ hashFiles('wasm-node/javascript/package-lock.json', 'lib/src/**', 'wasm-node/rust/src/**') }}
+
+      - name: Cache e2e-tests JS deps
+        uses: actions/cache@v4
+        with:
+          path: e2e-tests/js/node_modules
+          key: e2e-js-${{ hashFiles('e2e-tests/js/package-lock.json') }}
+
+      - name: Pre-pull zombienet node images
+        run: |
+          set -euo pipefail
+          docker pull "$POLKADOT_IMAGE"
+          docker pull "$CUMULUS_IMAGE"
+
+      - name: Run e2e test
+        env:
+          ZOMBIE_PROVIDER: docker
+          RUST_LOG: info
+        run: cargo test --manifest-path e2e-tests/Cargo.toml --test light_node_submission -- --nocapture
+
+      - name: Upload zombienet logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zombienet-logs
+          path: |
+            /tmp/zombie-*/**
+            /tmp/zombienet-*/**
+          if-no-files-found: ignore
+          retention-days: 7
