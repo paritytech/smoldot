@@ -1334,73 +1334,80 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     })
     .map_err(|e| format!("Failed to compile runtime: {e}"))?;
 
-    // AuraApi_slot_duration
-    let (slot_duration, vm) = {
-        let call_proof = network_service
-            .clone()
-            .call_proof_request(
-                peer_id.clone(),
-                codec::CallProofRequestConfig {
-                    block_hash,
-                    method: Cow::Borrowed("AuraApi_slot_duration"),
-                    parameter_vectored: iter::empty::<Vec<u8>>(),
-                },
-                Duration::from_secs(16),
-            )
-            .await
-            .map_err(|e| format!("AuraApi_slot_duration call proof request failed: {e}"))?;
+    // Download both Aura call proofs in parallel. try_join cancels the
+    // remaining request eagerly if either one fails.
+    let peer_id_clone = peer_id.clone();
+    let (slot_duration_proof, authorities_proof) = future::try_join(
+        async {
+            network_service
+                .clone()
+                .call_proof_request(
+                    peer_id_clone,
+                    codec::CallProofRequestConfig {
+                        block_hash,
+                        method: Cow::Borrowed("AuraApi_slot_duration"),
+                        parameter_vectored: iter::empty::<Vec<u8>>(),
+                    },
+                    Duration::from_secs(16),
+                )
+                .await
+                .map_err(|e| format!("AuraApi_slot_duration call proof request failed: {e}"))
+        },
+        async {
+            network_service
+                .clone()
+                .call_proof_request(
+                    peer_id,
+                    codec::CallProofRequestConfig {
+                        block_hash,
+                        method: Cow::Borrowed("AuraApi_authorities"),
+                        parameter_vectored: iter::empty::<Vec<u8>>(),
+                    },
+                    Duration::from_secs(16),
+                )
+                .await
+                .map_err(|e| format!("AuraApi_authorities call proof request failed: {e}"))
+        },
+    )
+    .await?;
 
-        let decoded_call_proof =
-            trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-                proof: call_proof.decode().to_vec(),
-            })
-            .map_err(|e| format!("Failed to decode slot_duration call proof: {e}"))?;
+    // Decode proofs.
+    let decoded_slot_duration_proof =
+        trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+            proof: slot_duration_proof.decode().to_vec(),
+        })
+        .map_err(|e| format!("Failed to decode slot_duration call proof: {e}"))?;
 
-        let (output, vm) = run_single_runtime_call(
-            vm,
-            "AuraApi_slot_duration",
-            &decoded_call_proof,
-            &state_root,
-        )?;
+    let decoded_authorities_proof =
+        trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+            proof: authorities_proof.decode().to_vec(),
+        })
+        .map_err(|e| format!("Failed to decode authorities call proof: {e}"))?;
 
-        let duration = <[u8; 8]>::try_from(output.as_slice())
-            .ok()
-            .and_then(|b| NonZero::<u64>::new(u64::from_le_bytes(b)))
-            .ok_or_else(|| String::from("Failed to decode AuraApi_slot_duration output"))?;
-        (duration, vm)
-    };
+    // Execute calls sequentially (the VM is consumed and returned by each call).
+    let (slot_duration_output, vm) = run_single_runtime_call(
+        vm,
+        "AuraApi_slot_duration",
+        &decoded_slot_duration_proof,
+        &state_root,
+    )?;
 
-    // AuraApi_authorities
-    let (authorities, vm) = {
-        let call_proof = network_service
-            .clone()
-            .call_proof_request(
-                peer_id,
-                codec::CallProofRequestConfig {
-                    block_hash,
-                    method: Cow::Borrowed("AuraApi_authorities"),
-                    parameter_vectored: iter::empty::<Vec<u8>>(),
-                },
-                Duration::from_secs(16),
-            )
-            .await
-            .map_err(|e| format!("AuraApi_authorities call proof request failed: {e}"))?;
+    let slot_duration = <[u8; 8]>::try_from(slot_duration_output.as_slice())
+        .ok()
+        .and_then(|b| NonZero::<u64>::new(u64::from_le_bytes(b)))
+        .ok_or_else(|| String::from("Failed to decode AuraApi_slot_duration output"))?;
 
-        let decoded_call_proof =
-            trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-                proof: call_proof.decode().to_vec(),
-            })
-            .map_err(|e| format!("Failed to decode authorities call proof: {e}"))?;
+    let (authorities_output, vm) = run_single_runtime_call(
+        vm,
+        "AuraApi_authorities",
+        &decoded_authorities_proof,
+        &state_root,
+    )?;
 
-        let (output, vm) =
-            run_single_runtime_call(vm, "AuraApi_authorities", &decoded_call_proof, &state_root)?;
-
-        let auths = header::AuraAuthoritiesIter::decode(&output)
-            .map_err(|_| String::from("Failed to decode AuraApi_authorities output"))?
-            .map(header::AuraAuthority::from)
-            .collect::<Vec<_>>();
-        (auths, vm)
-    };
+    let authorities = header::AuraAuthoritiesIter::decode(&authorities_output)
+        .map_err(|_| String::from("Failed to decode AuraApi_authorities output"))?
+        .map(header::AuraAuthority::from)
+        .collect::<Vec<_>>();
 
     log!(
         platform,
