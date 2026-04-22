@@ -8,8 +8,8 @@ on:
 
 env:
   # Bump in sync with e2e-tests/chain-specs/people-westend-local-spec.json if the runtime diverges.
-  POLKADOT_IMAGE: docker.io/parity/polkadot:polkadot-stable2603
-  CUMULUS_IMAGE: docker.io/parity/polkadot-parachain:polkadot-stable2603
+  POLKADOT_IMAGE: docker.io/parity/polkadot:stable2603
+  CUMULUS_IMAGE: docker.io/parity/polkadot-parachain:stable2603
 
 jobs:
   light-node-submission:
