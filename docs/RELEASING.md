@@ -259,11 +259,45 @@ cut a new release.
 
 ---
 
-## Appendix A — Manual npm republish (rare)
+## Appendix A — Manual dev publish
 
-`deploy.yml` has a `workflow_dispatch` trigger with an `npm_tag` input. Use it
-for non-`latest` publishes (`dev`, `canary`, etc.). The commit's
-`package.json` version must not already exist on npm.
+`deploy.yml` has a `workflow_dispatch` trigger with a single input,
+`npm_tag_suffix`. Use it to publish a dev build from any branch without
+editing `package.json` by hand.
+
+**Trigger.** Actions → "deploy" → "Run workflow" → pick the branch, optionally
+enter an `npm_tag_suffix`. The suffix must match `[A-Za-z0-9-]+`. Leave it
+blank for a generic dated dev publish.
+
+**What gets published.** The workflow rewrites `wasm-node/javascript/package.json`
+and `wasm-node/rust/Cargo.toml` in-memory to a computed version, packs, and
+dispatches to `npm_publish_automation`. Nothing is committed back to git.
+
+- **Version** always bumps patch — never minor or major
+- **With suffix** (e.g. `test123`):
+  - Version: `<next-patch>-dev.<YYYYMMDD>.<suffix>.<N>` → `3.1.2-dev.20260422.test123.0`
+  - Dist-tag: `dev-<YYYYMMDD>-<suffix>` → `dev-20260422-test123`
+- **Without suffix** (blank):
+  - Version: `<next-patch>-dev.<YYYYMMDD>.<N>` → `3.1.2-dev.20260422.0`
+  - Dist-tag: `dev-<YYYYMMDD>` → `dev-20260422`
+- **`N` counter** auto-increments. The workflow queries `npm view --json
+  smoldot versions` for prior publishes matching the prefix and uses
+  `max(N) + 1`. First dispatch of a new tuple starts at `0`.
+
+**Install a dev build:**
+
+```sh
+npm install smoldot@dev-20260422-test123   # by dist-tag (moves with each publish)
+npm install smoldot@3.1.2-dev.20260422.test123.0   # by exact version (immutable)
+```
+
+**Reruns are idempotent.** Re-running the same workflow run (via the UI's
+"Re-run jobs") produces the same VERSION; the automation's collision check
+skips the publish with a warning. Fresh dispatches produce fresh versions.
+
+**Why the dist-tag can't be `latest`.** The final dist-tag always starts with
+`dev-<YYYYMMDD>`. Suffix validation rejects anything outside `[A-Za-z0-9-]`.
+Even `suffix=""` produces `dev-<YYYYMMDD>`, not `latest`.
 
 ## Appendix B — Files for future automation
 
