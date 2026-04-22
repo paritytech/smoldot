@@ -5,8 +5,8 @@ export function createClient() {
   return start({
     maxLogLevel: 3,
     logCallback: (level, target, message) => {
-      const labels = { 1: "ERROR", 2: "WARN", 3: "INFO" };
-      const label = labels[level] || "TRACE";
+      const labels = { 1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE" };
+      const label = labels[level] ?? `L${level}`;
       console.error(`[${label}] [${target}] ${message}`);
     },
   });
@@ -31,18 +31,29 @@ export function sendRpc(chain, method, params = []) {
   return id;
 }
 
-export async function sendRpcAndWait(chain, method, params = []) {
+export async function sendRpcAndWait(chain, method, params = [], timeoutMs = 60000) {
   const id = sendRpc(chain, method, params);
   const idStr = id.toString();
-  while (true) {
-    const response = JSON.parse(await chain.nextJsonRpcResponse());
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const raw = await Promise.race([
+      chain.nextJsonRpcResponse(),
+      new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`Timed out waiting for ${method} response`)),
+          Math.max(1, deadline - Date.now()),
+        ),
+      ),
+    ]);
+    const response = JSON.parse(raw);
     if (response.id === idStr) {
       if (response.error) {
-        throw new Error(`RPC error: ${JSON.stringify(response.error)}`);
+        throw new Error(`RPC error for ${method}: ${JSON.stringify(response.error)}`);
       }
       return response.result;
     }
   }
+  throw new Error(`Timed out waiting for ${method} response after ${timeoutMs}ms`);
 }
 
 export async function waitForResponse(chain, predicate, timeoutMs = 60000) {

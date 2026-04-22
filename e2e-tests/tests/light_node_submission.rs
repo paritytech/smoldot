@@ -19,7 +19,7 @@ async fn light_node_statement_reaches_full_node() -> Result<(), anyhow::Error> {
         .unwrap_or_else(|| std::env::temp_dir().join(format!("zombienet-{}", std::process::id())));
     std::fs::create_dir_all(&base_dir)?;
 
-    let para_spec_path = create_para_chain_spec(&pubkey, &base_dir)?;
+    let para_spec_path = create_para_chain_spec_with_allowances(&[pubkey], &base_dir)?;
     info!("Parachain chain spec created at {}", para_spec_path.display());
 
     let network = spawn_network(&para_spec_path).await?;
@@ -52,7 +52,9 @@ async fn light_node_statement_reaches_full_node() -> Result<(), anyhow::Error> {
     info!("Subscribed to statements on collator-1");
 
     // Ensure smoldot is built and JS deps are installed
+    info!("Ensuring smoldot JS bundle is built");
     ensure_smoldot_built();
+    info!("Ensuring JS test dependencies are installed");
     ensure_js_deps_installed();
 
     // Run smoldot JS test and wait for statement concurrently
@@ -60,6 +62,10 @@ async fn light_node_statement_reaches_full_node() -> Result<(), anyhow::Error> {
     let para_spec_str = para_spec_file.path().to_str().unwrap().to_string();
     let statement_hex_clone = statement_hex.clone();
 
+    info!(
+        "Spawning JS test: js/light_node_submission.js (relay_spec={}, para_spec={})",
+        relay_spec_str, para_spec_str
+    );
     let js_handle = tokio::spawn(async move {
         run_js_test(
             "js/light_node_submission.js",
@@ -72,11 +78,14 @@ async fn light_node_statement_reaches_full_node() -> Result<(), anyhow::Error> {
         .await
     });
 
+    info!("Waiting up to 180s for statement to arrive on collator-1");
     let received = expect_one_statement(&mut sub, 180).await?;
     info!("Statement received on full node: {:?}", received);
 
+    info!("Waiting for JS test to finish");
     let js_result = js_handle.await.expect("JS task panicked");
     js_result.map_err(|e| anyhow::anyhow!("JS test failed: {e}"))?;
+    info!("JS test finished successfully");
 
     info!("Light node statement submission test passed");
     Ok(())

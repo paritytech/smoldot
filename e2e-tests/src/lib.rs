@@ -7,12 +7,25 @@ use log::info;
 use serde_json::Value;
 use zombienet_sdk::{LocalFileSystem, Network, NetworkConfigBuilder};
 
-/// Creates a parachain chain spec with a statement allowance for the given public key.
+/// Well-known prefix for the per-account statement allowance storage key.
+pub const STATEMENT_ALLOWANCE_PREFIX: &[u8] = b":statement_allowance:";
+
+/// Constructs a per-account statement allowance storage key.
 ///
-/// Follows the same approach as polkadot-sdk's `create_chain_spec_with_allowances`:
-/// loads a bundled template, injects the allowance into `genesis.raw.top`, writes to file.
-pub fn create_para_chain_spec(
-    pubkey: &[u8; 32],
+/// # Arguments
+/// * `account_id` - Account identifier as byte slice
+///
+/// # Returns
+/// Storage key: `":statement_allowance:" ++ account_id`
+pub fn statement_allowance_key(account_id: impl AsRef<[u8]>) -> Vec<u8> {
+    let mut key = STATEMENT_ALLOWANCE_PREFIX.to_vec();
+    key.extend_from_slice(account_id.as_ref());
+    key
+}
+
+/// Creates a parachain chain spec with a statement allowance for each given public key.
+pub fn create_para_chain_spec_with_allowances(
+    pubkeys: &[[u8; 32]],
     base_dir: &Path,
 ) -> Result<PathBuf, anyhow::Error> {
     let template = include_str!("../chain-specs/people-westend-local-spec.json");
@@ -26,11 +39,6 @@ pub fn create_para_chain_spec(
         .and_then(|t| t.as_object_mut())
         .ok_or_else(|| anyhow!("Failed to access genesis.raw.top in chain spec"))?;
 
-    // Storage key: b":statement_allowance:" + pubkey (no hashing, well-known prefix)
-    let prefix_hex = hex::encode(b":statement_allowance:");
-    let pubkey_hex = hex::encode(pubkey);
-    let storage_key = format!("0x{prefix_hex}{pubkey_hex}");
-
     // Storage value: SCALE-encoded StatementAllowance { max_count: 100u32, max_size: 1_000_000u32 }
     let max_count = 100u32;
     let max_size = 1_000_000u32;
@@ -39,8 +47,11 @@ pub fn create_para_chain_spec(
     allowance_bytes.extend_from_slice(&max_size.to_le_bytes());
     let storage_value = format!("0x{}", hex::encode(&allowance_bytes));
 
-    info!("Injecting statement allowance: key={storage_key}, value={storage_value}");
-    genesis.insert(storage_key, Value::String(storage_value));
+    for pubkey in pubkeys {
+        let storage_key = format!("0x{}", hex::encode(statement_allowance_key(pubkey)));
+        info!("Injecting statement allowance: key={storage_key}, value={storage_value}");
+        genesis.insert(storage_key, Value::String(storage_value.clone()));
+    }
 
     let chain_spec_path = base_dir.join("people-westend-custom.json");
     let json = serde_json::to_string_pretty(&spec)?;
@@ -50,8 +61,6 @@ pub fn create_para_chain_spec(
 }
 
 /// Spawns a zombienet network with relay chain + parachain (statement-store enabled).
-///
-/// Follows the same pattern as polkadot-sdk's `spawn_network_with_injected_allowances`.
 pub async fn spawn_network(
     para_spec_path: &Path,
 ) -> Result<Network<LocalFileSystem>, anyhow::Error> {
