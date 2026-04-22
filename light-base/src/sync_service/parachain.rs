@@ -47,6 +47,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     parachain_id: u32,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+    saved_runtime_code: Option<Vec<u8>>,
 ) {
     // Phase 1: Fetch the current finalized parachain head from the relay chain.
     let effective_chain_info = fetch_parachain_head_from_relay(
@@ -68,30 +69,48 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         )
     );
 
-    // Phase 2: Download the parachain runtime from a P2P peer and determine Aura
-    // consensus parameters. Retries indefinitely until successful.
-    let (effective_chain_info, finalized_runtime) = loop {
-        match bootstrap_parachain_consensus(
-            &log_target,
-            &platform,
-            &network_service,
-            &effective_chain_info,
-            block_number_bytes,
-        )
-        .await
-        {
-            Ok(b) => break (b.chain_info, b.finalized_runtime),
-            Err(err) => {
-                log!(
-                    &platform,
-                    Warn,
-                    &log_target,
-                    format!("Failed to bootstrap parachain consensus: {err}. Retrying in 5s...")
-                );
-                platform.sleep(Duration::from_secs(5)).await;
+    // Phase 2: Bootstrap Aura consensus parameters.
+    //
+    // If the database contains saved runtime code, attempt a warm start: compile the cached
+    // code locally and verify it by running lightweight Aura call proofs (~few KB each).
+    // This skips the ~2 MiB `:code` + `:heappages` P2P storage download on warm restart.
+    // On any failure, fall back to the cold bootstrap loop which downloads from peers.
+    let (effective_chain_info, finalized_runtime) =
+        if let Some(code) = saved_runtime_code {
+            match try_warm_start_from_cached_code(
+                &log_target,
+                &platform,
+                &network_service,
+                &effective_chain_info,
+                block_number_bytes,
+                code,
+            )
+            .await
+            {
+                Ok(b) => {
+                    log!(
+                        &platform,
+                        Info,
+                        &log_target,
+                        "Warm-started parachain consensus from cached runtime code"
+                    );
+                    (b.chain_info, b.finalized_runtime)
+                }
+                Err(err) => {
+                    log!(
+                        &platform,
+                        Warn,
+                        &log_target,
+                        format!(
+                            "Warm start failed ({err}), falling back to cold bootstrap..."
+                        )
+                    );
+                    cold_bootstrap_loop(&log_target, &platform, &network_service, &effective_chain_info, block_number_bytes).await
+                }
             }
-        }
-    };
+        } else {
+            cold_bootstrap_loop(&log_target, &platform, &network_service, &effective_chain_info, block_number_bytes).await
+        };
 
     // Phase 3: Spawn the paraheads background service that tracks relay chain
     // finalization and reports finalized parachain blocks.
@@ -1103,6 +1122,220 @@ impl<TPlat: PlatformRef> Task<TPlat> {
             self.all_notifications.push(subscription);
         }
     }
+}
+
+/// Retries `bootstrap_parachain_consensus` indefinitely with a 5s back-off.
+///
+/// Returns `(chain_info, finalized_runtime)` once a successful bootstrap completes.
+async fn cold_bootstrap_loop<TPlat: PlatformRef>(
+    log_target: &str,
+    platform: &TPlat,
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    chain_info: &chain::chain_information::ValidChainInformation,
+    block_number_bytes: usize,
+) -> (
+    chain::chain_information::ValidChainInformation,
+    FinalizedBlockRuntime,
+) {
+    loop {
+        match bootstrap_parachain_consensus(
+            log_target,
+            platform,
+            network_service,
+            chain_info,
+            block_number_bytes,
+        )
+        .await
+        {
+            Ok(b) => return (b.chain_info, b.finalized_runtime),
+            Err(err) => {
+                log!(
+                    platform,
+                    Warn,
+                    log_target,
+                    format!(
+                        "Failed to bootstrap parachain consensus: {err}. Retrying in 5s..."
+                    )
+                );
+                platform.sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+/// Attempts a warm start using runtime code cached in the database.
+///
+/// Compiles the cached code locally (no P2P download of `:code`), then fetches lightweight
+/// Aura call proofs (`AuraApi_slot_duration` and `AuraApi_authorities`) to determine consensus
+/// parameters. The entire P2P traffic is a few KB rather than ~2 MiB.
+///
+/// Returns an error string on any failure; the caller should fall back to cold bootstrap.
+async fn try_warm_start_from_cached_code<TPlat: PlatformRef>(
+    log_target: &str,
+    platform: &TPlat,
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    chain_info: &chain::chain_information::ValidChainInformation,
+    block_number_bytes: usize,
+    code: Vec<u8>,
+) -> Result<BootstrappedParachain, String> {
+    let ci_ref = chain_info.as_ref();
+    let state_root = *ci_ref.finalized_block_header.state_root;
+    let block_hash = ci_ref.finalized_block_header.hash(block_number_bytes);
+
+    log!(
+        platform,
+        Info,
+        log_target,
+        format!(
+            "Attempting warm start for parachain block #{} ({}) using {} bytes of cached runtime",
+            ci_ref.finalized_block_header.number,
+            HashDisplay(&block_hash),
+            code.len()
+        )
+    );
+
+    // Wait for a peer — same as bootstrap_parachain_consensus.
+    let peer_id = {
+        let mut from_network = Box::pin(network_service.subscribe().await);
+        if let Some(peer) = network_service.peers_list().await.next() {
+            peer
+        } else {
+            loop {
+                match from_network.next().await {
+                    Some(network_service::Event::Connected { peer_id, .. }) => break peer_id,
+                    Some(_) => continue,
+                    None => {
+                        from_network = Box::pin(network_service.subscribe().await);
+                    }
+                }
+            }
+        }
+    };
+
+    // Compile the cached code locally — no network download needed.
+    // Use default heap pages; the cold path does the same when `:heappages` is absent.
+    let heap_pages = executor::storage_heap_pages_to_value(None)
+        .map_err(|e| format!("Failed to derive default heap pages: {e}"))?;
+
+    log!(
+        platform,
+        Info,
+        log_target,
+        format!(
+            "Compiling cached parachain runtime ({} bytes)...",
+            code.len()
+        )
+    );
+
+    let vm = executor::host::HostVmPrototype::new(executor::host::Config {
+        module: &code,
+        heap_pages,
+        exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+        allow_unresolved_imports: true,
+    })
+    .map_err(|e| format!("Failed to compile cached runtime: {e}"))?;
+
+    // Fetch AuraApi_slot_duration call proof (~few KB).
+    let (slot_duration, vm) = {
+        let call_proof = network_service
+            .clone()
+            .call_proof_request(
+                peer_id.clone(),
+                codec::CallProofRequestConfig {
+                    block_hash,
+                    method: Cow::Borrowed("AuraApi_slot_duration"),
+                    parameter_vectored: iter::empty::<Vec<u8>>(),
+                },
+                Duration::from_secs(16),
+            )
+            .await
+            .map_err(|e| format!("AuraApi_slot_duration call proof request failed: {e}"))?;
+
+        let decoded_call_proof =
+            trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+                proof: call_proof.decode().to_vec(),
+            })
+            .map_err(|e| format!("Failed to decode slot_duration call proof: {e}"))?;
+
+        let (output, vm) = run_single_runtime_call(
+            vm,
+            "AuraApi_slot_duration",
+            &decoded_call_proof,
+            &state_root,
+        )?;
+
+        let duration = <[u8; 8]>::try_from(output.as_slice())
+            .ok()
+            .and_then(|b| NonZero::<u64>::new(u64::from_le_bytes(b)))
+            .ok_or_else(|| String::from("Failed to decode AuraApi_slot_duration output"))?;
+        (duration, vm)
+    };
+
+    // Fetch AuraApi_authorities call proof (~few KB).
+    let (authorities, vm) = {
+        let call_proof = network_service
+            .clone()
+            .call_proof_request(
+                peer_id,
+                codec::CallProofRequestConfig {
+                    block_hash,
+                    method: Cow::Borrowed("AuraApi_authorities"),
+                    parameter_vectored: iter::empty::<Vec<u8>>(),
+                },
+                Duration::from_secs(16),
+            )
+            .await
+            .map_err(|e| format!("AuraApi_authorities call proof request failed: {e}"))?;
+
+        let decoded_call_proof =
+            trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+                proof: call_proof.decode().to_vec(),
+            })
+            .map_err(|e| format!("Failed to decode authorities call proof: {e}"))?;
+
+        let (output, vm) =
+            run_single_runtime_call(vm, "AuraApi_authorities", &decoded_call_proof, &state_root)?;
+
+        let auths = header::AuraAuthoritiesIter::decode(&output)
+            .map_err(|_| String::from("Failed to decode AuraApi_authorities output"))?
+            .map(header::AuraAuthority::from)
+            .collect::<Vec<_>>();
+        (auths, vm)
+    };
+
+    log!(
+        platform,
+        Info,
+        log_target,
+        format!(
+            "Warm start: Aura consensus verified (slot_duration={}ms, authorities={})",
+            slot_duration,
+            authorities.len()
+        )
+    );
+
+    let new_chain_info = chain::chain_information::ChainInformation {
+        finalized_block_header: Box::new(ci_ref.finalized_block_header.into()),
+        consensus: chain::chain_information::ChainInformationConsensus::Aura {
+            finalized_authorities_list: authorities,
+            slot_duration,
+        },
+        finality: chain::chain_information::ChainInformationFinality::Outsourced,
+    };
+
+    let chain_info = chain::chain_information::ValidChainInformation::try_from(new_chain_info)
+        .map_err(|e| format!("Invalid chain information from warm start: {e}"))?;
+
+    Ok(BootstrappedParachain {
+        chain_info,
+        finalized_runtime: FinalizedBlockRuntime {
+            virtual_machine: vm,
+            storage_code: Some(code),
+            storage_heap_pages: None,
+            code_merkle_value: None,
+            closest_ancestor_excluding: None,
+        },
+    })
 }
 
 // Fetch the included parachain head from a finalized relay chain block.
