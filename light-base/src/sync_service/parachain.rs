@@ -101,9 +101,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                         &platform,
                         Warn,
                         &log_target,
-                        format!(
-                            "Warm start failed ({err}), falling back to cold bootstrap..."
-                        )
+                        format!("Warm start failed ({err}), falling back to cold bootstrap...")
                     );
                     cold_bootstrap_loop(&log_target, &platform, &network_service, &effective_chain_info, block_number_bytes).await
                 }
@@ -1153,9 +1151,7 @@ async fn cold_bootstrap_loop<TPlat: PlatformRef>(
                     platform,
                     Warn,
                     log_target,
-                    format!(
-                        "Failed to bootstrap parachain consensus: {err}. Retrying in 5s..."
-                    )
+                    format!("Failed to bootstrap parachain consensus: {err}. Retrying in 5s...")
                 );
                 platform.sleep(Duration::from_secs(5)).await;
             }
