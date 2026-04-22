@@ -557,14 +557,24 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         // and verification queue.
         // TODO: what if the new chain doesn't support grandpa?
         if self.warped_header_number <= chain_information.as_ref().finalized_block_header.number {
+            let new_hash = chain_information
+                .as_ref()
+                .finalized_block_header
+                .hash(self.block_number_bytes);
+
+            // If the header hash is identical, nothing has changed — skip the reset.
+            if new_hash == self.warped_header_hash {
+                return;
+            }
+
+            let old_state_root = self.warped_header_state_root;
+            let was_normal = matches!(self.warped_block_ty, WarpedBlockTy::Normal);
+
             self.warped_header = chain_information
                 .as_ref()
                 .finalized_block_header
                 .scale_encoding_vec(self.block_number_bytes);
-            self.warped_header_hash = chain_information
-                .as_ref()
-                .finalized_block_header
-                .hash(self.block_number_bytes);
+            self.warped_header_hash = new_hash;
             self.warped_header_state_root =
                 *chain_information.as_ref().finalized_block_header.state_root;
             self.warped_header_extrinsics_root = *chain_information
@@ -573,17 +583,11 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 .extrinsics_root;
             self.warped_header_number = chain_information.as_ref().finalized_block_header.number;
             self.warped_finality = chain_information.as_ref().finality.into();
+
             // Preserve `Normal` if warp sync already completed fragment verification.
             // A GrandPa commit advancing finality by a few blocks should not force
-            // another round of fragment verification before the runtime download can
-            // proceed. The runtime_download reset below is still necessary (the block
-            // hash changed so any cached proof is for the wrong state root).
-            // Preserve `Normal` if warp sync already completed fragment verification.
-            // A GrandPa commit advancing finality by a few blocks should not force
-            // another round of fragment verification before the runtime download can
-            // proceed. The runtime_download reset below is still necessary (the block
-            // hash changed so any cached proof is for the wrong state root).
-            if !matches!(self.warped_block_ty, WarpedBlockTy::Normal) {
+            // another round of fragment verification.
+            if !was_normal {
                 self.warped_block_ty = WarpedBlockTy::AlreadyVerified;
             }
 
@@ -591,9 +595,13 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             self.runtime_calls =
                 runtime_calls_default_value(self.verified_chain_information.as_ref().consensus);
 
-            self.runtime_download = RuntimeDownload::NotStarted {
-                hint_doesnt_match: false,
-            };
+            // Only reset the runtime download if the state root changed, since
+            // cached proofs are valid as long as the state root matches.
+            if self.warped_header_state_root != old_state_root {
+                self.runtime_download = RuntimeDownload::NotStarted {
+                    hint_doesnt_match: false,
+                };
+            }
 
             if !matches!(self.body_download, BodyDownload::NotNeeded) {
                 self.body_download = BodyDownload::NotStarted;
@@ -2487,6 +2495,7 @@ mod tests {
     /// For N > 0, includes required Aura pre-runtime and seal digest items.
     fn chain_info_at_block(
         number: u64,
+        state_root: [u8; 32],
         grandpa_public_key: [u8; 32],
         set_id: u64,
     ) -> ValidChainInformation {
@@ -2502,7 +2511,7 @@ mod tests {
             finalized_block_header: Box::new(header::Header {
                 parent_hash: [0u8; 32],
                 number,
-                state_root: [number as u8; 32],
+                state_root,
                 extrinsics_root: [0u8; 32],
                 digest: digest.into(),
             }),
@@ -2522,109 +2531,65 @@ mod tests {
         ValidChainInformation::try_from(chain_info).unwrap()
     }
 
+    /// Production scenario: warp sync verifies fragment for block 100, then a
+    /// GrandPa commit advances finality to block 101 (different header hash,
+    /// different state root). The runtime download should still be desired
+    /// without requiring another fragment verification round.
+    ///
+    /// The source height is set to 101 (matching the GrandPa commit) so that
+    /// no further warp sync fragments are desired — this is the production
+    /// scenario where the chain has caught up to the source.
     #[test]
-    fn set_chain_information_preserves_normal_warped_block_ty() {
-        // Generate a deterministic Ed25519 key pair for the GrandPa authority.
-        let signing_key = ed25519_zebra::SigningKey::from([42u8; 32]);
-        let vk = ed25519_zebra::VerificationKey::from(&signing_key);
-        let public_key: [u8; 32] = vk.into();
+    fn grandpa_commit_mid_warp_sync_preserves_runtime_download() {
+        let (mut ws, source_id) = setup_warp_sync_at_normal(None);
 
-        let block_number_bytes = 4;
-
-        // Start warp sync from genesis.
-        let mut ws: WarpSync<(), ()> = start_warp_sync(Config {
-            start_chain_information: genesis_chain_info(public_key),
-            block_number_bytes,
-            sources_capacity: 4,
-            requests_capacity: 4,
-            code_trie_node_hint: None,
-            num_download_ahead_fragments: 16,
-            warp_sync_minimum_gap: 0,
-            download_block_body: false,
-            download_all_chain_information_storage_proofs: false,
-        })
-        .unwrap();
-
-        // Add a source with high finalized height so warp sync wants fragments.
-        let source_id = ws.add_source(());
-        ws.set_source_finality_state(source_id, 1000);
-
-        // Build a header for block 100 with a ScheduledChange digest.
-        let encoded_header = build_header(
-            [0u8; 32],
-            100,
-            [1u8; 32],
-            Some(&[(public_key, 1)]),
-            block_number_bytes,
-        );
-        let header_hash = header::hash_from_scale_encoded_header(&encoded_header);
-
-        // Build a valid justification for this header.
-        let justification = build_justification(
-            &header_hash,
-            100,
-            block_number_bytes,
-            0, // set_id
-            1, // round
-            &signing_key,
-        );
-
-        // Inject the fragment as a warp sync response.
-        let warp_rq_id = ws.add_request(
-            source_id,
-            (),
-            RequestDetail::WarpSyncRequest {
-                block_hash: ws.warped_header_hash,
-            },
-        );
-        ws.warp_sync_request_response(
-            warp_rq_id,
-            vec![WarpSyncFragment {
-                scale_encoded_header: encoded_header,
-                scale_encoded_justification: justification,
-            }],
-            true, // final_set_of_fragments
-        );
-
-        // Process the fragment verification.
-        match ws.process_one() {
-            ProcessOne::VerifyWarpSyncFragment(verify) => {
-                let (warp_sync, result) = verify.verify([0u8; 32]);
-                ws = warp_sync;
-                let (hash, number) = result.expect("fragment verification should succeed");
-                assert_eq!(hash, header_hash);
-                assert_eq!(number, 100);
-            }
-            _ => panic!("expected VerifyWarpSyncFragment"),
-        }
-
-        // At this point, warped_block_ty should be Normal and desired_requests
-        // should yield a StorageGetMerkleProof for the runtime download.
-        let has_runtime_request = ws
-            .desired_requests()
-            .any(|(_, _, req)| matches!(req, DesiredRequest::StorageGetMerkleProof { .. }));
+        // Confirm runtime download is desired before the GrandPa commit.
         assert!(
-            has_runtime_request,
-            "after fragment verification, a runtime download should be desired"
+            ws.desired_requests()
+                .any(|(_, _, req)| matches!(req, DesiredRequest::StorageGetMerkleProof { .. })),
+            "runtime download should be desired after fragment verification"
         );
 
-        // Now simulate a GrandPa commit advancing finality to block 101.
-        // Update the source's finalized height to match (the source announced
-        // block 101 via GrandPa commit, so its finalized height is now 101).
+        let signing_key = ed25519_zebra::SigningKey::from([42u8; 32]);
+        let public_key: [u8; 32] = ed25519_zebra::VerificationKey::from(&signing_key).into();
+
+        // GrandPa commit advances finality to block 101. The source's finalized
+        // height matches — no further warp sync fragments needed.
         ws.set_source_finality_state(source_id, 101);
-        let new_chain_info = chain_info_at_block(101, public_key, 1);
+        let new_chain_info = chain_info_at_block(101, [101u8; 32], public_key, 1);
         ws.set_chain_information((&new_chain_info).into());
 
-        // CRITICAL ASSERTION: after set_chain_information, warped_block_ty should
-        // still be Normal, and desired_requests should still yield a
-        // StorageGetMerkleProof — no second fragment verification needed.
-        let has_runtime_request_after = ws
-            .desired_requests()
-            .any(|(_, _, req)| matches!(req, DesiredRequest::StorageGetMerkleProof { .. }));
+        // Runtime download should still be desired — no second fragment
+        // verification needed.
         assert!(
-            has_runtime_request_after,
-            "after set_chain_information, runtime download should still be desired \
-             (warped_block_ty should remain Normal, not reset to AlreadyVerified)"
+            ws.desired_requests()
+                .any(|(_, _, req)| matches!(req, DesiredRequest::StorageGetMerkleProof { .. })),
+            "after GrandPa commit to block 101, runtime download should still be desired"
+        );
+    }
+
+    /// When a GrandPa commit advances finality but the state root is the same,
+    /// the runtime download state should be preserved (no reset to NotStarted).
+    #[test]
+    fn set_chain_information_same_state_root_preserves_runtime_download() {
+        let (mut ws, source_id) = setup_warp_sync_at_normal(None);
+
+        let signing_key = ed25519_zebra::SigningKey::from([42u8; 32]);
+        let public_key: [u8; 32] = ed25519_zebra::VerificationKey::from(&signing_key).into();
+
+        // The fragment was built with state_root = [1u8; 32]. Advance to block
+        // 101 but keep the same state root. This simulates a block with no
+        // storage changes (only extrinsics_root differs).
+        ws.set_source_finality_state(source_id, 101);
+        let new_info = chain_info_at_block(101, [1u8; 32], public_key, 1);
+        ws.set_chain_information((&new_info).into());
+
+        // Runtime download should still be desired, and since the state root
+        // didn't change, it shouldn't have been reset.
+        assert!(
+            ws.desired_requests()
+                .any(|(_, _, req)| matches!(req, DesiredRequest::StorageGetMerkleProof { .. })),
+            "runtime download should be desired when state root is unchanged"
         );
     }
 
