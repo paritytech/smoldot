@@ -43,17 +43,34 @@ jobs:
         run: npm ci
         working-directory: e2e-tests/js
 
-      - name: Pre-pull zombienet node images
+      - name: Extract polkadot + polkadot-parachain binaries
+        # The docker provider's multiaddr is broken for host-side clients (it advertises the
+        # container bridge IP with the host-mapped port, which is unroutable). Run native
+        # instead: use Docker only as a delivery mechanism for versioned binaries.
         run: |
           set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/bin"
           docker pull "$POLKADOT_IMAGE"
           docker pull "$CUMULUS_IMAGE"
+          cid=$(docker create "$POLKADOT_IMAGE")
+          docker cp "${cid}:/usr/bin/polkadot"                         "$GITHUB_WORKSPACE/bin/"
+          docker cp "${cid}:/usr/lib/polkadot/polkadot-execute-worker" "$GITHUB_WORKSPACE/bin/"
+          docker cp "${cid}:/usr/lib/polkadot/polkadot-prepare-worker" "$GITHUB_WORKSPACE/bin/"
+          docker rm "${cid}"
+          cid=$(docker create "$CUMULUS_IMAGE")
+          docker cp "${cid}:/usr/local/bin/polkadot-parachain"         "$GITHUB_WORKSPACE/bin/"
+          docker rm "${cid}"
+          chmod +x "$GITHUB_WORKSPACE/bin/"*
+          "$GITHUB_WORKSPACE/bin/polkadot" --version
+          "$GITHUB_WORKSPACE/bin/polkadot-parachain" --version
 
       - name: Run e2e test
         env:
-          ZOMBIE_PROVIDER: docker
+          ZOMBIE_PROVIDER: native
           RUST_LOG: info
-        run: cargo test --manifest-path e2e-tests/Cargo.toml --test light_node_submission -- --nocapture
+        run: |
+          export PATH="$GITHUB_WORKSPACE/bin:$PATH"
+          cargo test --manifest-path e2e-tests/Cargo.toml --test light_node_submission -- --nocapture
 
       - name: Fix zombienet log permissions
         if: failure()
