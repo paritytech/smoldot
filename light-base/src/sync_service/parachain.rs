@@ -49,7 +49,46 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     saved_runtime_code: Option<Vec<u8>>,
 ) {
+    // If we have cached runtime code, kick off compilation in a background task immediately
+    // so it runs concurrently with Phase 1's relay-chain network I/O (~200-300 ms overlap).
+    // The code bytes are cloned because the background task needs ownership while the
+    // original is kept for `FinalizedBlockRuntime::storage_code` later.
+    let warm_start_state = if let Some(code) = saved_runtime_code {
+        let (tx, rx) = oneshot::channel();
+        let code_for_task = code.clone();
+        let task_name = format!("{log_target}-precompile-runtime");
+        log!(
+            &platform,
+            Info,
+            &log_target,
+            format!(
+                "Spawning background task to pre-compile cached parachain runtime ({} bytes)",
+                code.len()
+            )
+        );
+        platform.spawn_task(task_name.into(), async move {
+            let result = (|| {
+                let heap_pages = executor::storage_heap_pages_to_value(None)
+                    .map_err(|e| format!("Failed to derive default heap pages: {e}"))?;
+                executor::host::HostVmPrototype::new(executor::host::Config {
+                    module: &code_for_task,
+                    heap_pages,
+                    exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+                    allow_unresolved_imports: true,
+                })
+                .map_err(|e| format!("Failed to compile cached runtime: {e}"))
+            })();
+            // Ignore send errors: the receiver may have been dropped if warm start was
+            // abandoned before the task result was consumed.
+            let _ = tx.send(result);
+        });
+        Some((code, rx))
+    } else {
+        None
+    };
+
     // Phase 1: Fetch the current finalized parachain head from the relay chain.
+    // Runs concurrently with the pre-compilation task spawned above.
     let effective_chain_info = fetch_parachain_head_from_relay(
         &log_target,
         &platform,
@@ -71,57 +110,59 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
 
     // Phase 2: Bootstrap Aura consensus parameters.
     //
-    // If the database contains saved runtime code, attempt a warm start: compile the cached
-    // code locally and verify it by running lightweight Aura call proofs (~few KB each).
-    // This skips the ~2 MiB `:code` + `:heappages` P2P storage download on warm restart.
-    // On any failure, fall back to the cold bootstrap loop which downloads from peers.
-    let (effective_chain_info, finalized_runtime) = if let Some(code) = saved_runtime_code {
-        match try_warm_start_from_cached_code(
-            &log_target,
-            &platform,
-            &network_service,
-            &effective_chain_info,
-            block_number_bytes,
-            code,
-        )
-        .await
-        {
-            Ok(b) => {
-                log!(
-                    &platform,
-                    Info,
-                    &log_target,
-                    "Warm-started parachain consensus from cached runtime code"
-                );
-                (b.chain_info, b.finalized_runtime)
+    // If the database contains saved runtime code, attempt a warm start: use the pre-compiled
+    // VM (already compiled during Phase 1's network I/O) and verify it by running lightweight
+    // Aura call proofs (~few KB each). This skips the ~2 MiB `:code` + `:heappages` P2P
+    // storage download on warm restart. On any failure, fall back to the cold bootstrap loop.
+    let (effective_chain_info, finalized_runtime) =
+        if let Some((code, precompiled)) = warm_start_state {
+            match try_warm_start_from_cached_code(
+                &log_target,
+                &platform,
+                &network_service,
+                &effective_chain_info,
+                block_number_bytes,
+                precompiled,
+                code,
+            )
+            .await
+            {
+                Ok(b) => {
+                    log!(
+                        &platform,
+                        Info,
+                        &log_target,
+                        "Warm-started parachain consensus from cached runtime code"
+                    );
+                    (b.chain_info, b.finalized_runtime)
+                }
+                Err(err) => {
+                    log!(
+                        &platform,
+                        Warn,
+                        &log_target,
+                        format!("Warm start failed ({err}), falling back to cold bootstrap...")
+                    );
+                    cold_bootstrap_loop(
+                        &log_target,
+                        &platform,
+                        &network_service,
+                        &effective_chain_info,
+                        block_number_bytes,
+                    )
+                    .await
+                }
             }
-            Err(err) => {
-                log!(
-                    &platform,
-                    Warn,
-                    &log_target,
-                    format!("Warm start failed ({err}), falling back to cold bootstrap...")
-                );
-                cold_bootstrap_loop(
-                    &log_target,
-                    &platform,
-                    &network_service,
-                    &effective_chain_info,
-                    block_number_bytes,
-                )
-                .await
-            }
-        }
-    } else {
-        cold_bootstrap_loop(
-            &log_target,
-            &platform,
-            &network_service,
-            &effective_chain_info,
-            block_number_bytes,
-        )
-        .await
-    };
+        } else {
+            cold_bootstrap_loop(
+                &log_target,
+                &platform,
+                &network_service,
+                &effective_chain_info,
+                block_number_bytes,
+            )
+            .await
+        };
 
     // Phase 3: Spawn the paraheads background service that tracks relay chain
     // finalization and reports finalized parachain blocks.
@@ -1185,6 +1226,7 @@ async fn try_warm_start_from_cached_code<TPlat: PlatformRef>(
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
+    precompiled: oneshot::Receiver<Result<executor::host::HostVmPrototype, String>>,
     code: Vec<u8>,
 ) -> Result<BootstrappedParachain, String> {
     let ci_ref = chain_info.as_ref();
@@ -1221,28 +1263,13 @@ async fn try_warm_start_from_cached_code<TPlat: PlatformRef>(
         }
     };
 
-    // Compile the cached code locally — no network download needed.
-    // Use default heap pages; the cold path does the same when `:heappages` is absent.
-    let heap_pages = executor::storage_heap_pages_to_value(None)
-        .map_err(|e| format!("Failed to derive default heap pages: {e}"))?;
-
-    log!(
-        platform,
-        Info,
-        log_target,
-        format!(
-            "Compiling cached parachain runtime ({} bytes)...",
-            code.len()
-        )
-    );
-
-    let vm = executor::host::HostVmPrototype::new(executor::host::Config {
-        module: &code,
-        heap_pages,
-        exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
-        allow_unresolved_imports: true,
-    })
-    .map_err(|e| format!("Failed to compile cached runtime: {e}"))?;
+    // Await the pre-compiled VM from the background task that ran during Phase 1.
+    // In the common case compilation already finished; if not, we wait here briefly.
+    // The outer `?` handles a dropped sender (task panicked or was cancelled);
+    // the inner `?` propagates any compilation error from the background task.
+    let vm = precompiled
+        .await
+        .map_err(|_| String::from("Pre-compilation task was cancelled"))??;
 
     // Fetch AuraApi_slot_duration call proof (~few KB).
     let (slot_duration, vm) = {
