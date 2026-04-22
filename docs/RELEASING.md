@@ -63,10 +63,14 @@ the same version is tolerated.
 ## 2. Open a release branch
 
 ```sh
-git checkout -b npm-smoldot-v<X.Y.Z>
+git checkout -b release/npm-smoldot-v<X.Y.Z>
 ```
 
-Branch naming mirrors the npm version even when the rust crate versions differ.
+The `release/` prefix is required: the post-merge tag will be
+`npm-smoldot-v<X.Y.Z>`, so the branch must not share that exact name (git
+resolves tags before branches and ambiguous refs break `git push`, `git
+checkout`, etc.). The branch follows the npm version even when the rust crate
+versions differ.
 
 ---
 
@@ -74,15 +78,18 @@ Branch naming mirrors the npm version even when the rust crate versions differ.
 
 Edit exactly these fields (do not edit anything else in the same commit):
 
-1. `lib/Cargo.toml` — `version = "<A.B.C>"` *(if bumping `smoldot`)*
-2. `light-base/Cargo.toml` — `version = "<A.B.C>"` *(if bumping `smoldot-light`)*
-3. `wasm-node/rust/Cargo.toml` — `version = "<X.Y.Z>"` *(mirror npm)*
-4. `wasm-node/javascript/package.json` — `"version": "<X.Y.Z>"`
+1. `wasm-node/javascript/package.json` — `"version": "<X.Y.Z>"`
+2. `wasm-node/rust/Cargo.toml` — `version = "<X.Y.Z>"` *(mirror npm)*
+3. `lib/Cargo.toml` — `version = "<A.B.C>"` *(if bumping `smoldot`)*
+4. `light-base/Cargo.toml` — `version = "<A.B.C>"` *(if bumping `smoldot-light`)*
 
-**Do not** touch the `version = "..."` requirement on `smoldot` /
-`smoldot-light` in `full-node/Cargo.toml`, `light-base/Cargo.toml`, or
-`wasm-node/rust/Cargo.toml` unless a dependent actually needs a newer minimum.
-Past releases have not updated these in sync.
+**Path-dep `version` strings: bump only on major crosses.** Leave the
+`version = "..."` on `smoldot` / `smoldot-light` path-deps in
+`full-node/Cargo.toml`, `light-base/Cargo.toml`, and `wasm-node/rust/Cargo.toml`
+alone on patch and minor releases. Bump them only when the dep crosses a major
+boundary (e.g. `smoldot 1.x.y` → `2.0.0`). Rationale: the `path` resolves the
+source locally regardless of the string; the string is a tripwire that only
+needs to track the current compatibility range, not the exact version.
 
 **CI-enforced invariant:** `wasm-node/javascript/package.json` `.version` and
 `wasm-node/rust/Cargo.toml` `[package].version` must match exactly. The
@@ -158,7 +165,7 @@ git add lib/Cargo.toml light-base/Cargo.toml wasm-node/rust/Cargo.toml \
         wasm-node/javascript/package.json wasm-node/javascript/package-lock.json \
         wasm-node/CHANGELOG.md Cargo.lock
 git --no-gpg-sign commit -m "npm smoldot v<X.Y.Z>"
-git push origin npm-smoldot-v<X.Y.Z>
+git push origin release/npm-smoldot-v<X.Y.Z>
 ```
 
 Open a PR. Body template:
@@ -191,22 +198,26 @@ Squash-merge. Record the resulting commit SHA on `main` — tags will point at i
 
 ---
 
-## 10. Watch the automated deploys
+## 10. Sanity check after deployment job is finished
 
-Click through to the run of `deploy.yml` triggered by the merge. Check each of:
+Once the `deploy.yml` run on the release commit completes, perform these steps:
 
-- `npm-publish` — dispatch to `paritytech/npm_publish_automation` succeeded.
-  Verify: `npm view smoldot@<X.Y.Z>`.
-- `deno-publish` — `light-js-deno-v<X.Y.Z>` tag pushed. Verify:
-  `git fetch --tags && git tag -l 'light-js-deno-v<X.Y.Z>'`.
-- `crates-io-publish` — each bumped crate published. If `smoldot` was not
-  bumped, its step fails with "version already exists" (expected — the job
-  has `continue-on-error: true`). Verify bumped crates:
-  ```sh
-  curl -s https://crates.io/api/v1/crates/smoldot       | jq .crate.max_version
-  curl -s https://crates.io/api/v1/crates/smoldot-light | jq .crate.max_version
-  ```
-- `docs-publish` — pushed to `gh-pages`.
+```sh
+# npm package
+npm view smoldot@<X.Y.Z>
+
+# crates.io — requires a User-Agent with contact info
+curl -sS -A "some-agent" https://crates.io/api/v1/crates/smoldot       | jq .crate.max_version
+curl -sS -A "some-agent" https://crates.io/api/v1/crates/smoldot-light | jq .crate.max_version
+
+# Deno tag pushed by CI
+git fetch --tags
+git tag -l 'light-js-deno-v<X.Y.Z>'
+```
+
+Expected quirk: the `crates-io-publish` job's `smoldot` step fails with
+"version already exists" when `smoldot` wasn't bumped this release — benign
+(`continue-on-error: true`).
 
 ---
 
@@ -228,19 +239,16 @@ git push origin \
     [smoldot-v<A.B.C>]
 ```
 
-Tags are lightweight (no `-a`/`-m`).
+Tags are lightweight (no `-a`/`-m`). Verify they landed on origin:
 
----
+```sh
+git fetch --tags
+git tag -l '*<X.Y.Z>*'   # should list the CI-pushed light-js-deno-v tag plus the manual ones
+```
 
-## 12. Sanity-check post-release
-
-- `npm view smoldot@<X.Y.Z>` resolves; `dist-tags.latest` updated (unless a
-  non-`latest` dist-tag was passed via `workflow_dispatch`).
-- `https://crates.io/crates/smoldot-light/<A.B.C>` loads.
-- `git tag -l '*<X.Y.Z>*'` shows the auto and manual tags.
-
-On failure, do not delete published versions — yank (`npm deprecate`,
-`cargo yank`) and cut a new release.
+On any post-publish failure, do not delete published versions — yank
+(`npm deprecate smoldot@<X.Y.Z> '...'`, `cargo yank --version <A.B.C>`) and
+cut a new release.
 
 ---
 
