@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       npm_tag_suffix:
-        description: 'Optional suffix for the dev dist-tag. Non-empty → tag "dev-<YYYYMMDD>-<suffix>", version "<next-patch>-dev-<YYYYMMDD>-<suffix>.<N>". Empty → tag "dev-<YYYYMMDD>", version "<next-patch>-dev-<YYYYMMDD>.<N>". Version always bumps patch (never minor/major). Cannot produce "latest". Allowed suffix chars: [A-Za-z0-9-].'
+        description: 'Optional dev dist-tag suffix. Empty → "dev-<YYYYMMDD>"; else "dev-<YYYYMMDD>-<suffix>". Charset: [A-Za-z0-9-].'
         type: string
         required: false
         default: ''
