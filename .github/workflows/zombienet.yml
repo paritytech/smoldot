@@ -2,15 +2,19 @@ name: zombienet-e2e
 
 on:
   pull_request:
+    paths:
+      - 'lib/**'
+      - 'light-base/**'
+      - 'wasm-node/**'
+      - 'e2e-tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/zombienet.yml'
+      - '.github/actions/zombienet-smoldot/**'
+      - '.github/zombienet-env'
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      test_pattern:
-        description: "Regex over job-name to run a subset of tests."
-        type: string
-        default: ""
-        required: false
 
 concurrency:
   group: zombienet-e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -19,29 +23,58 @@ concurrency:
 permissions: read-all
 
 jobs:
-  preflight:
-    uses: ./.github/workflows/zombienet-reusable-preflight.yml
-    with:
-      tests_yaml: .github/zombienet-tests/zombienet_smoldot_tests.yml
-      test_pattern: ${{ inputs.test_pattern }}
+  env:
+    runs-on: ubuntu-latest
+    outputs:
+      ZOMBIE_PROVIDER: ${{ steps.vars.outputs.ZOMBIE_PROVIDER }}
+      RUST_LOG: ${{ steps.vars.outputs.RUST_LOG }}
+      ZOMBIENET_SDK_IMAGE: ${{ steps.vars.outputs.ZOMBIENET_SDK_IMAGE }}
+      ZOMBIENET_SDK_DEFAULT_RUNNER: ${{ steps.vars.outputs.ZOMBIENET_SDK_DEFAULT_RUNNER }}
+      ZOMBIENET_SDK_LARGE_RUNNER: ${{ steps.vars.outputs.ZOMBIENET_SDK_LARGE_RUNNER }}
+      POLKADOT_RELEASE_TAG: ${{ steps.vars.outputs.POLKADOT_RELEASE_TAG }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-  zombienet-smoldot-tests:
+      - name: Source zombienet-env
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          . .github/zombienet-env
+          {
+            echo "ZOMBIE_PROVIDER=${ZOMBIE_PROVIDER}"
+            echo "RUST_LOG=${RUST_LOG}"
+            echo "ZOMBIENET_SDK_IMAGE=${ZOMBIENET_SDK_IMAGE_FOR_NATIVE}"
+            echo "ZOMBIENET_SDK_DEFAULT_RUNNER=${ZOMBIENET_SDK_DEFAULT_RUNNER_FOR_NATIVE}"
+            echo "ZOMBIENET_SDK_LARGE_RUNNER=${ZOMBIENET_SDK_LARGE_RUNNER_FOR_NATIVE}"
+            echo "POLKADOT_RELEASE_TAG=${POLKADOT_RELEASE_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+  tests:
     name: ${{ matrix.test.job-name }}
-    needs: preflight
-    if: ${{ github.event_name == 'workflow_dispatch' || needs.preflight.outputs.changes_relevant == 'true' }}
-    runs-on: ${{ matrix.test.runner-type == 'large' && needs.preflight.outputs.ZOMBIENET_SDK_LARGE_RUNNER || needs.preflight.outputs.ZOMBIENET_SDK_DEFAULT_RUNNER }}
+    needs: env
+    runs-on: ${{ matrix.test.runner-type == 'large' && needs.env.outputs.ZOMBIENET_SDK_LARGE_RUNNER || needs.env.outputs.ZOMBIENET_SDK_DEFAULT_RUNNER }}
     timeout-minutes: 40
     container:
-      image: ${{ needs.preflight.outputs.ZOMBIENET_SDK_IMAGE }}
+      image: ${{ needs.env.outputs.ZOMBIENET_SDK_IMAGE }}
       options: -v /tmp/zombienet:/tmp/zombienet
     env:
-      ZOMBIE_PROVIDER: ${{ needs.preflight.outputs.ZOMBIE_PROVIDER }}
-      RUST_LOG: ${{ needs.preflight.outputs.RUST_LOG }}
+      ZOMBIE_PROVIDER: ${{ needs.env.outputs.ZOMBIE_PROVIDER }}
+      RUST_LOG: ${{ needs.env.outputs.RUST_LOG }}
 
     strategy:
       fail-fast: false
       matrix:
-        test: ${{ fromJson(needs.preflight.outputs.TEST_MATRIX) }}
+        test:
+          - job-name: "zombienet-smoldot-0001-statement_store_submission"
+            test: "statement_store_submission"
+            runner-type: "default"
+          - job-name: "zombienet-smoldot-0002-statement_store_reception"
+            test: "statement_store_reception"
+            runner-type: "default"
+          - job-name: "zombienet-smoldot-0003-statement_store_peer_connection"
+            test: "statement_store_peer_connection"
+            runner-type: "default"
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -92,7 +125,7 @@ jobs:
       - name: Run test
         uses: ./.github/actions/zombienet-smoldot
         with:
-          polkadot-release-tag: ${{ needs.preflight.outputs.POLKADOT_RELEASE_TAG }}
+          polkadot-release-tag: ${{ needs.env.outputs.POLKADOT_RELEASE_TAG }}
           test: ${{ matrix.test.test }}
 
       - name: Upload zombienet logs on failure
