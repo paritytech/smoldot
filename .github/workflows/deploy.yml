@@ -25,10 +25,11 @@ on:
       - main
   workflow_dispatch:
     inputs:
-      npm_tag:
-        description: 'npm distribution tag (e.g. "dev", "canary"). Required to prevent accidental @latest publish.'
+      npm_tag_suffix:
+        description: 'Optional suffix for the dev dist-tag. Non-empty → tag "dev-<YYYYMMDD>-<suffix>", version "<next-patch>-dev-<YYYYMMDD>-<suffix>.<N>". Empty → tag "dev-<YYYYMMDD>", version "<next-patch>-dev-<YYYYMMDD>.<N>". Version always bumps patch (never minor/major). Cannot produce "latest". Allowed suffix chars: [A-Za-z0-9-].'
         type: string
-        required: true
+        required: false
+        default: ''
 
 # TODO: improve the security of this module
 permissions: read-all
@@ -193,6 +194,58 @@ jobs:
           node-version: 18
       - uses: Swatinem/rust-cache@v2
 
+      # On workflow_dispatch: compute a unique dev version and a safe dist-tag,
+      # then rewrite them in-place into package.json and wasm-node/rust/Cargo.toml
+      # (never committed). On push-to-main this step is skipped; the committed
+      # versions are published to the default dist-tag (`latest`).
+      - name: Compute dev version and dist-tag
+        if: github.event_name == 'workflow_dispatch'
+        id: devver
+        shell: bash
+        run: |
+          apt-get update -qq && apt-get install -y -qq jq
+          SUFFIX='${{ inputs.npm_tag_suffix }}'
+          # Empty suffix is allowed; non-empty must match the charset.
+          if [[ -n "$SUFFIX" && ! "$SUFFIX" =~ ^[A-Za-z0-9-]+$ ]]; then
+            echo "::error::npm_tag_suffix must match [A-Za-z0-9-]+ or be empty"
+            exit 1
+          fi
+          BASE=$(jq -r .version wasm-node/javascript/package.json)
+          STABLE=${BASE%%-*}
+          IFS='.' read -r MA MI PA <<< "$STABLE"
+          # Always bump patch. Semver-safe: <next-patch>-dev.X sorts below any
+          # future stable (patch, minor, or major) regardless of what the real
+          # next release ends up being. If you ever need minor/major dev
+          # prereleases, add a `bump` workflow input.
+          NEXT="$MA.$MI.$((PA+1))"
+
+          DATE=$(date -u +%Y%m%d)
+
+          # Build the "dev[-<suffix>]" portion once, shared by version and tag.
+          if [[ -z "$SUFFIX" ]]; then
+            TAG="dev-${DATE}"
+          else
+            TAG="dev-${DATE}-${SUFFIX}"
+          fi
+          # Version's first prerelease identifier is the tag; "." + numeric N
+          # is a second identifier so that N sorts numerically.
+          PREFIX="${NEXT}-${TAG}"
+          MAX_N=$(
+            npm view --json smoldot versions 2>/dev/null \
+              | jq -r '.[]' \
+              | grep -E "^${PREFIX}\.[0-9]+$" \
+              | sed -E "s|^${PREFIX}\.||" \
+              | sort -n | tail -1
+          )
+          N=$(( ${MAX_N:--1} + 1 ))
+          VERSION="${PREFIX}.${N}"
+          jq --arg v "$VERSION" '.version=$v' wasm-node/javascript/package.json > _pj \
+            && mv _pj wasm-node/javascript/package.json
+          sed -i -E '0,/^version = "[^"]+"/s//version = "'"$VERSION"'"/' wasm-node/rust/Cargo.toml
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "Computed: $VERSION → dist-tag $TAG"
+
       - name: Install
         run: npm install
         working-directory: ./wasm-node/javascript
@@ -212,8 +265,9 @@ jobs:
         with:
           route: POST /repos/paritytech/npm_publish_automation/actions/workflows/publish.yml/dispatches
           ref: main
-          # Make sure to provide proper artifact_name, since this GH run produces multiple artifacts and npm_publish_automation must know, which one to use
-          inputs: '${{ format(''{{ "repo": "{0}", "run_id": "{1}", "artifact_name": "npm-package-{2}", "npm_tag": "{3}" }}'', github.repository, github.run_id, github.sha, inputs.npm_tag) }}'
+          # Empty npm_tag on push-to-main → automation omits `--tag` → npm defaults to `latest`.
+          # On workflow_dispatch → steps.devver.outputs.tag is non-empty.
+          inputs: '${{ format(''{{ "repo": "{0}", "run_id": "{1}", "artifact_name": "npm-package-{2}", "npm_tag": "{3}" }}'', github.repository, github.run_id, github.sha, steps.devver.outputs.tag) }}'
         env:
           GITHUB_TOKEN: ${{ secrets.NPM_PUBLISH_AUTOMATION_TOKEN }}
 
