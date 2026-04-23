@@ -103,7 +103,42 @@ pub(super) fn build_combined_affinity_filter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString as _;
+    use core::time::Duration;
     use futures_lite::future::block_on;
+
+    const SEED: u128 = 0x5EED_5EED_5EED_5EED_5EED_5EED_5EED_5EED;
+    const FPR: f64 = 0.01;
+
+    fn test_config() -> network_service::StatementProtocolConfig {
+        network_service::StatementProtocolConfig::new(
+            NonZero::new(128).unwrap(),
+            FPR,
+            SEED,
+            Duration::from_secs(1),
+        )
+    }
+
+    fn make_subscriptions(
+        entries: Vec<(&str, TopicFilter, Option<NonZero<usize>>)>,
+    ) -> hashbrown::HashMap<String, StatementSubscription, fnv::FnvBuildHasher> {
+        let mut map = hashbrown::HashMap::with_hasher(fnv::FnvBuildHasher::default());
+        for (id, filter, max_seen) in entries {
+            map.insert(id.to_string(), StatementSubscription::new(filter, max_seen));
+        }
+        map
+    }
+
+    fn statement_with_topics(topics: Vec<[u8; 32]>) -> codec::Statement {
+        codec::Statement {
+            proof: None,
+            decryption_key: None,
+            expiry: 42,
+            channel: None,
+            topics,
+            data: None,
+        }
+    }
 
     fn valid_statement() -> Vec<u8> {
         codec::encode_statement(&codec::Statement {
@@ -153,44 +188,6 @@ mod tests {
         assert_eq!(result, StatementSubmitResult::New);
     }
 
-    use alloc::string::ToString as _;
-    use core::time::Duration;
-
-    const SEED: u128 = 0x5EED_5EED_5EED_5EED_5EED_5EED_5EED_5EED;
-    const FPR: f64 = 0.01;
-
-    fn test_config() -> network_service::StatementProtocolConfig {
-        network_service::StatementProtocolConfig::new(
-            NonZero::new(128).unwrap(),
-            FPR,
-            SEED,
-            Duration::from_secs(1),
-        )
-    }
-
-    fn make_subscriptions(
-        entries: Vec<(&str, TopicFilter, Option<NonZero<usize>>)>,
-    ) -> hashbrown::HashMap<String, StatementSubscription, fnv::FnvBuildHasher> {
-        let mut map = hashbrown::HashMap::with_hasher(fnv::FnvBuildHasher::default());
-        for (id, filter, max_seen) in entries {
-            map.insert(id.to_string(), StatementSubscription::new(filter, max_seen));
-        }
-        map
-    }
-
-    fn statement_with_topics(topics: Vec<[u8; 32]>) -> codec::Statement {
-        codec::Statement {
-            proof: None,
-            decryption_key: None,
-            expiry: 42,
-            channel: None,
-            topics,
-            data: None,
-        }
-    }
-
-    // --- build_combined_affinity_filter: bloom filter construction ---
-
     #[test]
     fn build_combined_affinity_empty_subscriptions() {
         let config = test_config();
@@ -231,8 +228,6 @@ mod tests {
         assert!(filter.contains(&t1));
         assert!(filter.contains(&t2));
     }
-
-    // --- StatementSubscription::accept: false-positive discard + dedup ---
 
     #[test]
     fn accept_fresh_statement_passes() {

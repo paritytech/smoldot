@@ -431,15 +431,12 @@ mod tests {
 
     #[test]
     fn from_topics_empty_is_not_match_all() {
-        // `from_topics` is smoldot-only (no polkadot-sdk equivalent) and the empty-iterator path
-        // must not silently behave like the explicit `match_all` broadcast filter.
         let filter = AffinityFilter::from_topics(
             core::iter::empty::<&[u8; 32]>(),
             TEST_SEED,
             BLOOM_FALSE_POS_RATE,
         );
         assert!(!filter.matches_statement(&[&[0x01; 32]]));
-        // Broadcast statements (no topics) always match.
         assert!(filter.matches_statement(&[]));
     }
 }
