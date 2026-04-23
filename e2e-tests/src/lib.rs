@@ -7,6 +7,10 @@ use log::info;
 use serde_json::Value;
 use zombienet_sdk::{LocalFileSystem, Network, NetworkConfigBuilder};
 
+/// Para id used by the statement-store e2e fixture. Zombienet writes the
+/// final chain-spec (with bootnodes patched in) to `<base_dir>/<para_id>.json`.
+pub const PARA_ID: u32 = 1004;
+
 /// Well-known prefix for the per-account statement allowance storage key.
 pub const STATEMENT_ALLOWANCE_PREFIX: &[u8] = b":statement_allowance:";
 
@@ -23,14 +27,37 @@ pub fn statement_allowance_key(account_id: impl AsRef<[u8]>) -> Vec<u8> {
     key
 }
 
+/// Resolves the base directory tests share with zombienet.
+///
+/// Mirrors polkadot-sdk's convention: honour `ZOMBIENET_SDK_BASE_DIR` if set,
+/// otherwise fall back to a per-pid temp dir. Zombienet is configured (via
+/// `with_global_settings`) to use the same path, so the chain-specs it emits
+/// land where the tests can read them back.
+pub fn resolve_base_dir() -> Result<PathBuf, anyhow::Error> {
+    let path = std::env::var("ZOMBIENET_SDK_BASE_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("zombienet-{}", std::process::id())));
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+/// Template for the statement-store parachain chain spec.
+///
+/// Bundled rather than generated on the fly — polkadot-sdk's statement-store
+/// zombienet tests use the same approach (see `cumulus/zombienet/.../common.rs`).
+/// Regenerated via the `create_people_westend_spec.sh` script in
+/// paritytech/individuality.
+const PEOPLE_WESTEND_LOCAL_SPEC: &str =
+    include_str!("../chain-specs/people-westend-local-spec.json");
+
 /// Creates a parachain chain spec with a statement allowance for each given public key.
 pub fn create_para_chain_spec_with_allowances(
     pubkeys: &[[u8; 32]],
     base_dir: &Path,
 ) -> Result<PathBuf, anyhow::Error> {
-    let template = include_str!("../chain-specs/people-westend-local-spec.json");
-    let mut spec: Value =
-        serde_json::from_str(template).map_err(|e| anyhow!("Failed to parse chain spec: {e}"))?;
+    let mut spec: Value = serde_json::from_str(PEOPLE_WESTEND_LOCAL_SPEC)
+        .map_err(|e| anyhow!("Failed to parse chain spec: {e}"))?;
 
     let genesis = spec
         .get_mut("genesis")
@@ -61,10 +88,17 @@ pub fn create_para_chain_spec_with_allowances(
 }
 
 /// Spawns a zombienet network with relay chain + parachain (statement-store enabled).
+///
+/// All relay validators and parachain collators are marked as bootnodes, so the
+/// chain-spec files zombienet writes into `base_dir` end up with a fully populated
+/// `bootNodes` array — smoldot can then consume those files directly without any
+/// post-spawn patching.
 pub async fn spawn_network(
+    base_dir: &Path,
     para_spec_path: &Path,
 ) -> Result<Network<LocalFileSystem>, anyhow::Error> {
     let images = zombienet_sdk::environment::get_images_from_env();
+    let base_dir_str = base_dir.to_str().expect("base_dir is valid UTF-8").to_owned();
 
     let config = NetworkConfigBuilder::new()
         .with_relaychain(|r| {
@@ -72,11 +106,11 @@ pub async fn spawn_network(
                 .with_default_command("polkadot")
                 .with_default_image(images.polkadot.as_str())
                 .with_default_args(vec!["-lparachain=debug".into()])
-                .with_node(|node| node.with_name("validator-0"))
-                .with_node(|node| node.with_name("validator-1"))
+                .with_node(|node| node.with_name("validator-0").bootnode(true))
+                .with_node(|node| node.with_name("validator-1").bootnode(true))
         })
         .with_parachain(|p| {
-            p.with_id(1004)
+            p.with_id(PARA_ID)
                 .with_chain_spec_path(para_spec_path.to_str().expect("Valid UTF-8 path"))
                 .with_default_command("polkadot-parachain")
                 .with_default_image(images.cumulus.as_str())
@@ -92,9 +126,10 @@ pub async fn spawn_network(
                         log_arg.as_str().into(),
                     ]
                 })
-                .with_collator(|n| n.with_name("collator-0"))
-                .with_collator(|n| n.with_name("collator-1"))
+                .with_collator(|n| n.with_name("collator-0").bootnode(true))
+                .with_collator(|n| n.with_name("collator-1").bootnode(true))
         })
+        .with_global_settings(|g| g.with_base_dir(base_dir_str.as_str()))
         .build()
         .map_err(|e| {
             let errs = e
@@ -113,64 +148,32 @@ pub async fn spawn_network(
     Ok(network)
 }
 
-/// Reads the relay chain spec and collects validator multiaddrs from the network.
-pub fn get_relay_spec_and_bootnodes(
+/// Returns the chain-spec files zombienet emits for the relay chain and the
+/// statement-store parachain. Both already include the bootnodes — no patching
+/// required. Paths live under `network.base_dir()`.
+pub fn spawned_chain_spec_paths(
     network: &Network<LocalFileSystem>,
-) -> Result<(String, Vec<String>), anyhow::Error> {
-    let base_dir = network
-        .base_dir()
-        .ok_or_else(|| anyhow!("network has no base_dir"))?;
+) -> Result<(PathBuf, PathBuf), anyhow::Error> {
+    let base_dir = PathBuf::from(
+        network
+            .base_dir()
+            .ok_or_else(|| anyhow!("network has no base_dir"))?,
+    );
 
-    let chain = network.relaychain().chain();
-    let spec_path = PathBuf::from(base_dir).join(format!("{chain}.json"));
-    let spec = std::fs::read_to_string(&spec_path)
-        .map_err(|e| anyhow!("failed to read relay spec at {}: {e}", spec_path.display()))?;
+    let relay_chain = network.relaychain().chain();
+    let relay_path = base_dir.join(format!("{relay_chain}.json"));
 
-    let bootnodes: Vec<String> = network
-        .relaychain()
-        .nodes()
-        .iter()
-        .map(|node| node.multiaddr().to_string())
-        .collect();
-
-    Ok((spec, bootnodes))
-}
-
-/// Collects collator multiaddrs from the parachain.
-pub fn get_para_bootnodes(
-    network: &Network<LocalFileSystem>,
-) -> Result<Vec<String>, anyhow::Error> {
     let para = network
-        .parachain(1004)
-        .ok_or_else(|| anyhow!("parachain 1004 not found"))?;
+        .parachain(PARA_ID)
+        .ok_or_else(|| anyhow!("parachain {PARA_ID} not found"))?;
+    let para_path = base_dir.join(format!("{}.json", para.unique_id()));
 
-    let bootnodes: Vec<String> = para
-        .collators()
-        .iter()
-        .map(|node| node.multiaddr().to_string())
-        .collect();
-
-    Ok(bootnodes)
-}
-
-/// Patches a chain spec JSON with the given bootnodes.
-pub fn patch_bootnodes(spec_json: &str, bootnodes: &[String]) -> String {
-    let mut spec: Value = serde_json::from_str(spec_json).expect("invalid chain spec JSON");
-    spec["bootNodes"] = Value::Array(bootnodes.iter().map(|b| Value::String(b.clone())).collect());
-    serde_json::to_string_pretty(&spec).unwrap()
-}
-
-/// Writes a chain spec string to a temporary file.
-pub fn write_temp_spec(content: &str) -> tempfile::NamedTempFile {
-    use std::io::Write;
-    let mut file = tempfile::Builder::new()
-        .suffix(".json")
-        .tempfile()
-        .expect("failed to create temp file");
-    file.write_all(content.as_bytes())
-        .expect("failed to write temp spec");
-    file.flush().unwrap();
-    file
+    info!(
+        "Resolved chain-spec paths: relay={}, para={}",
+        relay_path.display(),
+        para_path.display()
+    );
+    Ok((relay_path, para_path))
 }
 
 fn project_root() -> PathBuf {

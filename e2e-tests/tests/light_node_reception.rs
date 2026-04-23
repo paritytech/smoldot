@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use log::info;
@@ -19,24 +18,14 @@ async fn light_node_receives_only_subscribed_statements() -> Result<(), anyhow::
 
     let (seed, pubkey) = test_keypair();
 
-    let base_dir = std::env::var("ZOMBIENET_SDK_BASE_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("zombienet-{}", std::process::id())));
-    std::fs::create_dir_all(&base_dir)?;
-
+    let base_dir = resolve_base_dir()?;
     let para_spec_path = create_para_chain_spec_with_allowances(&[pubkey], &base_dir)?;
     info!("Parachain chain spec created at {}", para_spec_path.display());
 
-    let network = spawn_network(&para_spec_path).await?;
+    let network = spawn_network(&base_dir, &para_spec_path).await?;
     info!("Network spawned");
 
-    let (relay_spec, relay_bootnodes) = get_relay_spec_and_bootnodes(&network)?;
-    let para_spec = std::fs::read_to_string(&para_spec_path)?;
-    let para_bootnodes = get_para_bootnodes(&network)?;
-
-    let relay_spec_file = write_temp_spec(&patch_bootnodes(&relay_spec, &relay_bootnodes));
-    let para_spec_file = write_temp_spec(&patch_bootnodes(&para_spec, &para_bootnodes));
+    let (relay_spec_path, para_spec_path) = spawned_chain_spec_paths(&network)?;
 
     // Two statements with distinct topics. stmt_A is subscribed; stmt_B is not.
     let topic_a = [0xaau8; 32];
@@ -64,8 +53,8 @@ async fn light_node_receives_only_subscribed_statements() -> Result<(), anyhow::
     info!("Ensuring JS test dependencies are installed");
     ensure_js_deps_installed();
 
-    let relay_spec_str = relay_spec_file.path().to_str().unwrap().to_string();
-    let para_spec_str = para_spec_file.path().to_str().unwrap().to_string();
+    let relay_spec_str = relay_spec_path.to_str().unwrap().to_string();
+    let para_spec_str = para_spec_path.to_str().unwrap().to_string();
     let topic_a_hex = format!("0x{}", hex::encode(topic_a));
     let ready_path_str = ready_path.to_str().unwrap().to_string();
     let stmt_a_hex_for_js = stmt_a_hex.clone();
