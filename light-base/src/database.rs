@@ -65,8 +65,9 @@ pub struct DatabaseContent {
 
     /// Raw bytes of the runtime code (`:code` storage value) saved from the last session.
     ///
-    /// When present, a parachain warm-start can compile this code locally and skip the ~2 MiB
-    /// P2P runtime download, falling back to cold bootstrap only on failure.
+    /// When present, a parachain warm-start can compile this code locally and verify
+    /// it against the network via lightweight Aura call proofs, skipping the ~2 MiB
+    /// P2P runtime download.
     pub runtime_code: Option<Vec<u8>>,
 }
 
@@ -213,37 +214,34 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         })
         .collect::<Vec<_>>();
 
-    let (runtime_code_hint, runtime_code) = match (
+    // Decode the runtime code storage value (base64) once. Both `runtime_code_hint`
+    // and `runtime_code` derive from it, avoiding a redundant 2 MiB clone.
+    let decoded_code = decoded
+        .code_storage_value
+        .as_ref()
+        .map(|sv| {
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, sv)
+                .map_err(|_| ())
+        })
+        .transpose()?;
+
+    let runtime_code_hint = match (
         decoded.code_merkle_value,
-        decoded.code_storage_value,
+        &decoded_code,
         decoded.code_closest_ancestor_excluding,
     ) {
-        (Some(mv), Some(sv), Some(an)) => {
-            let code =
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, &sv)
-                    .map_err(|_| ())?;
-            let hint = DatabaseContentRuntimeCodeHint {
-                code: code.clone(),
-                code_merkle_value: hex::decode(mv).map_err(|_| ())?,
-                closest_ancestor_excluding: an
-                    .as_bytes()
-                    .iter()
-                    .map(|char| Nibble::from_ascii_hex_digit(*char).ok_or(()))
-                    .collect::<Result<Vec<Nibble>, ()>>()?,
-            };
-            (Some(hint), Some(code))
-        }
-        // When only the storage value is present (no merkle value / ancestor), we still
-        // expose the raw code for the parachain warm-start path.
-        (None, Some(sv), _) => {
-            let code =
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, &sv)
-                    .map_err(|_| ())?;
-            (None, Some(code))
-        }
-        // A combination of `Some` and `None` for the hint fields is technically invalid, but
-        // we simply ignore this situation.
-        _ => (None, None),
+        (Some(mv), Some(code), Some(an)) => Some(DatabaseContentRuntimeCodeHint {
+            code: code.clone(),
+            code_merkle_value: hex::decode(mv).map_err(|_| ())?,
+            closest_ancestor_excluding: an
+                .as_bytes()
+                .iter()
+                .map(|char| Nibble::from_ascii_hex_digit(*char).ok_or(()))
+                .collect::<Result<Vec<Nibble>, ()>>()?,
+        }),
+        // A combination of `Some` and `None` is technically invalid, but we simply
+        // ignore this situation.
+        _ => None,
     };
 
     Ok(DatabaseContent {
@@ -251,7 +249,7 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         chain_information,
         known_nodes,
         runtime_code_hint,
-        runtime_code,
+        runtime_code: decoded_code,
     })
 }
 

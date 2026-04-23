@@ -111,9 +111,9 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
 
     /// Raw bytes of the runtime (`:code` storage value) saved in the database.
     ///
-    /// When `Some`, `start_parachain` will attempt a warm-start by compiling this code locally
-    /// and verifying it with lightweight Aura call proofs, skipping the ~2 MiB P2P download.
-    /// Falls back to cold bootstrap on any failure.
+    /// When `Some`, `start_parachain` compiles this code locally and verifies it
+    /// against the network via lightweight Aura call proofs, skipping the ~2 MiB
+    /// P2P download. Falls back to cold bootstrap on any failure.
     pub saved_runtime_code: Option<Vec<u8>>,
 }
 
