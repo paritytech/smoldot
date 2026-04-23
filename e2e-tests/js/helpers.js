@@ -2,8 +2,9 @@ import * as fs from "node:fs";
 import { start } from "smoldot";
 
 export function createClient() {
+  const maxLogLevel = Number.parseInt(process.env.SMOLDOT_LOG_LEVEL || "3", 10);
   return start({
-    maxLogLevel: 3,
+    maxLogLevel,
     logCallback: (level, target, message) => {
       const labels = { 1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE" };
       const label = labels[level] ?? `L${level}`;

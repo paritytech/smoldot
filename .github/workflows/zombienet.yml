@@ -79,13 +79,17 @@ jobs:
           "$GITHUB_WORKSPACE/bin/polkadot" --version
           "$GITHUB_WORKSPACE/bin/polkadot-parachain" --version
 
-      - name: Run e2e test
+      - name: Run e2e tests
         env:
           ZOMBIE_PROVIDER: native
           RUST_LOG: info
         run: |
           export PATH="$GITHUB_WORKSPACE/bin:$PATH"
-          cargo test --locked --manifest-path e2e-tests/Cargo.toml --test light_node_submission -- --nocapture
+          cargo test --locked --manifest-path e2e-tests/Cargo.toml \
+            --test light_node_submission \
+            --test light_node_reception \
+            --test light_node_peer_connection \
+            -- --nocapture --test-threads 1
 
       - name: Upload zombienet logs on failure
         if: failure()
