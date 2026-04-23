@@ -557,14 +557,24 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         // and verification queue.
         // TODO: what if the new chain doesn't support grandpa?
         if self.warped_header_number <= chain_information.as_ref().finalized_block_header.number {
+            let new_hash = chain_information
+                .as_ref()
+                .finalized_block_header
+                .hash(self.block_number_bytes);
+
+            // If the header hash is identical, nothing has changed — skip the reset.
+            if new_hash == self.warped_header_hash {
+                return;
+            }
+
+            let old_state_root = self.warped_header_state_root;
+            let was_normal = matches!(self.warped_block_ty, WarpedBlockTy::Normal);
+
             self.warped_header = chain_information
                 .as_ref()
                 .finalized_block_header
                 .scale_encoding_vec(self.block_number_bytes);
-            self.warped_header_hash = chain_information
-                .as_ref()
-                .finalized_block_header
-                .hash(self.block_number_bytes);
+            self.warped_header_hash = new_hash;
             self.warped_header_state_root =
                 *chain_information.as_ref().finalized_block_header.state_root;
             self.warped_header_extrinsics_root = *chain_information
@@ -573,15 +583,25 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 .extrinsics_root;
             self.warped_header_number = chain_information.as_ref().finalized_block_header.number;
             self.warped_finality = chain_information.as_ref().finality.into();
-            self.warped_block_ty = WarpedBlockTy::AlreadyVerified;
+
+            // Preserve `Normal` if warp sync already completed fragment verification.
+            // A GrandPa commit advancing finality by a few blocks should not force
+            // another round of fragment verification.
+            if !was_normal {
+                self.warped_block_ty = WarpedBlockTy::AlreadyVerified;
+            }
 
             self.verified_chain_information = chain_information.into();
             self.runtime_calls =
                 runtime_calls_default_value(self.verified_chain_information.as_ref().consensus);
 
-            self.runtime_download = RuntimeDownload::NotStarted {
-                hint_doesnt_match: false,
-            };
+            // Only reset the runtime download if the state root changed, since
+            // cached proofs are valid as long as the state root matches.
+            if self.warped_header_state_root != old_state_root {
+                self.runtime_download = RuntimeDownload::NotStarted {
+                    hint_doesnt_match: false,
+                };
+            }
 
             if !matches!(self.body_download, BodyDownload::NotNeeded) {
                 self.body_download = BodyDownload::NotStarted;
@@ -2355,4 +2375,336 @@ fn parameters_equal(mut a: &[u8], b: impl Iterator<Item = impl AsRef<[u8]>>) -> 
     }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::num::NonZero;
+
+    /// Build a SCALE-encoded GrandPa justification for `target_hash`/`target_number`
+    /// signed by the given ed25519 signing key, for the given `set_id` and `round`.
+    fn build_justification(
+        target_hash: &[u8; 32],
+        target_number: u64,
+        block_number_bytes: usize,
+        set_id: u64,
+        round: u64,
+        signing_key: &ed25519_zebra::SigningKey,
+    ) -> Vec<u8> {
+        // Build the message to sign: 1u8 || target_hash || target_number (LE, block_number_bytes) || round (LE 8) || set_id (LE 8)
+        let mut msg = Vec::with_capacity(1 + 32 + block_number_bytes + 8 + 8);
+        msg.push(1u8);
+        msg.extend_from_slice(target_hash);
+        let num_bytes = target_number.to_le_bytes();
+        msg.extend_from_slice(&num_bytes[..core::cmp::min(8, block_number_bytes)]);
+        if block_number_bytes > 8 {
+            msg.extend(core::iter::repeat(0u8).take(block_number_bytes - 8));
+        }
+        msg.extend_from_slice(&round.to_le_bytes());
+        msg.extend_from_slice(&set_id.to_le_bytes());
+
+        let signature = signing_key.sign(&msg);
+        let vk = ed25519_zebra::VerificationKey::from(signing_key);
+
+        // SCALE-encode the justification:
+        // round: u64 LE
+        // target_hash: [u8; 32]
+        // target_number: block_number_bytes LE
+        // precommits_count: SCALE compact
+        // for each precommit: target_hash[32] + target_number[block_number_bytes] + signature[64] + public_key[32]
+        // votes_ancestries_count: SCALE compact (0)
+        let mut out = Vec::new();
+        out.extend_from_slice(&round.to_le_bytes());
+        out.extend_from_slice(target_hash);
+        out.extend_from_slice(&num_bytes[..block_number_bytes]);
+        // 1 precommit, compact-encoded as 0x04
+        out.push(4u8);
+        // precommit: target_hash + target_number + signature + public_key
+        out.extend_from_slice(target_hash);
+        out.extend_from_slice(&num_bytes[..block_number_bytes]);
+        out.extend_from_slice(&<[u8; 64]>::from(signature));
+        out.extend_from_slice(vk.as_ref());
+        // 0 votes_ancestries, compact-encoded as 0x00
+        out.push(0u8);
+        out
+    }
+
+    /// Build a SCALE-encoded header at `number` with an optional `ScheduledChange` digest.
+    fn build_header(
+        parent_hash: [u8; 32],
+        number: u64,
+        state_root: [u8; 32],
+        new_authorities: Option<&[([u8; 32], u64)]>,
+        block_number_bytes: usize,
+    ) -> Vec<u8> {
+        let mut digest_items: Vec<header::DigestItem> = Vec::new();
+        if let Some(auths) = new_authorities {
+            let authorities: Vec<header::GrandpaAuthority> = auths
+                .iter()
+                .map(|(pk, weight)| header::GrandpaAuthority {
+                    public_key: *pk,
+                    weight: NonZero::new(*weight).unwrap(),
+                })
+                .collect();
+            digest_items.push(header::DigestItem::GrandpaConsensus(
+                header::GrandpaConsensusLog::ScheduledChange(header::GrandpaScheduledChange {
+                    next_authorities: authorities,
+                    delay: 0,
+                }),
+            ));
+        }
+
+        let h = header::HeaderRef {
+            parent_hash: &parent_hash,
+            number,
+            state_root: &state_root,
+            extrinsics_root: &[0u8; 32],
+            digest: header::DigestRef::from_slice(&digest_items).unwrap(),
+        };
+        h.scale_encoding_vec(block_number_bytes)
+    }
+
+    /// Helper to create a genesis chain info suitable for warp sync.
+    fn genesis_chain_info(grandpa_public_key: [u8; 32]) -> ValidChainInformation {
+        let chain_info = chain_information::ChainInformation {
+            finalized_block_header: Box::new(header::Header {
+                parent_hash: [0u8; 32],
+                number: 0,
+                state_root: [0u8; 32],
+                extrinsics_root: [0u8; 32],
+                digest: header::DigestRef::empty().into(),
+            }),
+            consensus: chain_information::ChainInformationConsensus::Aura {
+                finalized_authorities_list: Vec::new(),
+                slot_duration: NonZero::new(6000).unwrap(),
+            },
+            finality: chain_information::ChainInformationFinality::Grandpa {
+                after_finalized_block_authorities_set_id: 0,
+                finalized_triggered_authorities: vec![header::GrandpaAuthority {
+                    public_key: grandpa_public_key,
+                    weight: NonZero::new(1).unwrap(),
+                }],
+                finalized_scheduled_change: None,
+            },
+        };
+        ValidChainInformation::try_from(chain_info).unwrap()
+    }
+
+    /// Helper to build a chain info for block N (for set_chain_information).
+    /// For N > 0, includes required Aura pre-runtime and seal digest items.
+    fn chain_info_at_block(
+        number: u64,
+        state_root: [u8; 32],
+        grandpa_public_key: [u8; 32],
+        set_id: u64,
+    ) -> ValidChainInformation {
+        let mut digest_items: Vec<header::DigestItem> = Vec::new();
+        if number > 0 {
+            digest_items.push(header::DigestItem::AuraPreDigest(header::AuraPreDigest {
+                slot_number: number,
+            }));
+            digest_items.push(header::DigestItem::AuraSeal([0u8; 64]));
+        }
+        let digest = header::DigestRef::from_slice(&digest_items).unwrap();
+        let chain_info = chain_information::ChainInformation {
+            finalized_block_header: Box::new(header::Header {
+                parent_hash: [0u8; 32],
+                number,
+                state_root,
+                extrinsics_root: [0u8; 32],
+                digest: digest.into(),
+            }),
+            consensus: chain_information::ChainInformationConsensus::Aura {
+                finalized_authorities_list: Vec::new(),
+                slot_duration: NonZero::new(6000).unwrap(),
+            },
+            finality: chain_information::ChainInformationFinality::Grandpa {
+                after_finalized_block_authorities_set_id: set_id,
+                finalized_triggered_authorities: vec![header::GrandpaAuthority {
+                    public_key: grandpa_public_key,
+                    weight: NonZero::new(1).unwrap(),
+                }],
+                finalized_scheduled_change: None,
+            },
+        };
+        ValidChainInformation::try_from(chain_info).unwrap()
+    }
+
+    /// Production scenario: warp sync verifies fragment for block 100, then a
+    /// GrandPa commit advances finality to block 101 (different header hash,
+    /// different state root). The runtime download should still be desired
+    /// without requiring another fragment verification round.
+    ///
+    /// The source height is set to 101 (matching the GrandPa commit) so that
+    /// no further warp sync fragments are desired — this is the production
+    /// scenario where the chain has caught up to the source.
+    #[test]
+    fn grandpa_commit_mid_warp_sync_preserves_runtime_download() {
+        let (mut ws, source_id) = setup_warp_sync_at_normal(None);
+
+        // Confirm runtime download is desired before the GrandPa commit.
+        assert!(
+            ws.desired_requests()
+                .any(|(_, _, req)| matches!(req, DesiredRequest::StorageGetMerkleProof { .. })),
+            "runtime download should be desired after fragment verification"
+        );
+
+        let signing_key = ed25519_zebra::SigningKey::from([42u8; 32]);
+        let public_key: [u8; 32] = ed25519_zebra::VerificationKey::from(&signing_key).into();
+
+        // GrandPa commit advances finality to block 101. The source's finalized
+        // height matches — no further warp sync fragments needed.
+        ws.set_source_finality_state(source_id, 101);
+        let new_chain_info = chain_info_at_block(101, [101u8; 32], public_key, 1);
+        ws.set_chain_information((&new_chain_info).into());
+
+        // Runtime download should still be desired — no second fragment
+        // verification needed.
+        assert!(
+            ws.desired_requests()
+                .any(|(_, _, req)| matches!(req, DesiredRequest::StorageGetMerkleProof { .. })),
+            "after GrandPa commit to block 101, runtime download should still be desired"
+        );
+    }
+
+    /// When a GrandPa commit advances finality but the state root is the same,
+    /// the runtime download state should be preserved (no reset to NotStarted).
+    #[test]
+    fn set_chain_information_same_state_root_preserves_runtime_download() {
+        let (mut ws, source_id) = setup_warp_sync_at_normal(None);
+
+        let signing_key = ed25519_zebra::SigningKey::from([42u8; 32]);
+        let public_key: [u8; 32] = ed25519_zebra::VerificationKey::from(&signing_key).into();
+
+        // The fragment was built with state_root = [1u8; 32]. Advance to block
+        // 101 but keep the same state root. This simulates a block with no
+        // storage changes (only extrinsics_root differs).
+        ws.set_source_finality_state(source_id, 101);
+        let new_info = chain_info_at_block(101, [1u8; 32], public_key, 1);
+        ws.set_chain_information((&new_info).into());
+
+        // Runtime download should still be desired, and since the state root
+        // didn't change, it shouldn't have been reset.
+        assert!(
+            ws.desired_requests()
+                .any(|(_, _, req)| matches!(req, DesiredRequest::StorageGetMerkleProof { .. })),
+            "runtime download should be desired when state root is unchanged"
+        );
+    }
+
+    /// Helper: set up a warp sync state machine that has verified a fragment
+    /// and is in the `Normal` state ready for runtime download.
+    fn setup_warp_sync_at_normal(
+        hint: Option<ConfigCodeTrieNodeHint>,
+    ) -> (WarpSync<(), ()>, SourceId) {
+        let signing_key = ed25519_zebra::SigningKey::from([42u8; 32]);
+        let vk = ed25519_zebra::VerificationKey::from(&signing_key);
+        let public_key: [u8; 32] = vk.into();
+        let block_number_bytes = 4;
+
+        let mut ws: WarpSync<(), ()> = start_warp_sync(Config {
+            start_chain_information: genesis_chain_info(public_key),
+            block_number_bytes,
+            sources_capacity: 4,
+            requests_capacity: 4,
+            code_trie_node_hint: hint,
+            num_download_ahead_fragments: 16,
+            warp_sync_minimum_gap: 0,
+            download_block_body: false,
+            download_all_chain_information_storage_proofs: false,
+        })
+        .unwrap();
+
+        let source_id = ws.add_source(());
+        ws.set_source_finality_state(source_id, 100);
+
+        let encoded_header = build_header(
+            [0u8; 32],
+            100,
+            [1u8; 32],
+            Some(&[(public_key, 1)]),
+            block_number_bytes,
+        );
+        let header_hash = header::hash_from_scale_encoded_header(&encoded_header);
+        let justification =
+            build_justification(&header_hash, 100, block_number_bytes, 0, 1, &signing_key);
+
+        let warp_rq_id = ws.add_request(
+            source_id,
+            (),
+            RequestDetail::WarpSyncRequest {
+                block_hash: ws.warped_header_hash,
+            },
+        );
+        ws.warp_sync_request_response(
+            warp_rq_id,
+            vec![WarpSyncFragment {
+                scale_encoded_header: encoded_header,
+                scale_encoded_justification: justification,
+            }],
+            true,
+        );
+
+        match ws.process_one() {
+            ProcessOne::VerifyWarpSyncFragment(verify) => {
+                let (warp_sync, result) = verify.verify([0u8; 32]);
+                ws = warp_sync;
+                result.expect("fragment verification should succeed");
+            }
+            _ => panic!("expected VerifyWarpSyncFragment"),
+        }
+
+        (ws, source_id)
+    }
+
+    #[test]
+    fn hint_causes_ancestor_key_in_desired_request() {
+        let hint = ConfigCodeTrieNodeHint {
+            merkle_value: vec![0xAB; 32],
+            storage_value: vec![0x00, 0x61, 0x73, 0x6d], // fake wasm
+            closest_ancestor_excluding: vec![
+                Nibble::try_from(3).unwrap(),
+                Nibble::try_from(0xa).unwrap(),
+                Nibble::try_from(6).unwrap(),
+                Nibble::try_from(3).unwrap(),
+                Nibble::try_from(6).unwrap(),
+                Nibble::try_from(0xf).unwrap(),
+            ], // 6 nibbles = ":co" (3 bytes)
+        };
+
+        let expected_key: Vec<u8> =
+            trie::nibbles_to_bytes_truncate(hint.closest_ancestor_excluding.iter().copied())
+                .collect();
+
+        let (ws, _source_id) = setup_warp_sync_at_normal(Some(hint));
+
+        let request = ws
+            .desired_requests()
+            .find(|(_, _, req)| matches!(req, DesiredRequest::StorageGetMerkleProof { .. }));
+        assert!(request.is_some(), "runtime download should be desired");
+
+        if let Some((_, _, DesiredRequest::StorageGetMerkleProof { keys, .. })) = request {
+            assert_eq!(
+                keys[0], expected_key,
+                "with hint, first key should be the ancestor key, not :code"
+            );
+            assert_eq!(keys[1], b":heappages", "second key should be :heappages");
+        }
+    }
+
+    #[test]
+    fn no_hint_requests_code_key() {
+        let (ws, _source_id) = setup_warp_sync_at_normal(None);
+
+        let request = ws
+            .desired_requests()
+            .find(|(_, _, req)| matches!(req, DesiredRequest::StorageGetMerkleProof { .. }));
+        assert!(request.is_some(), "runtime download should be desired");
+
+        if let Some((_, _, DesiredRequest::StorageGetMerkleProof { keys, .. })) = request {
+            assert_eq!(keys[0], b":code", "without hint, first key should be :code");
+            assert_eq!(keys[1], b":heappages", "second key should be :heappages");
+        }
+    }
 }
