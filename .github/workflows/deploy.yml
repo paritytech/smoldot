@@ -201,6 +201,7 @@ jobs:
       - name: Compute dev version and dist-tag
         if: github.event_name == 'workflow_dispatch'
         id: devver
+        shell: bash
         run: |
           apt-get update -qq && apt-get install -y -qq jq
           SUFFIX='${{ inputs.npm_tag_suffix }}'
