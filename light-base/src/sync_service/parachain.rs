@@ -1439,75 +1439,119 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         platform,
         Info,
         log_target,
-        format!("Downloading parachain runtime from peer {peer_id}")
+        format!("Downloading parachain runtime and Aura proofs from peer {peer_id}")
     );
 
-    // Download :code and :heappages.
-    let proof = network_service
-        .clone()
-        .storage_proof_request(
-            peer_id.clone(),
-            codec::StorageProofRequestConfig {
-                block_hash,
-                keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
-            },
-            Duration::from_secs(60),
+    // Fire all three P2P requests in parallel. The storage proof branch includes
+    // decoding and WASM compilation, which overlaps with the Aura proof downloads.
+    let storage_and_compile_fut = {
+        let network_service = network_service.clone();
+        let peer_id = peer_id.clone();
+        async move {
+            let proof = network_service
+                .storage_proof_request(
+                    peer_id,
+                    codec::StorageProofRequestConfig {
+                        block_hash,
+                        keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
+                    },
+                    Duration::from_secs(60),
+                )
+                .await
+                .map_err(|e| format!("Storage proof request failed: {e}"))?;
+
+            let decoded_proof =
+                trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+                    proof: proof.decode().to_vec(),
+                })
+                .map_err(|e| format!("Failed to decode storage proof: {e}"))?;
+
+            let code = decoded_proof
+                .storage_value(&state_root, b":code")
+                .map_err(|_| String::from("Proof doesn't contain :code"))?
+                .ok_or_else(|| String::from("Runtime :code not found in storage"))?
+                .0
+                .to_vec();
+
+            let heap_pages_raw = decoded_proof
+                .storage_value(&state_root, b":heappages")
+                .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
+
+            let storage_heap_pages = heap_pages_raw.map(|(v, _)| v.to_vec());
+
+            let heap_pages = executor::storage_heap_pages_to_value(storage_heap_pages.as_deref())
+                .map_err(|e| format!("Invalid :heappages value: {e}"))?;
+
+            let vm = executor::host::HostVmPrototype::new(executor::host::Config {
+                module: &code,
+                heap_pages,
+                exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+                allow_unresolved_imports: true,
+            })
+            .map_err(|e| format!("Failed to compile runtime: {e}"))?;
+
+            Ok::<_, String>((vm, code, storage_heap_pages))
+        }
+    };
+
+    let slot_duration_proof_fut = {
+        let network_service = network_service.clone();
+        let peer_id = peer_id.clone();
+        async move {
+            network_service
+                .call_proof_request(
+                    peer_id,
+                    codec::CallProofRequestConfig {
+                        block_hash,
+                        method: Cow::Borrowed("AuraApi_slot_duration"),
+                        parameter_vectored: iter::empty::<Vec<u8>>(),
+                    },
+                    Duration::from_secs(16),
+                )
+                .await
+                .map_err(|e| format!("AuraApi_slot_duration call proof request failed: {e}"))
+        }
+    };
+
+    let authorities_proof_fut = {
+        let network_service = network_service.clone();
+        let peer_id = peer_id.clone();
+        async move {
+            network_service
+                .call_proof_request(
+                    peer_id,
+                    codec::CallProofRequestConfig {
+                        block_hash,
+                        method: Cow::Borrowed("AuraApi_authorities"),
+                        parameter_vectored: iter::empty::<Vec<u8>>(),
+                    },
+                    Duration::from_secs(16),
+                )
+                .await
+                .map_err(|e| format!("AuraApi_authorities call proof request failed: {e}"))
+        }
+    };
+
+    let ((vm, code, storage_heap_pages), slot_duration_raw_proof, authorities_raw_proof) =
+        future::try_join3(
+            storage_and_compile_fut,
+            slot_duration_proof_fut,
+            authorities_proof_fut,
         )
-        .await
-        .map_err(|e| format!("Storage proof request failed: {e}"))?;
-
-    let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-        proof: proof.decode().to_vec(),
-    })
-    .map_err(|e| format!("Failed to decode storage proof: {e}"))?;
-
-    let code = decoded_proof
-        .storage_value(&state_root, b":code")
-        .map_err(|_| String::from("Proof doesn't contain :code"))?
-        .ok_or_else(|| String::from("Runtime :code not found in storage"))?
-        .0
-        .to_vec();
-
-    let heap_pages_raw = decoded_proof
-        .storage_value(&state_root, b":heappages")
-        .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
-
-    let storage_heap_pages = heap_pages_raw.map(|(v, _)| v.to_vec());
-
-    let heap_pages = executor::storage_heap_pages_to_value(storage_heap_pages.as_deref())
-        .map_err(|e| format!("Invalid :heappages value: {e}"))?;
+        .await?;
 
     log!(
         platform,
         Info,
         log_target,
         format!(
-            "Downloaded parachain runtime ({} bytes), compiling...",
+            "Compiled parachain runtime ({} bytes), executing Aura calls...",
             code.len()
         )
     );
 
-    let vm = executor::host::HostVmPrototype::new(executor::host::Config {
-        module: &code,
-        heap_pages,
-        exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
-        allow_unresolved_imports: true,
-    })
-    .map_err(|e| format!("Failed to compile runtime: {e}"))?;
-
-    // Fetch Aura call proofs and verify consensus parameters.
-    let slot_duration_proof = fetch_call_proof(
-        network_service,
-        &peer_id,
-        block_hash,
-        "AuraApi_slot_duration",
-    )
-    .await?;
-    let authorities_proof =
-        fetch_call_proof(network_service, &peer_id, block_hash, "AuraApi_authorities").await?;
-
     let (slot_duration, authorities, vm) =
-        run_aura_calls(vm, slot_duration_proof, authorities_proof, &state_root)?;
+        run_aura_calls(vm, slot_duration_raw_proof, authorities_raw_proof, &state_root)?;
 
     log!(
         platform,
