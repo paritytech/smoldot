@@ -239,7 +239,8 @@ struct Background<TPlat: PlatformRef> {
     max_seen_statements: Option<NonZero<usize>>,
 
     /// Active statement subscriptions. Maps subscription ID to subscription state.
-    statement_subscriptions: hashbrown::HashMap<String, StatementSubscription, fnv::FnvBuildHasher>,
+    statement_subscriptions:
+        hashbrown::HashMap<String, super::statement::StatementSubscription, fnv::FnvBuildHasher>,
 
     statement_affinity_stale: bool,
     next_statement_affinity_update: Option<Pin<Box<TPlat::Delay>>>,
@@ -532,33 +533,6 @@ enum TransactionWatchTy {
     NewApiWatch,
 }
 
-struct StatementSubscription {
-    topic_filter: methods::TopicFilter,
-    seen: Option<lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>>,
-}
-
-impl StatementSubscription {
-    fn new(topic_filter: methods::TopicFilter, max_seen: Option<NonZero<usize>>) -> Self {
-        Self {
-            topic_filter,
-            seen: max_seen
-                .map(|cap| lru::LruCache::with_hasher(cap, fnv::FnvBuildHasher::default())),
-        }
-    }
-
-    fn accept(&mut self, hash: &[u8; 32], statement: &codec::Statement) -> bool {
-        if !self.topic_filter.matches(&statement.topics) {
-            return false;
-        }
-        if let Some(seen) = &mut self.seen {
-            if seen.put(*hash, ()).is_some() {
-                return false;
-            }
-        }
-        true
-    }
-}
-
 /// See [`Background::state_get_keys_paged_cache`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct GetKeysPagedCacheKey {
@@ -840,7 +814,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.statement_affinity_stale = false;
                 me.last_statement_affinity_update = Some(me.platform.now());
 
-                let combined_filter = build_combined_affinity_filter(
+                let combined_filter = super::statement::build_combined_affinity_filter(
                     &me.statement_subscriptions,
                     me.statement_protocol_config
                         .as_ref()
@@ -2994,7 +2968,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         me.statement_subscriptions.insert(
                             subscription_id.clone(),
-                            StatementSubscription::new(filter, me.max_seen_statements),
+                            super::statement::StatementSubscription::new(
+                                filter,
+                                me.max_seen_statements,
+                            ),
                         );
 
                         me.schedule_statement_affinity_update();
@@ -6166,28 +6143,3 @@ fn convert_runtime_version(
     }
 }
 
-fn build_combined_affinity_filter(
-    subscriptions: &hashbrown::HashMap<String, StatementSubscription, fnv::FnvBuildHasher>,
-    config: &network_service::StatementProtocolConfig,
-) -> network_service::AffinityFilter {
-    use smoldot::json_rpc::methods::TopicFilter;
-
-    let mut all_topics: Vec<&[u8; 32]> = Vec::new();
-
-    for sub in subscriptions.values() {
-        match &sub.topic_filter {
-            TopicFilter::Any => {
-                return network_service::AffinityFilter::match_all(config.bloom_seed());
-            }
-            TopicFilter::MatchAll(topics) | TopicFilter::MatchAny(topics) => {
-                all_topics.extend(topics.iter());
-            }
-        }
-    }
-
-    network_service::AffinityFilter::from_topics(
-        all_topics.into_iter(),
-        config.bloom_seed(),
-        config.false_positive_rate(),
-    )
-}
