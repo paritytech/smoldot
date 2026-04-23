@@ -234,10 +234,12 @@ jobs:
           # Version's first prerelease identifier is the tag; "." + numeric N
           # is a second identifier so that N sorts numerically.
           PREFIX="${NEXT}-${TAG}"
+          # `grep || true`: on the first dev release of the day no version matches
+          # the prefix; grep exits 1 which under `set -e -o pipefail` would kill the step.
           MAX_N=$(
             npm view --json smoldot versions 2>/dev/null \
               | jq -r '.[]' \
-              | grep -E "^${PREFIX}\.[0-9]+$" \
+              | { grep -E "^${PREFIX}\.[0-9]+$" || true; } \
               | sed -E "s|^${PREFIX}\.||" \
               | sort -n | tail -1
           )
