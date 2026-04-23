@@ -831,6 +831,7 @@ async fn run_background<TPlat: PlatformRef>(
             blocks_stream: None,
             runtime_downloads: stream::FuturesUnordered::new(),
             progress_runtime_call_requests: stream::FuturesUnordered::new(),
+            no_peers_retry_count: 0,
         }
     };
 
@@ -2766,6 +2767,7 @@ async fn run_background<TPlat: PlatformRef>(
                 };
 
                 // Insert the runtime into the tree.
+                background.no_peers_retry_count = 0;
                 match &mut background.tree {
                     Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
                         tree.async_op_finished(async_op_id, runtime);
@@ -2810,12 +2812,26 @@ async fn run_background<TPlat: PlatformRef>(
                     );
                 }
 
-                match &mut background.tree {
-                    Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
-                        tree.async_op_failure(async_op_id, &background.platform.now());
+                if error.is_no_peers() && background.no_peers_retry_count < 3 {
+                    let delay_ms = 200u64 << background.no_peers_retry_count;
+                    background.no_peers_retry_count += 1;
+                    let retry_at = background.platform.now() + Duration::from_millis(delay_ms);
+                    match &mut background.tree {
+                        Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                            tree.async_op_failure_retry_at(async_op_id, &retry_at);
+                        }
+                        Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                            tree.async_op_failure_retry_at(async_op_id, &retry_at);
+                        }
                     }
-                    Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                        tree.async_op_failure(async_op_id, &background.platform.now());
+                } else {
+                    match &mut background.tree {
+                        Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                            tree.async_op_failure(async_op_id, &background.platform.now());
+                        }
+                        Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                            tree.async_op_failure(async_op_id, &background.platform.now());
+                        }
                     }
                 }
             }
@@ -2832,6 +2848,13 @@ enum RuntimeDownloadError {
 }
 
 impl RuntimeDownloadError {
+    fn is_no_peers(&self) -> bool {
+        match self {
+            RuntimeDownloadError::StorageQuery(err) => err.is_no_peers(),
+            RuntimeDownloadError::InvalidHeader(_) => false,
+        }
+    }
+
     /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
     /// issue.
     fn is_network_problem(&self) -> bool {
@@ -2892,6 +2915,10 @@ struct Background<TPlat: PlatformRef> {
 
     /// Stream of notifications coming from the sync service. `None` if not subscribed yet.
     blocks_stream: Option<Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>>,
+
+    /// Number of consecutive runtime download failures due to no peers being available.
+    /// Used for exponential backoff (200ms, 400ms, 800ms) before falling to the normal cooldown.
+    no_peers_retry_count: u32,
 
     /// List of runtimes currently being downloaded from the network.
     /// For each item, the download id, storage value of `:code`, storage value of `:heappages`,

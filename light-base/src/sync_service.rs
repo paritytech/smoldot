@@ -1040,6 +1040,11 @@ pub struct StorageQueryError {
 }
 
 impl StorageQueryError {
+    /// Returns `true` if no peers were available to query.
+    pub fn is_no_peers(&self) -> bool {
+        self.errors.is_empty()
+    }
+
     /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
     /// issue.
     pub fn is_network_problem(&self) -> bool {
