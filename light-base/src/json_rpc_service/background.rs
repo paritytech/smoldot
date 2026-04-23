@@ -2969,25 +2969,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::statement_submit { encoded } => {
-                        let result =
-                            if smoldot::network::codec::decode_statement(&encoded.0).is_err() {
-                                methods::StatementSubmitResult::Invalid {
-                                    reason: "Invalid statement encoding".into(),
-                                }
-                            } else {
-                                let broadcasted = me
-                                    .network_service
-                                    .clone()
-                                    .broadcast_statement(encoded.0)
-                                    .await;
-                                if broadcasted.total == 0 {
-                                    methods::StatementSubmitResult::InternalError {
-                                        error: "No connected peers".into(),
-                                    }
-                                } else {
-                                    methods::StatementSubmitResult::New
-                                }
-                            };
+                        let network = me.network_service.clone();
+                        let result = super::statement::validate_and_broadcast_statement(
+                            &encoded.0,
+                            |bytes| async move { network.broadcast_statement(bytes).await },
+                        )
+                        .await;
 
                         let _ = me
                             .responses_tx

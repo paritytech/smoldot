@@ -1095,7 +1095,7 @@ pub enum SystemPeerRole {
 /// Result of submitting a statement.
 ///
 /// JSON format is compatible with polkadot-sdk's `SubmitResult`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum StatementSubmitResult {
     New,
@@ -1635,5 +1635,28 @@ mod tests {
         assert!(!filter.matches(&[t2]));
         assert!(!filter.matches(&[t3]));
         assert!(!filter.matches(&[]));
+    }
+
+    #[test]
+    fn topic_filter_match_all_empty_matches_everything() {
+        let filter = super::TopicFilter::match_all(Vec::new()).unwrap();
+        assert!(filter.matches(&[]));
+        assert!(filter.matches(&[[1u8; 32]]));
+    }
+
+    #[test]
+    fn topic_filter_match_all_rejects_too_many_topics() {
+        let topics: Vec<[u8; 32]> = (0..=crate::network::codec::MAX_TOPICS)
+            .map(|i| [i as u8; 32])
+            .collect();
+        assert!(super::TopicFilter::match_all(topics).is_err());
+    }
+
+    #[test]
+    fn topic_filter_match_any_rejects_too_many_topics() {
+        let topics: Vec<[u8; 32]> = (0..=crate::network::codec::MAX_ANY_TOPICS)
+            .map(|i| [i as u8; 32])
+            .collect();
+        assert!(super::TopicFilter::match_any(topics).is_err());
     }
 }
