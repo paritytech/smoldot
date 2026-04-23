@@ -134,9 +134,7 @@ mod tests {
     fn validate_and_broadcast_no_peers() {
         let result = block_on(validate_and_broadcast_statement(
             &valid_statement(),
-            |_| async {
-                BroadcastStatementResult { sent: 0, total: 0 }
-            },
+            |_| async { BroadcastStatementResult { sent: 0, total: 0 } },
         ));
         assert_eq!(
             result,
@@ -150,9 +148,7 @@ mod tests {
     fn validate_and_broadcast_new() {
         let result = block_on(validate_and_broadcast_statement(
             &valid_statement(),
-            |_| async {
-                BroadcastStatementResult { sent: 3, total: 5 }
-            },
+            |_| async { BroadcastStatementResult { sent: 3, total: 5 } },
         ));
         assert_eq!(result, StatementSubmitResult::New);
     }
@@ -241,18 +237,15 @@ mod tests {
     #[test]
     fn accept_fresh_statement_passes() {
         let t1 = [1u8; 32];
-        let mut sub = StatementSubscription::new(
-            TopicFilter::match_any(vec![t1]).unwrap(),
-            NonZero::new(8),
-        );
+        let mut sub =
+            StatementSubscription::new(TopicFilter::match_any(vec![t1]).unwrap(), NonZero::new(8));
         let stmt = statement_with_topics(vec![t1]);
         assert!(sub.accept(&[0xbb; 32], &stmt));
     }
 
     #[test]
     fn accept_duplicate_returns_false() {
-        let mut sub =
-            StatementSubscription::new(TopicFilter::Any, NonZero::new(8));
+        let mut sub = StatementSubscription::new(TopicFilter::Any, NonZero::new(8));
         let stmt = statement_with_topics(vec![]);
         let hash = [0xcc; 32];
         assert!(sub.accept(&hash, &stmt));
@@ -261,8 +254,7 @@ mod tests {
 
     #[test]
     fn accept_lru_eviction_allows_resubmit() {
-        let mut sub =
-            StatementSubscription::new(TopicFilter::Any, NonZero::new(2));
+        let mut sub = StatementSubscription::new(TopicFilter::Any, NonZero::new(2));
         let stmt = statement_with_topics(vec![]);
         let h_a = [0xa; 32];
         let h_b = [0xb; 32];
@@ -278,10 +270,8 @@ mod tests {
 
     #[test]
     fn dedup_is_per_subscription() {
-        let mut sub_a =
-            StatementSubscription::new(TopicFilter::Any, NonZero::new(8));
-        let mut sub_b =
-            StatementSubscription::new(TopicFilter::Any, NonZero::new(8));
+        let mut sub_a = StatementSubscription::new(TopicFilter::Any, NonZero::new(8));
+        let mut sub_b = StatementSubscription::new(TopicFilter::Any, NonZero::new(8));
         let stmt = statement_with_topics(vec![]);
         let hash = [0xee; 32];
 
