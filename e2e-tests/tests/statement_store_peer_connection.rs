@@ -29,8 +29,7 @@ async fn submit(node: &NetworkNode, stmt_hex: &str, label: &str) -> Result<(), a
 ///      Delivery here proves smoldot re-dialled a peer it had already seen,
 ///      and re-negotiated the statement protocol on top of the new connection.
 #[tokio::test(flavor = "multi_thread")]
-async fn light_node_recovers_statement_delivery_after_peer_restart()
--> Result<(), anyhow::Error> {
+async fn recovers_statement_delivery_after_peer_restart() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     );
@@ -64,10 +63,10 @@ async fn light_node_recovers_statement_delivery_after_peer_restart()
     let para_spec_str = para_spec_path.to_str().unwrap().to_string();
     let ready_path_str = ready_path.to_str().unwrap().to_string();
 
-    info!("Spawning JS test: js/light_node_peer_connection.js");
+    info!("Spawning JS test: js/statement_store_peer_connection.js");
     let js_handle = tokio::spawn(async move {
         run_js_test(
-            "js/light_node_peer_connection.js",
+            "js/statement_store_peer_connection.js",
             &[
                 ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
                 ("PARA_CHAIN_SPEC", para_spec_str.as_str()),

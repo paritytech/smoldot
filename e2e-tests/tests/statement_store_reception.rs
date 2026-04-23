@@ -11,7 +11,7 @@ fn decode_hex_0x(s: &str) -> Vec<u8> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn light_node_receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
+async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     );
@@ -60,10 +60,10 @@ async fn light_node_receives_only_subscribed_statements() -> Result<(), anyhow::
     let stmt_a_hex_for_js = stmt_a_hex.clone();
     let stmt_b_hex_for_js = stmt_b_hex.clone();
 
-    info!("Spawning JS test: js/light_node_reception.js (topicA={topic_a_hex})");
+    info!("Spawning JS test: js/statement_store_reception.js (topicA={topic_a_hex})");
     let js_handle = tokio::spawn(async move {
         run_js_test(
-            "js/light_node_reception.js",
+            "js/statement_store_reception.js",
             &[
                 ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
                 ("PARA_CHAIN_SPEC", para_spec_str.as_str()),

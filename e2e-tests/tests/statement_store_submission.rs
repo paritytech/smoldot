@@ -3,7 +3,7 @@ use smoldot_e2e_tests::*;
 use smoldot_e2e_tests::statement::*;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn light_node_statement_reaches_full_node() -> Result<(), anyhow::Error> {
+async fn statement_reaches_full_node() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     );
@@ -45,12 +45,12 @@ async fn light_node_statement_reaches_full_node() -> Result<(), anyhow::Error> {
     let statement_hex_clone = statement_hex.clone();
 
     info!(
-        "Spawning JS test: js/light_node_submission.js (relay_spec={}, para_spec={})",
+        "Spawning JS test: js/statement_store_submission.js (relay_spec={}, para_spec={})",
         relay_spec_str, para_spec_str
     );
     let js_handle = tokio::spawn(async move {
         run_js_test(
-            "js/light_node_submission.js",
+            "js/statement_store_submission.js",
             &[
                 ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
                 ("PARA_CHAIN_SPEC", para_spec_str.as_str()),

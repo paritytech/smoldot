@@ -139,7 +139,7 @@ try {
     sendRpc(para, "statement_unsubscribeStatement", [subId]);
   } catch (_) {}
 } catch (e) {
-  report("light_node_reception", false, e.message);
+  report("statement_store_reception", false, e.message);
   passed = false;
 } finally {
   try {

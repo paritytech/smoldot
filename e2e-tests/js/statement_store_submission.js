@@ -61,7 +61,7 @@ try {
     JSON.stringify(submitResult),
   );
 } catch (e) {
-  report("light_node_submission", false, e.message);
+  report("statement_store_submission", false, e.message);
   passed = false;
 } finally {
   try {

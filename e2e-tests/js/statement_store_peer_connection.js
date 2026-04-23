@@ -137,7 +137,7 @@ try {
     sendRpc(para, "statement_unsubscribeStatement", [subId]);
   } catch (_) {}
 } catch (e) {
-  report("light_node_peer_connection", false, e.message);
+  report("statement_store_peer_connection", false, e.message);
   passed = false;
 } finally {
   try {
