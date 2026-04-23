@@ -68,36 +68,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         )
     );
 
-    // Phase 2 (concurrent): Build a future to bootstrap consensus in the background.
-    // The bootstrap needs a connected peer, which the main loop provides via a
-    // oneshot channel when the first peer connects.
-    let (bootstrap_peer_tx, bootstrap_peer_rx) = oneshot::channel();
-    let bootstrap_future: Option<
-        future::BoxFuture<'static, Result<BootstrappedParachain, String>>,
-    > = {
-        let log_target = log_target.clone();
-        let platform = platform.clone();
-        let network_service = network_service.clone();
-        let finalized_header_bytes = effective_chain_info
-            .as_ref()
-            .finalized_block_header
-            .scale_encoding_vec(block_number_bytes);
-        Some(Box::pin(async move {
-            let peer_id = bootstrap_peer_rx
-                .await
-                .map_err(|_| String::from("Peer channel closed"))?;
-            bootstrap_parachain_consensus(
-                &log_target,
-                &platform,
-                &network_service,
-                peer_id,
-                &finalized_header_bytes,
-                block_number_bytes,
-            )
-            .await
-        }))
-    };
-
     // Phase 3: Spawn the paraheads background service that tracks relay chain
     // finalization and reports finalized parachain blocks.
     // This only needs the Phase 1 result (the finalized header), not Phase 2.
@@ -175,10 +145,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         paraheads_notifications: None,
         pending_parachain_finalization: None,
         network_up_to_date_best: true,
-        // Runtime is not yet known — will be set once bootstrap_future resolves.
         known_finalized_runtime: None,
-        bootstrap_future,
-        bootstrap_peer_tx: Some(bootstrap_peer_tx),
+        bootstrap_future: None,
+        bootstrap_peer_tx: None,
         bootstrap_retry_sleep: None,
         block_number_bytes,
         pending_requests: stream::FuturesUnordered::new(),
@@ -196,6 +165,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         ),
         platform,
     };
+
+    // Phase 2 (concurrent): Start bootstrap in the background.
+    task.start_bootstrap();
 
     // Phase 5: Main sync loop.
     loop {
@@ -1068,60 +1040,24 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             WakeUpReason::BootstrapComplete(Ok(bootstrapped)) => {
                 task.bootstrap_future = None;
 
-                let sync = task.sync.as_mut().unwrap_or_else(|| unreachable!());
+                log!(
+                    &task.platform,
+                    Info,
+                    &task.log_target,
+                    "Parachain consensus bootstrapped — upgrading to Aura"
+                );
 
-                // If finalization advanced past the block we bootstrapped from,
-                // the Aura authorities may have changed. Re-bootstrap.
-                if *sync.finalized_block_hash() != bootstrapped.bootstrap_block_hash {
-                    log!(
-                        &task.platform,
-                        Info,
-                        &task.log_target,
-                        "Finalized block advanced during bootstrap — re-bootstrapping"
-                    );
-                    let log_target = task.log_target.clone();
-                    let platform = task.platform.clone();
-                    let network_service = task.network_service.clone();
-                    let finalized_header_bytes = sync.finalized_block_header().to_vec();
-                    let block_number_bytes = task.block_number_bytes;
-                    let (tx, rx) = oneshot::channel();
-                    task.bootstrap_peer_tx = Some(tx);
-                    // Feed an existing peer if we have one, otherwise the
-                    // Connected handler will send one later.
-                    if let Some(peer_id) = task.peers_source_id_map.keys().next().cloned() {
-                        let _ = task.bootstrap_peer_tx.take().unwrap().send(peer_id);
-                    }
-                    task.bootstrap_future = Some(Box::pin(async move {
-                        let peer_id = rx
-                            .await
-                            .map_err(|_| String::from("Peer channel closed"))?;
-                        bootstrap_parachain_consensus(
-                            &log_target,
-                            &platform,
-                            &network_service,
-                            peer_id,
-                            &finalized_header_bytes,
-                            block_number_bytes,
-                        )
-                        .await
-                    }));
-                } else {
-                    log!(
-                        &task.platform,
-                        Info,
-                        &task.log_target,
-                        "Parachain consensus bootstrapped — upgrading to Aura"
-                    );
-
-                    sync.set_finalized_consensus(
+                task.sync
+                    .as_mut()
+                    .unwrap_or_else(|| unreachable!())
+                    .set_finalized_consensus(
                         chain::chain_information::ChainInformationConsensus::Aura {
                             finalized_authorities_list: bootstrapped.aura_authorities,
                             slot_duration: bootstrapped.aura_slot_duration,
                         },
                     );
-                    task.known_finalized_runtime = Some(bootstrapped.finalized_runtime);
-                    task.network_up_to_date_best = false;
-                }
+                task.known_finalized_runtime = Some(bootstrapped.finalized_runtime);
+                task.network_up_to_date_best = false;
             }
 
             WakeUpReason::BootstrapComplete(Err(err)) => {
@@ -1140,35 +1076,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
 
             WakeUpReason::BootstrapRetryReady => {
                 task.bootstrap_retry_sleep = None;
-                let log_target = task.log_target.clone();
-                let platform = task.platform.clone();
-                let network_service = task.network_service.clone();
-                let finalized_header_bytes = task
-                    .sync
-                    .as_ref()
-                    .unwrap_or_else(|| unreachable!())
-                    .finalized_block_header()
-                    .to_vec();
-                let block_number_bytes = task.block_number_bytes;
-                let (tx, rx) = oneshot::channel();
-                task.bootstrap_peer_tx = Some(tx);
-                if let Some(peer_id) = task.peers_source_id_map.keys().next().cloned() {
-                    let _ = task.bootstrap_peer_tx.take().unwrap().send(peer_id);
-                }
-                task.bootstrap_future = Some(Box::pin(async move {
-                    let peer_id = rx
-                        .await
-                        .map_err(|_| String::from("Peer channel closed"))?;
-                    bootstrap_parachain_consensus(
-                        &log_target,
-                        &platform,
-                        &network_service,
-                        peer_id,
-                        &finalized_header_bytes,
-                        block_number_bytes,
-                    )
-                    .await
-                }));
+                task.start_bootstrap();
             }
 
             // Unreachable variants - parachains don't use warp sync, finality proofs, or Grandpa
@@ -1248,6 +1156,36 @@ enum RequestOutcome {
 }
 
 impl<TPlat: PlatformRef> Task<TPlat> {
+    fn start_bootstrap(&mut self) {
+        let log_target = self.log_target.clone();
+        let platform = self.platform.clone();
+        let network_service = self.network_service.clone();
+        let finalized_header_bytes = self
+            .sync
+            .as_ref()
+            .unwrap_or_else(|| unreachable!())
+            .finalized_block_header()
+            .to_vec();
+        let block_number_bytes = self.block_number_bytes;
+        let (tx, rx) = oneshot::channel();
+        self.bootstrap_peer_tx = Some(tx);
+        if let Some(peer_id) = self.peers_source_id_map.keys().next().cloned() {
+            let _ = self.bootstrap_peer_tx.take().unwrap().send(peer_id);
+        }
+        self.bootstrap_future = Some(Box::pin(async move {
+            let peer_id = rx.await.map_err(|_| String::from("Peer channel closed"))?;
+            bootstrap_parachain_consensus(
+                &log_target,
+                &platform,
+                &network_service,
+                peer_id,
+                &finalized_header_bytes,
+                block_number_bytes,
+            )
+            .await
+        }));
+    }
+
     fn dispatch_all_subscribers(&mut self, notification: Notification) {
         for index in (0..self.all_notifications.len()).rev() {
             let subscription = self.all_notifications.swap_remove(index);
@@ -1386,8 +1324,6 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
 }
 
 struct BootstrappedParachain {
-    /// Hash of the block that was used to bootstrap consensus.
-    bootstrap_block_hash: [u8; 32],
     aura_authorities: Vec<header::AuraAuthority>,
     aura_slot_duration: NonZero<u64>,
     finalized_runtime: FinalizedBlockRuntime,
@@ -1553,7 +1489,6 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     );
 
     Ok(BootstrappedParachain {
-        bootstrap_block_hash: block_hash,
         aura_authorities: authorities,
         aura_slot_duration: slot_duration,
         finalized_runtime: FinalizedBlockRuntime {
