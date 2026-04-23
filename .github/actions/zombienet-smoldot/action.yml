@@ -1,12 +1,12 @@
 name: "Run smoldot zombienet test"
-description: "Downloads polkadot binaries from the pinned release and runs a single e2e test binary."
+description: "Downloads polkadot binaries from the pinned release and runs a single e2e test filter."
 
 inputs:
   polkadot-release-tag:
     description: "polkadot-sdk release tag providing the polkadot / polkadot-parachain binaries."
     required: true
-  test-binary:
-    description: "Cargo integration-test binary under e2e-tests/tests/ to run."
+  test-filter:
+    description: "Substring passed to cargo test; typically `zombie_ci::<suite>::<test>`."
     required: true
 
 runs:
@@ -31,9 +31,9 @@ runs:
     - name: Run e2e test
       shell: bash
       env:
-        TEST_BINARY: ${{ inputs.test-binary }}
+        TEST_FILTER: ${{ inputs.test-filter }}
       run: |
         set -euo pipefail
         export PATH="$GITHUB_WORKSPACE/bin:$PATH"
         cargo test --locked --manifest-path e2e-tests/Cargo.toml \
-          --test "$TEST_BINARY" -- --nocapture --test-threads 1
+          --test integration -- --nocapture --test-threads 1 "$TEST_FILTER"
