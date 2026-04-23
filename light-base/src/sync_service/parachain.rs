@@ -1792,3 +1792,52 @@ fn run_single_runtime_call(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use smoldot::executor;
+
+    /// Verify that the warm-start compilation path rejects invalid WASM bytes
+    /// gracefully (returns an error) rather than panicking.
+    #[test]
+    fn invalid_cached_runtime_fails_compilation() {
+        let garbage = b"this is not valid wasm";
+        let heap_pages = executor::storage_heap_pages_to_value(None).unwrap();
+        let result = executor::host::HostVmPrototype::new(executor::host::Config {
+            module: garbage,
+            heap_pages,
+            exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+            allow_unresolved_imports: true,
+        });
+        assert!(result.is_err(), "garbage bytes should fail compilation");
+    }
+
+    /// Verify that an empty cached runtime fails compilation gracefully.
+    #[test]
+    fn empty_cached_runtime_fails_compilation() {
+        let heap_pages = executor::storage_heap_pages_to_value(None).unwrap();
+        let result = executor::host::HostVmPrototype::new(executor::host::Config {
+            module: b"",
+            heap_pages,
+            exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+            allow_unresolved_imports: true,
+        });
+        assert!(result.is_err(), "empty bytes should fail compilation");
+    }
+
+    /// Verify that a WASM module without a memory section fails with a clear
+    /// error (NoMemory), not a panic. This is the expected behavior when a
+    /// cached runtime is truncated or corrupted but still has valid WASM magic.
+    #[test]
+    fn wasm_without_memory_fails_gracefully() {
+        let minimal_wasm = b"\x00asm\x01\x00\x00\x00";
+        let heap_pages = executor::storage_heap_pages_to_value(None).unwrap();
+        let result = executor::host::HostVmPrototype::new(executor::host::Config {
+            module: minimal_wasm,
+            heap_pages,
+            exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+            allow_unresolved_imports: true,
+        });
+        assert!(result.is_err(), "WASM without memory should fail");
+    }
+}

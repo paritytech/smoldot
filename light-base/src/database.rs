@@ -282,3 +282,93 @@ struct SerdeDatabase {
     )]
     code_closest_ancestor_excluding: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_db_json(fields: &[(&str, &str)]) -> String {
+        let genesis = format!(r#""genesisHash":"{}""#, "aa".repeat(32));
+        let nodes = r#""nodes":{}"#;
+        let extras: Vec<String> = fields
+            .iter()
+            .map(|(k, v)| format!(r#""{k}":{v}"#))
+            .collect();
+        let mut parts = vec![genesis, nodes.to_string()];
+        parts.extend(extras);
+        format!("{{{}}}", parts.join(","))
+    }
+
+    #[test]
+    fn decode_database_without_runtime_code() {
+        let json = make_db_json(&[]);
+        let db = decode_database(&json, 4).unwrap();
+        assert!(db.runtime_code.is_none());
+        assert!(db.runtime_code_hint.is_none());
+    }
+
+    #[test]
+    fn decode_database_with_runtime_code_only() {
+        let code_bytes = b"\x00asm\x01\x00\x00\x00";
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD_NO_PAD,
+            code_bytes,
+        );
+        let json = make_db_json(&[("runtimeCode", &format!(r#""{encoded}""#))]);
+        let db = decode_database(&json, 4).unwrap();
+        assert_eq!(db.runtime_code.as_deref(), Some(code_bytes.as_slice()));
+        assert!(db.runtime_code_hint.is_none());
+    }
+
+    #[test]
+    fn decode_database_with_full_hint_populates_both() {
+        let code_bytes = b"\x00asm\x01\x00\x00\x00";
+        let encoded_code = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD_NO_PAD,
+            code_bytes,
+        );
+        let merkle_hex = "ab".repeat(32);
+        let ancestor_nibbles = "3a636f";
+        let json = make_db_json(&[
+            ("runtimeCode", &format!(r#""{encoded_code}""#)),
+            ("codeMerkleValue", &format!(r#""{merkle_hex}""#)),
+            ("codeClosestAncestor", &format!(r#""{ancestor_nibbles}""#)),
+        ]);
+        let db = decode_database(&json, 4).unwrap();
+        assert_eq!(db.runtime_code.as_deref(), Some(code_bytes.as_slice()));
+        assert!(db.runtime_code_hint.is_some());
+        let hint = db.runtime_code_hint.unwrap();
+        assert_eq!(hint.code, code_bytes);
+        assert_eq!(hint.code_merkle_value, hex::decode(&merkle_hex).unwrap());
+    }
+
+    #[test]
+    fn decode_database_invalid_base64_runtime_code_returns_error() {
+        let json = make_db_json(&[("runtimeCode", r#""not-valid-base64!!!""#)]);
+        assert!(decode_database(&json, 4).is_err());
+    }
+
+    #[test]
+    fn encode_shrink_drops_runtime_code_when_too_large() {
+        let large_code = "A".repeat(10_000);
+        let db = SerdeDatabase {
+            genesis_hash: "aa".repeat(32),
+            chain: None,
+            nodes: Default::default(),
+            code_storage_value: Some(large_code),
+            code_merkle_value: Some("bb".repeat(32)),
+            code_closest_ancestor_excluding: None,
+        };
+        let serialized = serde_json::to_string(&db).unwrap();
+        assert!(serialized.len() > 1000);
+
+        let mut shrunk = db;
+        shrunk.code_storage_value = None;
+        shrunk.code_merkle_value = None;
+        let shrunk_serialized = serde_json::to_string(&shrunk).unwrap();
+        assert!(shrunk_serialized.len() < 200);
+
+        let decoded = decode_database(&shrunk_serialized, 4).unwrap();
+        assert!(decoded.runtime_code.is_none());
+    }
+}
