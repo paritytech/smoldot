@@ -108,6 +108,13 @@ pub struct ConfigSubstrateCompatibleRuntimeCodeHint {
 pub struct ConfigParachain<TPlat: PlatformRef> {
     /// Parameters of the relay chain.
     pub relay_chain: ConfigRelayChain<TPlat>,
+
+    /// Raw bytes of the runtime (`:code` storage value) saved in the database.
+    ///
+    /// When `Some`, `start_parachain` compiles this code locally and verifies it
+    /// against the network via lightweight Aura call proofs, skipping the ~2 MiB
+    /// P2P download. Falls back to cold bootstrap on any failure.
+    pub saved_runtime_code: Option<Vec<u8>>,
 }
 
 /// See [`ConfigParachain::relay_chain`].
@@ -154,6 +161,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 config_parachain.relay_chain.para_id,
                 from_foreground,
                 config.network_service.clone(),
+                config_parachain.saved_runtime_code,
             )),
             ConfigChainType::SubstrateCompatible(config_substrate_compat) => {
                 Box::pin(substrate_compat::start_substrate_compatible_chain(
