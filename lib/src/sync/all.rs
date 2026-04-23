@@ -243,6 +243,20 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         all_forks.as_chain_information()
     }
 
+    /// Updates the consensus algorithm of the finalized block in-place.
+    ///
+    /// Clears any non-finalized blocks, as they may have been verified with
+    /// incorrect consensus rules. Peers and requests are unaffected.
+    pub fn set_finalized_consensus(
+        &mut self,
+        consensus: chain_information::ChainInformationConsensus,
+    ) {
+        let Some(all_forks) = &mut self.all_forks else {
+            unreachable!()
+        };
+        all_forks.set_finalized_consensus(consensus);
+    }
+
     /// Returns the current status of the syncing.
     pub fn status(&'_ self) -> Status<'_, TSrc> {
         // TODO:

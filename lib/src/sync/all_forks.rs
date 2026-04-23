@@ -445,6 +445,16 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.chain.as_chain_information()
     }
 
+    /// Updates the consensus algorithm of the finalized block.
+    ///
+    /// See [`blocks_tree::NonFinalizedTree::set_finalized_consensus`] for details.
+    pub fn set_finalized_consensus(
+        &mut self,
+        consensus: chain_information::ChainInformationConsensus,
+    ) {
+        self.chain.set_finalized_consensus(consensus);
+    }
+
     /// Returns the header of the finalized block.
     pub fn finalized_block_header(&self) -> &[u8] {
         self.chain.finalized_block_header()

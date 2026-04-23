@@ -234,6 +234,39 @@ impl<T> NonFinalizedTree<T> {
         self.blocks_trigger_gp_change.clear();
     }
 
+    /// Updates the consensus algorithm of the finalized block.
+    ///
+    /// This is useful when the chain starts with `Unknown` consensus and later
+    /// discovers the actual consensus parameters (e.g. Aura authorities).
+    ///
+    /// Non-finalized blocks that were verified under the old consensus are cleared,
+    /// as they may have been verified with incorrect rules.
+    pub fn set_finalized_consensus(
+        &mut self,
+        consensus: chain_information::ChainInformationConsensus,
+    ) {
+        self.finalized_consensus = match consensus {
+            chain_information::ChainInformationConsensus::Unknown => FinalizedConsensus::Unknown,
+            chain_information::ChainInformationConsensus::Aura {
+                finalized_authorities_list,
+                slot_duration,
+            } => FinalizedConsensus::Aura {
+                authorities_list: Arc::new(finalized_authorities_list),
+                slot_duration,
+            },
+            chain_information::ChainInformationConsensus::Babe {
+                finalized_block_epoch_information,
+                finalized_next_epoch_transition,
+                slots_per_epoch,
+            } => FinalizedConsensus::Babe {
+                slots_per_epoch,
+                block_epoch_information: finalized_block_epoch_information.map(Arc::from),
+                next_epoch_transition: Arc::from(finalized_next_epoch_transition),
+            },
+        };
+        self.clear();
+    }
+
     /// Returns true if there isn't any non-finalized block in the chain.
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
