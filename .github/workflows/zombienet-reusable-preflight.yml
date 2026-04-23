@@ -1,0 +1,107 @@
+name: Zombienet Preflight
+
+# Resolves runner/image vars from `.github/zombienet-env`, generates the
+# test matrix from `.github/zombienet-tests/zombienet_smoldot_tests.yml`
+# and detects whether the current PR touches files relevant to zombienet.
+
+on:
+  workflow_call:
+    inputs:
+      tests_yaml:
+        required: true
+        type: string
+      test_pattern:
+        required: false
+        type: string
+    outputs:
+      changes_relevant:
+        value: ${{ jobs.preflight.outputs.changes_relevant }}
+        description: "True iff changes touch code relevant to zombienet tests."
+      ZOMBIE_PROVIDER:
+        value: ${{ jobs.preflight.outputs.ZOMBIE_PROVIDER }}
+      RUST_LOG:
+        value: ${{ jobs.preflight.outputs.RUST_LOG }}
+      ZOMBIENET_SDK_IMAGE:
+        value: ${{ jobs.preflight.outputs.ZOMBIENET_SDK_IMAGE }}
+      ZOMBIENET_SDK_DEFAULT_RUNNER:
+        value: ${{ jobs.preflight.outputs.ZOMBIENET_SDK_DEFAULT_RUNNER }}
+      ZOMBIENET_SDK_LARGE_RUNNER:
+        value: ${{ jobs.preflight.outputs.ZOMBIENET_SDK_LARGE_RUNNER }}
+      POLKADOT_RELEASE_TAG:
+        value: ${{ jobs.preflight.outputs.POLKADOT_RELEASE_TAG }}
+      TEST_MATRIX:
+        value: ${{ jobs.preflight.outputs.TEST_MATRIX }}
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      changes_relevant: ${{ steps.changes.outputs.relevant_any_changed == 'true' || steps.changes.outputs.currentWorkflow_any_changed == 'true' }}
+      ZOMBIE_PROVIDER: ${{ steps.vars.outputs.ZOMBIE_PROVIDER }}
+      RUST_LOG: ${{ steps.vars.outputs.RUST_LOG }}
+      ZOMBIENET_SDK_IMAGE: ${{ steps.vars.outputs.ZOMBIENET_SDK_IMAGE }}
+      ZOMBIENET_SDK_DEFAULT_RUNNER: ${{ steps.vars.outputs.ZOMBIENET_SDK_DEFAULT_RUNNER }}
+      ZOMBIENET_SDK_LARGE_RUNNER: ${{ steps.vars.outputs.ZOMBIENET_SDK_LARGE_RUNNER }}
+      POLKADOT_RELEASE_TAG: ${{ steps.vars.outputs.POLKADOT_RELEASE_TAG }}
+      TEST_MATRIX: ${{ steps.matrix.outputs.TEST_MATRIX }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Detect relevant changes
+        id: changes
+        uses: tj-actions/changed-files@8cba46e29c11878d930bca7870bb54394d3e8b21 # v47.0.2
+        with:
+          files_yaml: |
+            relevant:
+              - 'lib/**'
+              - 'light-base/**'
+              - 'wasm-node/**'
+              - 'e2e-tests/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            currentWorkflow:
+              - '.github/workflows/zombienet.yml'
+              - '.github/workflows/zombienet-reusable-preflight.yml'
+              - '.github/actions/zombienet-smoldot/**'
+              - '.github/zombienet-env'
+              - '.github/zombienet-tests/**'
+              - '.github/scripts/parse-zombienet-tests.py'
+
+      - name: Set vars
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            # shellcheck disable=SC2002
+            cat .github/zombienet-env | grep -Ev '^\s*#|^\s*$'
+            . .github/zombienet-env
+            echo "ZOMBIENET_SDK_IMAGE=${ZOMBIENET_SDK_IMAGE_FOR_NATIVE}"
+            echo "ZOMBIENET_SDK_DEFAULT_RUNNER=${ZOMBIENET_SDK_DEFAULT_RUNNER_FOR_NATIVE}"
+            echo "ZOMBIENET_SDK_LARGE_RUNNER=${ZOMBIENET_SDK_LARGE_RUNNER_FOR_NATIVE}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyYAML
+        shell: bash
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: Generate test matrix
+        id: matrix
+        shell: bash
+        env:
+          TESTS_YAML: ${{ inputs.tests_yaml }}
+          TEST_PATTERN: ${{ inputs.test_pattern || '' }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/parse-zombienet-tests.py \
+            --matrix "$TESTS_YAML" \
+            --test-pattern "$TEST_PATTERN" > matrix.json
+          echo "TEST_MATRIX=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "Generated matrix:"
+          cat matrix.json | python3 -m json.tool

@@ -5,29 +5,54 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      test_pattern:
+        description: "Regex over job-name to run a subset of tests."
+        type: string
+        default: ""
+        required: false
 
 concurrency:
-  group: zombienet-e2e-${{ github.ref }}
+  group: zombienet-e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  POLKADOT_IMAGE: docker.io/parity/polkadot:stable2603
-  CUMULUS_IMAGE: docker.io/parity/polkadot-parachain:stable2603
+permissions: read-all
 
 jobs:
-  light-node-submission:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
+  preflight:
+    uses: ./.github/workflows/zombienet-reusable-preflight.yml
+    with:
+      tests_yaml: .github/zombienet-tests/zombienet_smoldot_tests.yml
+      test_pattern: ${{ inputs.test_pattern }}
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+  zombienet-smoldot-tests:
+    name: ${{ matrix.test.job-name }}
+    needs: preflight
+    if: ${{ github.event_name == 'workflow_dispatch' || needs.preflight.outputs.changes_relevant == 'true' }}
+    runs-on: ${{ matrix.test.runner-type == 'large' && needs.preflight.outputs.ZOMBIENET_SDK_LARGE_RUNNER || needs.preflight.outputs.ZOMBIENET_SDK_DEFAULT_RUNNER }}
+    timeout-minutes: 40
+    container:
+      image: ${{ needs.preflight.outputs.ZOMBIENET_SDK_IMAGE }}
+      options: -v /tmp/zombienet:/tmp/zombienet
+    env:
+      ZOMBIE_PROVIDER: ${{ needs.preflight.outputs.ZOMBIE_PROVIDER }}
+      RUST_LOG: ${{ needs.preflight.outputs.RUST_LOG }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        test: ${{ fromJson(needs.preflight.outputs.TEST_MATRIX) }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - uses: actions/setup-node@v6.1.0
         with:
-          node-version: '18'
+          node-version: '22'
+
+      - name: Install wasm target
+        shell: bash
+        run: rustup target add wasm32-unknown-unknown
 
       - name: Cache cargo registry + e2e-tests target
         uses: actions/cache@v4
@@ -51,51 +76,30 @@ jobs:
           key: e2e-js-nm-${{ hashFiles('e2e-tests/js/package-lock.json') }}
 
       - name: Install smoldot JS deps
+        shell: bash
         run: npm ci
         working-directory: wasm-node/javascript
 
       - name: Install e2e-tests JS deps
+        shell: bash
         run: npm ci
         working-directory: e2e-tests/js
 
-      - name: Extract polkadot + polkadot-parachain binaries
-        # The docker provider's multiaddr is broken for host-side clients (it advertises the
-        # container bridge IP with the host-mapped port, which is unroutable). Run native
-        # instead: use Docker only as a delivery mechanism for versioned binaries.
-        run: |
-          set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/bin"
-          docker pull "$POLKADOT_IMAGE"
-          docker pull "$CUMULUS_IMAGE"
-          cid=$(docker create "$POLKADOT_IMAGE")
-          docker cp "${cid}:/usr/bin/polkadot"                         "$GITHUB_WORKSPACE/bin/"
-          docker cp "${cid}:/usr/lib/polkadot/polkadot-execute-worker" "$GITHUB_WORKSPACE/bin/"
-          docker cp "${cid}:/usr/lib/polkadot/polkadot-prepare-worker" "$GITHUB_WORKSPACE/bin/"
-          docker rm "${cid}"
-          cid=$(docker create "$CUMULUS_IMAGE")
-          docker cp "${cid}:/usr/local/bin/polkadot-parachain"         "$GITHUB_WORKSPACE/bin/"
-          docker rm "${cid}"
-          chmod +x "$GITHUB_WORKSPACE/bin/"*
-          "$GITHUB_WORKSPACE/bin/polkadot" --version
-          "$GITHUB_WORKSPACE/bin/polkadot-parachain" --version
-
-      - name: Run e2e tests
-        env:
-          ZOMBIE_PROVIDER: native
-          RUST_LOG: info
-        run: |
-          export PATH="$GITHUB_WORKSPACE/bin:$PATH"
-          cargo test --locked --manifest-path e2e-tests/Cargo.toml \
-            --test light_node_submission \
-            --test light_node_reception \
-            --test light_node_peer_connection \
-            -- --nocapture --test-threads 1
+      # Pull binaries from the polkadot-sdk release rather than extracting
+      # from a Docker image — running polkadot natively avoids the docker
+      # provider's broken multiaddr advertisement (container bridge IP with
+      # host-mapped port is unroutable for host-side clients like smoldot).
+      - name: Run test
+        uses: ./.github/actions/zombienet-smoldot
+        with:
+          polkadot-release-tag: ${{ needs.preflight.outputs.POLKADOT_RELEASE_TAG }}
+          test-binary: ${{ matrix.test.test-binary }}
 
       - name: Upload zombienet logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: zombienet-logs
+          name: zombienet-logs-${{ matrix.test.job-name }}-${{ github.sha }}
           path: |
             /tmp/zombie-*/**
             /tmp/zombienet-*/**

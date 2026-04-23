@@ -1,0 +1,22 @@
+# Matrix of zombienet tests fanned out by `.github/workflows/zombienet.yml`.
+#
+# Fields:
+#   job-name     — unique, human-readable identifier surfaced in GH UI/artifacts.
+#   test-binary  — cargo integration-test binary to run (file under `e2e-tests/tests/`).
+#                  Phase 2 will switch this to `test-filter` once tests live in
+#                  a single binary with module-path filtering.
+#   runner-type  — `default` or `large`; maps to ZOMBIENET_SDK_*_RUNNER_FOR_NATIVE.
+#
+# Add a new test → add a new entry. No workflow edits required.
+
+- job-name: "zombienet-smoldot-0001-statement_store_light_node_submission"
+  test-binary: "light_node_submission"
+  runner-type: "default"
+
+- job-name: "zombienet-smoldot-0002-statement_store_light_node_reception"
+  test-binary: "light_node_reception"
+  runner-type: "default"
+
+- job-name: "zombienet-smoldot-0003-statement_store_light_node_peer_connection"
+  test-binary: "light_node_peer_connection"
+  runner-type: "default"
