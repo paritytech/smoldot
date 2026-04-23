@@ -203,7 +203,9 @@ jobs:
         id: devver
         shell: bash
         run: |
-          apt-get update -qq && apt-get install -y -qq jq
+          set -x
+          DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq
           SUFFIX='${{ inputs.npm_tag_suffix }}'
           # Empty suffix is allowed; non-empty must match the charset.
           if [[ -n "$SUFFIX" && ! "$SUFFIX" =~ ^[A-Za-z0-9-]+$ ]]; then
