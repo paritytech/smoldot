@@ -1371,16 +1371,13 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         }
     };
 
-    let (compile_result, slot_duration_proof_result, authorities_proof_result) = future::join3(
-        storage_and_compile_fut,
-        slot_duration_proof_fut,
-        authorities_proof_fut,
-    )
-    .await;
-
-    let (vm, code, storage_heap_pages) = compile_result?;
-    let slot_duration_raw_proof = slot_duration_proof_result?;
-    let authorities_raw_proof = authorities_proof_result?;
+    let ((vm, code, storage_heap_pages), slot_duration_raw_proof, authorities_raw_proof) =
+        future::try_join3(
+            storage_and_compile_fut,
+            slot_duration_proof_fut,
+            authorities_proof_fut,
+        )
+        .await?;
 
     log!(
         platform,
