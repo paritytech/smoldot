@@ -93,7 +93,7 @@ jobs:
         uses: ./.github/actions/zombienet-smoldot
         with:
           polkadot-release-tag: ${{ needs.preflight.outputs.POLKADOT_RELEASE_TAG }}
-          test-filter: ${{ matrix.test.test-filter }}
+          test: ${{ matrix.test.test }}
 
       - name: Upload zombienet logs on failure
         if: failure()
