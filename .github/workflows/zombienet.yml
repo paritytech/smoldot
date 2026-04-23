@@ -10,7 +10,6 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/zombienet.yml'
-      - '.github/actions/zombienet-smoldot/**'
       - '.github/zombienet-env'
   push:
     branches: [main]
@@ -122,11 +121,30 @@ jobs:
       # from a Docker image — running polkadot natively avoids the docker
       # provider's broken multiaddr advertisement (container bridge IP with
       # host-mapped port is unroutable for host-side clients like smoldot).
+      - name: Download polkadot binaries
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.env.outputs.POLKADOT_RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/bin"
+          base="https://github.com/paritytech/polkadot-sdk/releases/download/${RELEASE_TAG}"
+          for bin in polkadot polkadot-execute-worker polkadot-prepare-worker polkadot-parachain; do
+            curl -fL --retry 3 -o "$GITHUB_WORKSPACE/bin/${bin}" "${base}/${bin}"
+            chmod +x "$GITHUB_WORKSPACE/bin/${bin}"
+          done
+          "$GITHUB_WORKSPACE/bin/polkadot" --version
+          "$GITHUB_WORKSPACE/bin/polkadot-parachain" --version
+
       - name: Run test
-        uses: ./.github/actions/zombienet-smoldot
-        with:
-          polkadot-release-tag: ${{ needs.env.outputs.POLKADOT_RELEASE_TAG }}
-          test: ${{ matrix.test.test }}
+        shell: bash
+        env:
+          TEST: ${{ matrix.test.test }}
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/bin:$PATH"
+          cargo test --locked --manifest-path e2e-tests/Cargo.toml \
+            --test "$TEST" -- --nocapture
 
       - name: Upload zombienet logs on failure
         if: failure()
