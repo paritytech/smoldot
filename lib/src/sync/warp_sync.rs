@@ -557,24 +557,14 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         // and verification queue.
         // TODO: what if the new chain doesn't support grandpa?
         if self.warped_header_number <= chain_information.as_ref().finalized_block_header.number {
-            let new_hash = chain_information
-                .as_ref()
-                .finalized_block_header
-                .hash(self.block_number_bytes);
-
-            // If the header hash is identical, nothing has changed — skip the reset.
-            if new_hash == self.warped_header_hash {
-                return;
-            }
-
-            let old_state_root = self.warped_header_state_root;
-            let was_normal = matches!(self.warped_block_ty, WarpedBlockTy::Normal);
-
             self.warped_header = chain_information
                 .as_ref()
                 .finalized_block_header
                 .scale_encoding_vec(self.block_number_bytes);
-            self.warped_header_hash = new_hash;
+            self.warped_header_hash = chain_information
+                .as_ref()
+                .finalized_block_header
+                .hash(self.block_number_bytes);
             self.warped_header_state_root =
                 *chain_information.as_ref().finalized_block_header.state_root;
             self.warped_header_extrinsics_root = *chain_information
@@ -583,25 +573,15 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 .extrinsics_root;
             self.warped_header_number = chain_information.as_ref().finalized_block_header.number;
             self.warped_finality = chain_information.as_ref().finality.into();
-
-            // Preserve `Normal` if warp sync already completed fragment verification.
-            // A GrandPa commit advancing finality by a few blocks should not force
-            // another round of fragment verification.
-            if !was_normal {
-                self.warped_block_ty = WarpedBlockTy::AlreadyVerified;
-            }
+            self.warped_block_ty = WarpedBlockTy::AlreadyVerified;
 
             self.verified_chain_information = chain_information.into();
             self.runtime_calls =
                 runtime_calls_default_value(self.verified_chain_information.as_ref().consensus);
 
-            // Only reset the runtime download if the state root changed, since
-            // cached proofs are valid as long as the state root matches.
-            if self.warped_header_state_root != old_state_root {
-                self.runtime_download = RuntimeDownload::NotStarted {
-                    hint_doesnt_match: false,
-                };
-            }
+            self.runtime_download = RuntimeDownload::NotStarted {
+                hint_doesnt_match: false,
+            };
 
             if !matches!(self.body_download, BodyDownload::NotNeeded) {
                 self.body_download = BodyDownload::NotStarted;
