@@ -15,7 +15,7 @@ use clap::Parser;
 use log::{info, warn};
 use smoldot_benchmarks::{
     current_finalized_block, ensure_js_deps_installed, ensure_smoldot_js_deps_installed,
-    pick_bench_nodes, wait_for_finalized_block, Stats,
+    pick_bench_nodes, read_chain_spec_info, wait_for_finalized_block, ChainSpecInfo, Stats,
 };
 use smoldot_e2e_tests::{
     ensure_smoldot_built, resolve_base_dir,
@@ -143,6 +143,16 @@ async fn main() -> Result<(), anyhow::Error> {
         (relay_path, Some(para_path), Some(network))
     };
 
+    let relay_info = read_chain_spec_info(&relay_spec)?;
+    let para_info = match para_spec.as_deref() {
+        Some(p) => Some(read_chain_spec_info(p)?),
+        None => None,
+    };
+    info!("Relay chain: {}", relay_info.label());
+    if let Some(p) = &para_info {
+        info!("Para chain:  {}", p.label());
+    }
+
     let total = args.warmup + args.iterations;
     info!(
         "Running {} warmup + {} measured iteration(s), target={:?}",
@@ -184,8 +194,33 @@ async fn main() -> Result<(), anyhow::Error> {
         follow_subscribe: stats_over(&samples, |s| s.follow_subscribe_ms),
         wait_initialized: stats_over(&samples, |s| s.wait_initialized_ms),
     };
-    print_report(&args, &total_stats, &phase_stats, before, after);
+    let source = if network.is_some() {
+        "zombienet-local"
+    } else {
+        "user-supplied spec"
+    };
+    print_report(&Report {
+        args: &args,
+        source,
+        relay: &relay_info,
+        para: para_info.as_ref(),
+        total: &total_stats,
+        phases: &phase_stats,
+        before,
+        after,
+    });
     Ok(())
+}
+
+struct Report<'a> {
+    args: &'a Args,
+    source: &'a str,
+    relay: &'a ChainSpecInfo,
+    para: Option<&'a ChainSpecInfo>,
+    total: &'a Stats,
+    phases: &'a PhaseStats,
+    before: DriftBlocks,
+    after: DriftBlocks,
 }
 
 #[derive(Clone, Debug)]
@@ -347,53 +382,55 @@ async fn drift_blocks(
     DriftBlocks { relay, para }
 }
 
-fn print_report(
-    args: &Args,
-    total: &Stats,
-    phases: &PhaseStats,
-    before: DriftBlocks,
-    after: DriftBlocks,
-) {
+fn print_report(r: &Report<'_>) {
     println!();
     println!("=== cold-startup benchmark ===");
-    println!("target              : {:?}", args.target);
-    println!("iterations          : {}", total.n);
-    println!("warmup              : {}", args.warmup);
-    println!("with_runtime        : {}", !args.no_with_runtime);
-    print_drift("relay finalized", before.relay, after.relay);
-    print_drift("para finalized", before.para, after.para);
+    println!("source              : {}", r.source);
+    println!("relay chain         : {}", r.relay.label());
+    if let Some(p) = r.para {
+        println!("para chain          : {}", p.label());
+    }
+    println!("target              : {:?}", r.args.target);
+    println!("iterations          : {}", r.total.n);
+    println!("warmup              : {}", r.args.warmup);
+    println!("with_runtime        : {}", !r.args.no_with_runtime);
+    print_drift("relay finalized", r.before.relay, r.after.relay);
+    print_drift("para finalized", r.before.para, r.after.para);
     println!();
-    print_stats_block("initialized_ms (total)", total);
-    if let Some(s) = &phases.add_chain_relay {
+    print_stats_block("initialized_ms (total)", r.total);
+    if let Some(s) = &r.phases.add_chain_relay {
         print_stats_block("  addChain relay", s);
     }
-    if let Some(s) = &phases.add_chain_para {
+    if let Some(s) = &r.phases.add_chain_para {
         print_stats_block("  addChain para", s);
     }
-    if let Some(s) = &phases.follow_subscribe {
+    if let Some(s) = &r.phases.follow_subscribe {
         print_stats_block("  follow subscribe reply", s);
     }
-    if let Some(s) = &phases.wait_initialized {
+    if let Some(s) = &r.phases.wait_initialized {
         print_stats_block("  wait initialized event", s);
     }
 
-    if args.json {
+    if r.args.json {
         let obj = serde_json::json!({
-            "target": format!("{:?}", args.target).to_lowercase(),
-            "iterations": total.n,
-            "warmup": args.warmup,
-            "with_runtime": !args.no_with_runtime,
-            "initialized_ms": total,
+            "source": r.source,
+            "relay_chain": r.relay,
+            "para_chain": r.para,
+            "target": format!("{:?}", r.args.target).to_lowercase(),
+            "iterations": r.total.n,
+            "warmup": r.args.warmup,
+            "with_runtime": !r.args.no_with_runtime,
+            "initialized_ms": r.total,
             "phases": {
-                "add_chain_relay_ms": phases.add_chain_relay,
-                "add_chain_para_ms": phases.add_chain_para,
-                "follow_subscribe_ms": phases.follow_subscribe,
-                "wait_initialized_ms": phases.wait_initialized,
+                "add_chain_relay_ms": r.phases.add_chain_relay,
+                "add_chain_para_ms": r.phases.add_chain_para,
+                "follow_subscribe_ms": r.phases.follow_subscribe,
+                "wait_initialized_ms": r.phases.wait_initialized,
             },
-            "relay_finalized_before": before.relay,
-            "relay_finalized_after": after.relay,
-            "para_finalized_before": before.para,
-            "para_finalized_after": after.para,
+            "relay_finalized_before": r.before.relay,
+            "relay_finalized_after": r.after.relay,
+            "para_finalized_before": r.before.para,
+            "para_finalized_after": r.after.para,
         });
         println!();
         println!("JSON {}", serde_json::to_string(&obj).unwrap());

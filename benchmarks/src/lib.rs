@@ -60,6 +60,40 @@ pub fn benchmarks_js_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("js")
 }
 
+/// Human-facing identifiers pulled from a chain-spec JSON file.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChainSpecInfo {
+    pub name: Option<String>,
+    pub id: Option<String>,
+}
+
+/// Reads the top-level `name` and `id` fields from a chain-spec JSON.
+///
+/// Both fields are optional so partially-formed specs still produce a value
+/// rather than an error.
+pub fn read_chain_spec_info(path: &Path) -> Result<ChainSpecInfo, anyhow::Error> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("read chain spec {}", path.display()))?;
+    let v: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse chain spec {}", path.display()))?;
+    Ok(ChainSpecInfo {
+        name: v.get("name").and_then(|x| x.as_str()).map(String::from),
+        id: v.get("id").and_then(|x| x.as_str()).map(String::from),
+    })
+}
+
+impl ChainSpecInfo {
+    /// Returns a compact `"Name (id)"` / `"Name"` / `"id"` label for humans.
+    pub fn label(&self) -> String {
+        match (&self.name, &self.id) {
+            (Some(n), Some(i)) if n != i => format!("{n} ({i})"),
+            (Some(n), _) => n.clone(),
+            (_, Some(i)) => i.clone(),
+            _ => "<unknown>".to_string(),
+        }
+    }
+}
+
 /// Polls `chain_getFinalizedHead` + `chain_getHeader` on `node` until the
 /// finalized block number is at least `min_block`, or `timeout` elapses.
 ///
