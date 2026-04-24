@@ -146,35 +146,72 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let before = drift_blocks(network.as_ref()).await;
 
-    let mut samples = Vec::with_capacity(args.iterations);
+    let mut samples: Vec<Sample> = Vec::with_capacity(args.iterations);
     for i in 0..total {
         let label = if i < args.warmup {
             format!("warmup {}/{}", i + 1, args.warmup)
         } else {
             format!("sample {}/{}", i - args.warmup + 1, args.iterations)
         };
-        let ms = run_one(&args, &relay_spec, para_spec.as_deref())
+        let s = run_one(&args, &relay_spec, para_spec.as_deref())
             .await
             .with_context(|| format!("iteration {label} failed"))?;
-        info!("[{label}] initialized_ms = {ms:.1}");
+        info!(
+            "[{label}] initialized_ms = {:.1} (addChain_relay={:.1} addChain_para={:.1} follow_subscribe={:.1} wait_initialized={:.1})",
+            s.initialized_ms,
+            s.add_chain_relay_ms.unwrap_or(f64::NAN),
+            s.add_chain_para_ms.unwrap_or(f64::NAN),
+            s.follow_subscribe_ms.unwrap_or(f64::NAN),
+            s.wait_initialized_ms.unwrap_or(f64::NAN),
+        );
         if i >= args.warmup {
-            samples.push(ms);
+            samples.push(s);
         }
     }
 
     let after = drift_blocks(network.as_ref()).await;
 
-    let stats = Stats::from_samples(&samples)
+    let total_stats = stats_over(&samples, |s| Some(s.initialized_ms))
         .ok_or_else(|| anyhow!("no samples collected"))?;
-    print_report(&args, &stats, before, after);
+    let phase_stats = PhaseStats {
+        add_chain_relay: stats_over(&samples, |s| s.add_chain_relay_ms),
+        add_chain_para: stats_over(&samples, |s| s.add_chain_para_ms),
+        follow_subscribe: stats_over(&samples, |s| s.follow_subscribe_ms),
+        wait_initialized: stats_over(&samples, |s| s.wait_initialized_ms),
+    };
+    print_report(&args, &total_stats, &phase_stats, before, after);
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct Sample {
+    initialized_ms: f64,
+    add_chain_relay_ms: Option<f64>,
+    add_chain_para_ms: Option<f64>,
+    follow_subscribe_ms: Option<f64>,
+    wait_initialized_ms: Option<f64>,
+}
+
+struct PhaseStats {
+    add_chain_relay: Option<Stats>,
+    add_chain_para: Option<Stats>,
+    follow_subscribe: Option<Stats>,
+    wait_initialized: Option<Stats>,
+}
+
+fn stats_over<F>(samples: &[Sample], f: F) -> Option<Stats>
+where
+    F: Fn(&Sample) -> Option<f64>,
+{
+    let vals: Vec<f64> = samples.iter().filter_map(&f).collect();
+    Stats::from_samples(&vals)
 }
 
 async fn run_one(
     args: &Args,
     relay_spec: &std::path::Path,
     para_spec: Option<&std::path::Path>,
-) -> Result<f64, anyhow::Error> {
+) -> Result<Sample, anyhow::Error> {
     let script = smoldot_benchmarks::benchmarks_js_dir().join("cold_startup.js");
     let cwd = smoldot_benchmarks::benchmarks_js_dir()
         .parent()
@@ -229,9 +266,21 @@ async fn run_one(
 
     let v: serde_json::Value = serde_json::from_str(&result_line)
         .with_context(|| format!("parse RESULT line: {result_line}"))?;
-    v.get("initialized_ms")
+    let initialized_ms = v
+        .get("initialized_ms")
         .and_then(|x| x.as_f64())
-        .ok_or_else(|| anyhow!("RESULT missing initialized_ms field: {result_line}"))
+        .ok_or_else(|| anyhow!("RESULT missing initialized_ms field: {result_line}"))?;
+    let phases = v.get("phases");
+    let get_phase = |name: &str| -> Option<f64> {
+        phases.and_then(|p| p.get(name)).and_then(|x| x.as_f64())
+    };
+    Ok(Sample {
+        initialized_ms,
+        add_chain_relay_ms: get_phase("add_chain_relay_ms"),
+        add_chain_para_ms: get_phase("add_chain_para_ms"),
+        follow_subscribe_ms: get_phase("follow_subscribe_ms"),
+        wait_initialized_ms: get_phase("wait_initialized_ms"),
+    })
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -266,30 +315,49 @@ async fn drift_blocks(
     DriftBlocks { relay, para }
 }
 
-fn print_report(args: &Args, stats: &Stats, before: DriftBlocks, after: DriftBlocks) {
+fn print_report(
+    args: &Args,
+    total: &Stats,
+    phases: &PhaseStats,
+    before: DriftBlocks,
+    after: DriftBlocks,
+) {
     println!();
     println!("=== cold-startup benchmark ===");
     println!("target              : {:?}", args.target);
-    println!("iterations          : {}", stats.n);
+    println!("iterations          : {}", total.n);
     println!("warmup              : {}", args.warmup);
     println!("with_runtime        : {}", !args.no_with_runtime);
     print_drift("relay finalized", before.relay, after.relay);
     print_drift("para finalized", before.para, after.para);
     println!();
-    println!("initialized_ms:");
-    println!("  mean    = {:.1}", stats.mean);
-    println!("  median  = {:.1}", stats.median);
-    println!("  p95     = {:.1}", stats.p95);
-    println!("  stddev  = {:.1}", stats.stddev);
-    println!("  min/max = {:.1} / {:.1}", stats.min, stats.max);
+    print_stats_block("initialized_ms (total)", total);
+    if let Some(s) = &phases.add_chain_relay {
+        print_stats_block("  addChain relay", s);
+    }
+    if let Some(s) = &phases.add_chain_para {
+        print_stats_block("  addChain para", s);
+    }
+    if let Some(s) = &phases.follow_subscribe {
+        print_stats_block("  follow subscribe reply", s);
+    }
+    if let Some(s) = &phases.wait_initialized {
+        print_stats_block("  wait initialized event", s);
+    }
 
     if args.json {
         let obj = serde_json::json!({
             "target": format!("{:?}", args.target).to_lowercase(),
-            "iterations": stats.n,
+            "iterations": total.n,
             "warmup": args.warmup,
             "with_runtime": !args.no_with_runtime,
-            "initialized_ms": stats,
+            "initialized_ms": total,
+            "phases": {
+                "add_chain_relay_ms": phases.add_chain_relay,
+                "add_chain_para_ms": phases.add_chain_para,
+                "follow_subscribe_ms": phases.follow_subscribe,
+                "wait_initialized_ms": phases.wait_initialized,
+            },
             "relay_finalized_before": before.relay,
             "relay_finalized_after": after.relay,
             "para_finalized_before": before.para,
@@ -298,6 +366,13 @@ fn print_report(args: &Args, stats: &Stats, before: DriftBlocks, after: DriftBlo
         println!();
         println!("JSON {}", serde_json::to_string(&obj).unwrap());
     }
+}
+
+fn print_stats_block(label: &str, s: &Stats) {
+    println!(
+        "{label:<28} mean={:.1} median={:.1} p95={:.1} stddev={:.1} min={:.1} max={:.1}",
+        s.mean, s.median, s.p95, s.stddev, s.min, s.max
+    );
 }
 
 fn print_drift(label: &str, before: Option<u64>, after: Option<u64>) {

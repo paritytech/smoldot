@@ -49,16 +49,27 @@ const client = start({
 
 let exitCode = 1;
 try {
+  const tBeforeRelay = performance.now();
   const relay = await client.addChain({ chainSpec: relaySpec });
+  const tAfterRelay = performance.now();
+
+  let tBeforePara = tAfterRelay;
+  let tAfterPara = tAfterRelay;
   const chain =
     target === "relay"
       ? relay
-      : await client.addChain({
-          chainSpec: paraSpec,
-          potentialRelayChains: [relay],
-        });
+      : await (async () => {
+          tBeforePara = performance.now();
+          const p = await client.addChain({
+            chainSpec: paraSpec,
+            potentialRelayChains: [relay],
+          });
+          tAfterPara = performance.now();
+          return p;
+        })();
 
   const followReqId = "1";
+  const tFollowSent = performance.now();
   chain.sendJsonRpc(
     JSON.stringify({
       jsonrpc: "2.0",
@@ -71,6 +82,7 @@ try {
   // Drain responses until we see an "initialized" notification for our
   // subscription. `subId` is set once the follow response arrives.
   let subId = null;
+  let tSubId = null;
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
@@ -94,6 +106,7 @@ try {
         );
       }
       subId = msg.result;
+      tSubId = performance.now();
       continue;
     }
     if (
@@ -102,8 +115,20 @@ try {
       msg.params.result?.event === "initialized"
     ) {
       const tInit = performance.now();
-      const initializedMs = tInit - tStart;
-      console.log(`RESULT ${JSON.stringify({ initialized_ms: initializedMs })}`);
+      const phases = {
+        add_chain_relay_ms: tAfterRelay - tBeforeRelay,
+        follow_subscribe_ms: tSubId !== null ? tSubId - tFollowSent : null,
+        wait_initialized_ms:
+          tSubId !== null ? tInit - tSubId : tInit - tFollowSent,
+      };
+      if (target === "para") {
+        phases.add_chain_para_ms = tAfterPara - tBeforePara;
+      }
+      const result = {
+        initialized_ms: tInit - tStart,
+        phases,
+      };
+      console.log(`RESULT ${JSON.stringify(result)}`);
       exitCode = 0;
       break;
     }
