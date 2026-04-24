@@ -15,17 +15,25 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::time::{Duration, Instant};
 use log::info;
 use smoldot::network::codec::statement_hash;
 use smoldot_e2e_tests::statement::*;
 use smoldot_e2e_tests::*;
-use zombienet_sdk::subxt::ext::subxt_rpcs::rpc_params;
 
 fn decode_hex_0x(s: &str) -> Vec<u8> {
     hex::decode(s.trim_start_matches("0x")).expect("valid hex")
 }
 
+/// Smoldot delivers statements that match its subscription filter, dedups
+/// across peers, and drops statements outside the filter.
+///
+/// Flow:
+///   1. Spawn collator-0 + collator-1.
+///   2. Submit stmt_A (topic A) and stmt_B (topic B) to collator-0; wait for
+///      both to reach collator-1 so the two full nodes hold the same set.
+///   3. Start smoldot; it peers with both collators and subscribes to topic A.
+///   4. Smoldot must deliver stmt_A to the subscriber exactly once, never
+///      deliver stmt_B, and never deliver any unrelated statement.
 #[tokio::test(flavor = "multi_thread")]
 async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
@@ -56,77 +64,40 @@ async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
         hex::encode(hash_b)
     );
 
-    // Prepare a READY signal file the JS will write when peered + subscribed.
-    let ready_file = tempfile::Builder::new()
-        .suffix(".ready")
-        .tempfile()?;
-    let ready_path = ready_file.path().to_path_buf();
-    std::fs::write(&ready_path, "")?;
+    // Submit both statements to collator-0, then confirm they reach collator-1
+    // via gossip. Once confirmed, both collators hold the same statements and
+    // smoldot will see them from each peer.
+    let collator_0 = network.get_node("collator-0")?;
+    submit_statement(collator_0, &stmt_a_hex, "stmt_A").await?;
+    submit_statement(collator_0, &stmt_b_hex, "stmt_B").await?;
 
-    // Spawn JS light node concurrently with Rust waiting for READY.
+    let rpc_1 = network.get_node("collator-1")?.rpc().await?;
+    let mut sub_1 = subscribe_any(&rpc_1).await?;
+
+    let received = receive_statements(2, &mut sub_1, 120).await?;
+    assert!(received.contains(&stmt_a_hex) && received.contains(&stmt_b_hex));
+    info!("Both statements confirmed on collator-1 via gossip");
+
     info!("Ensuring smoldot JS bundle is built");
     ensure_smoldot_built();
     info!("Ensuring JS test dependencies are installed");
     ensure_js_deps_installed();
 
-    let relay_spec_str = relay_spec_path.to_str().unwrap().to_string();
-    let para_spec_str = para_spec_path.to_str().unwrap().to_string();
     let topic_a_hex = format!("0x{}", hex::encode(topic_a));
-    let ready_path_str = ready_path.to_str().unwrap().to_string();
-    let stmt_a_hex_for_js = stmt_a_hex.clone();
-    let stmt_b_hex_for_js = stmt_b_hex.clone();
 
-    info!("Spawning JS test: js/statement_store_reception.js (topicA={topic_a_hex})");
-    let js_handle = tokio::spawn(async move {
-        run_js_test(
-            "js/statement_store_reception.js",
-            &[
-                ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
-                ("PARA_CHAIN_SPEC", para_spec_str.as_str()),
-                ("TOPIC_A", topic_a_hex.as_str()),
-                ("STATEMENT_A_HEX", stmt_a_hex_for_js.as_str()),
-                ("STATEMENT_B_HEX", stmt_b_hex_for_js.as_str()),
-                ("READY_FD_PATH", ready_path_str.as_str()),
-            ],
-        )
-        .await
-    });
-
-    // Wait for JS to signal READY (subscription active, peers settled).
-    info!("Waiting up to 120s for JS READY signal at {}", ready_path.display());
-    let ready_deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let contents = tokio::fs::read_to_string(&ready_path)
-            .await
-            .unwrap_or_default();
-        if contents.contains("READY") {
-            break;
-        }
-        if Instant::now() >= ready_deadline {
-            anyhow::bail!("Timed out waiting for JS READY signal");
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    info!("JS signalled READY");
-
-    // Submit both statements on collator-0. They will propagate via gossip to
-    // the smoldot light node through two independent paths (collator-0 and
-    // collator-1 → smoldot), exercising smoldot's per-subscription dedup.
-    let collator0 = network.get_node("collator-0")?;
-    let rpc0 = collator0.rpc().await?;
-
-    let submit_a: serde_json::Value = rpc0
-        .request("statement_submit", rpc_params![&stmt_a_hex])
-        .await?;
-    info!("statement_submit(stmt_A) on collator-0 => {submit_a}");
-    let submit_b: serde_json::Value = rpc0
-        .request("statement_submit", rpc_params![&stmt_b_hex])
-        .await?;
-    info!("statement_submit(stmt_B) on collator-0 => {submit_b}");
-
-    info!("Waiting for JS test to finish");
-    let js_result = js_handle.await.expect("JS task panicked");
-    js_result.map_err(|e| anyhow::anyhow!("JS test failed: {e}"))?;
+    info!("Running JS test: js/statement_store_reception.js (topicA={topic_a_hex})");
+    run_js_test(
+        "js/statement_store_reception.js",
+        &[
+            ("RELAY_CHAIN_SPEC", relay_spec_path.to_str().unwrap()),
+            ("PARA_CHAIN_SPEC", para_spec_path.to_str().unwrap()),
+            ("TOPIC_A", topic_a_hex.as_str()),
+            ("STATEMENT_A_HEX", stmt_a_hex.as_str()),
+            ("STATEMENT_B_HEX", stmt_b_hex.as_str()),
+        ],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("JS test failed: {e}"))?;
 
     info!("Light node reception test passed");
     Ok(())

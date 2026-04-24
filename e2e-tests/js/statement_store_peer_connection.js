@@ -15,55 +15,30 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { createClient, addChainFromSpec, sendRpc, report } from "./helpers.js";
+import {
+  createSmoldotClient,
+  addChainFromSpec,
+  sendRpc,
+  report,
+  readJsonRpcUntil,
+} from "./helpers.js";
 
 const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
 const paraSpecPath = process.env.PARA_CHAIN_SPEC;
 const stmtHexes = (process.env.STATEMENT_HEXES || "")
   .split(",")
-  .map((s) => s.trim().toLowerCase())
+  .map((s) => s.trim())
   .filter(Boolean);
-const READY_FD_PATH = process.env.READY_FD_PATH;
 const LISTEN_MS = Number.parseInt(process.env.LISTEN_MS || "300000", 10);
-const PEER_SETTLE_MS = Number.parseInt(
-  process.env.PEER_SETTLE_MS || "15000",
-  10,
-);
 
-if (
-  !relaySpecPath ||
-  !paraSpecPath ||
-  stmtHexes.length === 0 ||
-  !READY_FD_PATH
-) {
+if (!relaySpecPath || !paraSpecPath || stmtHexes.length === 0) {
   console.error(
-    "Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, STATEMENT_HEXES, READY_FD_PATH",
+    "Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, STATEMENT_HEXES",
   );
   process.exit(1);
 }
 
-async function drainUntil(chain, predicate, deadlineMs) {
-  while (Date.now() < deadlineMs) {
-    const remaining = deadlineMs - Date.now();
-    let raw;
-    try {
-      raw = await Promise.race([
-        chain.nextJsonRpcResponse(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("timeout")), remaining),
-        ),
-      ]);
-    } catch (_) {
-      return undefined;
-    }
-    const msg = JSON.parse(raw);
-    const out = predicate(msg);
-    if (out !== undefined) return out;
-  }
-  return undefined;
-}
-
-const client = createClient();
+const client = createSmoldotClient();
 let relay;
 let para;
 let passed = true;
@@ -83,7 +58,7 @@ try {
     "any",
   ]).toString();
 
-  const subId = await drainUntil(
+  const subId = await readJsonRpcUntil(
     para,
     (msg) => {
       if (msg.id === subReqId) {
@@ -102,18 +77,12 @@ try {
   }
   report("statement_subscribeStatement accepted", true, `subId=${subId}`);
 
-  await new Promise((r) => setTimeout(r, PEER_SETTLE_MS));
-
-  const fs = await import("node:fs/promises");
-  await fs.writeFile(READY_FD_PATH, "READY\n");
-  report("signalled READY", true, READY_FD_PATH);
-
   // Record the first time we see each expected hash. Rust will drive the
   // churn + submissions; we just confirm each statement lands eventually.
   const seen = new Map(stmtHexes.map((h) => [h, null]));
   const listenDeadline = Date.now() + LISTEN_MS;
 
-  await drainUntil(
+  await readJsonRpcUntil(
     para,
     (msg) => {
       if (msg.method !== "statement_statement") return undefined;
@@ -122,10 +91,9 @@ try {
       if (result?.event !== "newStatements") return undefined;
       const stmts = result.data?.statements ?? [];
       for (const s of stmts) {
-        const h = s.toLowerCase();
-        if (seen.has(h) && seen.get(h) === null) {
-          seen.set(h, Date.now());
-          console.error(`[received] ${h.slice(0, 18)}…`);
+        if (seen.has(s) && seen.get(s) === null) {
+          seen.set(s, Date.now());
+          console.error(`[received] ${s.slice(0, 18)}…`);
         }
       }
       // Stop listening once every expected hash has been seen.

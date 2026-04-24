@@ -19,6 +19,12 @@ use log::info;
 use smoldot_e2e_tests::*;
 use smoldot_e2e_tests::statement::*;
 
+/// A statement submitted by smoldot propagates to the full-node network.
+///
+/// Flow:
+///   1. Spawn collator-0 + collator-1; subscribe on both over RPC.
+///   2. Start smoldot; it peers with the collators and submits a statement.
+///   3. Both collators must deliver that exact statement to their subscribers.
 #[tokio::test(flavor = "multi_thread")]
 async fn statement_reaches_full_node() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
@@ -43,12 +49,12 @@ async fn statement_reaches_full_node() -> Result<(), anyhow::Error> {
     let statement_hex = create_test_statement(&seed, &topic, data);
     info!("Test statement created ({} bytes encoded)", statement_hex.len() / 2);
 
-    // Subscribe on collator-1 (verify statement reaches a node that may not be directly
-    // connected to smoldot, proving gossip propagation)
-    let collator = network.get_node("collator-1")?;
-    let rpc = collator.rpc().await?;
-    let mut sub = subscribe_any(&rpc).await?;
-    info!("Subscribed to statements on collator-1");
+    // Subscribe on both collators
+    let rpc_0 = network.get_node("collator-0")?.rpc().await?;
+    let rpc_1 = network.get_node("collator-1")?.rpc().await?;
+    let mut sub_0 = subscribe_any(&rpc_0).await?;
+    let mut sub_1 = subscribe_any(&rpc_1).await?;
+    info!("Subscribed to statements on collator-0 and collator-1");
 
     // Ensure smoldot is built and JS deps are installed
     info!("Ensuring smoldot JS bundle is built");
@@ -77,9 +83,14 @@ async fn statement_reaches_full_node() -> Result<(), anyhow::Error> {
         .await
     });
 
-    info!("Waiting up to 180s for statement to arrive on collator-1");
-    let received = expect_one_statement(&mut sub, 180).await?;
-    info!("Statement received on full node: {:?}", received);
+    info!("Waiting up to 180s for statement to arrive on both collators");
+    let (received_0, received_1) = tokio::try_join!(
+        receive_statements(1, &mut sub_0, 180),
+        receive_statements(1, &mut sub_1, 180),
+    )?;
+    assert_eq!(received_0[0], statement_hex);
+    assert_eq!(received_1[0], statement_hex);
+    info!("Submitted statement received on both collator-0 and collator-1");
 
     info!("Waiting for JS test to finish");
     let js_result = js_handle.await.expect("JS task panicked");

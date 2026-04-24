@@ -15,60 +15,31 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { createClient, addChainFromSpec, sendRpc, report } from "./helpers.js";
+import {
+  createSmoldotClient,
+  addChainFromSpec,
+  sendRpc,
+  sendRpcAndWait,
+  report,
+  readJsonRpcUntil,
+} from "./helpers.js";
 
 const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
 const paraSpecPath = process.env.PARA_CHAIN_SPEC;
 const topicAHex = process.env.TOPIC_A;
 const stmtAHex = process.env.STATEMENT_A_HEX;
 const stmtBHex = process.env.STATEMENT_B_HEX;
-const READY_FD_PATH = process.env.READY_FD_PATH;
 const LISTEN_MS = Number.parseInt(process.env.LISTEN_MS || "60000", 10);
-const PEER_SETTLE_MS = Number.parseInt(
-  process.env.PEER_SETTLE_MS || "15000",
-  10,
-);
 
-if (
-  !relaySpecPath ||
-  !paraSpecPath ||
-  !topicAHex ||
-  !stmtAHex ||
-  !stmtBHex ||
-  !READY_FD_PATH
-) {
+if (!relaySpecPath || !paraSpecPath || !topicAHex || !stmtAHex || !stmtBHex) {
   console.error(
-    "Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, TOPIC_A, STATEMENT_A_HEX, STATEMENT_B_HEX, READY_FD_PATH",
+    "Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, TOPIC_A, STATEMENT_A_HEX, STATEMENT_B_HEX",
   );
   process.exit(1);
 }
 
-const norm = (h) => h.toLowerCase();
-const normA = norm(stmtAHex);
-const normB = norm(stmtBHex);
 
-async function drainUntil(chain, predicate, deadlineMs) {
-  while (Date.now() < deadlineMs) {
-    const remaining = deadlineMs - Date.now();
-    let raw;
-    try {
-      raw = await Promise.race([
-        chain.nextJsonRpcResponse(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("timeout")), remaining),
-        ),
-      ]);
-    } catch (_) {
-      return undefined;
-    }
-    const msg = JSON.parse(raw);
-    const out = predicate(msg);
-    if (out !== undefined) return out;
-  }
-  return undefined;
-}
-
-const client = createClient();
+const client = createSmoldotClient();
 let relay;
 let para;
 let passed = true;
@@ -83,13 +54,11 @@ try {
   });
   report("addChain parachain with statementStore", true);
 
-  // Subscribe immediately so the affinity filter is in place before peers
-  // negotiate the statement protocol.
   const subReqId = sendRpc(para, "statement_subscribeStatement", [
     { matchAny: [topicAHex] },
   ]).toString();
 
-  const subId = await drainUntil(
+  const subId = await readJsonRpcUntil(
     para,
     (msg) => {
       if (msg.id === subReqId) {
@@ -108,21 +77,30 @@ try {
   }
   report("statement_subscribeStatement accepted", true, `subId=${subId}`);
 
-  // Give smoldot time to peer with both collators before we signal readiness.
-  await new Promise((r) => setTimeout(r, PEER_SETTLE_MS));
+  // Wait until smoldot is connected to both collators. The dedup assertion
+  // below is only meaningful if both peers are pushing the same statements.
+  const peerDeadline = Date.now() + 60_000;
+  let peers = 0;
+  while (Date.now() < peerDeadline) {
+    const health = await sendRpcAndWait(para, "system_health");
+    peers = health?.peers ?? 0;
+    if (peers >= 2) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  if (peers < 2) {
+    throw new Error(`smoldot only connected to ${peers} peers (expected >= 2)`);
+  }
+  report("smoldot connected to both collators", true, `peers=${peers}`);
 
-  // Signal Rust we're ready to receive statements.
-  const fs = await import("node:fs/promises");
-  await fs.writeFile(READY_FD_PATH, "READY\n");
-  report("signalled READY", true, READY_FD_PATH);
-
-  // Listen for notifications for LISTEN_MS after READY.
+  // Listen for notifications. The statements were submitted on collator-0
+  // before this process started, so they arrive via statement-store gossip
+  // once smoldot peers with the collators.
   let countA = 0;
   let countB = 0;
   let countOther = 0;
   const listenDeadline = Date.now() + LISTEN_MS;
 
-  await drainUntil(
+  await readJsonRpcUntil(
     para,
     (msg) => {
       if (msg.method !== "statement_statement") return undefined;
@@ -131,9 +109,8 @@ try {
       if (result?.event !== "newStatements") return undefined;
       const stmts = result.data?.statements ?? [];
       for (const s of stmts) {
-        const h = norm(s);
-        if (h === normA) countA += 1;
-        else if (h === normB) countB += 1;
+        if (s === stmtAHex) countA += 1;
+        else if (s === stmtBHex) countB += 1;
         else countOther += 1;
       }
       return undefined;

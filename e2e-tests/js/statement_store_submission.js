@@ -16,11 +16,11 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import {
-  createClient,
+  createSmoldotClient,
   addChainFromSpec,
   sendRpc,
   sendRpcAndWait,
-  waitForResponse,
+  waitForJsonRpcMatch,
   report,
 } from "./helpers.js";
 
@@ -35,7 +35,7 @@ if (!relaySpecPath || !paraSpecPath || !statementHex) {
   process.exit(1);
 }
 
-const client = createClient();
+const client = createSmoldotClient();
 let relay;
 let para;
 let passed = true;

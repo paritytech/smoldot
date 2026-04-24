@@ -25,7 +25,7 @@ use log::info;
 use serde_json::Value;
 use smoldot::network::codec::{Proof, Statement, encode_statement};
 use zombienet_sdk::{
-    LocalFileSystem, Network, NetworkConfigBuilder,
+    LocalFileSystem, Network, NetworkConfigBuilder, NetworkNode,
     subxt::{
         backend::rpc::RpcClient,
         ext::subxt_rpcs::{client::RpcSubscription, rpc_params},
@@ -53,11 +53,6 @@ pub fn statement_allowance_key(account_id: impl AsRef<[u8]>) -> Vec<u8> {
 }
 
 /// Template for the statement-store parachain chain spec.
-///
-/// Bundled rather than generated on the fly — polkadot-sdk's statement-store
-/// zombienet tests use the same approach (see `cumulus/zombienet/.../common.rs`).
-/// Regenerated via the `create_people_westend_spec.sh` script in
-/// paritytech/individuality.
 const PEOPLE_WESTEND_LOCAL_SPEC: &str =
     include_str!("../chain-specs/people-westend-local-spec.json");
 
@@ -116,8 +111,8 @@ pub async fn spawn_network(
                 .with_default_command("polkadot")
                 .with_default_image(images.polkadot.as_str())
                 .with_default_args(vec!["-lparachain=debug".into()])
-                .with_node(|node| node.with_name("validator-0").bootnode(true))
-                .with_node(|node| node.with_name("validator-1").bootnode(true))
+                .with_validator(|node| node.with_name("validator-0").bootnode(true))
+                .with_validator(|node| node.with_name("validator-1").bootnode(true))
         })
         .with_parachain(|p| {
             p.with_id(PARA_ID)
@@ -139,7 +134,13 @@ pub async fn spawn_network(
                 .with_collator(|n| n.with_name("collator-0").bootnode(true))
                 .with_collator(|n| n.with_name("collator-1").bootnode(true))
         })
-        .with_global_settings(|g| g.with_base_dir(base_dir_str.as_str()))
+        .with_global_settings(|g| {
+            g.with_base_dir(base_dir_str.as_str())
+                // Keep the network alive if a node exits non-zero. Required so
+                // that `NetworkNode::restart` works under CI — otherwise a kill
+                // during restart is treated as a fatal failure.
+                .with_tear_down_on_failure(false)
+        })
         .build()
         .map_err(|e| {
             let errs = e
@@ -194,6 +195,20 @@ pub fn test_keypair() -> ([u8; 32], [u8; 32]) {
     (seed, pubkey)
 }
 
+/// Submits a hex-encoded statement to a full node and returns the RPC response.
+pub async fn submit_statement(
+    node: &NetworkNode,
+    stmt_hex: &str,
+    label: &str,
+) -> Result<Value, anyhow::Error> {
+    let rpc = node.rpc().await?;
+    let result: Value = rpc
+        .request("statement_submit", rpc_params![&stmt_hex])
+        .await?;
+    info!("statement_submit({label}) on {} => {result}", node.name());
+    Ok(result)
+}
+
 /// Subscribes to all statements on a full node.
 pub async fn subscribe_any(
     rpc: &RpcClient,
@@ -208,32 +223,50 @@ pub async fn subscribe_any(
     Ok(subscription)
 }
 
-/// Waits for a single statement from a subscription.
-pub async fn expect_one_statement(
+/// Collects `count` hex-encoded statements from a subscription. The statements
+/// may arrive across one or more `newStatements` batches; the call returns as
+/// soon as the count is reached or the timeout expires.
+pub async fn receive_statements(
+    count: usize,
     subscription: &mut RpcSubscription<Value>,
     timeout_secs: u64,
-) -> Result<Value, anyhow::Error> {
-    loop {
-        let item = tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            subscription.next(),
-        )
-        .await
-        .map_err(|_| anyhow!("Timeout waiting for statement after {timeout_secs}s"))?
-        .ok_or_else(|| anyhow!("Subscription stream ended unexpectedly"))?
-        .map_err(|e| anyhow!("Subscription error: {e}"))?;
+) -> Result<Vec<String>, anyhow::Error> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let mut collected: Vec<String> = Vec::with_capacity(count);
+
+    while collected.len() < count {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow!(
+                "Timeout after {timeout_secs}s: collected {}/{count} statements",
+                collected.len()
+            ));
+        }
+        let item = tokio::time::timeout(remaining, subscription.next())
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "Timeout after {timeout_secs}s: collected {}/{count} statements",
+                    collected.len()
+                )
+            })?
+            .ok_or_else(|| anyhow!("Subscription stream ended unexpectedly"))?
+            .map_err(|e| anyhow!("Subscription error: {e}"))?;
 
         // StatementEvent is { "event": "newStatements", "data": { "statements": [...], ... } }
-        if let Some(statements) = item
-            .get("data")
-            .and_then(|d| d.get("statements"))
+        if let Some(arr) = item
+            .pointer("/data/statements")
             .and_then(|s| s.as_array())
         {
-            if !statements.is_empty() {
-                return Ok(item);
+            for v in arr {
+                if let Some(s) = v.as_str() {
+                    collected.push(s.to_string());
+                }
             }
         }
     }
+
+    Ok(collected)
 }
 
 /// Creates a signed Ed25519 statement and returns its hex-encoded form.

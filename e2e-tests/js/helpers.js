@@ -18,7 +18,7 @@
 import * as fs from "node:fs";
 import { start } from "smoldot";
 
-export function createClient() {
+export function createSmoldotClient() {
   const maxLogLevel = Number.parseInt(process.env.SMOLDOT_LOG_LEVEL || "3", 10);
   return start({
     maxLogLevel,
@@ -74,7 +74,7 @@ export async function sendRpcAndWait(chain, method, params = [], timeoutMs = 600
   throw new Error(`Timed out waiting for ${method} response after ${timeoutMs}ms`);
 }
 
-export async function waitForResponse(chain, predicate, timeoutMs = 60000) {
+export async function waitForJsonRpcMatch(chain, predicate, timeoutMs = 60000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const raceResult = await Promise.race([
@@ -92,6 +92,27 @@ export async function waitForResponse(chain, predicate, timeoutMs = 60000) {
     }
   }
   throw new Error("Timed out waiting for matching response");
+}
+
+export async function readJsonRpcUntil(chain, predicate, deadlineMs) {
+  while (Date.now() < deadlineMs) {
+    const remaining = deadlineMs - Date.now();
+    let raw;
+    try {
+      raw = await Promise.race([
+        chain.nextJsonRpcResponse(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("timeout")), remaining),
+        ),
+      ]);
+    } catch (_) {
+      return undefined;
+    }
+    const msg = JSON.parse(raw);
+    const out = predicate(msg);
+    if (out !== undefined) return out;
+  }
+  return undefined;
 }
 
 export function report(name, passed, detail) {

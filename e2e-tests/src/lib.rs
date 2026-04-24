@@ -21,10 +21,9 @@ pub mod statement;
 
 /// Resolves the base directory tests share with zombienet.
 ///
-/// Mirrors polkadot-sdk's convention: honour `ZOMBIENET_SDK_BASE_DIR` if set,
-/// otherwise fall back to a per-pid temp dir. Zombienet is configured (via
-/// `with_global_settings`) to use the same path, so the chain-specs it emits
-/// land where the tests can read them back.
+/// Honour `ZOMBIENET_SDK_BASE_DIR` if set, otherwise fall back to a per-pid temp dir.
+/// Zombienet is configured (via `with_global_settings`) to use the same path,
+/// so the chain-specs it emits land where the tests can read them back.
 pub fn resolve_base_dir() -> Result<PathBuf, anyhow::Error> {
     let path = std::env::var("ZOMBIENET_SDK_BASE_DIR")
         .ok()
