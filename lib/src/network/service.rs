@@ -2432,20 +2432,48 @@ where
                                     .is_some()
                             );
 
-                            // If the substream failed to open, we simply try again.
-                            // Trying again means that we might be hammering the remote with
-                            // substream requests, however as of the writing of this text this is
-                            // necessary in order to bypass an issue in Substrate.
-                            // Note that in the situation where the connection is shutting down,
-                            // we don't re-open the substream on a different connection, but
-                            // that's ok as the block announces substream should be closed soon.
+                            // If the substream failed to open, we may try again. Re-trying
+                            // used to be unconditional (with the documented comment that it
+                            // "might be hammering the remote") in order to bypass a transient
+                            // issue in Substrate where a protocol could be briefly
+                            // unavailable.
+                            //
+                            // That unconditional retry is a pathological tight loop when the
+                            // remote peer does not advertise the protocol at all: every
+                            // multistream-select attempt deterministically returns `na`, and
+                            // we respin immediately, producing tens of thousands of attempts
+                            // per second per connection and flooding the host's networking
+                            // stack. This is the situation whenever we try to speak a
+                            // notifications protocol with a peer that hasn't opted into it —
+                            // a concrete example is the statement protocol against a peer
+                            // whose node was not started with the statement-store pallet
+                            // enabled.
+                            //
+                            // Fix: keep retrying on transient errors (timeout / reset /
+                            // decode / …), preserving the long-standing Substrate workaround,
+                            // but treat `ProtocolNotAvailable` — which is the peer's explicit
+                            // answer that the protocol is not supported — as permanent for
+                            // the lifetime of the connection. The one exception is the
+                            // Statement V2 → V1 fallback, which is a single additional try.
+                            //
+                            // When the peer reconnects, the block-announces open path will
+                            // retry every notification protocol from scratch, so nothing is
+                            // permanently lost across sessions.
                             if result.is_err() {
                                 if self.inner.connection_state(connection_id).shutting_down {
                                     continue;
                                 }
 
-                                // Fallback to Statement V1 if Statement V2 failed
-                                let substream_protocol = match (result, substream_protocol) {
+                                // Decide whether to retry and with which protocol.
+                                //
+                                // 1. Statement V2 refused → retry ONCE with Statement V1.
+                                // 2. `ProtocolNotAvailable` otherwise → give up on this
+                                //    (peer, protocol) until the peer reconnects.
+                                // 3. Any other error → retry the same protocol.
+                                let (substream_protocol, should_retry) = match (
+                                    &result,
+                                    substream_protocol,
+                                ) {
                                     (
                                         Err(collection::NotificationsOutErr::Substream(
                                             established::NotificationsOutErr::ProtocolNotAvailable,
@@ -2454,12 +2482,25 @@ where
                                             version: codec::StatementProtocolVersion::V2,
                                             ..
                                         },
-                                    ) => NotificationsProtocol::Statement {
-                                        chain_index,
-                                        version: codec::StatementProtocolVersion::V1,
-                                    },
-                                    _ => substream_protocol,
+                                    ) => (
+                                        NotificationsProtocol::Statement {
+                                            chain_index,
+                                            version: codec::StatementProtocolVersion::V1,
+                                        },
+                                        true,
+                                    ),
+                                    (
+                                        Err(collection::NotificationsOutErr::Substream(
+                                            established::NotificationsOutErr::ProtocolNotAvailable,
+                                        )),
+                                        p,
+                                    ) => (p, false),
+                                    (_, p) => (p, true),
                                 };
+
+                                if !should_retry {
+                                    continue;
+                                }
 
                                 let new_substream_id = self.inner.open_out_notifications(
                                     connection_id,
