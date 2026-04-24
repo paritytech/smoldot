@@ -19,9 +19,9 @@ import {
   createSmoldotClient,
   addChainFromSpec,
   sendRpc,
-  sendRpcAndWait,
   report,
   readJsonRpcUntil,
+  waitForMessage,
 } from "./helpers.js";
 
 const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
@@ -29,11 +29,19 @@ const paraSpecPath = process.env.PARA_CHAIN_SPEC;
 const topicAHex = process.env.TOPIC_A;
 const stmtAHex = process.env.STATEMENT_A_HEX;
 const stmtBHex = process.env.STATEMENT_B_HEX;
-const LISTEN_MS = Number.parseInt(process.env.LISTEN_MS || "60000", 10);
+const SYNC_PATH = process.env.SYNC_PATH;
+const LISTEN_MS = Number.parseInt(process.env.LISTEN_MS || "10000", 10);
 
-if (!relaySpecPath || !paraSpecPath || !topicAHex || !stmtAHex || !stmtBHex) {
+if (
+  !relaySpecPath ||
+  !paraSpecPath ||
+  !topicAHex ||
+  !stmtAHex ||
+  !stmtBHex ||
+  !SYNC_PATH
+) {
   console.error(
-    "Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, TOPIC_A, STATEMENT_A_HEX, STATEMENT_B_HEX",
+    "Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, TOPIC_A, STATEMENT_A_HEX, STATEMENT_B_HEX, SYNC_PATH",
   );
   process.exit(1);
 }
@@ -77,28 +85,20 @@ try {
   }
   report("statement_subscribeStatement accepted", true, `subId=${subId}`);
 
-  // Wait until smoldot is connected to both collators. The dedup assertion
-  // below is only meaningful if both peers are pushing the same statements.
-  const peerDeadline = Date.now() + 60_000;
-  let peers = 0;
-  while (Date.now() < peerDeadline) {
-    const health = await sendRpcAndWait(para, "system_health");
-    peers = health?.peers ?? 0;
-    if (peers >= 2) break;
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  if (peers < 2) {
-    throw new Error(`smoldot only connected to ${peers} peers (expected >= 2)`);
-  }
-  report("smoldot connected to both collators", true, `peers=${peers}`);
+  // Block until Rust signals that smoldot is peered with both collators at
+  // the statement-store level. The listen window below only makes sense
+  // after that point: both peers push stmt_A during their initial sync.
+  await waitForMessage(SYNC_PATH, "READY");
+  report("Rust signalled READY", true);
 
-  // Listen for notifications. The statements were submitted on collator-0
-  // before this process started, so they arrive via statement-store gossip
-  // once smoldot peers with the collators.
   let countA = 0;
   let countB = 0;
   let countOther = 0;
-  const listenDeadline = Date.now() + LISTEN_MS;
+  let firstAms = null;
+  let firstBms = null;
+  let firstOtherMs = null;
+  const listenStart = Date.now();
+  const listenDeadline = listenStart + LISTEN_MS;
 
   await readJsonRpcUntil(
     para,
@@ -108,10 +108,18 @@ try {
       const result = msg.params.result;
       if (result?.event !== "newStatements") return undefined;
       const stmts = result.data?.statements ?? [];
+      const elapsed = Date.now() - listenStart;
       for (const s of stmts) {
-        if (s === stmtAHex) countA += 1;
-        else if (s === stmtBHex) countB += 1;
-        else countOther += 1;
+        if (s === stmtAHex) {
+          countA += 1;
+          if (firstAms === null) firstAms = elapsed;
+        } else if (s === stmtBHex) {
+          countB += 1;
+          if (firstBms === null) firstBms = elapsed;
+        } else {
+          countOther += 1;
+          if (firstOtherMs === null) firstOtherMs = elapsed;
+        }
       }
       return undefined;
     },
@@ -122,7 +130,9 @@ try {
   report(
     "reception: stmt_A received exactly once, stmt_B never, no stray statements",
     ok,
-    `countA=${countA}, countB=${countB}, other=${countOther}`,
+    `stmt_A first=${firstAms}ms count=${countA} | ` +
+      `stmt_B first=${firstBms}ms count=${countB} | ` +
+      `other first=${firstOtherMs}ms count=${countOther}`,
   );
   if (!ok) passed = false;
 

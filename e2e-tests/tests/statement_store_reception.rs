@@ -24,16 +24,17 @@ fn decode_hex_0x(s: &str) -> Vec<u8> {
     hex::decode(s.trim_start_matches("0x")).expect("valid hex")
 }
 
-/// Smoldot delivers statements that match its subscription filter, dedups
-/// across peers, and drops statements outside the filter.
+/// Smoldot delivers statements matching its subscription filter, dedups across
+/// peers, and drops statements outside the filter.
 ///
 /// Flow:
 ///   1. Spawn collator-0 + collator-1.
-///   2. Submit stmt_A (topic A) and stmt_B (topic B) to collator-0; wait for
-///      both to reach collator-1 so the two full nodes hold the same set.
-///   3. Start smoldot; it peers with both collators and subscribes to topic A.
-///   4. Smoldot must deliver stmt_A to the subscriber exactly once, never
-///      deliver stmt_B, and never deliver any unrelated statement.
+///   2. Submit stmt_A and stmt_B to collator-0; wait for both to reach
+///      collator-1 via gossip.
+///   3. Start smoldot; it peers with both collators and subscribes to stmt_A's
+///      topic.
+///   4. Smoldot must deliver stmt_A exactly once, never stmt_B, and nothing
+///      else.
 #[tokio::test(flavor = "multi_thread")]
 async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
@@ -64,15 +65,16 @@ async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
         hex::encode(hash_b)
     );
 
-    // Submit both statements to collator-0, then confirm they reach collator-1
-    // via gossip. Once confirmed, both collators hold the same statements and
-    // smoldot will see them from each peer.
+    // Subscribe on collator-1 first so we don't miss gossip from collator-0.
+    // Bind the RPC client — dropping it closes the websocket and terminates
+    // the subscription stream.
     let collator_0 = network.get_node("collator-0")?;
+    let collator_1 = network.get_node("collator-1")?;
+    let rpc_1 = collator_1.rpc().await?;
+    let mut sub_1 = subscribe_any(&rpc_1).await?;
+
     submit_statement(collator_0, &stmt_a_hex, "stmt_A").await?;
     submit_statement(collator_0, &stmt_b_hex, "stmt_B").await?;
-
-    let rpc_1 = network.get_node("collator-1")?.rpc().await?;
-    let mut sub_1 = subscribe_any(&rpc_1).await?;
 
     let received = receive_statements(2, &mut sub_1, 120).await?;
     assert!(received.contains(&stmt_a_hex) && received.contains(&stmt_b_hex));
@@ -83,21 +85,45 @@ async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
     info!("Ensuring JS test dependencies are installed");
     ensure_js_deps_installed();
 
-    let topic_a_hex = format!("0x{}", hex::encode(topic_a));
+    let sync = SyncFile::new()?;
+    let sync_path_str = sync.path().to_str().unwrap().to_string();
 
-    info!("Running JS test: js/statement_store_reception.js (topicA={topic_a_hex})");
-    run_js_test(
-        "js/statement_store_reception.js",
-        &[
-            ("RELAY_CHAIN_SPEC", relay_spec_path.to_str().unwrap()),
-            ("PARA_CHAIN_SPEC", para_spec_path.to_str().unwrap()),
-            ("TOPIC_A", topic_a_hex.as_str()),
-            ("STATEMENT_A_HEX", stmt_a_hex.as_str()),
-            ("STATEMENT_B_HEX", stmt_b_hex.as_str()),
-        ],
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("JS test failed: {e}"))?;
+    let topic_a_hex = format!("0x{}", hex::encode(topic_a));
+    let relay_spec_str = relay_spec_path.to_str().unwrap().to_string();
+    let para_spec_str = para_spec_path.to_str().unwrap().to_string();
+    let stmt_a_hex_js = stmt_a_hex.clone();
+    let stmt_b_hex_js = stmt_b_hex.clone();
+    let topic_a_hex_js = topic_a_hex.clone();
+
+    info!("Spawning JS test: js/statement_store_reception.js (topicA={topic_a_hex})");
+    let js_handle = tokio::spawn(async move {
+        run_js_test(
+            "js/statement_store_reception.js",
+            &[
+                ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
+                ("PARA_CHAIN_SPEC", para_spec_str.as_str()),
+                ("TOPIC_A", topic_a_hex_js.as_str()),
+                ("STATEMENT_A_HEX", stmt_a_hex_js.as_str()),
+                ("STATEMENT_B_HEX", stmt_b_hex_js.as_str()),
+                ("SYNC_PATH", sync_path_str.as_str()),
+            ],
+        )
+        .await
+    });
+
+    // Wait for smoldot to peer with both collators at the statement-store
+    // level. Each collator already holds stmt_A and stmt_B, so both push them
+    // during the initial statement-store sync — this is what makes the dedup
+    // assertion in JS meaningful.
+    wait_until_peered(collator_0, 2, 120).await?;
+    wait_until_peered(collator_1, 2, 120).await?;
+
+    // Tell JS to start its listen window now that both substreams are up.
+    sync.send("READY")?;
+    info!("Signalled JS READY");
+
+    let js_result = js_handle.await.expect("JS task panicked");
+    js_result.map_err(|e| anyhow::anyhow!("JS test failed: {e}"))?;
 
     info!("Light node reception test passed");
     Ok(())

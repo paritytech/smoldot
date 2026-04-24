@@ -94,6 +94,21 @@ export async function waitForJsonRpcMatch(chain, predicate, timeoutMs = 60000) {
   throw new Error("Timed out waiting for matching response");
 }
 
+/// Polls the Rust→JS sync file at `path` until a line equals `expected`,
+/// or throws on timeout. Pair with `SyncFile` on the Rust side.
+export async function waitForMessage(path, expected, timeoutMs = 120_000, pollMs = 100) {
+  const fs = await import("node:fs/promises");
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const contents = await fs.readFile(path, "utf8").catch(() => "");
+    if (contents.split("\n").some((line) => line.trim() === expected)) {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  throw new Error(`Timed out waiting for sync message "${expected}" at ${path}`);
+}
+
 export async function readJsonRpcUntil(chain, predicate, deadlineMs) {
   while (Date.now() < deadlineMs) {
     const remaining = deadlineMs - Date.now();
@@ -116,10 +131,11 @@ export async function readJsonRpcUntil(chain, predicate, deadlineMs) {
 }
 
 export function report(name, passed, detail) {
+  const suffix = detail ? `: ${detail}` : "";
   if (passed) {
-    console.log(`PASS: ${name}`);
+    console.log(`PASS: ${name}${suffix}`);
   } else {
-    console.log(`FAIL: ${name}: ${detail}`);
+    console.log(`FAIL: ${name}${suffix}`);
     process.exitCode = 1;
   }
 }

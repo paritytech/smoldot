@@ -73,28 +73,29 @@ async fn recovers_statement_delivery_after_peer_restart() -> Result<(), anyhow::
         .await
     });
 
-    // Baseline — delivery works before any disruption.
-    submit_statement(network.get_node("collator-0")?, &stmt_1_hex, "stmt_1").await?;
+    // Wait until smoldot has peered with collator-0, then submit the baseline
+    // statement. Smoldot's statement-store only delivers statements received
+    // over the gossip protocol while peered, so timing matters.
+    let collator_0 = network.get_node("collator-0")?;
+    wait_until_peered(collator_0, 2, 120).await?;
+    submit_statement(collator_0, &stmt_1_hex, "stmt_1").await?;
 
-    // Restart collator-0, then submit once it's back. `restart` awaits the
-    // node being ready again; the submit will land, and smoldot's reconnect
-    // + gossip backfill carries stmt_2 back to the subscriber.
     info!("Restarting collator-0");
-    network
-        .get_node("collator-0")?
+    collator_0
         .restart(None)
         .await
         .map_err(|e| anyhow::anyhow!("restart(collator-0) failed: {e}"))?;
-    submit_statement(network.get_node("collator-0")?, &stmt_2_hex, "stmt_2").await?;
+    wait_until_peered(collator_0, 2, 120).await?;
+    submit_statement(collator_0, &stmt_2_hex, "stmt_2").await?;
 
-    // Same for collator-1.
+    let collator_1 = network.get_node("collator-1")?;
     info!("Restarting collator-1");
-    network
-        .get_node("collator-1")?
+    collator_1
         .restart(None)
         .await
         .map_err(|e| anyhow::anyhow!("restart(collator-1) failed: {e}"))?;
-    submit_statement(network.get_node("collator-1")?, &stmt_3_hex, "stmt_3").await?;
+    wait_until_peered(collator_1, 2, 120).await?;
+    submit_statement(collator_1, &stmt_3_hex, "stmt_3").await?;
 
     info!("Waiting for JS test to finish");
     let js_result = js_handle.await.expect("JS task panicked");

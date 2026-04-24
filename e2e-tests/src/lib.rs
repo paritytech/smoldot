@@ -19,6 +19,34 @@ use std::path::{Path, PathBuf};
 
 pub mod statement;
 
+/// A file-backed Rust → JS message channel. Rust appends newline-terminated
+/// messages with [`SyncFile::send`]; JS polls the file and waits for a given
+/// line via the `waitForMessage` helper in `e2e-tests/js/helpers.js`. The
+/// tempfile lives as long as this struct, so keep it alive for the full test.
+pub struct SyncFile {
+    file: tempfile::NamedTempFile,
+}
+
+impl SyncFile {
+    pub fn new() -> Result<Self, anyhow::Error> {
+        let file = tempfile::Builder::new().suffix(".sync").tempfile()?;
+        Ok(Self { file })
+    }
+
+    pub fn path(&self) -> &Path {
+        self.file.path()
+    }
+
+    pub fn send(&self, message: &str) -> Result<(), anyhow::Error> {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(self.file.path())?;
+        writeln!(f, "{message}")?;
+        Ok(())
+    }
+}
+
 /// Resolves the base directory tests share with zombienet.
 ///
 /// Honour `ZOMBIENET_SDK_BASE_DIR` if set, otherwise fall back to a per-pid temp dir.

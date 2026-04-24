@@ -195,6 +195,40 @@ pub fn test_keypair() -> ([u8; 32], [u8; 32]) {
     (seed, pubkey)
 }
 
+/// Waits until `node` is up and has at least `min_peers` statement-store peers
+/// connected. Uses the `substrate_sync_statement_peers_connected` Prometheus
+/// metric — stricter than the libp2p peer count from `system_health`. Shares
+/// a single deadline between the "up" check and the metric poll.
+pub async fn wait_until_peered(
+    node: &NetworkNode,
+    min_peers: usize,
+    timeout_secs: u64,
+) -> Result<(), anyhow::Error> {
+    let node_name = node.name();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let remaining = || {
+        deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .as_secs()
+            .max(1)
+    };
+
+    node.wait_until_is_up(remaining())
+        .await
+        .map_err(|e| anyhow!("{node_name} did not come up: {e}"))?;
+
+    node.wait_metric_with_timeout(
+        "substrate_sync_statement_peers_connected",
+        |v| v >= min_peers as f64,
+        remaining(),
+    )
+    .await
+    .map_err(|e| anyhow!("{node_name} did not reach {min_peers} peers: {e}"))?;
+
+    info!("{node_name} reached {min_peers} statement-store peers");
+    Ok(())
+}
+
 /// Submits a hex-encoded statement to a full node and returns the RPC response.
 pub async fn submit_statement(
     node: &NetworkNode,
