@@ -7,7 +7,7 @@ members = [
     "light-base",
     "wasm-node/rust",
 ]
-exclude = ["e2e-tests"]
+exclude = ["e2e-tests", "benchmarks"]
 
 [workspace.package]
 authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krieger1708@gmail.com>"]
