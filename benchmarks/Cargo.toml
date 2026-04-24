@@ -17,4 +17,4 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.132"
 smoldot-e2e-tests = { path = "../e2e-tests" }
 tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "process", "time"] }
-zombienet-sdk = "0.3"
+zombienet-sdk = "0.4"
