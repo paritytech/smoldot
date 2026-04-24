@@ -104,12 +104,17 @@ async fn main() -> Result<(), anyhow::Error> {
                 "--target para requires --para-chain-spec when --relay-chain-spec is given"
             ));
         }
-        info!("Using user-supplied chain specs; skipping zombienet spawn");
-        (
-            args.relay_chain_spec.clone().unwrap(),
-            args.para_chain_spec.clone(),
-            None,
-        )
+        let relay = resolve_chain_spec(&args.relay_chain_spec.clone().unwrap())?;
+        let para = args
+            .para_chain_spec
+            .as_ref()
+            .map(|p| resolve_chain_spec(p))
+            .transpose()?;
+        info!("Using chain specs: relay={}", relay.display());
+        if let Some(p) = &para {
+            info!("Using chain specs: para={}", p.display());
+        }
+        (relay, para, None)
     } else {
         let base_dir = resolve_base_dir()?;
         info!("Base dir: {}", base_dir.display());
@@ -205,6 +210,33 @@ where
 {
     let vals: Vec<f64> = samples.iter().filter_map(&f).collect();
     Stats::from_samples(&vals)
+}
+
+/// Accepts either a direct path to a chain spec JSON, or a short name that
+/// resolves to `<repo-root>/demo-chain-specs/<name>.json`. The short-name form
+/// lets `--relay-chain-spec polkadot` work without typing a relative path.
+fn resolve_chain_spec(input: &std::path::Path) -> Result<PathBuf, anyhow::Error> {
+    if input.is_file() {
+        return Ok(input.to_path_buf());
+    }
+    // Short name → demo-chain-specs lookup. Only triggers when the input has
+    // no separator and no extension.
+    let as_str = input.to_string_lossy();
+    let looks_like_name =
+        !as_str.contains('/') && !as_str.contains('\\') && input.extension().is_none();
+    if looks_like_name {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let candidate = repo_root.join("demo-chain-specs").join(format!("{as_str}.json"));
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(anyhow!(
+        "chain spec {:?} not found (tried as-is and as demo-chain-specs/<name>.json)",
+        input
+    ))
 }
 
 async fn run_one(

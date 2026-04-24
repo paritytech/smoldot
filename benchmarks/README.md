@@ -11,10 +11,33 @@ no reused state.
 
 ### Run
 
+Against a zombienet-local network (default — fully reproducible, no
+internet needed):
+
 ```sh
 cd benchmarks
 cargo run --release --bin cold-startup -- --iterations 10
 ```
+
+Against a real public network (uses the `lightSyncState` checkpoint and
+bootnodes shipped in the chain spec):
+
+```sh
+# Polkadot relay
+cargo run --release --bin cold-startup -- \
+  --target relay --relay-chain-spec polkadot --iterations 5
+
+# Polkadot AssetHub parachain
+cargo run --release --bin cold-startup -- \
+  --target para \
+  --relay-chain-spec polkadot \
+  --para-chain-spec polkadot_asset_hub \
+  --iterations 5
+```
+
+Real-network runs depend on reachable public bootnodes and a working
+internet connection, so samples will be noisier than zombienet and may
+need `--timeout-secs` raised from the default 120s on slow links.
 
 Common flags:
 
@@ -25,10 +48,10 @@ Common flags:
 - `--no-with-runtime` — pass `withRuntime: false` (fires earlier; default
   is `true`, which waits for the runtime to be fetched)
 - `--json` — emit a single JSON object in addition to the human report
-- `--relay-chain-spec PATH` / `--para-chain-spec PATH` — skip zombienet
-  spawn and use provided specs (e.g. `demo-chain-specs/polkadot.json` to
-  bench against a live network — note that this depends on external
-  bootnodes being reachable)
+- `--relay-chain-spec <PATH|NAME>` / `--para-chain-spec <PATH|NAME>` —
+  skip zombienet spawn and use provided specs. Accepts either a full
+  path or a short name that resolves to `demo-chain-specs/<name>.json`
+  (so `--relay-chain-spec polkadot` just works).
 
 ### What this measures
 
