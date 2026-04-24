@@ -2,15 +2,6 @@ name: zombienet-e2e
 
 on:
   pull_request:
-    paths:
-      - 'lib/**'
-      - 'light-base/**'
-      - 'wasm-node/**'
-      - 'e2e-tests/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/zombienet.yml'
-      - '.github/zombienet-env'
   push:
     branches: [main]
   workflow_dispatch:
@@ -117,10 +108,7 @@ jobs:
         run: npm ci
         working-directory: e2e-tests/js
 
-      # Pull binaries from the polkadot-sdk release rather than extracting
-      # from a Docker image — running polkadot natively avoids the docker
-      # provider's broken multiaddr advertisement (container bridge IP with
-      # host-mapped port is unroutable for host-side clients like smoldot).
+      # Pull binaries from the polkadot-sdk release
       - name: Download polkadot binaries
         shell: bash
         env:

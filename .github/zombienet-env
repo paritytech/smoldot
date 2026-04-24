@@ -1,13 +1,10 @@
 # Central configuration for zombienet CI runs.
-# Sourced by `.github/workflows/zombienet-reusable-preflight.yml`.
-# Edit here to bump runner, image or polkadot release in one place.
 
-# Provider — `native` runs binaries directly on the runner (no k8s).
+# Provider — `native` runs binaries directly on the runner.
 ZOMBIE_PROVIDER=native
 
 # Container image that executes the test harness. Pinned for reproducibility;
 # bump together with polkadot-sdk's `.github/env` to stay on a common toolchain.
-# Smoldot uses edition 2024, so requires Rust >= 1.85 — the tag below ships 1.93.
 ZOMBIENET_SDK_IMAGE_FOR_NATIVE=docker.io/paritytech/ci-unified:bullseye-1.93.0-2026-01-27-v202604100059
 
 # Parity self-hosted runner pool used by polkadot-sdk's zombienet tests.
