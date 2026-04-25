@@ -50,12 +50,17 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     saved_runtime_code: Option<Vec<u8>>,
 ) {
     // Phase 1: Fetch the current finalized parachain head from the relay chain.
+    // On warm start (saved_runtime_code is Some), use the already-finalized relay
+    // block immediately. On cold start, wait for a new finalization to give peers
+    // time to sync.
+    let is_warm = saved_runtime_code.is_some();
     let effective_chain_info = fetch_parachain_head_from_relay(
         &log_target,
         &platform,
         &relay_chain_sync,
         parachain_id,
         block_number_bytes,
+        is_warm,
     )
     .await;
 
@@ -100,6 +105,8 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     &log_target,
                     &platform,
                     &network_service,
+                    &relay_chain_sync,
+                    parachain_id,
                     &effective_chain_info,
                     block_number_bytes,
                 )
@@ -111,6 +118,8 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             &log_target,
             &platform,
             &network_service,
+            &relay_chain_sync,
+            parachain_id,
             &effective_chain_info,
             block_number_bytes,
         )
@@ -1136,18 +1145,21 @@ async fn cold_bootstrap_loop<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
+    para_id: u32,
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
 ) -> (
     chain::chain_information::ValidChainInformation,
     FinalizedBlockRuntime,
 ) {
+    let mut current_chain_info = chain_info.clone();
     loop {
         match bootstrap_parachain_consensus(
             log_target,
             platform,
             network_service,
-            chain_info,
+            &current_chain_info,
             block_number_bytes,
         )
         .await
@@ -1161,6 +1173,19 @@ async fn cold_bootstrap_loop<TPlat: PlatformRef>(
                     format!("Failed to bootstrap parachain consensus: {err}. Retrying in 5s...")
                 );
                 platform.sleep(Duration::from_secs(5)).await;
+
+                // Re-fetch the parachain head from the current relay finalized
+                // block. The relay chain keeps finalizing while we retry, and
+                // peers are more likely to have synced to a newer block.
+                current_chain_info = fetch_parachain_head_from_relay(
+                    log_target,
+                    platform,
+                    relay_chain_sync,
+                    para_id,
+                    block_number_bytes,
+                    true, // on retry, the relay has had time to finalize
+                )
+                .await;
             }
         }
     }
@@ -1271,21 +1296,28 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
 }
 
 // Fetch the included parachain head from a finalized relay chain block.
+//
+// When `use_initial_finalized` is true (warm start), the function immediately
+// tries the relay chain's already-finalized block. This avoids waiting for a new
+// finalization round when the relay is already synced.
+//
+// On cold start, `use_initial_finalized` should be false: the already-finalized
+// block is very recent and parachain peers may not have synced to it yet. Waiting
+// for a new finalization gives peers time to catch up, preventing call proof
+// timeouts that would waste the 45s papi getFinalizedBlock budget.
 async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
     relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
     para_id: u32,
     block_number_bytes: usize,
+    use_initial_finalized: bool,
 ) -> chain::chain_information::ValidChainInformation {
     let mut subscription = relay_chain_sync
         .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
         .await;
 
-    // Try the already-finalized block first before waiting for new notifications.
-    // On warm restart the relay chain may already be synced, so there's no reason
-    // to wait for the next finalization round.
-    let mut try_initial_finalized = true;
+    let mut try_initial_finalized = use_initial_finalized;
 
     log!(
         platform,
