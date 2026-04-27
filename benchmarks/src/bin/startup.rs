@@ -161,7 +161,7 @@ async fn main() -> Result<(), anyhow::Error> {
         let network = spawn_network(&base_dir, &para_spec_path).await?;
         let (relay_path, para_path) = spawned_chain_spec_paths(&network)?;
 
-        let (validator, _) = pick_bench_nodes(&network)?;
+        let (validator, collator) = pick_bench_nodes(&network)?;
         info!(
             "Waiting for relay finalized block >= {} on {} (timeout {}s)",
             args.min_finalized_before_bench,
@@ -174,6 +174,21 @@ async fn main() -> Result<(), anyhow::Error> {
             Duration::from_secs(args.finalized_wait_secs),
         )
         .await?;
+
+        if matches!(args.target, Target::Para) {
+            info!(
+                "Waiting for para finalized block >= {} on {} (timeout {}s)",
+                args.min_finalized_before_bench,
+                collator.name(),
+                args.finalized_wait_secs,
+            );
+            wait_for_finalized_block(
+                collator,
+                args.min_finalized_before_bench,
+                Duration::from_secs(args.finalized_wait_secs),
+            )
+            .await?;
+        }
 
         (relay_path, Some(para_path), base_dir, Some(network))
     };
