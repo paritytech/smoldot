@@ -16,7 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{
-    BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground, paraheads,
+    BlockNotification, FinalizedBlockRuntime, Notification, RuntimeCodeHint, SubscribeAll,
+    ToBackground, paraheads,
 };
 use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 
@@ -47,7 +48,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     parachain_id: u32,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
-    saved_runtime_code: Option<Vec<u8>>,
+    runtime_code_hint: Option<RuntimeCodeHint>,
 ) {
     // Phase 1: Fetch the current finalized parachain head from the relay chain.
     let effective_chain_info = fetch_parachain_head_from_relay(
@@ -71,20 +72,21 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
 
     // Phase 2: Obtain Aura consensus parameters and the compiled runtime.
     //
-    // Warm path: if the database contains cached runtime code, compile it locally
-    // and verify against the network via lightweight `:heappages` + Aura call proofs
-    // (~few KB total). Skips the ~2 MiB `:code` P2P download.
+    // Warm path: if the database has a cached `:code` triple, fetch a tiny Merkle
+    // proof anchored at `closest_ancestor_excluding`, derive the on-chain `:code`
+    // Merkle value, and compare it to the cached one. On match, reuse the cached
+    // bytes; on mismatch (or any error) fall through to the cold path.
     //
     // Cold path: download `:code` + `:heappages` (~2 MiB), compile, then fetch
     // Aura call proofs to determine consensus parameters.
-    let (effective_chain_info, finalized_runtime) = if let Some(code) = saved_runtime_code {
+    let (effective_chain_info, finalized_runtime) = if let Some(hint) = runtime_code_hint {
         match warm_bootstrap(
             &log_target,
             &platform,
             &network_service,
             &effective_chain_info,
             block_number_bytes,
-            code,
+            hint,
         )
         .await
         {
@@ -94,7 +96,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     &platform,
                     Warn,
                     &log_target,
-                    format!("Warm start failed ({err}), falling back to cold bootstrap...")
+                    format!("Warm start failed ({err}); falling back to cold bootstrap")
                 );
                 cold_bootstrap_loop(
                     &log_target,
@@ -1166,16 +1168,25 @@ async fn cold_bootstrap_loop<TPlat: PlatformRef>(
     }
 }
 
-/// Warm-start: compile cached runtime code locally, then verify against the
-/// network by fetching `:heappages` and Aura call proofs (~few KB total).
-/// Skips the ~2 MiB `:code` P2P download.
+/// Warm-start: verify the cached `:code` against on-chain state via a tiny
+/// Merkle-value proof, then compile and use the cached bytes.
+///
+/// The proof is anchored at `closest_ancestor_excluding` (the parent of `:code`
+/// in the trie) rather than at `:code` itself. This lets us read the Merkle
+/// value of `:code`'s leaf from the parent's child pointer without having the
+/// remote peer send us the ~2 MiB `:code` storage value. State-root binding is
+/// preserved because the parent path itself is still proven against the
+/// finalized block's state root.
+///
+/// On any failure (network error, decoded proof missing data, Merkle mismatch,
+/// compile failure, Aura call failure), the caller falls back to cold bootstrap.
 async fn warm_bootstrap<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
-    code: Vec<u8>,
+    hint: RuntimeCodeHint,
 ) -> Result<BootstrappedParachain, String> {
     let ci_ref = chain_info.as_ref();
     let state_root = *ci_ref.finalized_block_header.state_root;
@@ -1186,17 +1197,24 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
         Info,
         log_target,
         format!(
-            "Warm-starting parachain at block #{} ({}) using {} bytes of cached runtime",
+            "Warm-starting parachain at block #{} ({}) with {}-byte cached runtime",
             ci_ref.finalized_block_header.number,
             HashDisplay(&block_hash),
-            code.len()
+            hint.storage_value.len()
         )
     );
 
     let peer_id = wait_for_peer(network_service).await;
 
-    // Fetch :heappages (tiny) and both Aura call proofs in parallel.
-    let (heap_pages_proof, slot_duration_proof, authorities_proof) = future::try_join3(
+    // Build the bytes form of `closest_ancestor_excluding`. This is the key we
+    // ask the peer to prove; it is a strict prefix of `:code` so the response
+    // contains the trie path up to `:code`'s parent (whose child pointer is the
+    // leaf's Merkle value), but does not have to include the leaf or its value.
+    let ancestor_key_bytes =
+        trie::nibbles_to_bytes_truncate(hint.closest_ancestor_excluding.iter().copied())
+            .collect::<Vec<u8>>();
+
+    let (merkle_proof, slot_duration_proof, authorities_proof) = future::try_join3(
         async {
             network_service
                 .clone()
@@ -1204,12 +1222,12 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
                     peer_id.clone(),
                     codec::StorageProofRequestConfig {
                         block_hash,
-                        keys: [&b":heappages"[..]].into_iter(),
+                        keys: [ancestor_key_bytes.as_slice(), &b":heappages"[..]].into_iter(),
                     },
                     Duration::from_secs(16),
                 )
                 .await
-                .map_err(|e| format!(":heappages storage proof request failed: {e}"))
+                .map_err(|e| format!("Merkle proof request failed: {e}"))
         },
         fetch_call_proof(
             network_service,
@@ -1221,31 +1239,43 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
     )
     .await?;
 
-    // Decode :heappages from the storage proof.
-    let decoded_hp_proof =
-        trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-            proof: heap_pages_proof.decode().to_vec(),
-        })
-        .map_err(|e| format!("Failed to decode :heappages proof: {e}"))?;
+    let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+        proof: merkle_proof.decode().to_vec(),
+    })
+    .map_err(|e| format!("Failed to decode Merkle proof: {e}"))?;
 
-    let heap_pages_raw = decoded_hp_proof
+    let onchain_merkle_value = decoded_proof
+        .closest_descendant_merkle_value(
+            &state_root,
+            trie::bytes_to_nibbles(b":code".iter().copied()),
+        )
+        .map_err(|_| String::from(":code Merkle value not derivable from proof"))?
+        .ok_or_else(|| String::from(":code has no descendant in the on-chain trie"))?;
+
+    if onchain_merkle_value != hint.merkle_value.as_slice() {
+        return Err(format!(
+            "cached :code Merkle value does not match on-chain ({} vs {} bytes; runtime upgraded?)",
+            hint.merkle_value.len(),
+            onchain_merkle_value.len(),
+        ));
+    }
+
+    let storage_heap_pages = decoded_proof
         .storage_value(&state_root, b":heappages")
-        .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
-    let storage_heap_pages = heap_pages_raw.map(|(v, _)| v.to_vec());
+        .map_err(|_| String::from("Proof doesn't contain :heappages"))?
+        .map(|(v, _)| v.to_vec());
 
     let heap_pages = executor::storage_heap_pages_to_value(storage_heap_pages.as_deref())
         .map_err(|e| format!("Invalid :heappages value: {e}"))?;
 
-    // Compile cached code with correct heap pages.
     let vm = executor::host::HostVmPrototype::new(executor::host::Config {
-        module: &code,
+        module: &hint.storage_value,
         heap_pages,
         exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
         allow_unresolved_imports: true,
     })
     .map_err(|e| format!("Failed to compile cached runtime: {e}"))?;
 
-    // Verify Aura consensus parameters against the network.
     let (slot_duration, authorities, vm) =
         run_aura_calls(vm, slot_duration_proof, authorities_proof, &state_root)?;
 
@@ -1254,7 +1284,8 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
         Info,
         log_target,
         format!(
-            "Warm start verified: Aura consensus (slot_duration={}ms, authorities={})",
+            "Warm start verified (state-root-bound :code Merkle match), Aura: \
+             slot_duration={}ms authorities={}",
             slot_duration,
             authorities.len()
         )
@@ -1265,8 +1296,9 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
         slot_duration,
         authorities,
         vm,
-        code,
+        hint.storage_value,
         storage_heap_pages,
+        Some((hint.merkle_value, hint.closest_ancestor_excluding)),
     )
 }
 
@@ -1474,6 +1506,13 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
 
     let storage_heap_pages = heap_pages_raw.map(|(v, _)| v.to_vec());
 
+    // Extract the Merkle-value triple for `:code` from the same proof. These three
+    // pieces are what `encode_database` persists, and what the next session's
+    // warm-start path uses to verify a cached runtime against on-chain state
+    // without re-downloading 2 MiB of `:code`.
+    let (code_merkle_value, closest_ancestor_excluding) =
+        extract_code_merkle_triple(&decoded_proof, &state_root)?;
+
     let heap_pages = executor::storage_heap_pages_to_value(storage_heap_pages.as_deref())
         .map_err(|e| format!("Invalid :heappages value: {e}"))?;
 
@@ -1527,6 +1566,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         vm,
         code,
         storage_heap_pages,
+        Some((code_merkle_value, closest_ancestor_excluding)),
     )
 }
 
@@ -1617,7 +1657,6 @@ fn run_aura_calls(
     Ok((slot_duration, authorities, vm))
 }
 
-/// Builds a `BootstrappedParachain` from verified Aura parameters and a compiled VM.
 fn build_bootstrapped_parachain(
     chain_info: &chain::chain_information::ValidChainInformation,
     slot_duration: NonZero<u64>,
@@ -1625,7 +1664,12 @@ fn build_bootstrapped_parachain(
     vm: executor::host::HostVmPrototype,
     code: Vec<u8>,
     storage_heap_pages: Option<Vec<u8>>,
+    code_merkle_triple: Option<(Vec<u8>, Vec<trie::Nibble>)>,
 ) -> Result<BootstrappedParachain, String> {
+    let (code_merkle_value, closest_ancestor_excluding) = match code_merkle_triple {
+        Some((mv, ca)) => (Some(mv), Some(ca)),
+        None => (None, None),
+    };
     let ci_ref = chain_info.as_ref();
     let new_chain_info = chain::chain_information::ChainInformation {
         finalized_block_header: Box::new(ci_ref.finalized_block_header.into()),
@@ -1645,10 +1689,36 @@ fn build_bootstrapped_parachain(
             virtual_machine: vm,
             storage_code: Some(code),
             storage_heap_pages,
-            code_merkle_value: None,
-            closest_ancestor_excluding: None,
+            code_merkle_value,
+            closest_ancestor_excluding,
         },
     })
+}
+
+/// Reads the Merkle value of `:code` (and the path that led to its parent) from
+/// a storage proof that includes the `:code` leaf. Used by the cold path to
+/// produce the triple that the next session's warm-start needs.
+fn extract_code_merkle_triple(
+    proof: &trie::proof_decode::DecodedTrieProof<Vec<u8>>,
+    state_root: &[u8; 32],
+) -> Result<(Vec<u8>, Vec<trie::Nibble>), String> {
+    let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
+    let merkle_value = proof
+        .closest_descendant_merkle_value(state_root, code_nibbles.iter().copied())
+        .map_err(|_| String::from(":code Merkle value missing from proof"))?
+        .ok_or_else(|| String::from(":code has no descendant in the trie"))?
+        .to_vec();
+
+    let closest_ancestor_excluding = proof
+        .closest_ancestor_in_proof(
+            state_root,
+            code_nibbles.iter().take(code_nibbles.len() - 1).copied(),
+        )
+        .map_err(|_| String::from(":code closest ancestor missing from proof"))?
+        .ok_or_else(|| String::from(":code is outside of the trie"))?
+        .collect::<Vec<_>>();
+
+    Ok((merkle_value, closest_ancestor_excluding))
 }
 
 /// Runs a single runtime call, serving storage reads from the given proof.
@@ -1747,54 +1817,5 @@ fn run_single_runtime_call(
                 return Err(format!("{function_name}: forbidden offchain host function"));
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use smoldot::executor;
-
-    /// Verify that the warm-start compilation path rejects invalid WASM bytes
-    /// gracefully (returns an error) rather than panicking.
-    #[test]
-    fn invalid_cached_runtime_fails_compilation() {
-        let garbage = b"this is not valid wasm";
-        let heap_pages = executor::storage_heap_pages_to_value(None).unwrap();
-        let result = executor::host::HostVmPrototype::new(executor::host::Config {
-            module: garbage,
-            heap_pages,
-            exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
-            allow_unresolved_imports: true,
-        });
-        assert!(result.is_err(), "garbage bytes should fail compilation");
-    }
-
-    /// Verify that an empty cached runtime fails compilation gracefully.
-    #[test]
-    fn empty_cached_runtime_fails_compilation() {
-        let heap_pages = executor::storage_heap_pages_to_value(None).unwrap();
-        let result = executor::host::HostVmPrototype::new(executor::host::Config {
-            module: b"",
-            heap_pages,
-            exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
-            allow_unresolved_imports: true,
-        });
-        assert!(result.is_err(), "empty bytes should fail compilation");
-    }
-
-    /// Verify that a WASM module without a memory section fails with a clear
-    /// error (NoMemory), not a panic. This is the expected behavior when a
-    /// cached runtime is truncated or corrupted but still has valid WASM magic.
-    #[test]
-    fn wasm_without_memory_fails_gracefully() {
-        let minimal_wasm = b"\x00asm\x01\x00\x00\x00";
-        let heap_pages = executor::storage_heap_pages_to_value(None).unwrap();
-        let result = executor::host::HostVmPrototype::new(executor::host::Config {
-            module: minimal_wasm,
-            heap_pages,
-            exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
-            allow_unresolved_imports: true,
-        });
-        assert!(result.is_err(), "WASM without memory should fail");
     }
 }

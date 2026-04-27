@@ -61,14 +61,13 @@ pub struct DatabaseContent {
     ///
     /// Does **not** necessarily match the finalized block found in
     /// [`DatabaseContent::chain_information`].
-    pub runtime_code_hint: Option<DatabaseContentRuntimeCodeHint>,
-
-    /// Raw bytes of the runtime code (`:code` storage value) saved from the last session.
     ///
-    /// When present, a parachain warm-start can compile this code locally and verify
-    /// it against the network via lightweight Aura call proofs, skipping the ~2 MiB
-    /// P2P runtime download.
-    pub runtime_code: Option<Vec<u8>>,
+    /// Used by both the relay-chain warp-sync fast path and by the parachain warm-start
+    /// path: in the parachain case, the cached `code` is reused only after fetching a
+    /// tiny Merkle proof for `closest_ancestor_excluding` and confirming that
+    /// `merkle_value` still matches the on-chain trie node. This avoids the ~2 MiB
+    /// `:code` download while keeping a state-root-bound integrity check.
+    pub runtime_code_hint: Option<DatabaseContentRuntimeCodeHint>,
 }
 
 /// See [`DatabaseContent::runtime_code_hint`].
@@ -214,24 +213,14 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         })
         .collect::<Vec<_>>();
 
-    // Decode the runtime code storage value (base64) once. Both `runtime_code_hint`
-    // and `runtime_code` derive from it, avoiding a redundant 2 MiB clone.
-    let decoded_code = decoded
-        .code_storage_value
-        .as_ref()
-        .map(|sv| {
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, sv)
-                .map_err(|_| ())
-        })
-        .transpose()?;
-
     let runtime_code_hint = match (
         decoded.code_merkle_value,
-        &decoded_code,
+        decoded.code_storage_value,
         decoded.code_closest_ancestor_excluding,
     ) {
-        (Some(mv), Some(code), Some(an)) => Some(DatabaseContentRuntimeCodeHint {
-            code: code.clone(),
+        (Some(mv), Some(sv), Some(an)) => Some(DatabaseContentRuntimeCodeHint {
+            code: base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, sv)
+                .map_err(|_| ())?,
             code_merkle_value: hex::decode(mv).map_err(|_| ())?,
             closest_ancestor_excluding: an
                 .as_bytes()
@@ -249,7 +238,6 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         chain_information,
         known_nodes,
         runtime_code_hint,
-        runtime_code: decoded_code,
     })
 }
 
@@ -298,15 +286,14 @@ mod tests {
     }
 
     #[test]
-    fn decode_database_without_runtime_code() {
+    fn decode_database_without_hint() {
         let json = make_db_json(&[]);
         let db = decode_database(&json, 4).unwrap();
-        assert!(db.runtime_code.is_none());
         assert!(db.runtime_code_hint.is_none());
     }
 
     #[test]
-    fn decode_database_with_runtime_code_only() {
+    fn decode_database_partial_hint_is_ignored() {
         let code_bytes = b"\x00asm\x01\x00\x00\x00";
         let encoded = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD_NO_PAD,
@@ -314,12 +301,11 @@ mod tests {
         );
         let json = make_db_json(&[("runtimeCode", &format!(r#""{encoded}""#))]);
         let db = decode_database(&json, 4).unwrap();
-        assert_eq!(db.runtime_code.as_deref(), Some(code_bytes.as_slice()));
         assert!(db.runtime_code_hint.is_none());
     }
 
     #[test]
-    fn decode_database_with_full_hint_populates_both() {
+    fn decode_database_with_full_hint() {
         let code_bytes = b"\x00asm\x01\x00\x00\x00";
         let encoded_code = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD_NO_PAD,
@@ -332,41 +318,64 @@ mod tests {
             ("codeMerkleValue", &format!(r#""{merkle_hex}""#)),
             ("codeClosestAncestor", &format!(r#""{ancestor_nibbles}""#)),
         ]);
-        let db = decode_database(&json, 4).unwrap();
-        assert_eq!(db.runtime_code.as_deref(), Some(code_bytes.as_slice()));
-        assert!(db.runtime_code_hint.is_some());
-        let hint = db.runtime_code_hint.unwrap();
+        let hint = decode_database(&json, 4)
+            .unwrap()
+            .runtime_code_hint
+            .unwrap();
         assert_eq!(hint.code, code_bytes);
         assert_eq!(hint.code_merkle_value, hex::decode(&merkle_hex).unwrap());
+        assert_eq!(
+            hint.closest_ancestor_excluding.len(),
+            ancestor_nibbles.len()
+        );
     }
 
     #[test]
-    fn decode_database_invalid_base64_runtime_code_returns_error() {
-        let json = make_db_json(&[("runtimeCode", r#""not-valid-base64!!!""#)]);
+    fn decode_database_invalid_base64_returns_error() {
+        let merkle_hex = "ab".repeat(32);
+        let json = make_db_json(&[
+            ("runtimeCode", r#""not-valid-base64!!!""#),
+            ("codeMerkleValue", &format!(r#""{merkle_hex}""#)),
+            ("codeClosestAncestor", r#""3a""#),
+        ]);
         assert!(decode_database(&json, 4).is_err());
     }
 
     #[test]
-    fn encode_shrink_drops_runtime_code_when_too_large() {
-        let large_code = "A".repeat(10_000);
-        let db = SerdeDatabase {
+    fn shrink_loop_drops_code_when_serialization_exceeds_max_size() {
+        // Mimic the body of encode_database's cap loop: when the serialized
+        // database exceeds max_size, the code/merkle pair is dropped first.
+        // We can't call encode_database directly (it requires full services),
+        // so we drive SerdeDatabase manually through the same shrink rule.
+        let mut draft = SerdeDatabase {
             genesis_hash: "aa".repeat(32),
             chain: None,
             nodes: Default::default(),
-            code_storage_value: Some(large_code),
+            code_storage_value: Some("A".repeat(10_000)),
             code_merkle_value: Some("bb".repeat(32)),
-            code_closest_ancestor_excluding: None,
+            code_closest_ancestor_excluding: Some("3a636f".to_string()),
         };
-        let serialized = serde_json::to_string(&db).unwrap();
-        assert!(serialized.len() > 1000);
 
-        let mut shrunk = db;
-        shrunk.code_storage_value = None;
-        shrunk.code_merkle_value = None;
-        let shrunk_serialized = serde_json::to_string(&shrunk).unwrap();
-        assert!(shrunk_serialized.len() < 200);
+        let max_size = 500;
+        let mut iterations = 0;
+        let serialized = loop {
+            iterations += 1;
+            assert!(iterations < 5, "shrink loop should converge quickly");
+            let s = serde_json::to_string(&draft).unwrap();
+            if s.len() <= max_size {
+                break s;
+            }
+            assert!(
+                draft.code_storage_value.is_some() || draft.code_merkle_value.is_some(),
+                "first shrink step must be the code pair",
+            );
+            draft.code_merkle_value = None;
+            draft.code_storage_value = None;
+            draft.code_closest_ancestor_excluding = None;
+        };
 
-        let decoded = decode_database(&shrunk_serialized, 4).unwrap();
-        assert!(decoded.runtime_code.is_none());
+        assert!(serialized.len() <= max_size);
+        let decoded = decode_database(&serialized, 4).unwrap();
+        assert!(decoded.runtime_code_hint.is_none());
     }
 }

@@ -90,17 +90,19 @@ pub struct ConfigSubstrateCompatible {
     /// if it matches the Merkle value provided in the hint, use the storage value in the hint
     /// instead of downloading it. If the hint doesn't match, an extra round-trip will be needed,
     /// but if the hint matches it saves a big download.
-    pub runtime_code_hint: Option<ConfigSubstrateCompatibleRuntimeCodeHint>,
+    pub runtime_code_hint: Option<RuntimeCodeHint>,
 }
 
-/// See [`ConfigSubstrateCompatible::runtime_code_hint`].
-pub struct ConfigSubstrateCompatibleRuntimeCodeHint {
-    /// Storage value of the `:code` trie node corresponding to
-    /// [`ConfigSubstrateCompatibleRuntimeCodeHint::merkle_value`].
+/// Cached `:code` triple from a previous session, used by both the relay-chain warp-sync
+/// fast path ([`ConfigSubstrateCompatible::runtime_code_hint`]) and the parachain
+/// warm-start path ([`ConfigParachain::runtime_code_hint`]) to skip re-downloading the
+/// runtime when the on-chain Merkle value still matches.
+pub struct RuntimeCodeHint {
+    /// Cached storage value of the `:code` key.
     pub storage_value: Vec<u8>,
-    /// Merkle value of the `:code` trie node in the storage main trie.
+    /// Cached Merkle value of the `:code` trie node in the storage main trie.
     pub merkle_value: Vec<u8>,
-    /// Closest ancestor of the `:code` key except for `:code` itself.
+    /// Closest ancestor of the `:code` key, excluding `:code` itself.
     pub closest_ancestor_excluding: Vec<Nibble>,
 }
 
@@ -109,12 +111,13 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
     /// Parameters of the relay chain.
     pub relay_chain: ConfigRelayChain<TPlat>,
 
-    /// Raw bytes of the runtime (`:code` storage value) saved in the database.
+    /// Cached `:code` triple from a previous session.
     ///
-    /// When `Some`, `start_parachain` compiles this code locally and verifies it
-    /// against the network via lightweight Aura call proofs, skipping the ~2 MiB
-    /// P2P download. Falls back to cold bootstrap on any failure.
-    pub saved_runtime_code: Option<Vec<u8>>,
+    /// When `Some`, `start_parachain` requests a tiny Merkle proof for
+    /// `closest_ancestor_excluding` and reuses `storage_value` only if the on-chain
+    /// Merkle value matches `merkle_value`. Otherwise it falls back to the full
+    /// `:code` storage proof download.
+    pub runtime_code_hint: Option<RuntimeCodeHint>,
 }
 
 /// See [`ConfigParachain::relay_chain`].
@@ -161,7 +164,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 config_parachain.relay_chain.para_id,
                 from_foreground,
                 config.network_service.clone(),
-                config_parachain.saved_runtime_code,
+                config_parachain.runtime_code_hint,
             )),
             ConfigChainType::SubstrateCompatible(config_substrate_compat) => {
                 Box::pin(substrate_compat::start_substrate_compatible_chain(
