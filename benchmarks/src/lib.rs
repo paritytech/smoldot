@@ -11,9 +11,7 @@ use std::{
 use anyhow::{anyhow, Context};
 use log::info;
 use serde_json::Value;
-use zombienet_sdk::{
-    subxt::ext::subxt_rpcs::rpc_params, LocalFileSystem, Network, NetworkNode,
-};
+use zombienet_sdk::{subxt::ext::subxt_rpcs::rpc_params, LocalFileSystem, Network, NetworkNode};
 
 /// Installs JS deps for `benchmarks/js` if not already present.
 ///
@@ -50,10 +48,7 @@ pub fn ensure_smoldot_js_deps_installed() {
         .current_dir(&js_dir)
         .status()
         .expect("failed to run npm ci in wasm-node/javascript");
-    assert!(
-        status.success(),
-        "npm ci in wasm-node/javascript failed"
-    );
+    assert!(status.success(), "npm ci in wasm-node/javascript failed");
 }
 
 pub fn benchmarks_js_dir() -> PathBuf {
@@ -72,8 +67,8 @@ pub struct ChainSpecInfo {
 /// Both fields are optional so partially-formed specs still produce a value
 /// rather than an error.
 pub fn read_chain_spec_info(path: &Path) -> Result<ChainSpecInfo, anyhow::Error> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("read chain spec {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("read chain spec {}", path.display()))?;
     let v: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse chain spec {}", path.display()))?;
     Ok(ChainSpecInfo {
@@ -141,9 +136,7 @@ pub async fn wait_for_finalized_block(
 /// Reads the current finalized block number on `node`. Single RPC roundtrip.
 pub async fn current_finalized_block(node: &NetworkNode) -> Result<u64, anyhow::Error> {
     let rpc = node.rpc().await?;
-    let finalized_hash: String = rpc
-        .request("chain_getFinalizedHead", rpc_params![])
-        .await?;
+    let finalized_hash: String = rpc.request("chain_getFinalizedHead", rpc_params![]).await?;
     let header: Value = rpc
         .request("chain_getHeader", rpc_params![finalized_hash])
         .await?;
@@ -207,7 +200,15 @@ impl Stats {
         let min = *sorted.first().unwrap();
         let max = *sorted.last().unwrap();
 
-        Some(Self { n, mean, median, p95, stddev, min, max })
+        Some(Self {
+            n,
+            mean,
+            median,
+            p95,
+            stddev,
+            min,
+            max,
+        })
     }
 }
 

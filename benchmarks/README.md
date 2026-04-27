@@ -20,7 +20,8 @@ Two modes (selected with `--mode`):
 
 In warm mode the runner does the save-DB step automatically:
 
-1. Spawn zombienet (or use user-supplied specs), wait for relay finality.
+1. Spawn zombienet (or use user-supplied specs), wait for relay finality
+   (and para finality when `--target para`).
 2. Once: start smoldot, addChain, wait for `chainHead_v1_follow`
    `"initialized"`, call `chainHead_unstable_finalizedDatabase`, write
    `<chainId>.db`.
@@ -75,6 +76,11 @@ cargo run --release --bin startup -- \
   skip zombienet and use given specs. Short name resolves to
   `demo-chain-specs/<name>.json`
 - `--timeout-secs N` — per-iteration timeout (default 120)
+- `--min-finalized-before-bench N` — on zombienet, wait until the relay
+  (and para, when `--target para`) reaches at least block N before starting
+  iterations (default 1). No-op when chain specs are user-supplied.
+- `--finalized-wait-secs N` — max time to wait for the readiness gate above
+  (default 180)
 - `--json` — also emit a machine-readable JSON line
 
 Warm-mode-only:

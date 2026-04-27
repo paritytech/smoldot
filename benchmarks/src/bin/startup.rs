@@ -121,80 +121,13 @@ enum Target {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), anyhow::Error> {
-    env_logger::try_init_from_env(
-        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
-    )
-    .ok();
-
+    init_logging();
     let args = Args::parse();
+    ensure_all_deps();
 
-    info!("Ensuring smoldot's own JS deps are installed (wasm-node/javascript)");
-    ensure_smoldot_js_deps_installed();
-    info!("Ensuring smoldot JS bundle is built");
-    ensure_smoldot_built();
-    info!("Ensuring benchmark JS deps are installed");
-    ensure_js_deps_installed();
-
-    let (relay_spec, para_spec, default_db_dir, network) = if args.relay_chain_spec.is_some() {
-        if matches!(args.target, Target::Para) && args.para_chain_spec.is_none() {
-            return Err(anyhow!(
-                "--target para requires --para-chain-spec when --relay-chain-spec is given"
-            ));
-        }
-        let relay = resolve_chain_spec(&args.relay_chain_spec.clone().unwrap())?;
-        let para = args
-            .para_chain_spec
-            .as_ref()
-            .map(|p| resolve_chain_spec(p))
-            .transpose()?;
-        info!("Using chain specs: relay={}", relay.display());
-        if let Some(p) = &para {
-            info!("Using chain specs: para={}", p.display());
-        }
-        let tempdir = std::env::temp_dir().join(format!("smoldot-bench-{}", std::process::id()));
-        (relay, para, tempdir, None)
-    } else {
-        let base_dir = resolve_base_dir()?;
-        info!("Base dir: {}", base_dir.display());
-        let para_spec_path = create_para_chain_spec_with_allowances(&[], &base_dir)?;
-        info!("Spawning zombienet network");
-        let network = spawn_network(&base_dir, &para_spec_path).await?;
-        let (relay_path, para_path) = spawned_chain_spec_paths(&network)?;
-
-        let (validator, collator) = pick_bench_nodes(&network)?;
-        info!(
-            "Waiting for relay finalized block >= {} on {} (timeout {}s)",
-            args.min_finalized_before_bench,
-            validator.name(),
-            args.finalized_wait_secs,
-        );
-        wait_for_finalized_block(
-            validator,
-            args.min_finalized_before_bench,
-            Duration::from_secs(args.finalized_wait_secs),
-        )
-        .await?;
-
-        if matches!(args.target, Target::Para) {
-            info!(
-                "Waiting for para finalized block >= {} on {} (timeout {}s)",
-                args.min_finalized_before_bench,
-                collator.name(),
-                args.finalized_wait_secs,
-            );
-            wait_for_finalized_block(
-                collator,
-                args.min_finalized_before_bench,
-                Duration::from_secs(args.finalized_wait_secs),
-            )
-            .await?;
-        }
-
-        (relay_path, Some(para_path), base_dir, Some(network))
-    };
-
-    let relay_info = read_chain_spec_info(&relay_spec)?;
-    let para_info = match para_spec.as_deref() {
+    let setup = setup_chains(&args).await?;
+    let relay_info = read_chain_spec_info(&setup.relay_spec)?;
+    let para_info = match setup.para_spec.as_deref() {
         Some(p) => Some(read_chain_spec_info(p)?),
         None => None,
     };
@@ -203,98 +136,35 @@ async fn main() -> Result<(), anyhow::Error> {
         info!("Para chain:  {}", p.label());
     }
 
-    // Warm mode: prepare the DB dir and ensure DB files exist.
-    let db_dir = if args.mode == Mode::Warm {
-        let dir = args.db_dir.clone().unwrap_or(default_db_dir);
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("create db-dir {}", dir.display()))?;
+    let db_dir = prepare_warm_db_dir(
+        &args,
+        &setup.relay_spec,
+        setup.para_spec.as_deref(),
+        &setup.default_db_dir,
+        &relay_info,
+        para_info.as_ref(),
+    )
+    .await?;
 
-        let relay_db_id = relay_info
-            .id
-            .clone()
-            .ok_or_else(|| anyhow!("relay chain spec has no `id` field; cannot name DB file"))?;
-        let para_db_id = if matches!(args.target, Target::Para) {
-            Some(
-                para_info
-                    .as_ref()
-                    .and_then(|p| p.id.clone())
-                    .ok_or_else(|| {
-                        anyhow!("para chain spec has no `id` field; cannot name DB file")
-                    })?,
-            )
-        } else {
-            None
-        };
-
-        let needed: Vec<PathBuf> = std::iter::once(dir.join(format!("{relay_db_id}.db")))
-            .chain(para_db_id.as_ref().map(|id| dir.join(format!("{id}.db"))))
-            .collect();
-        let all_exist = needed.iter().all(|p| p.is_file());
-        if args.reuse_db && all_exist {
-            info!(
-                "Reusing existing DB files in {}: {}",
-                dir.display(),
-                needed
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        } else {
-            if args.reuse_db && !all_exist {
-                warn!(
-                    "--reuse-db set but not all DB files present in {}; regenerating",
-                    dir.display()
-                );
-            }
-            info!("Saving DBs to {}", dir.display());
-            run_save_db(&args, &relay_spec, para_spec.as_deref(), &dir).await?;
-        }
-        Some(dir)
-    } else {
-        None
-    };
-
-    let total = args.warmup + args.iterations;
     info!(
         "Running {} warmup + {} measured iteration(s), mode={:?}, target={:?}",
         args.warmup, args.iterations, args.mode, args.target
     );
 
-    let before = drift_blocks(network.as_ref()).await;
-
-    let mut samples: Vec<Sample> = Vec::with_capacity(args.iterations);
-    for i in 0..total {
-        let label = if i < args.warmup {
-            format!("warmup {}/{}", i + 1, args.warmup)
-        } else {
-            format!("sample {}/{}", i - args.warmup + 1, args.iterations)
-        };
-        let s = run_one(&args, &relay_spec, para_spec.as_deref(), db_dir.as_deref())
-            .await
-            .with_context(|| format!("iteration {label} failed"))?;
-        info!(
-            "[{label}] finalized_ms = {:.1} (addChain_relay={:.1} addChain_para={:.1} wait_finalized={:.1})",
-            s.finalized_ms,
-            s.add_chain_relay_ms.unwrap_or(f64::NAN),
-            s.add_chain_para_ms.unwrap_or(f64::NAN),
-            s.wait_finalized_ms.unwrap_or(f64::NAN),
-        );
-        if i >= args.warmup {
-            samples.push(s);
-        }
-    }
-
-    let after = drift_blocks(network.as_ref()).await;
+    let before = drift_blocks(setup.network.as_ref()).await;
+    let samples = run_iterations(
+        &args,
+        &setup.relay_spec,
+        setup.para_spec.as_deref(),
+        db_dir.as_deref(),
+    )
+    .await?;
+    let after = drift_blocks(setup.network.as_ref()).await;
 
     let total_stats = stats_over(&samples, |s| Some(s.finalized_ms))
         .ok_or_else(|| anyhow!("no samples collected"))?;
-    let phase_stats = PhaseStats {
-        add_chain_relay: stats_over(&samples, |s| s.add_chain_relay_ms),
-        add_chain_para: stats_over(&samples, |s| s.add_chain_para_ms),
-        wait_finalized: stats_over(&samples, |s| s.wait_finalized_ms),
-    };
-    let source = if network.is_some() {
+    let phase_stats = collect_phase_stats(&samples);
+    let source = if setup.network.is_some() {
         "zombienet-local"
     } else {
         "user-supplied spec"
@@ -311,6 +181,207 @@ async fn main() -> Result<(), anyhow::Error> {
         after,
     });
     Ok(())
+}
+
+fn init_logging() {
+    env_logger::try_init_from_env(
+        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
+    )
+    .ok();
+}
+
+fn ensure_all_deps() {
+    info!("Ensuring smoldot's own JS deps are installed (wasm-node/javascript)");
+    ensure_smoldot_js_deps_installed();
+    info!("Ensuring smoldot JS bundle is built");
+    ensure_smoldot_built();
+    info!("Ensuring benchmark JS deps are installed");
+    ensure_js_deps_installed();
+}
+
+struct ChainSetup {
+    relay_spec: PathBuf,
+    para_spec: Option<PathBuf>,
+    default_db_dir: PathBuf,
+    network: Option<zombienet_sdk::Network<zombienet_sdk::LocalFileSystem>>,
+}
+
+async fn setup_chains(args: &Args) -> Result<ChainSetup, anyhow::Error> {
+    if let Some(rs) = &args.relay_chain_spec {
+        if matches!(args.target, Target::Para) && args.para_chain_spec.is_none() {
+            return Err(anyhow!(
+                "--target para requires --para-chain-spec when --relay-chain-spec is given"
+            ));
+        }
+        let relay_spec = resolve_chain_spec(rs)?;
+        let para_spec = args
+            .para_chain_spec
+            .as_ref()
+            .map(|p| resolve_chain_spec(p))
+            .transpose()?;
+        info!("Using chain specs: relay={}", relay_spec.display());
+        if let Some(p) = &para_spec {
+            info!("Using chain specs: para={}", p.display());
+        }
+        let default_db_dir =
+            std::env::temp_dir().join(format!("smoldot-bench-{}", std::process::id()));
+        Ok(ChainSetup {
+            relay_spec,
+            para_spec,
+            default_db_dir,
+            network: None,
+        })
+    } else {
+        let base_dir = resolve_base_dir()?;
+        info!("Base dir: {}", base_dir.display());
+        let para_spec_path = create_para_chain_spec_with_allowances(&[], &base_dir)?;
+        info!("Spawning zombienet network");
+        let network = spawn_network(&base_dir, &para_spec_path).await?;
+        let (relay_path, para_path) = spawned_chain_spec_paths(&network)?;
+        wait_for_network_ready(args, &network).await?;
+        Ok(ChainSetup {
+            relay_spec: relay_path,
+            para_spec: Some(para_path),
+            default_db_dir: base_dir,
+            network: Some(network),
+        })
+    }
+}
+
+async fn wait_for_network_ready(
+    args: &Args,
+    network: &zombienet_sdk::Network<zombienet_sdk::LocalFileSystem>,
+) -> Result<(), anyhow::Error> {
+    let (validator, collator) = pick_bench_nodes(network)?;
+    info!(
+        "Waiting for relay finalized block >= {} on {} (timeout {}s)",
+        args.min_finalized_before_bench,
+        validator.name(),
+        args.finalized_wait_secs,
+    );
+    wait_for_finalized_block(
+        validator,
+        args.min_finalized_before_bench,
+        Duration::from_secs(args.finalized_wait_secs),
+    )
+    .await?;
+
+    if matches!(args.target, Target::Para) {
+        info!(
+            "Waiting for para finalized block >= {} on {} (timeout {}s)",
+            args.min_finalized_before_bench,
+            collator.name(),
+            args.finalized_wait_secs,
+        );
+        wait_for_finalized_block(
+            collator,
+            args.min_finalized_before_bench,
+            Duration::from_secs(args.finalized_wait_secs),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn prepare_warm_db_dir(
+    args: &Args,
+    relay_spec: &std::path::Path,
+    para_spec: Option<&std::path::Path>,
+    default_db_dir: &std::path::Path,
+    relay_info: &ChainSpecInfo,
+    para_info: Option<&ChainSpecInfo>,
+) -> Result<Option<PathBuf>, anyhow::Error> {
+    if args.mode != Mode::Warm {
+        return Ok(None);
+    }
+    let dir = args
+        .db_dir
+        .clone()
+        .unwrap_or_else(|| default_db_dir.to_path_buf());
+    std::fs::create_dir_all(&dir).with_context(|| format!("create db-dir {}", dir.display()))?;
+
+    let relay_db_id = relay_info
+        .id
+        .clone()
+        .ok_or_else(|| anyhow!("relay chain spec has no `id` field; cannot name DB file"))?;
+    let para_db_id = if matches!(args.target, Target::Para) {
+        Some(
+            para_info
+                .and_then(|p| p.id.clone())
+                .ok_or_else(|| anyhow!("para chain spec has no `id` field; cannot name DB file"))?,
+        )
+    } else {
+        None
+    };
+
+    let needed: Vec<PathBuf> = std::iter::once(dir.join(format!("{relay_db_id}.db")))
+        .chain(para_db_id.as_ref().map(|id| dir.join(format!("{id}.db"))))
+        .collect();
+    let all_exist = needed.iter().all(|p| p.is_file());
+    if args.reuse_db && all_exist {
+        info!(
+            "Reusing existing DB files in {}: {}",
+            dir.display(),
+            needed
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    } else {
+        if args.reuse_db && !all_exist {
+            warn!(
+                "--reuse-db set but not all DB files present in {}; regenerating",
+                dir.display()
+            );
+        }
+        info!("Saving DBs to {}", dir.display());
+        run_save_db(args, relay_spec, para_spec, &dir).await?;
+    }
+    Ok(Some(dir))
+}
+
+async fn run_iterations(
+    args: &Args,
+    relay_spec: &std::path::Path,
+    para_spec: Option<&std::path::Path>,
+    db_dir: Option<&std::path::Path>,
+) -> Result<Vec<Sample>, anyhow::Error> {
+    let total = args.warmup + args.iterations;
+    let mut samples: Vec<Sample> = Vec::with_capacity(args.iterations);
+    for i in 0..total {
+        let label = if i < args.warmup {
+            format!("warmup {}/{}", i + 1, args.warmup)
+        } else {
+            format!("sample {}/{}", i - args.warmup + 1, args.iterations)
+        };
+        info!(
+            "[{label}] starting smoldot (mode={:?}, target={:?})",
+            args.mode, args.target
+        );
+        let s = smoldot_run(args, relay_spec, para_spec, db_dir)
+            .await
+            .with_context(|| format!("iteration {label} failed"))?;
+        info!(
+            "[{label}] finalized_ms = {:.1} (addChain_relay={:.1} addChain_para={:.1} wait_finalized={:.1})",
+            s.finalized_ms,
+            s.add_chain_relay_ms.unwrap_or(f64::NAN),
+            s.add_chain_para_ms.unwrap_or(f64::NAN),
+            s.wait_finalized_ms.unwrap_or(f64::NAN),
+        );
+        if i >= args.warmup {
+            samples.push(s);
+        }
+    }
+    Ok(samples)
+}
+
+fn collect_phase_stats(samples: &[Sample]) -> PhaseStats {
+    PhaseStats {
+        add_chain_relay: stats_over(samples, |s| s.add_chain_relay_ms),
+        add_chain_para: stats_over(samples, |s| s.add_chain_para_ms),
+        wait_finalized: stats_over(samples, |s| s.wait_finalized_ms),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -413,7 +484,7 @@ async fn run_save_db(
     Ok(())
 }
 
-async fn run_one(
+async fn smoldot_run(
     args: &Args,
     relay_spec: &std::path::Path,
     para_spec: Option<&std::path::Path>,

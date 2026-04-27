@@ -26,29 +26,35 @@ import { start } from "smoldot";
 import { createClient } from "polkadot-api";
 import { getSmProvider } from "polkadot-api/sm-provider";
 
-const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
-const paraSpecPath = process.env.PARA_CHAIN_SPEC || "";
-const target = process.env.TARGET || (paraSpecPath ? "para" : "relay");
-const loadDir = process.env.LOAD_DB_DIR || "";
-const timeoutMs = Number.parseInt(process.env.TIMEOUT_MS || "120000", 10);
+const env = parseEnv();
+const exitCode = await runBench(env);
+process.exit(exitCode);
 
-if (!relaySpecPath) {
-  console.error("RELAY_CHAIN_SPEC is required");
-  process.exit(1);
+function parseEnv() {
+  const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
+  const paraSpecPath = process.env.PARA_CHAIN_SPEC || "";
+  const target = process.env.TARGET || (paraSpecPath ? "para" : "relay");
+  const loadDir = process.env.LOAD_DB_DIR || "";
+  const timeoutMs = Number.parseInt(process.env.TIMEOUT_MS || "120000", 10);
+
+  if (!relaySpecPath) {
+    console.error("RELAY_CHAIN_SPEC is required");
+    process.exit(1);
+  }
+  if (target === "para" && !paraSpecPath) {
+    console.error("TARGET=para requires PARA_CHAIN_SPEC");
+    process.exit(1);
+  }
+
+  const relaySpec = fs.readFileSync(relaySpecPath, "utf8");
+  const paraSpec = target === "para" ? fs.readFileSync(paraSpecPath, "utf8") : null;
+  const relayDb = loadDir ? loadDb(loadDir, JSON.parse(relaySpec).id) : undefined;
+  const paraDb = loadDir && paraSpec ? loadDb(loadDir, JSON.parse(paraSpec).id) : undefined;
+
+  return { relaySpec, paraSpec, target, timeoutMs, relayDb, paraDb };
 }
-if (target === "para" && !paraSpecPath) {
-  console.error("TARGET=para requires PARA_CHAIN_SPEC");
-  process.exit(1);
-}
 
-const relaySpec = fs.readFileSync(relaySpecPath, "utf8");
-const paraSpec = target === "para" ? fs.readFileSync(paraSpecPath, "utf8") : null;
-
-// Warm mode only: pre-load `<chainId>.db` blobs we'll pass to addChain.
-const relayDb = loadDir ? loadDb(JSON.parse(relaySpec).id) : undefined;
-const paraDb = loadDir && paraSpec ? loadDb(JSON.parse(paraSpec).id) : undefined;
-
-function loadDb(id) {
+function loadDb(loadDir, id) {
   const p = path.join(loadDir, `${id}.db`);
   if (!fs.existsSync(p)) {
     // Fail fast — warm bench without a DB is meaningless.
@@ -58,44 +64,23 @@ function loadDb(id) {
   return fs.readFileSync(p, "utf8");
 }
 
-// Mark the start just before handing control to smoldot. File reads above
-// are excluded — they are not what we are benchmarking.
-const tStart = performance.now();
-
-const smoldot = start({
-  maxLogLevel: Number.parseInt(process.env.SMOLDOT_LOG_LEVEL || "2", 10),
-  logCallback: (level, t, m) => {
-    const labels = { 1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE" };
-    console.error(`[${labels[level] ?? `L${level}`}] [${t}] ${m}`);
-  },
-});
-
-let exitCode = 1;
-let client;
-try {
-  const tBeforeRelay = performance.now();
-  const relay = await smoldot.addChain({
-    chainSpec: relaySpec,
-    databaseContent: relayDb,
+function startSmoldot() {
+  return start({
+    maxLogLevel: Number.parseInt(process.env.SMOLDOT_LOG_LEVEL || "2", 10),
+    logCallback: (level, t, m) => {
+      const labels = { 1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE" };
+      console.error(`[${labels[level] ?? `L${level}`}] [${t}] ${m}`);
+    },
   });
-  const tAfterRelay = performance.now();
+}
 
-  let tBeforePara = tAfterRelay;
-  let tAfterPara = tAfterRelay;
-  const chain =
-    target === "relay"
-      ? relay
-      : await (async () => {
-          tBeforePara = performance.now();
-          const p = await smoldot.addChain({
-            chainSpec: paraSpec,
-            potentialRelayChains: [relay],
-            databaseContent: paraDb,
-          });
-          tAfterPara = performance.now();
-          return p;
-        })();
+async function addChain(smoldot, chainSpec, databaseContent, potentialRelayChains) {
+  const t0 = performance.now();
+  const chain = await smoldot.addChain({ chainSpec, databaseContent, potentialRelayChains });
+  return { chain, ms: performance.now() - t0 };
+}
 
+async function waitForFinalized(chain, timeoutMs) {
   // Wrap the smoldot Chain so polkadot-api's `client.destroy()` doesn't call
   // `chain.remove()` — we own teardown via `smoldot.terminate()` in `finally`.
   const provider = {
@@ -103,9 +88,8 @@ try {
     nextJsonRpcResponse: () => chain.nextJsonRpcResponse(),
     remove: () => {},
   };
-
-  const tBeforeWait = performance.now();
-  client = createClient(getSmProvider(() => provider));
+  const t0 = performance.now();
+  const client = createClient(getSmProvider(() => provider));
   const block = await Promise.race([
     client.getFinalizedBlock(),
     new Promise((_, reject) =>
@@ -116,30 +100,50 @@ try {
     ),
   ]);
   const tFinalized = performance.now();
-
-  const phases = {
-    add_chain_relay_ms: tAfterRelay - tBeforeRelay,
-    wait_finalized_ms: tFinalized - tBeforeWait,
-  };
-  if (target === "para") {
-    phases.add_chain_para_ms = tAfterPara - tBeforePara;
-  }
-  const result = {
-    finalized_ms: tFinalized - tStart,
-    phases,
-    block: { number: block.number, hash: block.hash },
-  };
-  console.log(`RESULT ${JSON.stringify(result)}`);
-  exitCode = 0;
-} catch (e) {
-  console.error(`startup error: ${e?.message ?? e}`);
-} finally {
-  try {
-    if (client) client.destroy();
-  } catch (_) {}
-  try {
-    await smoldot.terminate();
-  } catch (_) {}
+  return { client, block, ms: tFinalized - t0, tFinalized };
 }
 
-process.exit(exitCode);
+async function runBench(env) {
+  // Mark the start just before handing control to smoldot. File reads above
+  // are excluded — they are not what we are benchmarking.
+  const tStart = performance.now();
+  const smoldot = startSmoldot();
+
+  let client;
+  try {
+    const relay = await addChain(smoldot, env.relaySpec, env.relayDb);
+    const para =
+      env.target === "para"
+        ? await addChain(smoldot, env.paraSpec, env.paraDb, [relay.chain])
+        : null;
+    const targetChain = (para ?? relay).chain;
+
+    const wait = await waitForFinalized(targetChain, env.timeoutMs);
+    client = wait.client;
+    const finalized_ms = wait.tFinalized - tStart;
+
+    const phases = {
+      add_chain_relay_ms: relay.ms,
+      wait_finalized_ms: wait.ms,
+    };
+    if (para) phases.add_chain_para_ms = para.ms;
+
+    const result = {
+      finalized_ms,
+      phases,
+      block: { number: wait.block.number, hash: wait.block.hash },
+    };
+    console.log(`RESULT ${JSON.stringify(result)}`);
+    return 0;
+  } catch (e) {
+    console.error(`startup error: ${e?.message ?? e}`);
+    return 1;
+  } finally {
+    try {
+      if (client) client.destroy();
+    } catch (_) {}
+    try {
+      await smoldot.terminate();
+    } catch (_) {}
+  }
+}
