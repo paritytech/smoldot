@@ -10,9 +10,9 @@ End-to-end tests that spin up a Zombienet network and drive a Node.js-hosted smo
 - **Rust** with the wasm32-unknown-unknown target.
 - **Node.js 22+**.
 - **Polkadot binaries on `$PATH`**: `polkadot`, `polkadot-parachain`,
-  `polkadot-execute-worker`, `polkadot-prepare-worker`. CI pins the
-  release tag in `.github/zombienet-env`. Locally, download that release
-  from polkadot-sdk or build from source.
+  `polkadot-execute-worker`, `polkadot-prepare-worker`, `test-parachain`.
+  CI pins the release tag in `.github/zombienet-env`. Locally, download
+  that release from polkadot-sdk or build from source.
 
 
 ## How to run
