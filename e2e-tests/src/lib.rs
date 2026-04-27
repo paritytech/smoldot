@@ -68,18 +68,9 @@ fn project_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Ensures the smoldot JS bundle is built and up to date.
-///
-/// Rebuilds if the `dist` directory is missing, or if any Rust source under
-/// `wasm-node/rust` is newer than the bundle. This matters during development
-/// when `lib.rs` has changed since the last build — the cached `dist` can lag.
+/// Ensures the smoldot JS bundle is built.
 pub fn ensure_smoldot_built() {
     let js_dir = project_root().join("wasm-node/javascript");
-    let dist_dir = js_dir.join("dist");
-    let needs_build = !dist_dir.exists() || is_dist_stale(&dist_dir);
-    if !needs_build {
-        return;
-    }
     let status = std::process::Command::new("npm")
         .arg("run")
         .arg("build")
@@ -87,45 +78,6 @@ pub fn ensure_smoldot_built() {
         .status()
         .expect("failed to run npm build");
     assert!(status.success(), "smoldot npm build failed");
-}
-
-fn is_dist_stale(dist_dir: &Path) -> bool {
-    let Ok(dist_mtime) = dist_dir.metadata().and_then(|m| m.modified()) else {
-        return true;
-    };
-    let sources = [
-        project_root().join("wasm-node/rust"),
-        project_root().join("lib"),
-        project_root().join("light-base"),
-    ];
-    for src in &sources {
-        if walk_newer_than(src, dist_mtime) {
-            return true;
-        }
-    }
-    false
-}
-
-fn walk_newer_than(path: &Path, cutoff: std::time::SystemTime) -> bool {
-    let Ok(meta) = path.metadata() else {
-        return false;
-    };
-    if meta.is_file() {
-        return meta.modified().map(|m| m > cutoff).unwrap_or(false);
-    }
-    if let Ok(entries) = std::fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            // Skip target and node_modules — they churn without affecting the bundle.
-            if matches!(name.to_str(), Some("target") | Some("node_modules")) {
-                continue;
-            }
-            if walk_newer_than(&entry.path(), cutoff) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Ensures JS test dependencies are installed.
