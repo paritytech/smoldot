@@ -348,7 +348,9 @@ fn resolve_chain_spec(input: &std::path::Path) -> Result<PathBuf, anyhow::Error>
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap();
-        let candidate = repo_root.join("demo-chain-specs").join(format!("{as_str}.json"));
+        let candidate = repo_root
+            .join("demo-chain-specs")
+            .join(format!("{as_str}.json"));
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -460,8 +462,8 @@ async fn run_one(
     }
 
     let status = child.wait().await?;
-    let result_line = result_line
-        .ok_or_else(|| anyhow!("no RESULT line emitted; child exit: {status}"))?;
+    let result_line =
+        result_line.ok_or_else(|| anyhow!("no RESULT line emitted; child exit: {status}"))?;
     if !status.success() {
         warn!("child exited non-zero ({status}) despite RESULT line; parsing anyway");
     }
@@ -473,9 +475,8 @@ async fn run_one(
         .and_then(|x| x.as_f64())
         .ok_or_else(|| anyhow!("RESULT missing finalized_ms field: {result_line}"))?;
     let phases = v.get("phases");
-    let get_phase = |name: &str| -> Option<f64> {
-        phases.and_then(|p| p.get(name)).and_then(|x| x.as_f64())
-    };
+    let get_phase =
+        |name: &str| -> Option<f64> { phases.and_then(|p| p.get(name)).and_then(|x| x.as_f64()) };
     Ok(Sample {
         finalized_ms,
         add_chain_relay_ms: get_phase("add_chain_relay_ms"),
