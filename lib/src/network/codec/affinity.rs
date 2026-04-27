@@ -414,4 +414,29 @@ mod tests {
         filter.insert(&inserted);
         assert!(filter.matches_statement(&[&missing, &inserted]));
     }
+
+    #[test]
+    fn decode_rejects_truncated_bits_body() {
+        // The compact length claims 2 u64 words (16 bytes of bits) but only 8 bytes follow;
+        // `EncodedBloomFilter::decode` guards against this via the `rest.len() != bits_len * 8`
+        // check. polkadot-sdk delegates to `codec::Decode` which handles incomplete input
+        // automatically; smoldot parses peer bytes by hand and needs explicit coverage.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&TEST_SEED.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(crate::util::encode_scale_compact_usize(2).as_ref());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        assert!(AffinityFilter::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn from_topics_empty_is_not_match_all() {
+        let filter = AffinityFilter::from_topics(
+            core::iter::empty::<&[u8; 32]>(),
+            TEST_SEED,
+            BLOOM_FALSE_POS_RATE,
+        );
+        assert!(!filter.matches_statement(&[&[0x01; 32]]));
+        assert!(filter.matches_statement(&[]));
+    }
 }

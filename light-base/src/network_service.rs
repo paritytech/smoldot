@@ -3161,6 +3161,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 version,
             }) => {
+                log!(
+                    &task.platform,
+                    Trace,
+                    "network",
+                    "statement-protocol-open-success",
+                    chain = &task.network[chain_id].log_name,
+                    peer_id,
+                    ?version,
+                );
+
                 if matches!(version, codec::StatementProtocolVersion::V2) {
                     task.v2_statement_peers
                         .entry(chain_id)
