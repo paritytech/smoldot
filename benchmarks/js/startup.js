@@ -1,23 +1,24 @@
-// Single warm-startup measurement. Spawned as a fresh Node subprocess per
-// iteration by the Rust bench runner. Unlike cold_startup.js, this passes a
-// pre-saved `databaseContent` to `addChain()` so smoldot skips warp-sync and
-// resumes from the snapshot.
-//
-// Prints exactly one line:
+// Single startup measurement (cold or warm). Spawned as a fresh Node
+// subprocess per iteration by the Rust bench runner. Prints exactly one line:
 //   RESULT {"finalized_ms":<n>,"phases":{...},"block":{...}}
 // and exits 0 on success, non-zero on any failure.
 //
-// Measured window: `performance.now()` just before `start()` through
-// polkadot-api `client.getFinalizedBlock()` resolving — same gate as
-// cold_startup.js.
+// Cold vs warm is selected by env: when LOAD_DB_DIR is set, smoldot is given
+// a pre-saved `databaseContent` per chain so it skips warp-sync and resumes
+// from the snapshot.
 //
-// Env vars (mirrors cold_startup.js plus LOAD_DB_DIR):
+// Measured window: `performance.now()` just before `start()` through
+// polkadot-api `client.getFinalizedBlock()` resolving — i.e. the first
+// finalized block usable by an app sitting on top of smoldot. Matches
+// wasm-node/javascript/bench/time-to-initialized.mjs.
+//
+// Env vars:
 //   RELAY_CHAIN_SPEC   path to relay chain spec (required)
-//   PARA_CHAIN_SPEC    path to parachain chain spec (optional)
-//   TARGET             "relay" | "para"
-//   LOAD_DB_DIR        dir containing <chainId>.db files (required)
-//   TIMEOUT_MS         default 120000
-//   SMOLDOT_LOG_LEVEL  default 2
+//   PARA_CHAIN_SPEC    path to parachain chain spec (optional — omit for relay-only)
+//   TARGET             "relay" | "para" (default: "para" if PARA_CHAIN_SPEC set, else "relay")
+//   LOAD_DB_DIR        dir containing <chainId>.db files (optional — switches to warm mode)
+//   TIMEOUT_MS         overall timeout (default: 120000)
+//   SMOLDOT_LOG_LEVEL  smoldot maxLogLevel (default: 2 — warnings only)
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -28,11 +29,11 @@ import { getSmProvider } from "polkadot-api/sm-provider";
 const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
 const paraSpecPath = process.env.PARA_CHAIN_SPEC || "";
 const target = process.env.TARGET || (paraSpecPath ? "para" : "relay");
-const loadDir = process.env.LOAD_DB_DIR;
+const loadDir = process.env.LOAD_DB_DIR || "";
 const timeoutMs = Number.parseInt(process.env.TIMEOUT_MS || "120000", 10);
 
-if (!relaySpecPath || !loadDir) {
-  console.error("RELAY_CHAIN_SPEC and LOAD_DB_DIR are required");
+if (!relaySpecPath) {
+  console.error("RELAY_CHAIN_SPEC is required");
   process.exit(1);
 }
 if (target === "para" && !paraSpecPath) {
@@ -42,13 +43,10 @@ if (target === "para" && !paraSpecPath) {
 
 const relaySpec = fs.readFileSync(relaySpecPath, "utf8");
 const paraSpec = target === "para" ? fs.readFileSync(paraSpecPath, "utf8") : null;
-const relayId = JSON.parse(relaySpec).id;
-const paraId = paraSpec ? JSON.parse(paraSpec).id : null;
 
-// Only load DBs for chains we will actually addChain. Target=relay does not
-// need the para DB even if PARA_CHAIN_SPEC was passed (zombienet always does).
-const relayDb = loadDb(relayId);
-const paraDb = paraId ? loadDb(paraId) : undefined;
+// Warm mode only: pre-load `<chainId>.db` blobs we'll pass to addChain.
+const relayDb = loadDir ? loadDb(JSON.parse(relaySpec).id) : undefined;
+const paraDb = loadDir && paraSpec ? loadDb(JSON.parse(paraSpec).id) : undefined;
 
 function loadDb(id) {
   const p = path.join(loadDir, `${id}.db`);
@@ -98,6 +96,8 @@ try {
           return p;
         })();
 
+  // Wrap the smoldot Chain so polkadot-api's `client.destroy()` doesn't call
+  // `chain.remove()` — we own teardown via `smoldot.terminate()` in `finally`.
   const provider = {
     sendJsonRpc: (req) => chain.sendJsonRpc(req),
     nextJsonRpcResponse: () => chain.nextJsonRpcResponse(),
@@ -132,7 +132,7 @@ try {
   console.log(`RESULT ${JSON.stringify(result)}`);
   exitCode = 0;
 } catch (e) {
-  console.error(`warm_startup error: ${e?.message ?? e}`);
+  console.error(`startup error: ${e?.message ?? e}`);
 } finally {
   try {
     if (client) client.destroy();

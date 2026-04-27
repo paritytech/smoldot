@@ -272,7 +272,7 @@ async fn run_one(
     relay_spec: &std::path::Path,
     para_spec: Option<&std::path::Path>,
 ) -> Result<Sample, anyhow::Error> {
-    let script = smoldot_benchmarks::benchmarks_js_dir().join("cold_startup.js");
+    let script = smoldot_benchmarks::benchmarks_js_dir().join("startup.js");
     let cwd = smoldot_benchmarks::benchmarks_js_dir()
         .parent()
         .unwrap()
