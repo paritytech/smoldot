@@ -2,8 +2,13 @@
 
 ## Cold startup
 
-Time from `start()` to the first `chainHead_v1_follow` notification with
-`event: "initialized"`. Each iteration spawns a fresh `node` subprocess.
+Time from `start()` until polkadot-api `client.getFinalizedBlock()` resolves
+— i.e. an app sitting on top of smoldot has its first finalized block in
+hand. Each iteration spawns a fresh `node` subprocess.
+
+This matches what `wasm-node/javascript/bench/time-to-initialized.mjs`
+measures and is later than the bare `chainHead_v1_follow` `"initialized"`
+notification (which fires before polkadot-api fetches the block details).
 
 ### Run
 
@@ -43,7 +48,6 @@ cargo run --release --bin cold-startup -- \
 - `--relay-chain-spec <PATH|NAME>` / `--para-chain-spec <PATH|NAME>` —
   skip zombienet and use given specs. Short name resolves to
   `demo-chain-specs/<name>.json`
-- `--no-with-runtime` — `withRuntime: false` (fires earlier)
 - `--timeout-secs N` — per-iteration timeout (default 120)
 - `--json` — also emit a machine-readable JSON line
 
@@ -66,10 +70,11 @@ prior session's state.
 The runner does the save-DB step automatically:
 
 1. Spawn zombienet (or use user-supplied specs), wait for relay finality.
-2. Once: start smoldot, addChain, wait for `initialized`, call
-   `chainHead_unstable_finalizedDatabase`, write `<chainId>.db`.
+2. Once: start smoldot, addChain, wait for `chainHead_v1_follow`
+   `"initialized"`, call `chainHead_unstable_finalizedDatabase`, write
+   `<chainId>.db`.
 3. N iterations: fresh Node subprocess, `addChain({databaseContent})`,
-   measure time-to-initialized.
+   measure time-to-finalized-block (same gate as cold).
 
 ### Run
 

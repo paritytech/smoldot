@@ -1,21 +1,26 @@
-// Single cold-startup measurement. Spawned as a fresh Node subprocess per
-// iteration by the Rust bench runner. Prints exactly one line of the form:
-//   RESULT {"finalized_ms":<number>,"phases":{...},"block":{...}}
+// Single warm-startup measurement. Spawned as a fresh Node subprocess per
+// iteration by the Rust bench runner. Unlike cold_startup.js, this passes a
+// pre-saved `databaseContent` to `addChain()` so smoldot skips warp-sync and
+// resumes from the snapshot.
+//
+// Prints exactly one line:
+//   RESULT {"finalized_ms":<n>,"phases":{...},"block":{...}}
 // and exits 0 on success, non-zero on any failure.
 //
 // Measured window: `performance.now()` just before `start()` through
-// polkadot-api `client.getFinalizedBlock()` resolving — i.e. the first
-// finalized block usable by an app sitting on top of smoldot. This matches
-// what wasm-node/javascript/bench/time-to-initialized.mjs measures.
+// polkadot-api `client.getFinalizedBlock()` resolving — same gate as
+// cold_startup.js.
 //
-// Env vars:
+// Env vars (mirrors cold_startup.js plus LOAD_DB_DIR):
 //   RELAY_CHAIN_SPEC   path to relay chain spec (required)
-//   PARA_CHAIN_SPEC    path to parachain chain spec (optional — omit for relay-only)
-//   TARGET             "relay" | "para" (default: "para" if PARA_CHAIN_SPEC set, else "relay")
-//   TIMEOUT_MS         overall timeout (default: 120000)
-//   SMOLDOT_LOG_LEVEL  smoldot maxLogLevel (default: 2 — warnings only)
+//   PARA_CHAIN_SPEC    path to parachain chain spec (optional)
+//   TARGET             "relay" | "para"
+//   LOAD_DB_DIR        dir containing <chainId>.db files (required)
+//   TIMEOUT_MS         default 120000
+//   SMOLDOT_LOG_LEVEL  default 2
 
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { start } from "smoldot";
 import { createClient } from "polkadot-api";
 import { getSmProvider } from "polkadot-api/sm-provider";
@@ -23,10 +28,11 @@ import { getSmProvider } from "polkadot-api/sm-provider";
 const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
 const paraSpecPath = process.env.PARA_CHAIN_SPEC || "";
 const target = process.env.TARGET || (paraSpecPath ? "para" : "relay");
+const loadDir = process.env.LOAD_DB_DIR;
 const timeoutMs = Number.parseInt(process.env.TIMEOUT_MS || "120000", 10);
 
-if (!relaySpecPath) {
-  console.error("RELAY_CHAIN_SPEC is required");
+if (!relaySpecPath || !loadDir) {
+  console.error("RELAY_CHAIN_SPEC and LOAD_DB_DIR are required");
   process.exit(1);
 }
 if (target === "para" && !paraSpecPath) {
@@ -35,10 +41,27 @@ if (target === "para" && !paraSpecPath) {
 }
 
 const relaySpec = fs.readFileSync(relaySpecPath, "utf8");
-const paraSpec = paraSpecPath ? fs.readFileSync(paraSpecPath, "utf8") : null;
+const paraSpec = target === "para" ? fs.readFileSync(paraSpecPath, "utf8") : null;
+const relayId = JSON.parse(relaySpec).id;
+const paraId = paraSpec ? JSON.parse(paraSpec).id : null;
 
-// Mark the start just before handing control to smoldot. Reading chain-spec
-// files off disk is excluded — that is not what we are benchmarking.
+// Only load DBs for chains we will actually addChain. Target=relay does not
+// need the para DB even if PARA_CHAIN_SPEC was passed (zombienet always does).
+const relayDb = loadDb(relayId);
+const paraDb = paraId ? loadDb(paraId) : undefined;
+
+function loadDb(id) {
+  const p = path.join(loadDir, `${id}.db`);
+  if (!fs.existsSync(p)) {
+    // Fail fast — warm bench without a DB is meaningless.
+    console.error(`missing DB file for chain '${id}' at ${p}`);
+    process.exit(1);
+  }
+  return fs.readFileSync(p, "utf8");
+}
+
+// Mark the start just before handing control to smoldot. File reads above
+// are excluded — they are not what we are benchmarking.
 const tStart = performance.now();
 
 const smoldot = start({
@@ -53,7 +76,10 @@ let exitCode = 1;
 let client;
 try {
   const tBeforeRelay = performance.now();
-  const relay = await smoldot.addChain({ chainSpec: relaySpec });
+  const relay = await smoldot.addChain({
+    chainSpec: relaySpec,
+    databaseContent: relayDb,
+  });
   const tAfterRelay = performance.now();
 
   let tBeforePara = tAfterRelay;
@@ -66,13 +92,12 @@ try {
           const p = await smoldot.addChain({
             chainSpec: paraSpec,
             potentialRelayChains: [relay],
+            databaseContent: paraDb,
           });
           tAfterPara = performance.now();
           return p;
         })();
 
-  // Wrap the smoldot Chain so polkadot-api's `client.destroy()` doesn't call
-  // `chain.remove()` — we own teardown via `smoldot.terminate()` in `finally`.
   const provider = {
     sendJsonRpc: (req) => chain.sendJsonRpc(req),
     nextJsonRpcResponse: () => chain.nextJsonRpcResponse(),
@@ -107,7 +132,7 @@ try {
   console.log(`RESULT ${JSON.stringify(result)}`);
   exitCode = 0;
 } catch (e) {
-  console.error(`cold_startup error: ${e?.message ?? e}`);
+  console.error(`warm_startup error: ${e?.message ?? e}`);
 } finally {
   try {
     if (client) client.destroy();
