@@ -55,3 +55,48 @@ warp-sync-from-checkpoint). Treat it as a regression canary for the
 init-path code. On zombienet, the `para finalized: 0 -> 0` drift row is
 structurally always zero — westend-local has no para-side finality
 pallet; smoldot derives para finality from the relay.
+
+## Warm startup
+
+Same measurement window as cold, but smoldot is given a pre-saved DB
+(`addChain({databaseContent})`) so it skips warp-sync and resumes from a
+snapshot. Mirrors the browser page-reload case where IndexedDB has the
+prior session's state.
+
+The runner does the save-DB step automatically:
+
+1. Spawn zombienet (or use user-supplied specs), wait for relay finality.
+2. Once: start smoldot, addChain, wait for `initialized`, call
+   `chainHead_unstable_finalizedDatabase`, write `<chainId>.db`.
+3. N iterations: fresh Node subprocess, `addChain({databaseContent})`,
+   measure time-to-initialized.
+
+### Run
+
+```sh
+# zombienet: westend-local relay
+ZOMBIE_PROVIDER=native cargo run --release --bin warm-startup -- --target relay --iterations 10
+
+# zombienet: people-westend-local parachain
+ZOMBIE_PROVIDER=native cargo run --release --bin warm-startup -- --target para --iterations 10
+
+# real network: Polkadot relay
+cargo run --release --bin warm-startup -- \
+  --target relay --relay-chain-spec polkadot --iterations 5
+```
+
+### Extra flags (on top of cold-startup's)
+
+- `--db-dir PATH` — where to read/write `<chainId>.db`. Defaults to the
+  zombienet base dir for zombienet runs, or a tempdir for user-supplied
+  specs.
+- `--reuse-db` — reuse existing DB files in `--db-dir` instead of
+  regenerating. Useful for fast iteration on a real network; **not**
+  recommended on zombienet (each spawn is a fresh network, the saved DB
+  is stale).
+
+### DB scope
+
+- `--target relay` saves only the relay DB.
+- `--target para` saves both relay and para DBs (smoldot needs both to
+  resolve para finality).

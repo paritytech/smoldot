@@ -8,6 +8,10 @@ publish = false
 name = "cold-startup"
 path = "src/bin/cold_startup.rs"
 
+[[bin]]
+name = "warm-startup"
+path = "src/bin/warm_startup.rs"
+
 [dependencies]
 anyhow = "1.0.81"
 clap = { version = "4.5", features = ["derive"] }
