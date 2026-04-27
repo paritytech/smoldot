@@ -5,12 +5,8 @@ edition = "2021"
 publish = false
 
 [[bin]]
-name = "cold-startup"
-path = "src/bin/cold_startup.rs"
-
-[[bin]]
-name = "warm-startup"
-path = "src/bin/warm_startup.rs"
+name = "startup"
+path = "src/bin/startup.rs"
 
 [dependencies]
 anyhow = "1.0.81"

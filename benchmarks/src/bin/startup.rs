@@ -1,23 +1,34 @@
-//! Warm-startup benchmark for the smoldot light client.
+//! Startup benchmark for the smoldot light client.
 //!
-//! "Warm" = fresh `node` subprocess but pre-saved DB. Smoldot reads the DB
-//! blob passed to `addChain({ databaseContent })` and skips warp-sync,
-//! resuming from the serialized snapshot. This matches what a browser-based
-//! light client experiences on page reload when the prior session persisted
-//! its state to IndexedDB.
+//! Measures the time from `start()` until polkadot-api's
+//! `client.getFinalizedBlock()` resolves — i.e. an app sitting on top of
+//! smoldot has its first finalized block in hand. Each iteration runs in a
+//! fresh `node` subprocess.
 //!
-//! Flow:
+//! Two modes:
+//!   - `--mode cold` (default): smoldot starts with no DB. On a real network
+//!     this is dominated by warp-sync from the chain spec's `lightSyncState`
+//!     checkpoint. On a zombienet-local chain there is no checkpoint, so the
+//!     number is NOT representative of mainnet cold start — treat it as a
+//!     regression canary for the init-path code.
+//!   - `--mode warm`: smoldot is given a pre-saved DB
+//!     (`addChain({ databaseContent })`) so it skips warp-sync and resumes
+//!     from the snapshot. Mirrors the browser page-reload case where
+//!     IndexedDB has the prior session's state.
+//!
+//! Warm mode flow:
 //!   1. Spawn zombienet (or use user-supplied specs). Wait for relay finality.
 //!   2. Save-DB step (one Node subprocess): start smoldot, addChain, wait for
 //!      chainHead_v1_follow `initialized`, then call
-//!      `chainHead_unstable_finalizedDatabase` on each needed chain and
-//!      write `<chainId>.db` into `--db-dir`.
-//!   3. Measurement: N fresh Node subprocesses, each loading the saved DB
-//!      blobs and measuring time-to-finalized-block (same gate as cold).
+//!      `chainHead_unstable_finalizedDatabase` on each needed chain and write
+//!      `<chainId>.db` into `--db-dir`.
+//!   3. N fresh Node subprocesses, each loading the saved DB blobs and
+//!      measuring time-to-finalized-block (same gate as cold).
 //!
 //! DB scope:
 //!   - `--target relay` saves only the relay DB.
-//!   - `--target para` saves both relay and para DBs (smoldot needs both).
+//!   - `--target para` saves both relay and para DBs (smoldot needs both to
+//!     resolve para finality).
 
 use std::{path::PathBuf, process::Stdio, time::Duration};
 
@@ -35,8 +46,12 @@ use smoldot_e2e_tests::{
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[derive(Parser, Debug)]
-#[command(about = "Warm-startup benchmark for smoldot (uses pre-saved DB)")]
+#[command(about = "Startup benchmark for smoldot (cold or warm)")]
 struct Args {
+    /// Cold = no DB. Warm = pre-saved DB blob skips warp-sync.
+    #[arg(long, value_enum, default_value_t = Mode::Cold)]
+    mode: Mode,
+
     /// Number of measured iterations.
     #[arg(long, default_value_t = 10)]
     iterations: usize,
@@ -64,29 +79,38 @@ struct Args {
     #[arg(long, default_value_t = 120)]
     timeout_secs: u64,
 
-    /// Max time to wait for the relay finalization gate (seconds). Only
-    /// applies when zombienet is spawned.
-    #[arg(long, default_value_t = 180)]
-    finalized_wait_secs: u64,
-
-    /// Minimum relay finalized block required before starting the save-DB
-    /// step. Only applies when zombienet is spawned.
+    /// Wait for the relay's finalized block number to reach at least this
+    /// value before starting iterations. Readiness is always gated on the
+    /// relay (parachain finality derives from it and can lag significantly on
+    /// a fresh local network). Only applies when zombienet is spawned.
     #[arg(long, default_value_t = 1)]
     min_finalized_before_bench: u64,
 
-    /// Directory to write/read `<chainId>.db` files. Defaults to the zombienet
-    /// base dir (cleaned up with the run) or a tempdir for user-supplied specs.
+    /// Max time to wait for the relay finalization gate (seconds).
+    #[arg(long, default_value_t = 180)]
+    finalized_wait_secs: u64,
+
+    /// Warm mode only: directory to write/read `<chainId>.db` files. Defaults
+    /// to the zombienet base dir (cleaned up with the run) or a tempdir for
+    /// user-supplied specs.
     #[arg(long)]
     db_dir: Option<PathBuf>,
 
-    /// Reuse DB files in `--db-dir` if they already exist (skip save step).
-    /// Default: always regenerate the DB.
+    /// Warm mode only: reuse DB files in `--db-dir` if they already exist
+    /// (skip save step). Default: always regenerate the DB.
     #[arg(long, default_value_t = false)]
     reuse_db: bool,
 
     /// Emit a JSON line in addition to the human report.
     #[arg(long, default_value_t = false)]
     json: bool,
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum, Default, PartialEq, Eq)]
+enum Mode {
+    #[default]
+    Cold,
+    Warm,
 }
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -164,60 +188,62 @@ async fn main() -> Result<(), anyhow::Error> {
         info!("Para chain:  {}", p.label());
     }
 
-    let db_dir = args.db_dir.clone().unwrap_or(default_db_dir);
-    std::fs::create_dir_all(&db_dir)
-        .with_context(|| format!("create db-dir {}", db_dir.display()))?;
+    // Warm mode: prepare the DB dir and ensure DB files exist.
+    let db_dir = if args.mode == Mode::Warm {
+        let dir = args.db_dir.clone().unwrap_or(default_db_dir);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create db-dir {}", dir.display()))?;
 
-    // Figure out which DB files we need.
-    let relay_db_id = relay_info
-        .id
-        .clone()
-        .ok_or_else(|| anyhow!("relay chain spec has no `id` field; cannot name DB file"))?;
-    let para_db_id = if matches!(args.target, Target::Para) {
-        Some(
-            para_info
-                .as_ref()
-                .and_then(|p| p.id.clone())
-                .ok_or_else(|| anyhow!("para chain spec has no `id` field; cannot name DB file"))?,
-        )
+        let relay_db_id = relay_info
+            .id
+            .clone()
+            .ok_or_else(|| anyhow!("relay chain spec has no `id` field; cannot name DB file"))?;
+        let para_db_id = if matches!(args.target, Target::Para) {
+            Some(
+                para_info
+                    .as_ref()
+                    .and_then(|p| p.id.clone())
+                    .ok_or_else(|| {
+                        anyhow!("para chain spec has no `id` field; cannot name DB file")
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        let needed: Vec<PathBuf> = std::iter::once(dir.join(format!("{relay_db_id}.db")))
+            .chain(para_db_id.as_ref().map(|id| dir.join(format!("{id}.db"))))
+            .collect();
+        let all_exist = needed.iter().all(|p| p.is_file());
+        if args.reuse_db && all_exist {
+            info!(
+                "Reusing existing DB files in {}: {}",
+                dir.display(),
+                needed
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        } else {
+            if args.reuse_db && !all_exist {
+                warn!(
+                    "--reuse-db set but not all DB files present in {}; regenerating",
+                    dir.display()
+                );
+            }
+            info!("Saving DBs to {}", dir.display());
+            run_save_db(&args, &relay_spec, para_spec.as_deref(), &dir).await?;
+        }
+        Some(dir)
     } else {
         None
     };
 
-    let needed_db_files: Vec<PathBuf> = std::iter::once(db_dir.join(format!("{relay_db_id}.db")))
-        .chain(
-            para_db_id
-                .as_ref()
-                .map(|id| db_dir.join(format!("{id}.db"))),
-        )
-        .collect();
-
-    let all_exist = needed_db_files.iter().all(|p| p.is_file());
-    if args.reuse_db && all_exist {
-        info!(
-            "Reusing existing DB files in {}: {}",
-            db_dir.display(),
-            needed_db_files
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    } else {
-        if args.reuse_db && !all_exist {
-            warn!(
-                "--reuse-db set but not all DB files present in {}; regenerating",
-                db_dir.display()
-            );
-        }
-        info!("Saving DBs to {}", db_dir.display());
-        run_save_db(&args, &relay_spec, para_spec.as_deref(), &db_dir).await?;
-    }
-
     let total = args.warmup + args.iterations;
     info!(
-        "Running {} warmup + {} measured iteration(s), target={:?}",
-        args.warmup, args.iterations, args.target
+        "Running {} warmup + {} measured iteration(s), mode={:?}, target={:?}",
+        args.warmup, args.iterations, args.mode, args.target
     );
 
     let before = drift_blocks(network.as_ref()).await;
@@ -229,7 +255,7 @@ async fn main() -> Result<(), anyhow::Error> {
         } else {
             format!("sample {}/{}", i - args.warmup + 1, args.iterations)
         };
-        let s = run_one(&args, &relay_spec, para_spec.as_deref(), &db_dir)
+        let s = run_one(&args, &relay_spec, para_spec.as_deref(), db_dir.as_deref())
             .await
             .with_context(|| format!("iteration {label} failed"))?;
         info!(
@@ -263,7 +289,7 @@ async fn main() -> Result<(), anyhow::Error> {
         source,
         relay: &relay_info,
         para: para_info.as_ref(),
-        db_dir: &db_dir,
+        db_dir: db_dir.as_deref(),
         total: &total_stats,
         phases: &phase_stats,
         before,
@@ -294,6 +320,8 @@ where
     Stats::from_samples(&vals)
 }
 
+/// Accepts either a direct path to a chain spec JSON, or a short name that
+/// resolves to `<repo-root>/demo-chain-specs/<name>.json`.
 fn resolve_chain_spec(input: &std::path::Path) -> Result<PathBuf, anyhow::Error> {
     if input.is_file() {
         return Ok(input.to_path_buf());
@@ -372,7 +400,7 @@ async fn run_one(
     args: &Args,
     relay_spec: &std::path::Path,
     para_spec: Option<&std::path::Path>,
-    db_dir: &std::path::Path,
+    db_dir: Option<&std::path::Path>,
 ) -> Result<Sample, anyhow::Error> {
     let script = smoldot_benchmarks::benchmarks_js_dir().join("startup.js");
     let cwd = smoldot_benchmarks::benchmarks_js_dir()
@@ -392,14 +420,16 @@ async fn run_one(
             },
         )
         .env("TIMEOUT_MS", (args.timeout_secs * 1000).to_string())
-        .env("LOAD_DB_DIR", db_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     if let Some(p) = para_spec {
         cmd.env("PARA_CHAIN_SPEC", p);
     }
+    if let Some(d) = db_dir {
+        cmd.env("LOAD_DB_DIR", d);
+    }
 
-    let mut child = cmd.spawn().context("spawn node (warm_startup)")?;
+    let mut child = cmd.spawn().context("spawn node (startup)")?;
     let stdout = child
         .stdout
         .take()
@@ -476,7 +506,7 @@ struct Report<'a> {
     source: &'a str,
     relay: &'a ChainSpecInfo,
     para: Option<&'a ChainSpecInfo>,
-    db_dir: &'a std::path::Path,
+    db_dir: Option<&'a std::path::Path>,
     total: &'a Stats,
     phases: &'a PhaseStats,
     before: DriftBlocks,
@@ -485,14 +515,17 @@ struct Report<'a> {
 
 fn print_report(r: &Report<'_>) {
     println!();
-    println!("=== warm-startup benchmark ===");
+    println!("=== startup benchmark ===");
+    println!("mode                : {:?}", r.args.mode);
     println!("source              : {}", r.source);
     println!("relay chain         : {}", r.relay.label());
     if let Some(p) = r.para {
         println!("para chain          : {}", p.label());
     }
     println!("target              : {:?}", r.args.target);
-    println!("db dir              : {}", r.db_dir.display());
+    if let Some(d) = r.db_dir {
+        println!("db dir              : {}", d.display());
+    }
     println!("iterations          : {}", r.total.n);
     println!("warmup              : {}", r.args.warmup);
     print_drift("relay finalized", r.before.relay, r.after.relay);
@@ -511,11 +544,12 @@ fn print_report(r: &Report<'_>) {
 
     if r.args.json {
         let obj = serde_json::json!({
+            "mode": format!("{:?}", r.args.mode).to_lowercase(),
             "source": r.source,
             "relay_chain": r.relay,
             "para_chain": r.para,
             "target": format!("{:?}", r.args.target).to_lowercase(),
-            "db_dir": r.db_dir.display().to_string(),
+            "db_dir": r.db_dir.map(|p| p.display().to_string()),
             "iterations": r.total.n,
             "warmup": r.args.warmup,
             "finalized_ms": r.total,
