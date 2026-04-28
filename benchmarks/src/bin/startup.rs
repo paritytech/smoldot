@@ -79,10 +79,12 @@ struct Args {
     #[arg(long, default_value_t = 120)]
     timeout_secs: u64,
 
-    /// Wait for the relay's finalized block number to reach at least this
-    /// value before starting iterations. Readiness is always gated on the
-    /// relay (parachain finality derives from it and can lag significantly on
-    /// a fresh local network). Only applies when zombienet is spawned.
+    /// Before starting iterations, wait for this many additional finalized
+    /// blocks past the network's current finalized at the moment we begin
+    /// gating. Readiness is always gated on the relay (parachain finality
+    /// derives from it and can lag significantly on a fresh local network);
+    /// when target=para, the same delta is also required on the para node.
+    /// Only applies when zombienet is spawned.
     #[arg(long, default_value_t = 10)]
     min_finalized_before_bench: u64,
 
@@ -253,29 +255,38 @@ async fn wait_for_network_ready(
     network: &zombienet_sdk::Network<zombienet_sdk::LocalFileSystem>,
 ) -> Result<(), anyhow::Error> {
     let (validator, collator) = pick_bench_nodes(network)?;
+
+    let relay_start = current_finalized_block(validator).await?;
+    let relay_target = relay_start + args.min_finalized_before_bench;
     info!(
-        "Waiting for relay finalized block >= {} on {} (timeout {}s)",
+        "Waiting for relay finalized block >= {} (start {} + {}) on {} (timeout {}s)",
+        relay_target,
+        relay_start,
         args.min_finalized_before_bench,
         validator.name(),
         args.finalized_wait_secs,
     );
     wait_for_finalized_block(
         validator,
-        args.min_finalized_before_bench,
+        relay_target,
         Duration::from_secs(args.finalized_wait_secs),
     )
     .await?;
 
     if matches!(args.target, Target::Para) {
+        let para_start = current_finalized_block(collator).await?;
+        let para_target = para_start + args.min_finalized_before_bench;
         info!(
-            "Waiting for para finalized block >= {} on {} (timeout {}s)",
+            "Waiting for para finalized block >= {} (start {} + {}) on {} (timeout {}s)",
+            para_target,
+            para_start,
             args.min_finalized_before_bench,
             collator.name(),
             args.finalized_wait_secs,
         );
         wait_for_finalized_block(
             collator,
-            args.min_finalized_before_bench,
+            para_target,
             Duration::from_secs(args.finalized_wait_secs),
         )
         .await?;
