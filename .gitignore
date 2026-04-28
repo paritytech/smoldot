@@ -1,1 +1,3 @@
 /target
+/e2e-tests/target
+/e2e-tests/js/node_modules

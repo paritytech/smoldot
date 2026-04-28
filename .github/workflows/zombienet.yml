@@ -1,0 +1,149 @@
+name: zombienet-e2e
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: zombienet-e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: read-all
+
+jobs:
+  env:
+    runs-on: ubuntu-latest
+    outputs:
+      ZOMBIE_PROVIDER: ${{ steps.vars.outputs.ZOMBIE_PROVIDER }}
+      RUST_LOG: ${{ steps.vars.outputs.RUST_LOG }}
+      ZOMBIENET_SDK_IMAGE: ${{ steps.vars.outputs.ZOMBIENET_SDK_IMAGE }}
+      ZOMBIENET_SDK_DEFAULT_RUNNER: ${{ steps.vars.outputs.ZOMBIENET_SDK_DEFAULT_RUNNER }}
+      ZOMBIENET_SDK_LARGE_RUNNER: ${{ steps.vars.outputs.ZOMBIENET_SDK_LARGE_RUNNER }}
+      POLKADOT_RELEASE_TAG: ${{ steps.vars.outputs.POLKADOT_RELEASE_TAG }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Source zombienet-env
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          . .github/zombienet-env
+          {
+            echo "ZOMBIE_PROVIDER=${ZOMBIE_PROVIDER}"
+            echo "RUST_LOG=${RUST_LOG}"
+            echo "ZOMBIENET_SDK_IMAGE=${ZOMBIENET_SDK_IMAGE_FOR_NATIVE}"
+            echo "ZOMBIENET_SDK_DEFAULT_RUNNER=${ZOMBIENET_SDK_DEFAULT_RUNNER_FOR_NATIVE}"
+            echo "ZOMBIENET_SDK_LARGE_RUNNER=${ZOMBIENET_SDK_LARGE_RUNNER_FOR_NATIVE}"
+            echo "POLKADOT_RELEASE_TAG=${POLKADOT_RELEASE_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+  tests:
+    name: ${{ matrix.test.job-name }}
+    needs: env
+    runs-on: ${{ matrix.test.runner-type == 'large' && needs.env.outputs.ZOMBIENET_SDK_LARGE_RUNNER || needs.env.outputs.ZOMBIENET_SDK_DEFAULT_RUNNER }}
+    timeout-minutes: 40
+    container:
+      image: ${{ needs.env.outputs.ZOMBIENET_SDK_IMAGE }}
+      options: -v /tmp/zombienet:/tmp/zombienet
+    env:
+      ZOMBIE_PROVIDER: ${{ needs.env.outputs.ZOMBIE_PROVIDER }}
+      RUST_LOG: ${{ needs.env.outputs.RUST_LOG }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - job-name: "zombienet-smoldot-0000-smoke"
+            test: "smoke"
+            runner-type: "default"
+          - job-name: "zombienet-smoldot-0001-statement_store_submission"
+            test: "statement_store_submission"
+            runner-type: "default"
+          - job-name: "zombienet-smoldot-0002-statement_store_reception"
+            test: "statement_store_reception"
+            runner-type: "default"
+          - job-name: "zombienet-smoldot-0003-statement_store_peer_connection"
+            test: "statement_store_peer_connection"
+            runner-type: "default"
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-node@v6.1.0
+        with:
+          node-version: '22'
+
+      - name: Install wasm target
+        shell: bash
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo registry + e2e-tests target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            e2e-tests/target
+          key: e2e-cargo-${{ hashFiles('e2e-tests/Cargo.lock', 'lib/Cargo.toml') }}
+
+      - name: Cache smoldot JS node_modules
+        uses: actions/cache@v4
+        with:
+          path: wasm-node/javascript/node_modules
+          key: smoldot-js-nm-${{ hashFiles('wasm-node/javascript/package-lock.json') }}
+
+      - name: Cache e2e-tests JS node_modules
+        uses: actions/cache@v4
+        with:
+          path: e2e-tests/js/node_modules
+          key: e2e-js-nm-${{ hashFiles('e2e-tests/js/package-lock.json') }}
+
+      - name: Install smoldot JS deps
+        shell: bash
+        run: npm ci
+        working-directory: wasm-node/javascript
+
+      - name: Install e2e-tests JS deps
+        shell: bash
+        run: npm ci
+        working-directory: e2e-tests/js
+
+      # Pull binaries from the polkadot-sdk release
+      - name: Download polkadot binaries
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.env.outputs.POLKADOT_RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/bin"
+          base="https://github.com/paritytech/polkadot-sdk/releases/download/${RELEASE_TAG}"
+          for bin in polkadot polkadot-execute-worker polkadot-prepare-worker polkadot-parachain; do
+            curl -fL --retry 3 -o "$GITHUB_WORKSPACE/bin/${bin}" "${base}/${bin}"
+            chmod +x "$GITHUB_WORKSPACE/bin/${bin}"
+          done
+          "$GITHUB_WORKSPACE/bin/polkadot" --version
+          "$GITHUB_WORKSPACE/bin/polkadot-parachain" --version
+
+      - name: Run test
+        shell: bash
+        env:
+          TEST: ${{ matrix.test.test }}
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/bin:$PATH"
+          cargo test --locked --manifest-path e2e-tests/Cargo.toml \
+            --test "$TEST" -- --nocapture
+
+      - name: Upload zombienet logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zombienet-logs-${{ matrix.test.job-name }}-${{ github.sha }}
+          path: |
+            /tmp/zombie-*/**
+            /tmp/zombienet-*/**
+          if-no-files-found: ignore
+          retention-days: 7

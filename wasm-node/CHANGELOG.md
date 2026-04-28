@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 3.1.1 - 2026-04-22
+
+### Fixed
+
+- Fix parachain cold-start where `chainHead_v1_follow` never emitted `initialized` because the bootstrapped runtime was discarded before being passed to the parachain runtime service. ([#3203](https://github.com/paritytech/smoldot/pull/3203))
+- Tolerate races between `chainHead_v1_follow` background events and client-initiated `unfollow` / `stopOperation`, which could previously panic the JSON-RPC background task. ([#3194](https://github.com/paritytech/smoldot/pull/3194))
+
 ## 3.1.0 - 2026-04-17
 
 ### Added

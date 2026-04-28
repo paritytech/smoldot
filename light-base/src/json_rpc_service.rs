@@ -38,6 +38,7 @@
 // TODO: re-review this once finished
 
 mod background;
+mod statement;
 
 use crate::{
     bitswap_service, log, network_service, platform::PlatformRef, runtime_service, sync_service,
