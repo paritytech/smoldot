@@ -88,8 +88,8 @@ struct Args {
     #[arg(long, default_value_t = 10)]
     min_finalized_before_bench: u64,
 
-    /// Max time to wait for the relay finalization gate (seconds).
-    #[arg(long, default_value_t = 180)]
+    /// Max time to wait for the relay/para finalization gate (seconds).
+    #[arg(long, default_value_t = 300)]
     finalized_wait_secs: u64,
 
     /// Warm mode only: directory to write/read `<chainId>.db` files. Defaults
