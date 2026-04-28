@@ -155,6 +155,15 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             .block_number_bytes()
     }
 
+    /// Resolves once the underlying sync service's warp-sync phase has finished, or immediately
+    /// if it was never needed. See [`sync_service::SyncService::wait_warp_sync_finished`].
+    pub async fn wait_warp_sync_finished(&self) {
+        self.background_task_config
+            .sync_service
+            .wait_warp_sync_finished()
+            .await
+    }
+
     /// Subscribes to the state of the chain: the current state and the new blocks.
     ///
     /// This function only returns once the runtime of the current finalized block is known. This

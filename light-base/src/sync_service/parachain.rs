@@ -542,6 +542,11 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 task.network_up_to_date_best = true;
             }
 
+            WakeUpReason::ForegroundMessage(ToBackground::WaitWarpSyncFinished { send_back }) => {
+                // Parachain sync doesn't run a warp-sync phase; resolve immediately.
+                let _ = send_back.send(());
+            }
+
             WakeUpReason::ForegroundMessage(ToBackground::IsNearHeadOfChainHeuristic {
                 send_back,
             }) => {
@@ -1113,21 +1118,30 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
     para_id: u32,
     block_number_bytes: usize,
 ) -> chain::chain_information::ValidChainInformation {
+    // Wait for relay-chain warp sync to finish before trusting the runtime service's initial
+    // finalized block. On cold start with a stale chain-spec checkpoint, that field is the
+    // checkpoint until warp sync promotes it. On warm restart this resolves immediately.
+    log!(
+        platform,
+        Info,
+        log_target,
+        "Waiting for relay chain warp sync to finish..."
+    );
+    relay_chain_sync.wait_warp_sync_finished().await;
+    log!(
+        platform,
+        Debug,
+        log_target,
+        "Relay chain warp sync finished."
+    );
+
     let mut subscription = relay_chain_sync
         .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
         .await;
 
     // Try the already-finalized block first before waiting for new notifications.
-    // On warm restart the relay chain may already be synced, so there's no reason
-    // to wait for the next finalization round.
+    // Safe now that warp sync has finished — the initial finalized is post-warp.
     let mut try_initial_finalized = true;
-
-    log!(
-        platform,
-        Info,
-        log_target,
-        "Waiting for relay chain to finalize a block..."
-    );
 
     loop {
         let finalized_hash = if try_initial_finalized {
@@ -1136,6 +1150,12 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
                 &subscription.finalized_block_scale_encoded_header,
             )
         } else {
+            log!(
+                platform,
+                Info,
+                log_target,
+                "Waiting for relay chain to finalize a block..."
+            );
             loop {
                 match subscription.new_blocks.next().await {
                     Some(runtime_service::Notification::Finalized { hash, .. }) => {

@@ -239,6 +239,24 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         rx.await.unwrap()
     }
 
+    /// Resolves once the warp-sync phase has finished, or immediately if it was never needed.
+    ///
+    /// On cold start with a chain spec whose checkpoint is far behind the current head, the
+    /// `finalized_block_scale_encoded_header` returned by [`SyncService::subscribe_all`] is
+    /// initially the chain-spec checkpoint and only advances to the real head after warp-sync
+    /// completes. Callers that need a post-warp finalized block should await this future before
+    /// reading that field.
+    pub async fn wait_warp_sync_finished(&self) {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .send(ToBackground::WaitWarpSyncFinished { send_back })
+            .await
+            .unwrap();
+
+        let _ = rx.await;
+    }
+
     /// Returns true if it is believed that we are near the head of the chain.
     ///
     /// The way this method is implemented is opaque and cannot be relied on. The return value
@@ -1219,6 +1237,8 @@ pub struct BlockNotification {
 }
 
 enum ToBackground {
+    /// See [`SyncService::wait_warp_sync_finished`].
+    WaitWarpSyncFinished { send_back: oneshot::Sender<()> },
     /// See [`SyncService::is_near_head_of_chain_heuristic`].
     IsNearHeadOfChainHeuristic { send_back: oneshot::Sender<bool> },
     /// See [`SyncService::subscribe_all`].

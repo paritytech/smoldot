@@ -931,6 +931,18 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 }
 
                 (
+                    WakeUpReason::ForegroundMessage(ToBackground::WaitWarpSyncFinished {
+                        send_back,
+                    }),
+                    _,
+                ) => {
+                    // Paraheads doesn't run a warp-sync phase of its own; delegate to the relay's
+                    // sync service.
+                    self.relay_chain_sync.wait_warp_sync_finished().await;
+                    let _ = send_back.send(());
+                }
+
+                (
                     WakeUpReason::ForegroundMessage(ToBackground::IsNearHeadOfChainHeuristic {
                         send_back,
                     }),

@@ -30,6 +30,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{cmp, iter, num::NonZero, pin::Pin, time::Duration};
+use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{FutureExt as _, StreamExt as _, future, stream};
 use hashbrown::HashMap;
@@ -104,6 +105,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         ))
         .fuse(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
+        pending_warp_sync_finished: Vec::new(),
         log_target,
         from_network_service: None,
         network_service,
@@ -337,6 +339,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 );
 
                 task.sync = Some(sync);
+
+                for send_back in task.pending_warp_sync_finished.drain(..) {
+                    let _ = send_back.send(());
+                }
 
                 task.warp_sync_taking_long_time_warning =
                     future::Either::Right(future::pending()).fuse();
@@ -883,6 +889,19 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 }
 
                 task.network_up_to_date_finalized = true;
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::WaitWarpSyncFinished { send_back }) => {
+                let finished = task
+                    .sync
+                    .as_ref()
+                    .unwrap_or_else(|| unreachable!())
+                    .is_warp_sync_finished();
+                if finished {
+                    let _ = send_back.send(());
+                } else {
+                    task.pending_warp_sync_finished.push(send_back);
+                }
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::IsNearHeadOfChainHeuristic {
@@ -1435,6 +1454,10 @@ struct Task<TPlat: PlatformRef> {
 
     /// All event subscribers that are interested in events about the chain.
     all_notifications: Vec<async_channel::Sender<Notification>>,
+
+    /// Senders to notify once the warp-sync phase has finished. Drained when warp sync ends or
+    /// is observed to be already finished.
+    pending_warp_sync_finished: Vec<oneshot::Sender<()>>,
 
     /// Contains a `Delay` after which we print a warning about GrandPa warp sync taking a long
     /// time. Set to `Pending` after the warp sync has finished, so that future remains pending

@@ -280,6 +280,15 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }*/
     }
 
+    /// Returns `true` if the warp sync phase has finished or was never needed.
+    ///
+    /// Once this returns `true`, all syncing happens through the all-forks state machine and the
+    /// finalized block tracked by this state machine will only advance through normal finality
+    /// notifications.
+    pub fn is_warp_sync_finished(&self) -> bool {
+        self.warp_sync.is_none()
+    }
+
     /// Returns the header of the finalized block.
     pub fn finalized_block_header(&self) -> &[u8] {
         let Some(all_forks) = &self.all_forks else {
