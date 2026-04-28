@@ -65,11 +65,14 @@ function loadDb(loadDir, id) {
 }
 
 function startSmoldot() {
+  const tStart = performance.now();
   return start({
     maxLogLevel: Number.parseInt(process.env.SMOLDOT_LOG_LEVEL || "2", 10),
     logCallback: (level, t, m) => {
       const labels = { 1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE" };
-      console.error(`[${labels[level] ?? `L${level}`}] [${t}] ${m}`);
+      const dt = (performance.now() - tStart).toFixed(1).padStart(8);
+      const wall = new Date().toISOString();
+      console.error(`[${wall}] [+${dt}ms] [${labels[level] ?? `L${level}`}] [${t}] ${m}`);
     },
   });
 }
