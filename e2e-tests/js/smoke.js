@@ -25,9 +25,12 @@ import {
 
 const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
 const paraSpecPath = process.env.PARA_CHAIN_SPEC;
+const requiredBlocks = Number.parseInt(process.env.REQUIRED_BLOCKS, 10);
 
-if (!relaySpecPath || !paraSpecPath) {
-  console.error("Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC");
+if (!relaySpecPath || !paraSpecPath || !Number.isFinite(requiredBlocks)) {
+  console.error(
+    "Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, REQUIRED_BLOCKS",
+  );
   process.exit(1);
 }
 
@@ -76,7 +79,7 @@ try {
       if (result?.event === "initialized") {
         for (const h of result.finalizedBlockHashes ?? []) initialBlocks.add(h);
       } else if (result?.event === "newBlock" && !initialBlocks.has(result.blockHash)) {
-        if (++newBlocks >= 2) return true;
+        if (++newBlocks >= requiredBlocks) return true;
       } else if (result?.event === "stop") {
         throw new Error("chainHead follow stopped unexpectedly");
       }
@@ -85,8 +88,12 @@ try {
     Date.now() + 120_000,
   );
 
-  const ok = newBlocks >= 2;
-  report("smoldot saw new parachain blocks", ok, `count=${newBlocks}`);
+  const ok = newBlocks >= requiredBlocks;
+  report(
+    "smoldot saw new parachain blocks",
+    ok,
+    `count=${newBlocks}/${requiredBlocks}`,
+  );
   if (!ok) passed = false;
 } catch (e) {
   report("smoke", false, e.message);

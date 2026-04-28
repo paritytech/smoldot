@@ -21,10 +21,12 @@ use anyhow::anyhow;
 use smoldot_e2e_tests::*;
 use zombienet_sdk::NetworkConfigBuilder;
 
-const PARA_ID: u32 = 2000;
+const PARA_ID: u32 = 1004;
+const REQUIRED_BLOCKS: u32 = 5;
 
-/// Smoke test: spawn rococo-local + the stock `test-parachain`, then run
-/// smoldot and assert it sees a new parachain block.
+/// Smoke test: spawn westend-local + people-westend-local (both built-in
+/// chains of `polkadot` and `polkadot-parachain`), then run smoldot and
+/// assert it sees new parachain blocks.
 #[tokio::test(flavor = "multi_thread")]
 async fn smoke() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
@@ -37,7 +39,7 @@ async fn smoke() -> Result<(), anyhow::Error> {
 
     let config = NetworkConfigBuilder::new()
         .with_relaychain(|r| {
-            r.with_chain("rococo-local")
+            r.with_chain("westend-local")
                 .with_default_command("polkadot")
                 .with_default_image(images.polkadot.as_str())
                 .with_validator(|n| n.with_name("validator-0").bootnode(true))
@@ -45,8 +47,13 @@ async fn smoke() -> Result<(), anyhow::Error> {
         })
         .with_parachain(|p| {
             p.with_id(PARA_ID)
-                .with_default_command("test-parachain")
+                .with_default_command("polkadot-parachain")
                 .with_default_image(images.cumulus.as_str())
+                .with_chain("people-westend-local")
+                .with_default_args(vec![
+                    "--force-authoring".into(),
+                    "--authoring=slot-based".into(),
+                ])
                 .with_collator(|n| n.with_name("alice").bootnode(true))
                 .with_collator(|n| n.with_name("bob").bootnode(true))
         })
@@ -67,10 +74,13 @@ async fn smoke() -> Result<(), anyhow::Error> {
     network.detach().await;
     network.wait_until_is_up(120).await?;
 
-    // The parachain producing a block implies the relay is running too.
     network
         .get_node("alice")?
-        .wait_metric_with_timeout("block_height{status=\"best\"}", |h| h >= 1.0, 300u64)
+        .wait_metric_with_timeout(
+            "block_height{status=\"best\"}",
+            |h| h >= REQUIRED_BLOCKS as f64,
+            300u64,
+        )
         .await
         .map_err(|e| anyhow!("alice did not produce parachain blocks: {e}"))?;
 
@@ -80,19 +90,21 @@ async fn smoke() -> Result<(), anyhow::Error> {
             .ok_or_else(|| anyhow!("network has no base_dir"))?,
     );
     let relay_spec = zombienet_base.join(format!("{}.json", network.relaychain().chain()));
-    let para_unique = network
+    let parachain = network
         .parachain(PARA_ID)
-        .ok_or_else(|| anyhow!("parachain {PARA_ID} not found"))?
-        .unique_id();
-    let para_spec = zombienet_base.join(format!("{para_unique}.json"));
+        .ok_or_else(|| anyhow!("parachain {PARA_ID} not found"))?;
+    let para_spec_name = parachain.chain_id().unwrap_or(parachain.unique_id());
+    let para_spec = zombienet_base.join(format!("{para_spec_name}.json"));
 
     ensure_smoldot_built();
     ensure_js_deps_installed();
+    let required_blocks = REQUIRED_BLOCKS.to_string();
     run_js_test(
         "js/smoke.js",
         &[
             ("RELAY_CHAIN_SPEC", relay_spec.to_str().expect("UTF-8 path")),
             ("PARA_CHAIN_SPEC", para_spec.to_str().expect("UTF-8 path")),
+            ("REQUIRED_BLOCKS", required_blocks.as_str()),
         ],
     )
     .await
