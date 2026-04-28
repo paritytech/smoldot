@@ -23,12 +23,12 @@ use smoldot_e2e_tests::*;
 /// comes back.
 ///
 /// Flow:
-///   1. Spawn collator-0 + collator-1; smoldot connects and subscribes.
-///   2. Submit stmt_1 via collator-0 → must arrive at smoldot.
-///   3. Restart collator-0, wait for smoldot to reconnect, submit stmt_2 via
-///      collator-0 → must arrive at smoldot.
-///   4. Restart collator-1, wait for smoldot to reconnect, submit stmt_3 via
-///      collator-1 → must arrive at smoldot.
+///   1. Spawn alice + bob; smoldot connects and subscribes.
+///   2. Submit stmt_1 via alice → must arrive at smoldot.
+///   3. Restart alice, wait for smoldot to reconnect, submit stmt_2 via
+///      alice → must arrive at smoldot.
+///   4. Restart bob, wait for smoldot to reconnect, submit stmt_3 via
+///      bob → must arrive at smoldot.
 #[tokio::test(flavor = "multi_thread")]
 async fn recovers_statement_delivery_after_peer_restart() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
@@ -73,29 +73,29 @@ async fn recovers_statement_delivery_after_peer_restart() -> Result<(), anyhow::
         .await
     });
 
-    // Wait until smoldot has peered with collator-0, then submit the baseline
+    // Wait until smoldot has peered with alice, then submit the baseline
     // statement. Smoldot's statement-store only delivers statements received
     // over the gossip protocol while peered, so timing matters.
-    let collator_0 = network.get_node("collator-0")?;
-    wait_until_peered(collator_0, 2, 120).await?;
-    submit_statement(collator_0, &stmt_1_hex, "stmt_1").await?;
+    let alice = network.get_node("alice")?;
+    wait_until_peered(alice, 2, 120).await?;
+    submit_statement(alice, &stmt_1_hex, "stmt_1").await?;
 
-    info!("Restarting collator-0");
-    collator_0
+    info!("Restarting alice");
+    alice
         .restart(None)
         .await
-        .map_err(|e| anyhow::anyhow!("restart(collator-0) failed: {e}"))?;
-    wait_until_peered(collator_0, 2, 120).await?;
-    submit_statement(collator_0, &stmt_2_hex, "stmt_2").await?;
+        .map_err(|e| anyhow::anyhow!("restart(alice) failed: {e}"))?;
+    wait_until_peered(alice, 2, 120).await?;
+    submit_statement(alice, &stmt_2_hex, "stmt_2").await?;
 
-    let collator_1 = network.get_node("collator-1")?;
-    info!("Restarting collator-1");
-    collator_1
+    let bob = network.get_node("bob")?;
+    info!("Restarting bob");
+    bob
         .restart(None)
         .await
-        .map_err(|e| anyhow::anyhow!("restart(collator-1) failed: {e}"))?;
-    wait_until_peered(collator_1, 2, 120).await?;
-    submit_statement(collator_1, &stmt_3_hex, "stmt_3").await?;
+        .map_err(|e| anyhow::anyhow!("restart(bob) failed: {e}"))?;
+    wait_until_peered(bob, 2, 120).await?;
+    submit_statement(bob, &stmt_3_hex, "stmt_3").await?;
 
     info!("Waiting for JS test to finish");
     let js_result = js_handle.await.expect("JS task panicked");

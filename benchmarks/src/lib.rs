@@ -160,8 +160,8 @@ pub fn pick_bench_nodes(
     network: &Network<LocalFileSystem>,
 ) -> Result<(&NetworkNode, &NetworkNode), anyhow::Error> {
     let validator = network.get_node("validator-0")?;
-    let collator = network.get_node("collator-0")?;
-    Ok((validator, collator))
+    let alice = network.get_node("alice")?;
+    Ok((validator, alice))
 }
 
 /// Sample statistics over a set of f64 measurements (milliseconds).

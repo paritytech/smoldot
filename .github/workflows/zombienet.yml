@@ -56,6 +56,9 @@ jobs:
       fail-fast: false
       matrix:
         test:
+          - job-name: "zombienet-smoldot-0000-smoke"
+            test: "smoke"
+            runner-type: "default"
           - job-name: "zombienet-smoldot-0001-statement_store_submission"
             test: "statement_store_submission"
             runner-type: "default"

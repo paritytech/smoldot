@@ -28,9 +28,9 @@ fn decode_hex_0x(s: &str) -> Vec<u8> {
 /// peers, and drops statements outside the filter.
 ///
 /// Flow:
-///   1. Spawn collator-0 + collator-1.
-///   2. Submit stmt_A and stmt_B to collator-0; wait for both to reach
-///      collator-1 via gossip.
+///   1. Spawn alice + bob.
+///   2. Submit stmt_A and stmt_B to alice; wait for both to reach
+///      bob via gossip.
 ///   3. Start smoldot; it peers with both collators and subscribes to stmt_A's
 ///      topic.
 ///   4. Smoldot must deliver stmt_A exactly once, never stmt_B, and nothing
@@ -65,20 +65,20 @@ async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
         hex::encode(hash_b)
     );
 
-    // Subscribe on collator-1 first so we don't miss gossip from collator-0.
+    // Subscribe on bob first so we don't miss gossip from alice.
     // Bind the RPC client — dropping it closes the websocket and terminates
     // the subscription stream.
-    let collator_0 = network.get_node("collator-0")?;
-    let collator_1 = network.get_node("collator-1")?;
-    let rpc_1 = collator_1.rpc().await?;
-    let mut sub_1 = subscribe_any(&rpc_1).await?;
+    let alice = network.get_node("alice")?;
+    let bob = network.get_node("bob")?;
+    let bob_rpc = bob.rpc().await?;
+    let mut bob_sub = subscribe_any(&bob_rpc).await?;
 
-    submit_statement(collator_0, &stmt_a_hex, "stmt_A").await?;
-    submit_statement(collator_0, &stmt_b_hex, "stmt_B").await?;
+    submit_statement(alice, &stmt_a_hex, "stmt_A").await?;
+    submit_statement(alice, &stmt_b_hex, "stmt_B").await?;
 
-    let received = receive_statements(2, &mut sub_1, 120).await?;
+    let received = receive_statements(2, &mut bob_sub, 120).await?;
     assert!(received.contains(&stmt_a_hex) && received.contains(&stmt_b_hex));
-    info!("Both statements confirmed on collator-1 via gossip");
+    info!("Both statements confirmed on bob via gossip");
 
     info!("Ensuring smoldot JS bundle is built");
     ensure_smoldot_built();
@@ -115,8 +115,8 @@ async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
     // level. Each collator already holds stmt_A and stmt_B, so both push them
     // during the initial statement-store sync — this is what makes the dedup
     // assertion in JS meaningful.
-    wait_until_peered(collator_0, 2, 120).await?;
-    wait_until_peered(collator_1, 2, 120).await?;
+    wait_until_peered(alice, 2, 120).await?;
+    wait_until_peered(bob, 2, 120).await?;
 
     // Tell JS to start its listen window now that both substreams are up.
     sync.send("READY")?;

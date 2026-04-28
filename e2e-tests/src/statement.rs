@@ -127,12 +127,13 @@ pub async fn spawn_network(
                     let log_arg = format!("-l{log_filter}");
                     vec![
                         "--force-authoring".into(),
+                        "--authoring=slot-based".into(),
                         "--enable-statement-store".into(),
                         log_arg.as_str().into(),
                     ]
                 })
-                .with_collator(|n| n.with_name("collator-0").bootnode(true))
-                .with_collator(|n| n.with_name("collator-1").bootnode(true))
+                .with_collator(|n| n.with_name("alice").bootnode(true))
+                .with_collator(|n| n.with_name("bob").bootnode(true))
         })
         .with_global_settings(|g| {
             g.with_base_dir(base_dir_str.as_str())
