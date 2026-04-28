@@ -78,20 +78,15 @@ async fn smoke() -> Result<(), anyhow::Error> {
     let spawn_fn = zombienet_sdk::environment::get_spawn_fn();
     let network = spawn_fn(config).await?;
     network.detach().await;
+
+    // Network nodes run as detached subprocesses; build smoldot + JS deps now
+    // so they're ready by the time the relay has finalized enough for warp.
+    log::info!("building smoldot + installing JS deps");
+    ensure_smoldot_built();
+    ensure_js_deps_installed();
+
     network.wait_until_is_up(120).await?;
     log::info!("network is up");
-
-    log::info!("waiting for alice to produce {REQUIRED_BLOCKS} parachain blocks (best)");
-    network
-        .get_node("alice")?
-        .wait_metric_with_timeout(
-            "block_height{status=\"best\"}",
-            |h| h >= REQUIRED_BLOCKS as f64,
-            300u64,
-        )
-        .await
-        .map_err(|e| anyhow!("alice did not produce parachain blocks: {e}"))?;
-    log::info!("alice produced ≥{REQUIRED_BLOCKS} parachain blocks");
 
     let validator = network.get_node("validator-0")?;
     let baseline_finalized = validator.reports(FINALIZED_METRIC).await? as u32;
@@ -113,6 +108,19 @@ async fn smoke() -> Result<(), anyhow::Error> {
         })?;
     log::info!("relay finalized reached #{target_finalized}");
 
+    // Sanity check: parachain has been producing in the meantime.
+    log::info!("checking that alice has ≥{REQUIRED_BLOCKS} parachain blocks (best)");
+    network
+        .get_node("alice")?
+        .wait_metric_with_timeout(
+            "block_height{status=\"best\"}",
+            |h| h >= REQUIRED_BLOCKS as f64,
+            60u64,
+        )
+        .await
+        .map_err(|e| anyhow!("alice did not produce parachain blocks: {e}"))?;
+    log::info!("alice has ≥{REQUIRED_BLOCKS} parachain blocks");
+
     let zombienet_base = PathBuf::from(
         network
             .base_dir()
@@ -125,8 +133,6 @@ async fn smoke() -> Result<(), anyhow::Error> {
     let para_spec_name = parachain.chain_id().unwrap_or(parachain.unique_id());
     let para_spec = zombienet_base.join(format!("{para_spec_name}.json"));
 
-    ensure_smoldot_built();
-    ensure_js_deps_installed();
     let required_blocks = REQUIRED_BLOCKS.to_string();
 
     log::info!(
