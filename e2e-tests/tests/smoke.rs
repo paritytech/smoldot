@@ -23,6 +23,11 @@ use zombienet_sdk::NetworkConfigBuilder;
 
 const PARA_ID: u32 = 1004;
 const REQUIRED_BLOCKS: u32 = 5;
+/// Relay-chain blocks finalized past baseline before launching smoldot.
+/// Above smoldot's `warp_sync_minimum_gap` (32) with headroom, so warp sync
+/// has a real target to chase.
+const WARP_SYNC_GAP: u32 = 50;
+const FINALIZED_METRIC: &str = "block_height{status=\"finalized\"}";
 
 /// Smoke test: spawn westend-local + people-westend-local (both built-in
 /// chains of `polkadot` and `polkadot-parachain`), then run smoldot and
@@ -69,11 +74,14 @@ async fn smoke() -> Result<(), anyhow::Error> {
             )
         })?;
 
+    log::info!("spawning zombienet network");
     let spawn_fn = zombienet_sdk::environment::get_spawn_fn();
     let network = spawn_fn(config).await?;
     network.detach().await;
     network.wait_until_is_up(120).await?;
+    log::info!("network is up");
 
+    log::info!("waiting for alice to produce {REQUIRED_BLOCKS} parachain blocks (best)");
     network
         .get_node("alice")?
         .wait_metric_with_timeout(
@@ -83,6 +91,27 @@ async fn smoke() -> Result<(), anyhow::Error> {
         )
         .await
         .map_err(|e| anyhow!("alice did not produce parachain blocks: {e}"))?;
+    log::info!("alice produced ≥{REQUIRED_BLOCKS} parachain blocks");
+
+    let validator = network.get_node("validator-0")?;
+    let baseline_finalized = validator.reports(FINALIZED_METRIC).await? as u32;
+    let target_finalized = baseline_finalized + WARP_SYNC_GAP;
+    log::info!(
+        "waiting for relay finalized to reach #{target_finalized} (baseline=#{baseline_finalized}, gap={WARP_SYNC_GAP})"
+    );
+    validator
+        .wait_metric_with_timeout(
+            FINALIZED_METRIC,
+            |h| h >= target_finalized as f64,
+            300u64,
+        )
+        .await
+        .map_err(|e| {
+            anyhow!(
+                "relay did not finalize past warp gap (baseline={baseline_finalized}, target={target_finalized}): {e}"
+            )
+        })?;
+    log::info!("relay finalized reached #{target_finalized}");
 
     let zombienet_base = PathBuf::from(
         network
@@ -99,6 +128,12 @@ async fn smoke() -> Result<(), anyhow::Error> {
     ensure_smoldot_built();
     ensure_js_deps_installed();
     let required_blocks = REQUIRED_BLOCKS.to_string();
+
+    log::info!(
+        "running smoldot JS smoke test (relay_spec={}, para_spec={}, required_blocks={REQUIRED_BLOCKS})",
+        relay_spec.display(),
+        para_spec.display(),
+    );
     run_js_test(
         "js/smoke.js",
         &[
