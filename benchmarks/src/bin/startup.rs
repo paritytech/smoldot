@@ -83,7 +83,7 @@ struct Args {
     /// value before starting iterations. Readiness is always gated on the
     /// relay (parachain finality derives from it and can lag significantly on
     /// a fresh local network). Only applies when zombienet is spawned.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 10)]
     min_finalized_before_bench: u64,
 
     /// Max time to wait for the relay finalization gate (seconds).

@@ -59,37 +59,17 @@ try {
           potentialRelayChains: [relay],
         });
 
-  const followReqId = "follow";
-  chain.sendJsonRpc(
-    JSON.stringify({
-      jsonrpc: "2.0",
-      id: followReqId,
-      method: "chainHead_v1_follow",
-      params: [true],
-    }),
-  );
-
-  let subId = null;
-  let initialized = false;
+  // Wait until each chain we plan to dump has finalized at least one block
+  // past `chainHead_v1_follow`'s `initialized` event. The initial finalized
+  // header is racy on cold start (smoldot's `subscribe_all` can return the
+  // chain-spec checkpoint while warp-sync chain-information-build is still
+  // pending), so dumping immediately after `initialized` may snapshot
+  // genesis. A single post-init `finalized` event proves smoldot has
+  // advanced its own finality and the dump is non-stale.
   const deadline = Date.now() + timeoutMs;
-  while (!initialized && Date.now() < deadline) {
-    const raw = await nextMsg(chain, deadline);
-    if (!raw) break;
-    const msg = JSON.parse(raw);
-    if (msg.id === followReqId) {
-      if (msg.error) throw new Error(`follow failed: ${JSON.stringify(msg.error)}`);
-      subId = msg.result;
-      continue;
-    }
-    if (
-      subId &&
-      msg.params?.subscription === subId &&
-      msg.params.result?.event === "initialized"
-    ) {
-      initialized = true;
-    }
-  }
-  if (!initialized) throw new Error(`timed out waiting for initialized`);
+  const gates = [waitForFreshFinalized(relay, relayId, deadline)];
+  if (target === "para") gates.push(waitForFreshFinalized(chain, paraId, deadline));
+  await Promise.all(gates);
 
   // Save DBs for every chain smoldot needs on a warm restart. Target=relay
   // uses only the relay. Target=para needs both (smoldot needs the relay to
@@ -108,6 +88,51 @@ try {
 }
 
 process.exit(exitCode);
+
+async function waitForFreshFinalized(chain, label, deadline) {
+  const followReqId = `follow-${label}`;
+  chain.sendJsonRpc(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: followReqId,
+      method: "chainHead_v1_follow",
+      params: [true],
+    }),
+  );
+
+  let subId = null;
+  let initialHashes = null;
+
+  while (Date.now() < deadline) {
+    const raw = await nextMsg(chain, deadline);
+    if (!raw) break;
+    const msg = JSON.parse(raw);
+
+    if (msg.id === followReqId) {
+      if (msg.error) throw new Error(`[${label}] follow failed: ${JSON.stringify(msg.error)}`);
+      subId = msg.result;
+      continue;
+    }
+    if (!subId || msg.params?.subscription !== subId) continue;
+
+    const ev = msg.params.result;
+    if (ev?.event === "initialized") {
+      initialHashes = new Set(ev.finalizedBlockHashes ?? []);
+      console.error(
+        `[save_db] ${label}: initialized at ${[...initialHashes].join(",")}; waiting for first post-init finalized event`,
+      );
+      continue;
+    }
+    if (ev?.event === "finalized" && initialHashes) {
+      const fresh = (ev.finalizedBlockHashes ?? []).find((h) => !initialHashes.has(h));
+      if (fresh) {
+        console.error(`[save_db] ${label}: advanced past init (new finalized ${fresh})`);
+        return;
+      }
+    }
+  }
+  throw new Error(`[${label}] timed out waiting for first post-init finalized event`);
+}
 
 async function nextMsg(chain, deadline) {
   const remaining = deadline - Date.now();
