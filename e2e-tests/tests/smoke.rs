@@ -28,6 +28,7 @@ const REQUIRED_BLOCKS: u32 = 5;
 /// has a real target to chase.
 const WARP_SYNC_GAP: u32 = 50;
 const FINALIZED_METRIC: &str = "block_height{status=\"finalized\"}";
+const BEST_METRIC: &str = "block_height{status=\"best\"}";
 
 /// Smoke test: spawn westend-local + people-westend-local (both built-in
 /// chains of `polkadot` and `polkadot-parachain`), then run smoldot and
@@ -62,7 +63,7 @@ async fn smoke() -> Result<(), anyhow::Error> {
                 .with_collator(|n| n.with_name("alice").bootnode(true))
                 .with_collator(|n| n.with_name("bob").bootnode(true))
         })
-        .with_global_settings(|g| g.with_base_dir(base_dir_str.as_str()))
+        .with_global_settings(|g| g.with_base_dir(&base_dir_str))
         .build()
         .map_err(|errs| {
             anyhow!(
@@ -95,11 +96,7 @@ async fn smoke() -> Result<(), anyhow::Error> {
         "waiting for relay finalized to reach #{target_finalized} (baseline=#{baseline_finalized}, gap={WARP_SYNC_GAP})"
     );
     validator
-        .wait_metric_with_timeout(
-            FINALIZED_METRIC,
-            |h| h >= target_finalized as f64,
-            300u64,
-        )
+        .wait_metric_with_timeout(FINALIZED_METRIC, |h| h >= target_finalized as f64, 300u64)
         .await
         .map_err(|e| {
             anyhow!(
@@ -108,15 +105,10 @@ async fn smoke() -> Result<(), anyhow::Error> {
         })?;
     log::info!("relay finalized reached #{target_finalized}");
 
-    // Sanity check: parachain has been producing in the meantime.
     log::info!("checking that alice has ≥{REQUIRED_BLOCKS} parachain blocks (best)");
     network
         .get_node("alice")?
-        .wait_metric_with_timeout(
-            "block_height{status=\"best\"}",
-            |h| h >= REQUIRED_BLOCKS as f64,
-            60u64,
-        )
+        .wait_metric_with_timeout(BEST_METRIC, |h| h >= REQUIRED_BLOCKS as f64, 60u64)
         .await
         .map_err(|e| anyhow!("alice did not produce parachain blocks: {e}"))?;
     log::info!("alice has ≥{REQUIRED_BLOCKS} parachain blocks");
@@ -132,19 +124,19 @@ async fn smoke() -> Result<(), anyhow::Error> {
         .ok_or_else(|| anyhow!("parachain {PARA_ID} not found"))?;
     let para_spec_name = parachain.chain_id().unwrap_or(parachain.unique_id());
     let para_spec = zombienet_base.join(format!("{para_spec_name}.json"));
+    let relay_spec_str = relay_spec.to_str().expect("UTF-8 path");
+    let para_spec_str = para_spec.to_str().expect("UTF-8 path");
 
     let required_blocks = REQUIRED_BLOCKS.to_string();
 
     log::info!(
-        "running smoldot JS smoke test (relay_spec={}, para_spec={}, required_blocks={REQUIRED_BLOCKS})",
-        relay_spec.display(),
-        para_spec.display(),
+        "running smoldot JS smoke test (relay_spec={relay_spec_str}, para_spec={para_spec_str}, required_blocks={REQUIRED_BLOCKS})"
     );
     run_js_test(
         "js/smoke.js",
         &[
-            ("RELAY_CHAIN_SPEC", relay_spec.to_str().expect("UTF-8 path")),
-            ("PARA_CHAIN_SPEC", para_spec.to_str().expect("UTF-8 path")),
+            ("RELAY_CHAIN_SPEC", relay_spec_str),
+            ("PARA_CHAIN_SPEC", para_spec_str),
             ("REQUIRED_BLOCKS", required_blocks.as_str()),
         ],
     )
