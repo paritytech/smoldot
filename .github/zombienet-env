@@ -1,0 +1,19 @@
+# Central configuration for zombienet CI runs.
+
+# Provider — `native` runs binaries directly on the runner.
+ZOMBIE_PROVIDER=native
+
+# Container image that executes the test harness. Pinned for reproducibility;
+# bump together with polkadot-sdk's `.github/env` to stay on a common toolchain.
+ZOMBIENET_SDK_IMAGE_FOR_NATIVE=docker.io/paritytech/ci-unified:bullseye-1.93.0-2026-01-27-v202604100059
+
+# Parity self-hosted runner pool used by polkadot-sdk's zombienet tests.
+ZOMBIENET_SDK_DEFAULT_RUNNER_FOR_NATIVE=parity-zombienet-native-default
+ZOMBIENET_SDK_LARGE_RUNNER_FOR_NATIVE=parity-zombienet-native-large
+
+# polkadot-sdk GitHub release whose binaries the tests run against.
+# Single source of truth — bump this line to track a newer release.
+POLKADOT_RELEASE_TAG=polkadot-stable2603
+
+# Logging passed to the test process.
+RUST_LOG=info
