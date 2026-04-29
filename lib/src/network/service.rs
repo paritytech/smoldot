@@ -2432,44 +2432,20 @@ where
                                     .is_some()
                             );
 
-                            // If the substream failed to open, we may try again. Re-trying
-                            // used to be unconditional (with the documented comment that it
-                            // "might be hammering the remote") in order to bypass a transient
-                            // issue in Substrate where a protocol could be briefly
-                            // unavailable.
-                            //
-                            // That unconditional retry is a pathological tight loop when the
-                            // remote peer does not advertise the protocol at all: every
-                            // multistream-select attempt deterministically returns `na`, and
-                            // we respin immediately, producing tens of thousands of attempts
-                            // per second per connection and flooding the host's networking
-                            // stack. This is the situation whenever we try to speak a
-                            // notifications protocol with a peer that hasn't opted into it —
-                            // a concrete example is the statement protocol against a peer
-                            // whose node was not started with the statement-store pallet
-                            // enabled.
-                            //
-                            // Fix: keep retrying on transient errors (timeout / reset /
-                            // decode / …), preserving the long-standing Substrate workaround,
-                            // but treat `ProtocolNotAvailable` — which is the peer's explicit
-                            // answer that the protocol is not supported — as permanent for
-                            // the lifetime of the connection. The one exception is the
-                            // Statement V2 → V1 fallback, which is a single additional try.
-                            //
-                            // When the peer reconnects, the block-announces open path will
-                            // retry every notification protocol from scratch, so nothing is
-                            // permanently lost across sessions.
+                            // If the substream failed to open, we may try again.
+                            // `ProtocolNotAvailable` is the peer's explicit answer that
+                            // it doesn't speak this protocol; retrying it is a tight loop,
+                            // so treat it as permanent until the peer reconnects. Other
+                            // errors may be transient (timeout / reset / …) and are
+                            // retried — this also preserves a long-standing workaround
+                            // for an issue in Substrate where a protocol could be briefly
+                            // unavailable. Statement V2 is special: on `ProtocolNotAvailable`
+                            // we fall back once to V1.
                             if result.is_err() {
                                 if self.inner.connection_state(connection_id).shutting_down {
                                     continue;
                                 }
 
-                                // Decide whether to retry and with which protocol.
-                                //
-                                // 1. Statement V2 refused → retry ONCE with Statement V1.
-                                // 2. `ProtocolNotAvailable` otherwise → give up on this
-                                //    (peer, protocol) until the peer reconnects.
-                                // 3. Any other error → retry the same protocol.
                                 let (substream_protocol, should_retry) = match (
                                     &result,
                                     substream_protocol,
