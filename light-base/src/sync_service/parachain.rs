@@ -79,11 +79,17 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     //
     // Cold path: download `:code` + `:heappages` (~2 MiB), compile, then fetch
     // Aura call proofs to determine consensus parameters.
+    //
+    // The peer cursor is shared across warm and cold so a peer that misbehaved
+    // during warm-start is not retried by cold; it cycles through all
+    // currently-connected peers before waiting on `Event::Connected`.
+    let mut peers = PeerCursor::new(network_service.clone());
     let (effective_chain_info, finalized_runtime) = if let Some(hint) = runtime_code_hint {
         match warm_bootstrap(
             &log_target,
             &platform,
             &network_service,
+            &mut peers,
             &effective_chain_info,
             block_number_bytes,
             hint,
@@ -102,7 +108,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     &log_target,
                     &platform,
                     &network_service,
-                    &effective_chain_info,
+                    &relay_chain_sync,
+                    parachain_id,
+                    effective_chain_info,
                     block_number_bytes,
                 )
                 .await
@@ -113,7 +121,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             &log_target,
             &platform,
             &network_service,
-            &effective_chain_info,
+            &relay_chain_sync,
+            parachain_id,
+            effective_chain_info,
             block_number_bytes,
         )
         .await
@@ -1134,35 +1144,78 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 /// Retries `bootstrap_parachain_consensus` indefinitely with a 5s back-off.
 ///
 /// Returns `(chain_info, finalized_runtime)` once a successful bootstrap completes.
+/// Cold bootstrap with bounded-failure recovery.
+///
+/// Cycles peers via [`PeerCursor`] on each retry (no fixed sleep between peers).
+/// After [`MAX_FAILURES_BEFORE_HEAD_REFRESH`] consecutive failures the cached
+/// `chain_info` is assumed stale (e.g. peers have pruned it because the relay
+/// chain advanced past it while we were stuck), and a fresh parachain head is
+/// fetched from the relay. The 5s sleep is reserved for the all-peers-failed
+/// case so we don't hammer the network when nothing is reachable.
 async fn cold_bootstrap_loop<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
-    chain_info: &chain::chain_information::ValidChainInformation,
+    relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
+    parachain_id: u32,
+    initial_chain_info: chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
 ) -> (
     chain::chain_information::ValidChainInformation,
     FinalizedBlockRuntime,
 ) {
+    const MAX_FAILURES_BEFORE_HEAD_REFRESH: u32 = 3;
+
+    let mut chain_info = initial_chain_info;
+    let mut peers = PeerCursor::new(network_service.clone());
+    let mut consecutive_failures: u32 = 0;
+
     loop {
         match bootstrap_parachain_consensus(
             log_target,
             platform,
             network_service,
-            chain_info,
+            &mut peers,
+            &chain_info,
             block_number_bytes,
         )
         .await
         {
             Ok(b) => return (b.chain_info, b.finalized_runtime),
             Err(err) => {
+                consecutive_failures += 1;
                 log!(
                     platform,
                     Warn,
                     log_target,
-                    format!("Failed to bootstrap parachain consensus: {err}. Retrying in 5s...")
+                    format!(
+                        "Failed to bootstrap parachain consensus (attempt {}): {err}",
+                        consecutive_failures
+                    )
                 );
-                platform.sleep(Duration::from_secs(5)).await;
+
+                if consecutive_failures >= MAX_FAILURES_BEFORE_HEAD_REFRESH {
+                    log!(
+                        platform,
+                        Info,
+                        log_target,
+                        format!(
+                            "Refreshing parachain head from relay chain after {} failures",
+                            consecutive_failures
+                        )
+                    );
+                    chain_info = fetch_parachain_head_from_relay(
+                        log_target,
+                        platform,
+                        relay_chain_sync,
+                        parachain_id,
+                        block_number_bytes,
+                    )
+                    .await;
+                    peers = PeerCursor::new(network_service.clone());
+                    consecutive_failures = 0;
+                    platform.sleep(Duration::from_secs(5)).await;
+                }
             }
         }
     }
@@ -1184,6 +1237,7 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    peers: &mut PeerCursor<TPlat>,
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
     hint: RuntimeCodeHint,
@@ -1204,15 +1258,17 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
         )
     );
 
-    let peer_id = wait_for_peer(network_service).await;
+    let peer_id = peers.next().await;
 
-    // Build the bytes form of `closest_ancestor_excluding`. This is the key we
-    // ask the peer to prove; it is a strict prefix of `:code` so the response
-    // contains the trie path up to `:code`'s parent (whose child pointer is the
-    // leaf's Merkle value), but does not have to include the leaf or its value.
-    let ancestor_key_bytes =
-        trie::nibbles_to_bytes_truncate(hint.closest_ancestor_excluding.iter().copied())
-            .collect::<Vec<u8>>();
+    // Request a proof of a same-length, byte-aligned sibling of `:code`. Asking
+    // for the sibling forces the peer to walk down to the trie node where
+    // `:code` and the sibling diverge — which is `:code`'s closest ancestor —
+    // without sending the (~2 MiB) leaf or its value. We deliberately do NOT
+    // use `nibbles_to_bytes_truncate(closest_ancestor_excluding)`: when the
+    // ancestor lives at an odd nibble depth (the common case for parachains),
+    // truncation drops a nibble and the returned proof stops one level too
+    // shallow, breaking verification.
+    const CODE_SIBLING_KEY: &[u8] = b":codd";
 
     let (merkle_proof, slot_duration_proof, authorities_proof) = future::try_join3(
         async {
@@ -1222,9 +1278,9 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
                     peer_id.clone(),
                     codec::StorageProofRequestConfig {
                         block_hash,
-                        keys: [ancestor_key_bytes.as_slice(), &b":heappages"[..]].into_iter(),
+                        keys: [CODE_SIBLING_KEY, &b":heappages"[..]].into_iter(),
                     },
-                    Duration::from_secs(16),
+                    Duration::from_secs(5),
                 )
                 .await
                 .map_err(|e| format!("Merkle proof request failed: {e}"))
@@ -1239,31 +1295,45 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
     )
     .await?;
 
-    let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-        proof: merkle_proof.decode().to_vec(),
-    })
-    .map_err(|e| format!("Failed to decode Merkle proof: {e}"))?;
+    let decoded_proof =
+        match trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+            proof: merkle_proof.decode().to_vec(),
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                ban_peer(network_service, &peer_id, "bad-warm-start-merkle-proof").await;
+                return Err(format!("Failed to decode Merkle proof: {e}"));
+            }
+        };
 
-    let onchain_merkle_value = decoded_proof
-        .closest_descendant_merkle_value(
-            &state_root,
-            trie::bytes_to_nibbles(b":code".iter().copied()),
-        )
-        .map_err(|_| String::from(":code Merkle value not derivable from proof"))?
-        .ok_or_else(|| String::from(":code has no descendant in the on-chain trie"))?;
+    let onchain_merkle_value = match extract_code_merkle_triple(&decoded_proof, &state_root) {
+        Ok((v, _)) => v,
+        Err(e) => {
+            // The proof was structurally valid but didn't reach `:code`'s closest
+            // ancestor — for the sibling-key request strategy that is the peer's
+            // fault, since proving `:codd`'s absence requires walking down to the
+            // divergence with `:code`. Ban and fall back.
+            ban_peer(network_service, &peer_id, "incomplete-warm-start-proof").await;
+            return Err(e);
+        }
+    };
 
     if onchain_merkle_value != hint.merkle_value.as_slice() {
         return Err(format!(
-            "cached :code Merkle value does not match on-chain ({} vs {} bytes; runtime upgraded?)",
-            hint.merkle_value.len(),
-            onchain_merkle_value.len(),
+            "cached :code Merkle value {} does not match on-chain {} (runtime upgraded \
+             or fork rollback?)",
+            hex::encode(&hint.merkle_value),
+            hex::encode(onchain_merkle_value),
         ));
     }
 
-    let storage_heap_pages = decoded_proof
-        .storage_value(&state_root, b":heappages")
-        .map_err(|_| String::from("Proof doesn't contain :heappages"))?
-        .map(|(v, _)| v.to_vec());
+    let storage_heap_pages = match decoded_proof.storage_value(&state_root, b":heappages") {
+        Ok(v) => v.map(|(value, _)| value.to_vec()),
+        Err(_) => {
+            ban_peer(network_service, &peer_id, "incomplete-warm-start-proof").await;
+            return Err(String::from("Proof doesn't contain :heappages"));
+        }
+    };
 
     let heap_pages = executor::storage_heap_pages_to_value(storage_heap_pages.as_deref())
         .map_err(|e| format!("Invalid :heappages value: {e}"))?;
@@ -1277,7 +1347,13 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
     .map_err(|e| format!("Failed to compile cached runtime: {e}"))?;
 
     let (slot_duration, authorities, vm) =
-        run_aura_calls(vm, slot_duration_proof, authorities_proof, &state_root)?;
+        match run_aura_calls(vm, slot_duration_proof, authorities_proof, &state_root) {
+            Ok(triple) => triple,
+            Err(e) => {
+                ban_peer(network_service, &peer_id, "bad-warm-start-aura-proof").await;
+                return Err(e);
+            }
+        };
 
     log!(
         platform,
@@ -1441,12 +1517,11 @@ struct BootstrappedParachain {
     finalized_runtime: FinalizedBlockRuntime,
 }
 
-/// Cold bootstrap: downloads `:code` + `:heappages` from a P2P peer, compiles the
-/// runtime, and verifies Aura consensus parameters via call proofs.
 async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    peers: &mut PeerCursor<TPlat>,
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
 ) -> Result<BootstrappedParachain, String> {
@@ -1465,7 +1540,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         )
     );
 
-    let peer_id = wait_for_peer(network_service).await;
+    let peer_id = peers.next().await;
 
     log!(
         platform,
@@ -1474,7 +1549,6 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         format!("Downloading parachain runtime from peer {peer_id}")
     );
 
-    // Download :code and :heappages.
     let proof = network_service
         .clone()
         .storage_proof_request(
@@ -1483,33 +1557,39 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
                 block_hash,
                 keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
             },
-            Duration::from_secs(60),
+            Duration::from_secs(20),
         )
         .await
         .map_err(|e| format!("Storage proof request failed: {e}"))?;
 
-    let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-        proof: proof.decode().to_vec(),
-    })
-    .map_err(|e| format!("Failed to decode storage proof: {e}"))?;
+    let decoded_proof =
+        match trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+            proof: proof.decode().to_vec(),
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                ban_peer(network_service, &peer_id, "bad-bootstrap-storage-proof").await;
+                return Err(format!("Failed to decode storage proof: {e}"));
+            }
+        };
 
-    let code = decoded_proof
-        .storage_value(&state_root, b":code")
-        .map_err(|_| String::from("Proof doesn't contain :code"))?
-        .ok_or_else(|| String::from("Runtime :code not found in storage"))?
-        .0
-        .to_vec();
+    let code = match decoded_proof.storage_value(&state_root, b":code") {
+        Ok(Some((value, _))) => value.to_vec(),
+        Ok(None) => return Err(String::from("Runtime :code not found in storage")),
+        Err(_) => {
+            ban_peer(network_service, &peer_id, "incomplete-bootstrap-proof").await;
+            return Err(String::from("Proof doesn't contain :code"));
+        }
+    };
 
-    let heap_pages_raw = decoded_proof
-        .storage_value(&state_root, b":heappages")
-        .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
+    let storage_heap_pages = match decoded_proof.storage_value(&state_root, b":heappages") {
+        Ok(v) => v.map(|(value, _)| value.to_vec()),
+        Err(_) => {
+            ban_peer(network_service, &peer_id, "incomplete-bootstrap-proof").await;
+            return Err(String::from("Proof doesn't contain :heappages"));
+        }
+    };
 
-    let storage_heap_pages = heap_pages_raw.map(|(v, _)| v.to_vec());
-
-    // Extract the Merkle-value triple for `:code` from the same proof. These three
-    // pieces are what `encode_database` persists, and what the next session's
-    // warm-start path uses to verify a cached runtime against on-chain state
-    // without re-downloading 2 MiB of `:code`.
     let (code_merkle_value, closest_ancestor_excluding) =
         extract_code_merkle_triple(&decoded_proof, &state_root)?;
 
@@ -1534,7 +1614,6 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     })
     .map_err(|e| format!("Failed to compile runtime: {e}"))?;
 
-    // Fetch Aura call proofs and verify consensus parameters.
     let slot_duration_proof = fetch_call_proof(
         network_service,
         &peer_id,
@@ -1546,7 +1625,13 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         fetch_call_proof(network_service, &peer_id, block_hash, "AuraApi_authorities").await?;
 
     let (slot_duration, authorities, vm) =
-        run_aura_calls(vm, slot_duration_proof, authorities_proof, &state_root)?;
+        match run_aura_calls(vm, slot_duration_proof, authorities_proof, &state_root) {
+            Ok(triple) => triple,
+            Err(e) => {
+                ban_peer(network_service, &peer_id, "bad-bootstrap-aura-proof").await;
+                return Err(e);
+            }
+        };
 
     log!(
         platform,
@@ -1570,20 +1655,60 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     )
 }
 
-/// Waits for at least one peer to be connected, returning its ID.
-async fn wait_for_peer<TPlat: PlatformRef>(
+async fn ban_peer<TPlat: PlatformRef>(
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
-) -> libp2p::PeerId {
-    let mut from_network = Box::pin(network_service.subscribe().await);
-    if let Some(peer) = network_service.peers_list().await.next() {
-        return peer;
+    peer_id: &libp2p::PeerId,
+    reason: &'static str,
+) {
+    network_service
+        .ban_and_disconnect(peer_id.clone(), network_service::BanSeverity::High, reason)
+        .await;
+}
+
+/// Hands out fresh peers for sequential bootstrap proof requests.
+///
+/// A single slow or malicious peer can stall bootstrap indefinitely if reused
+/// for every proof request. This cursor cycles through currently-connected
+/// peers, skipping any peer the caller has already tried (whether banned or
+/// just rejected), and waits on `Event::Connected` only when the connected
+/// set is exhausted.
+struct PeerCursor<TPlat: PlatformRef> {
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+    used: hashbrown::HashSet<libp2p::PeerId>,
+    events: Option<Pin<Box<async_channel::Receiver<network_service::Event>>>>,
+}
+
+impl<TPlat: PlatformRef> PeerCursor<TPlat> {
+    fn new(network_service: Arc<network_service::NetworkServiceChain<TPlat>>) -> Self {
+        Self {
+            network_service,
+            used: hashbrown::HashSet::new(),
+            events: None,
+        }
     }
-    loop {
-        match from_network.next().await {
-            Some(network_service::Event::Connected { peer_id, .. }) => return peer_id,
-            Some(_) => continue,
-            None => {
-                from_network = Box::pin(network_service.subscribe().await);
+
+    async fn next(&mut self) -> libp2p::PeerId {
+        for peer in self.network_service.peers_list().await {
+            if self.used.insert(peer.clone()) {
+                return peer;
+            }
+        }
+
+        loop {
+            if self.events.is_none() {
+                self.events = Some(Box::pin(self.network_service.subscribe().await));
+            }
+            let events = self.events.as_mut().expect("just initialized");
+            match events.next().await {
+                Some(network_service::Event::Connected { peer_id, .. }) => {
+                    if self.used.insert(peer_id.clone()) {
+                        return peer_id;
+                    }
+                }
+                Some(_) => continue,
+                None => {
+                    self.events = None;
+                }
             }
         }
     }
@@ -1698,17 +1823,20 @@ fn build_bootstrapped_parachain(
 /// Reads the Merkle value of `:code` (and the path that led to its parent) from
 /// a storage proof that includes the `:code` leaf. Used by the cold path to
 /// produce the triple that the next session's warm-start needs.
+/// Reads `:code`'s on-chain Merkle value from the parent's child pointer, plus
+/// the path of that closest ancestor.
+///
+/// Mirrors `lib/src/sync/warp_sync.rs:1908-1928`: walk the proof to the closest
+/// ancestor of `:code` (excluding the last nibble of `:code`'s path), then read
+/// the parent's child pointer for `:code`. The returned Merkle value is what
+/// the trie commits at that position; it does NOT require the `:code` leaf to
+/// be present in the proof, which is what lets the warm-start path skip the
+/// ~2 MiB `:code` download by asking for a sibling key.
 fn extract_code_merkle_triple(
     proof: &trie::proof_decode::DecodedTrieProof<Vec<u8>>,
     state_root: &[u8; 32],
 ) -> Result<(Vec<u8>, Vec<trie::Nibble>), String> {
     let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
-    let merkle_value = proof
-        .closest_descendant_merkle_value(state_root, code_nibbles.iter().copied())
-        .map_err(|_| String::from(":code Merkle value missing from proof"))?
-        .ok_or_else(|| String::from(":code has no descendant in the trie"))?
-        .to_vec();
-
     let closest_ancestor_excluding = proof
         .closest_ancestor_in_proof(
             state_root,
@@ -1717,6 +1845,16 @@ fn extract_code_merkle_triple(
         .map_err(|_| String::from(":code closest ancestor missing from proof"))?
         .ok_or_else(|| String::from(":code is outside of the trie"))?
         .collect::<Vec<_>>();
+
+    let next_nibble = code_nibbles[closest_ancestor_excluding.len()];
+    let merkle_value = proof
+        .trie_node_info(state_root, closest_ancestor_excluding.iter().copied())
+        .map_err(|_| String::from(":code closest ancestor missing trie_node_info"))?
+        .children
+        .child(next_nibble)
+        .merkle_value()
+        .ok_or_else(|| String::from(":code child pointer missing from ancestor"))?
+        .to_vec();
 
     Ok((merkle_value, closest_ancestor_excluding))
 }
