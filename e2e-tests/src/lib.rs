@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod network;
+pub mod snapshot;
 pub mod statement;
 
 pub use network::{

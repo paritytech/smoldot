@@ -22,14 +22,17 @@
 //! - **Cold**: network from snapshot, spec with `lightSyncState`, no smoldot DB.
 //! - **Warm**: network from snapshot, spec with `lightSyncState`, smoldot DB preloaded.
 //!
-//! Cold/Warm depend on artifacts not yet committed; their branches are stubbed
-//! with `todo!()` and will land alongside `tests/smoke_cold.rs` /
-//! `tests/smoke_warm.rs`. See `e2e-tests/docs/smoke-scenarios.md`.
+//! Cold/warm consume the artifact set produced by `generate_snapshots`; see
+//! `e2e-tests/docs/smoke-scenarios.md` and `crate::snapshot`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
+use serde_json::Value;
 use zombienet_sdk::{LocalFileSystem, Network, NetworkConfig, NetworkConfigBuilder};
+
+/// `BlockNumber` width on substrate-based chains used here (westend, people-westend).
+const BLOCK_NUMBER_BYTES: usize = 4;
 
 pub const PARA_ID: u32 = 1004;
 pub const FINALIZED_METRIC: &str = "block_height{status=\"finalized\"}";
@@ -115,7 +118,12 @@ pub async fn spawn_scenario(
 
     let (relay_spec, para_spec) = match &cfg.spec {
         SpecMode::Vanilla => extract_emitted_specs(&network)?,
-        SpecMode::WithLightSyncState { relay, para } => (relay.clone(), para.clone()),
+        SpecMode::WithLightSyncState { relay, para } => {
+            // Committed artifacts have empty `bootNodes` (they're per-spawn
+            // and would invalidate the artifact). Inject current multiaddrs
+            // into runtime copies that smoldot will load.
+            prepare_runtime_specs(&network, relay, para, base_dir_str)?
+        }
     };
 
     let mut finalized_floor = match &cfg.spec {
@@ -151,6 +159,13 @@ fn build_network_config(
             Some(para_db_tgz.to_str().expect("UTF-8 path").to_owned()),
         ),
     };
+    let (relay_spec_path, para_spec_path) = match &cfg.spec {
+        SpecMode::Vanilla => (None, None),
+        SpecMode::WithLightSyncState { relay, para } => (
+            Some(relay.to_str().expect("UTF-8 path").to_owned()),
+            Some(para.to_str().expect("UTF-8 path").to_owned()),
+        ),
+    };
 
     let builder = NetworkConfigBuilder::new()
         .with_relaychain(|r| {
@@ -158,6 +173,10 @@ fn build_network_config(
                 .with_chain("westend-local")
                 .with_default_command("polkadot")
                 .with_default_image(images.polkadot.as_str());
+            let r = match relay_spec_path.as_deref() {
+                None => r,
+                Some(p) => r.with_chain_spec_path(p),
+            };
             match relay_db_path.as_deref() {
                 None => r
                     .with_validator(|n| n.with_name("validator-0").bootnode(true))
@@ -185,6 +204,10 @@ fn build_network_config(
                     "--force-authoring".into(),
                     "--authoring=slot-based".into(),
                 ]);
+            let p = match para_spec_path.as_deref() {
+                None => p,
+                Some(path) => p.with_chain_spec_path(path),
+            };
             match para_db_path.as_deref() {
                 None => p
                     .with_collator(|n| n.with_name("alice").bootnode(true))
@@ -224,6 +247,64 @@ async fn wait_for_relay_first_finalized(
     Ok(())
 }
 
+/// Reads `committed_relay` / `committed_para` (port-agnostic artifacts with
+/// empty `bootNodes`), injects current bootnode multiaddrs, and writes
+/// runtime copies under `{base_dir}/smoldot-runtime-specs/`.
+fn prepare_runtime_specs(
+    network: &Network<LocalFileSystem>,
+    committed_relay: &Path,
+    committed_para: &Path,
+    base_dir_str: &str,
+) -> Result<(PathBuf, PathBuf), anyhow::Error> {
+    let runtime_dir = PathBuf::from(base_dir_str).join("smoldot-runtime-specs");
+    std::fs::create_dir_all(&runtime_dir)?;
+
+    let relay_multi = collect_multiaddrs(network, &["validator-0", "validator-1"])?;
+    let para_multi = collect_multiaddrs(network, &["alice", "bob"])?;
+
+    let relay_runtime = runtime_dir.join("relay-spec.json");
+    let para_runtime = runtime_dir.join("para-spec.json");
+    write_spec_with_bootnodes(committed_relay, &relay_runtime, &relay_multi)?;
+    write_spec_with_bootnodes(committed_para, &para_runtime, &para_multi)?;
+    log::info!(
+        "prepared runtime specs (relay={}, para={})",
+        relay_runtime.display(),
+        para_runtime.display()
+    );
+    Ok((relay_runtime, para_runtime))
+}
+
+fn collect_multiaddrs(
+    network: &Network<LocalFileSystem>,
+    names: &[&str],
+) -> Result<Vec<String>, anyhow::Error> {
+    names
+        .iter()
+        .map(|n| {
+            network
+                .get_node(*n)
+                .map(|node| node.multiaddr().to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn write_spec_with_bootnodes(
+    src: &Path,
+    dst: &Path,
+    multiaddrs: &[String],
+) -> Result<(), anyhow::Error> {
+    let mut spec: Value = serde_json::from_slice(&std::fs::read(src)?)?;
+    let array = multiaddrs
+        .iter()
+        .map(|m| Value::String(m.clone()))
+        .collect();
+    if let Some(obj) = spec.as_object_mut() {
+        obj.insert("bootNodes".to_string(), Value::Array(array));
+    }
+    std::fs::write(dst, serde_json::to_string_pretty(&spec)?)?;
+    Ok(())
+}
+
 fn extract_emitted_specs(
     network: &Network<LocalFileSystem>,
 ) -> Result<(PathBuf, PathBuf), anyhow::Error> {
@@ -241,12 +322,40 @@ fn extract_emitted_specs(
     Ok((relay_spec, para_spec))
 }
 
-fn parse_finalized_height_from_spec(_path: &Path) -> Result<u64, anyhow::Error> {
-    todo!("cold/warm scenarios — implemented when artifacts/v1 lands")
+fn parse_finalized_height_from_spec(path: &Path) -> Result<u64, anyhow::Error> {
+    let spec: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let header_hex = spec
+        .pointer("/lightSyncState/finalizedBlockHeader")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            anyhow!(
+                "{}: missing lightSyncState.finalizedBlockHeader",
+                path.display()
+            )
+        })?;
+    decode_header_number(header_hex).map_err(|e| anyhow!("{}: {e}", path.display()))
 }
 
-fn parse_finalized_height_from_db(_path: &Path) -> Result<u64, anyhow::Error> {
-    todo!("warm scenario — implemented when artifacts/v1 lands")
+fn parse_finalized_height_from_db(path: &Path) -> Result<u64, anyhow::Error> {
+    let db: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let header_hex = db
+        .pointer("/chain/finalized_block_header")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("{}: missing chain.finalized_block_header", path.display()))?;
+    decode_header_number(header_hex).map_err(|e| anyhow!("{}: {e}", path.display()))
+}
+
+/// Decodes a 0x-prefixed hex SCALE-encoded substrate header and returns its
+/// block number. Uses smoldot's own header decoder, kept consistent with what
+/// smoldot does when consuming the same artifact at runtime.
+fn decode_header_number(hex_with_prefix: &str) -> Result<u64, anyhow::Error> {
+    let stripped = hex_with_prefix
+        .strip_prefix("0x")
+        .ok_or_else(|| anyhow!("header hex missing 0x prefix"))?;
+    let bytes = hex::decode(stripped).map_err(|e| anyhow!("invalid hex: {e}"))?;
+    let header = smoldot::header::decode(&bytes, BLOCK_NUMBER_BYTES)
+        .map_err(|e| anyhow!("smoldot header decode: {e}"))?;
+    Ok(header.number)
 }
 
 /// Runs `js/smoke.js` against a live network. Env-injects spec paths, the
