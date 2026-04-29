@@ -39,7 +39,10 @@ async fn recovers_statement_delivery_after_peer_restart() -> Result<(), anyhow::
 
     let base_dir = resolve_base_dir()?;
     let para_spec_path = create_para_chain_spec_with_allowances(&[pubkey], &base_dir)?;
-    info!("Parachain chain spec created at {}", para_spec_path.display());
+    info!(
+        "Parachain chain spec created at {}",
+        para_spec_path.display()
+    );
 
     let network = spawn_network(&base_dir, &para_spec_path).await?;
     info!("Network spawned");
@@ -90,8 +93,7 @@ async fn recovers_statement_delivery_after_peer_restart() -> Result<(), anyhow::
 
     let bob = network.get_node("bob")?;
     info!("Restarting bob");
-    bob
-        .restart(None)
+    bob.restart(None)
         .await
         .map_err(|e| anyhow::anyhow!("restart(bob) failed: {e}"))?;
     wait_until_peered(bob, 2, 120).await?;

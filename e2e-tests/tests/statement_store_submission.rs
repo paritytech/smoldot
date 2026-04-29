@@ -16,8 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use log::info;
-use smoldot_e2e_tests::*;
 use smoldot_e2e_tests::statement::*;
+use smoldot_e2e_tests::*;
 
 /// A statement submitted by smoldot propagates to the full-node network.
 ///
@@ -36,7 +36,10 @@ async fn statement_reaches_full_node() -> Result<(), anyhow::Error> {
 
     let base_dir = resolve_base_dir()?;
     let para_spec_path = create_para_chain_spec_with_allowances(&[pubkey], &base_dir)?;
-    info!("Parachain chain spec created at {}", para_spec_path.display());
+    info!(
+        "Parachain chain spec created at {}",
+        para_spec_path.display()
+    );
 
     let network = spawn_network(&base_dir, &para_spec_path).await?;
     info!("Network spawned");
@@ -47,7 +50,10 @@ async fn statement_reaches_full_node() -> Result<(), anyhow::Error> {
     let topic = [0u8; 32];
     let data = b"light-node-submission-test";
     let statement_hex = create_test_statement(&seed, &topic, data);
-    info!("Test statement created ({} bytes encoded)", statement_hex.len() / 2);
+    info!(
+        "Test statement created ({} bytes encoded)",
+        statement_hex.len() / 2
+    );
 
     // Subscribe on both collators
     let alice_rpc = network.get_node("alice")?.rpc().await?;
