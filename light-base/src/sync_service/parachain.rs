@@ -71,12 +71,13 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
 
     // Phase 2: Obtain Aura consensus parameters and the compiled runtime.
     //
-    // Warm path: if the database contains cached runtime code, compile it locally
-    // and verify against the network via lightweight `:heappages` + Aura call proofs
-    // (~few KB total). Skips the ~2 MiB `:code` P2P download.
+    // Warm path: if the database contains cached runtime code, anchor the cached bytes to
+    // the on-chain state root via a `:code\0` absence proof (the absence proof traverses
+    // `:code`'s leaf without bundling its 2 MiB value), then compile and run the Aura call
+    // proofs against state. Skips the ~2 MiB `:code` P2P download.
     //
-    // Cold path: download `:code` + `:heappages` (~2 MiB), compile, then fetch
-    // Aura call proofs to determine consensus parameters.
+    // Cold path: download `:code` + `:heappages` (~2 MiB), compile, then fetch Aura call
+    // proofs to determine consensus parameters.
     let (effective_chain_info, finalized_runtime) = if let Some(code) = saved_runtime_code {
         match warm_bootstrap(
             &log_target,
@@ -1166,6 +1167,11 @@ async fn cold_bootstrap_loop<TPlat: PlatformRef>(
     }
 }
 
+/// Probe key for the warm-start `:code` anchor. A strict descendant of `:code` that doesn't
+/// exist on chain — its absence proof must traverse `:code`'s leaf, exposing the value-hash
+/// (state v1) without bundling the 2 MiB runtime value.
+const CODE_ANCHOR_PROBE_KEY: &[u8] = b":code\0";
+
 /// Warm-start: compile cached runtime code locally, then verify against the
 /// network by fetching `:heappages` and Aura call proofs (~few KB total).
 /// Skips the ~2 MiB `:code` P2P download.
@@ -1195,15 +1201,9 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
 
     let peer_id = wait_for_peer(network_service).await;
 
-    // Fetch a "near :code" absence proof + :heappages, plus both Aura call proofs in parallel.
-    //
-    // We probe `:code\0` (a non-existent strict descendant of `:code`) instead of `:code`
-    // itself. The absence proof must walk through `:code`'s leaf to prove the descendant
-    // doesn't exist, so the leaf node is in the response. But because no value is being
-    // *read* at the queried key, substrate's prove_read should not bundle `:code`'s 2 MiB
-    // value into the proof's value table. For state v1 (modern parachains) the leaf
-    // encoding only carries `Hashed(blake2_256(value))`, which `trie_node_info` exposes as
-    // `HashKnownValueMissing(hash)` — enough to verify cached bytes via blake2.
+    // Fetch the `:code` anchor probe + `:heappages` storage proof and both Aura call proofs
+    // in parallel. See `CODE_ANCHOR_PROBE_KEY` for why we probe an absent descendant of
+    // `:code` rather than `:code` itself.
     let (code_hp_proof, slot_duration_proof, authorities_proof) = future::try_join3(
         async {
             network_service
@@ -1212,12 +1212,12 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
                     peer_id.clone(),
                     codec::StorageProofRequestConfig {
                         block_hash,
-                        keys: [&b":code\0"[..], &b":heappages"[..]].into_iter(),
+                        keys: [CODE_ANCHOR_PROBE_KEY, &b":heappages"[..]].into_iter(),
                     },
                     Duration::from_secs(16),
                 )
                 .await
-                .map_err(|e| format!(":code\\0/:heappages storage proof request failed: {e}"))
+                .map_err(|e| format!("Storage proof request failed: {e}"))
         },
         fetch_call_proof(
             network_service,
@@ -1234,12 +1234,14 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
     let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
         proof: proof_bytes,
     })
-    .map_err(|e| format!("Failed to decode :code\\0/:heappages proof: {e}"))?;
+    .map_err(|e| format!("Failed to decode storage proof: {e}"))?;
 
-    // Anchor the cached runtime to the finalized state root. The peer may return
-    // either the full :code value (state v0, or a v1 proof that included it) or
-    // only its blake2_256 hash (state v1, value-stripped). Both must match the
-    // cached bytes; any mismatch fails this path and falls back to cold bootstrap.
+    // Anchor the cached runtime to the finalized state root. For state v1 (the design target)
+    // the proof exposes only `:code`'s blake2_256 value-hash via `HashKnownValueMissing`, and
+    // we hash the cached bytes to compare. The `Known` arm is a defensive fallback for state
+    // v0 chains or peers that bundle the value despite the probe key targeting absence — we
+    // still verify, just without the bandwidth saving. Any mismatch returns Err and the
+    // caller falls back to cold bootstrap.
     let code_info = decoded_proof
         .trie_node_info(
             &state_root,
@@ -1247,22 +1249,6 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
         )
         .map_err(|_| String::from("Proof missing :code path"))?;
     match code_info.storage_value {
-        trie::proof_decode::StorageValue::Known { value, inline } => {
-            log!(
-                platform,
-                Debug,
-                log_target,
-                format!(
-                    "Warm-start :code anchor: branch=Known proof_bytes={} value_bytes={} inline={}",
-                    proof_byte_len,
-                    value.len(),
-                    inline,
-                )
-            );
-            if value != code.as_slice() {
-                return Err(String::from("cached :code does not match on-chain bytes"));
-            }
-        }
         trie::proof_decode::StorageValue::HashKnownValueMissing(on_chain_hash) => {
             log!(
                 platform,
@@ -1278,6 +1264,20 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
                 return Err(String::from(
                     "cached :code hash does not match on-chain :code hash",
                 ));
+            }
+        }
+        trie::proof_decode::StorageValue::Known { value, inline: _ } => {
+            log!(
+                platform,
+                Warn,
+                log_target,
+                format!(
+                    "Warm-start :code anchor: branch=Known proof_bytes={}, unexpected branch hit",
+                    proof_byte_len,
+                )
+            );
+            if value != code.as_slice() {
+                return Err(String::from("cached :code does not match on-chain bytes"));
             }
         }
         trie::proof_decode::StorageValue::None => {

@@ -566,19 +566,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             }
         };
 
-        log!(
-            &self.platform,
-            Warn,
-            "smoldot",
-            format!(
-                "DB decode result: chain_info={} used_db={} runtime_code={} hint={}",
-                chain_information.is_some(),
-                used_database_chain_information,
-                saved_runtime_code.as_ref().map(|c| c.len()).unwrap_or(0),
-                runtime_code_hint.is_some(),
-            )
-        );
-
         // If the chain specification specifies a parachain, find the corresponding relay chain
         // in the list of potential relay chains passed by the user.
         // If no relay chain can be found, the chain creation fails. Exactly one matching relay
@@ -753,7 +740,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             if let Some(code) = &saved_runtime_code {
                                 log!(
                                     &self.platform,
-                                    Info,
+                                    Debug,
                                     "smoldot",
                                     format!(
                                         "Parachain warm-start available: cached runtime={}KB",
