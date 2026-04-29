@@ -1195,7 +1195,15 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
 
     let peer_id = wait_for_peer(network_service).await;
 
-    // Fetch :code+:heappages and both Aura call proofs in parallel.
+    // Fetch a "near :code" absence proof + :heappages, plus both Aura call proofs in parallel.
+    //
+    // We probe `:code\0` (a non-existent strict descendant of `:code`) instead of `:code`
+    // itself. The absence proof must walk through `:code`'s leaf to prove the descendant
+    // doesn't exist, so the leaf node is in the response. But because no value is being
+    // *read* at the queried key, substrate's prove_read should not bundle `:code`'s 2 MiB
+    // value into the proof's value table. For state v1 (modern parachains) the leaf
+    // encoding only carries `Hashed(blake2_256(value))`, which `trie_node_info` exposes as
+    // `HashKnownValueMissing(hash)` — enough to verify cached bytes via blake2.
     let (code_hp_proof, slot_duration_proof, authorities_proof) = future::try_join3(
         async {
             network_service
@@ -1204,12 +1212,12 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
                     peer_id.clone(),
                     codec::StorageProofRequestConfig {
                         block_hash,
-                        keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
+                        keys: [&b":code\0"[..], &b":heappages"[..]].into_iter(),
                     },
                     Duration::from_secs(16),
                 )
                 .await
-                .map_err(|e| format!(":code/:heappages storage proof request failed: {e}"))
+                .map_err(|e| format!(":code\\0/:heappages storage proof request failed: {e}"))
         },
         fetch_call_proof(
             network_service,
@@ -1226,7 +1234,7 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
     let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
         proof: proof_bytes,
     })
-    .map_err(|e| format!("Failed to decode :code/:heappages proof: {e}"))?;
+    .map_err(|e| format!("Failed to decode :code\\0/:heappages proof: {e}"))?;
 
     // Anchor the cached runtime to the finalized state root. The peer may return
     // either the full :code value (state v0, or a v1 proof that included it) or
