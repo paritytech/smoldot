@@ -1221,8 +1221,10 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
     )
     .await?;
 
+    let proof_bytes = code_hp_proof.decode().to_vec();
+    let proof_byte_len = proof_bytes.len();
     let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-        proof: code_hp_proof.decode().to_vec(),
+        proof: proof_bytes,
     })
     .map_err(|e| format!("Failed to decode :code/:heappages proof: {e}"))?;
 
@@ -1237,12 +1239,32 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
         )
         .map_err(|_| String::from("Proof missing :code path"))?;
     match code_info.storage_value {
-        trie::proof_decode::StorageValue::Known { value, .. } => {
+        trie::proof_decode::StorageValue::Known { value, inline } => {
+            log!(
+                platform,
+                Debug,
+                log_target,
+                format!(
+                    "Warm-start :code anchor: branch=Known proof_bytes={} value_bytes={} inline={}",
+                    proof_byte_len,
+                    value.len(),
+                    inline,
+                )
+            );
             if value != code.as_slice() {
                 return Err(String::from("cached :code does not match on-chain bytes"));
             }
         }
         trie::proof_decode::StorageValue::HashKnownValueMissing(on_chain_hash) => {
+            log!(
+                platform,
+                Debug,
+                log_target,
+                format!(
+                    "Warm-start :code anchor: branch=HashKnownValueMissing proof_bytes={}",
+                    proof_byte_len,
+                )
+            );
             let computed = blake2_rfc::blake2b::blake2b(32, &[], &code);
             if computed.as_bytes() != &on_chain_hash[..] {
                 return Err(String::from(
