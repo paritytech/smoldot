@@ -15,17 +15,22 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import * as fs from "node:fs";
 import {
   createSmoldotClient,
   addChainFromSpec,
+  readDbContentIfSet,
   sendRpc,
   readJsonRpcUntil,
+  sendRpcAndWait,
   report,
 } from "./helpers.js";
 
 const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
 const paraSpecPath = process.env.PARA_CHAIN_SPEC;
 const requiredBlocks = Number.parseInt(process.env.REQUIRED_BLOCKS, 10);
+const finalizedFloor = Number.parseInt(process.env.FINALIZED_FLOOR ?? "0", 10);
+const dbDumpDir = process.env.SMOLDOT_DB_DUMP_DIR;
 
 if (!relaySpecPath || !paraSpecPath || !Number.isFinite(requiredBlocks)) {
   console.error(
@@ -40,13 +45,32 @@ let para;
 let passed = true;
 
 try {
-  relay = await addChainFromSpec(client, relaySpecPath);
+  const relayDbContent = readDbContentIfSet("SMOLDOT_DB_RELAY");
+  const paraDbContent = readDbContentIfSet("SMOLDOT_DB_PARA");
+
+  relay = await addChainFromSpec(client, relaySpecPath, {
+    databaseContent: relayDbContent,
+  });
   report("addChain relay", true);
 
   para = await addChainFromSpec(client, paraSpecPath, {
+    databaseContent: paraDbContent,
     potentialRelayChains: [relay],
   });
   report("addChain parachain", true);
+
+  if (finalizedFloor > 0) {
+    const head = await sendRpcAndWait(relay, "chain_getFinalizedHead", [], 30_000);
+    const header = await sendRpcAndWait(relay, "chain_getHeader", [head], 30_000);
+    const num = Number.parseInt(header.number, 16);
+    const ok = Number.isFinite(num) && num >= finalizedFloor;
+    report(
+      "relay finalized clears floor",
+      ok,
+      `finalized=#${num} floor=#${finalizedFloor}`,
+    );
+    if (!ok) throw new Error(`relay finalized #${num} below floor #${finalizedFloor}`);
+  }
 
   const followReqId = sendRpc(para, "chainHead_v1_follow", [false]).toString();
   const subId = await readJsonRpcUntil(
@@ -95,6 +119,25 @@ try {
     `count=${newBlocks}/${requiredBlocks}`,
   );
   if (!ok) passed = false;
+
+  if (passed && dbDumpDir) {
+    fs.mkdirSync(dbDumpDir, { recursive: true });
+    const relayDb = await sendRpcAndWait(
+      relay,
+      "chainHead_unstable_finalizedDatabase",
+      [],
+      30_000,
+    );
+    const paraDb = await sendRpcAndWait(
+      para,
+      "chainHead_unstable_finalizedDatabase",
+      [],
+      30_000,
+    );
+    fs.writeFileSync(`${dbDumpDir}/relay.json`, relayDb);
+    fs.writeFileSync(`${dbDumpDir}/para.json`, paraDb);
+    report("dumped smoldot databaseContent", true, dbDumpDir);
+  }
 } catch (e) {
   report("smoke", false, e.message);
   passed = false;

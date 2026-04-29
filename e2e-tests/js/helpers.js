@@ -35,6 +35,12 @@ export async function addChainFromSpec(client, specPath, opts = {}) {
   return client.addChain({ chainSpec, ...opts });
 }
 
+export function readDbContentIfSet(envVar) {
+  const path = process.env[envVar];
+  if (!path) return undefined;
+  return fs.readFileSync(path, "utf8");
+}
+
 let nextId = 1;
 
 export function sendRpc(chain, method, params = []) {

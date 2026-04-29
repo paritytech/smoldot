@@ -17,7 +17,13 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod network;
 pub mod statement;
+
+pub use network::{
+    run_smoke_js, spawn_scenario, LiveNetwork, ScenarioConfig, SmoldotState, SpecMode, StartMode,
+    BEST_METRIC, FINALIZED_METRIC, PARA_ID,
+};
 
 /// A file-backed Rust → JS message channel. Rust appends newline-terminated
 /// messages with [`SyncFile::send`]; JS polls the file and waits for a given
