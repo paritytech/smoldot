@@ -1195,8 +1195,8 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
 
     let peer_id = wait_for_peer(network_service).await;
 
-    // Fetch :heappages (tiny) and both Aura call proofs in parallel.
-    let (heap_pages_proof, slot_duration_proof, authorities_proof) = future::try_join3(
+    // Fetch :code+:heappages and both Aura call proofs in parallel.
+    let (code_hp_proof, slot_duration_proof, authorities_proof) = future::try_join3(
         async {
             network_service
                 .clone()
@@ -1204,12 +1204,12 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
                     peer_id.clone(),
                     codec::StorageProofRequestConfig {
                         block_hash,
-                        keys: [&b":heappages"[..]].into_iter(),
+                        keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
                     },
                     Duration::from_secs(16),
                 )
                 .await
-                .map_err(|e| format!(":heappages storage proof request failed: {e}"))
+                .map_err(|e| format!(":code/:heappages storage proof request failed: {e}"))
         },
         fetch_call_proof(
             network_service,
@@ -1221,14 +1221,41 @@ async fn warm_bootstrap<TPlat: PlatformRef>(
     )
     .await?;
 
-    // Decode :heappages from the storage proof.
-    let decoded_hp_proof =
-        trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-            proof: heap_pages_proof.decode().to_vec(),
-        })
-        .map_err(|e| format!("Failed to decode :heappages proof: {e}"))?;
+    let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+        proof: code_hp_proof.decode().to_vec(),
+    })
+    .map_err(|e| format!("Failed to decode :code/:heappages proof: {e}"))?;
 
-    let heap_pages_raw = decoded_hp_proof
+    // Anchor the cached runtime to the finalized state root. The peer may return
+    // either the full :code value (state v0, or a v1 proof that included it) or
+    // only its blake2_256 hash (state v1, value-stripped). Both must match the
+    // cached bytes; any mismatch fails this path and falls back to cold bootstrap.
+    let code_info = decoded_proof
+        .trie_node_info(
+            &state_root,
+            trie::bytes_to_nibbles(b":code".iter().copied()),
+        )
+        .map_err(|_| String::from("Proof missing :code path"))?;
+    match code_info.storage_value {
+        trie::proof_decode::StorageValue::Known { value, .. } => {
+            if value != code.as_slice() {
+                return Err(String::from("cached :code does not match on-chain bytes"));
+            }
+        }
+        trie::proof_decode::StorageValue::HashKnownValueMissing(on_chain_hash) => {
+            let computed = blake2_rfc::blake2b::blake2b(32, &[], &code);
+            if computed.as_bytes() != &on_chain_hash[..] {
+                return Err(String::from(
+                    "cached :code hash does not match on-chain :code hash",
+                ));
+            }
+        }
+        trie::proof_decode::StorageValue::None => {
+            return Err(String::from(":code missing in on-chain state"));
+        }
+    }
+
+    let heap_pages_raw = decoded_proof
         .storage_value(&state_root, b":heappages")
         .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
     let storage_heap_pages = heap_pages_raw.map(|(v, _)| v.to_vec());
