@@ -559,6 +559,19 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         });
 
                         task.sync = Some(sync);
+
+                        // All-forks just advanced finalized; the warp-sync gate may have
+                        // resolved without warp sync ever transitioning.
+                        if task
+                            .sync
+                            .as_ref()
+                            .unwrap_or_else(|| unreachable!())
+                            .is_warp_sync_finished()
+                        {
+                            for send_back in task.pending_warp_sync_finished.drain(..) {
+                                let _ = send_back.send(());
+                            }
+                        }
                     }
 
                     (

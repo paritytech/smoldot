@@ -187,6 +187,12 @@ pub struct AllSync<TRq, TSrc, TBl> {
 impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Initializes a new state machine.
     pub fn new(config: Config) -> Self {
+        let starting_block_number = config
+            .chain_information
+            .as_ref()
+            .finalized_block_header
+            .number;
+
         AllSync {
             // TODO: notify API user if can't start warp sync?
             warp_sync: warp_sync::start_warp_sync(warp_sync::Config {
@@ -224,6 +230,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 max_requests_per_block: config.max_requests_per_block,
                 block_number_bytes: config.block_number_bytes,
                 allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
+                starting_block_number,
             },
         }
     }
@@ -280,13 +287,20 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }*/
     }
 
-    /// Returns `true` if the warp sync phase has finished or was never needed.
+    /// Returns `true` once the finalized block reported by this state machine has moved past
+    /// the chain-spec starting checkpoint — either because warp sync transitioned, or because
+    /// the all-forks state machine advanced past it through normal GRANDPA finality.
     ///
-    /// Once this returns `true`, all syncing happens through the all-forks state machine and the
-    /// finalized block tracked by this state machine will only advance through normal finality
-    /// notifications.
+    /// On a cold start with a stale checkpoint, only warp sync can advance the
+    /// finalized block, so this resolves on `WarpSyncFinished`. On a warm restart or against a
+    /// short local network where all-forks naturally catches up, this resolves as soon as the
+    /// first finality proof is verified.
     pub fn is_warp_sync_finished(&self) -> bool {
-        self.warp_sync.is_none()
+        if self.warp_sync.is_none() {
+            true
+        } else {
+            self.finalized_block_number() > self.shared.starting_block_number
+        }
     }
 
     /// Returns the header of the finalized block.
@@ -2507,6 +2521,11 @@ struct Shared<TRq, TSrc> {
     block_number_bytes: usize,
     /// Value passed through [`Config::allow_unknown_consensus_engines`].
     allow_unknown_consensus_engines: bool,
+    /// Block number of the chain-spec's initial finalized header. Used by
+    /// [`AllSync::is_warp_sync_finished`] to detect when normal finality has
+    /// advanced the chain past the starting checkpoint, in cases where warp
+    /// sync was never needed.
+    starting_block_number: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
