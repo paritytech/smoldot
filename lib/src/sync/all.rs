@@ -295,6 +295,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// finalized block, so this resolves on `WarpSyncFinished`. On a warm restart or against a
     /// short local network where all-forks naturally catches up, this resolves as soon as the
     /// first finality proof is verified.
+    ///
+    /// Note: this gate is at the sync-service layer; the runtime service the parachain
+    /// reads from may briefly lag, so the first `subscribe_all` after this returns can
+    /// still report the chain-spec starting block as finalized. Harmless on the short
+    /// chains where the all-forks branch fires (handful of blocks of staleness at most);
+    /// the cold-start-with-stale-checkpoint case goes through `WarpSyncFinished` and
+    /// stays in lockstep.
     pub fn is_warp_sync_finished(&self) -> bool {
         if self.warp_sync.is_none() {
             true
