@@ -46,7 +46,7 @@ function parseFlags(argv) {
   const { values } = parseArgs({
     args: argv,
     options: {
-      "chain-spec": { type: "string" },
+      "parachain-spec": { type: "string" },
       "relay-chain-spec": { type: "string" },
       bootnodes: { type: "string" },
       "false-positive-rate": { type: "string", default: "0.01" },
@@ -63,8 +63,11 @@ function parseFlags(argv) {
     strict: true,
   });
 
-  if (!values["chain-spec"]) {
-    throw new Error("--chain-spec is required");
+  if (!values["parachain-spec"]) {
+    throw new Error("--parachain-spec is required");
+  }
+  if (!values["relay-chain-spec"]) {
+    throw new Error("--relay-chain-spec is required");
   }
 
   const numClients = Number.parseInt(values["num-clients"], 10);
@@ -73,7 +76,7 @@ function parseFlags(argv) {
   if (!(numRounds > 0)) throw new Error(`--num-rounds must be > 0`);
 
   return {
-    chainSpecPath: values["chain-spec"],
+    parachainSpecPath: values["parachain-spec"],
     relayChainSpecPath: values["relay-chain-spec"],
     bootnodes: values.bootnodes ? values.bootnodes.split(",").map((b) => b.trim()).filter(Boolean) : [],
     falsePositiveRate: Number.parseFloat(values["false-positive-rate"]),
@@ -93,8 +96,8 @@ function logConfiguration(log, args) {
   const pattern = args.messagesPattern.map(([c, s]) => `${c}x${s}B`).join(", ");
   log.info(
     `Starting Statement Store Latency Benchmark: ` +
-      `chain_spec=${args.chainSpecPath} ` +
-      (args.relayChainSpecPath ? `relay_chain_spec=${args.relayChainSpecPath} ` : "") +
+      `parachain_spec=${args.parachainSpecPath} ` +
+      `relay_chain_spec=${args.relayChainSpecPath} ` +
       `bootnodes=${args.bootnodes.length} ` +
       `clients=${args.numClients} rounds=${args.numRounds} ` +
       `interval=${args.intervalMs}ms pattern=[${pattern}]`,
@@ -107,19 +110,13 @@ async function spawnClient({ clientId, args, parachainSpec, relaySpec, log }) {
     logCallback: (lvl, target, msg) => log.forSmoldot(lvl, target, msg),
   });
 
-  const chains = [];
-  let relayChain = null;
-  if (relaySpec) {
-    relayChain = await smoldot.addChain({ chainSpec: relaySpec, disableJsonRpc: true });
-    chains.push(relayChain);
-  }
-
+  const relayChain = await smoldot.addChain({ chainSpec: relaySpec, disableJsonRpc: true });
   const parachain = await smoldot.addChain({
     chainSpec: parachainSpec,
-    potentialRelayChains: relayChain ? [relayChain] : [],
+    potentialRelayChains: [relayChain],
     statementStore: { falsePositiveRate: args.falsePositiveRate },
   });
-  chains.push(parachain);
+  const chains = [relayChain, parachain];
 
   const rpc = new SmoldotRpc(parachain, {
     onUnexpected: (e) => log.warn(`client ${clientId} rpc: ${e.message}`),
@@ -155,9 +152,9 @@ async function main() {
 
   logConfiguration(log, args);
 
-  const parachainSpecRaw = await loadChainSpec(args.chainSpecPath);
+  const parachainSpecRaw = await loadChainSpec(args.parachainSpecPath);
   const parachainSpec = spliceBootnodes(parachainSpecRaw, args.bootnodes);
-  const relaySpec = args.relayChainSpecPath ? await loadChainSpec(args.relayChainSpecPath) : null;
+  const relaySpec = await loadChainSpec(args.relayChainSpecPath);
 
   log.info(`Spawning ${args.numClients} client tasks... ${testRunId}`);
 

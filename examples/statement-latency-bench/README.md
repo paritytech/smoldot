@@ -19,7 +19,7 @@ npm install
 
 ```bash
 node bench.js \
-  --chain-spec ./chain-specs/parachain.json \
+  --parachain-spec ./chain-specs/parachain.json \
   --relay-chain-spec ./chain-specs/relay.json \
   --bootnodes /ip4/127.0.0.1/tcp/30333/ws/p2p/12D3KooW… \
   --num-clients 4 \
@@ -29,16 +29,16 @@ node bench.js \
   --interval-ms 5000
 ```
 
-If `--chain-spec` is a parachain spec, pass `--relay-chain-spec` too. Bootnodes
-in `--bootnodes` are appended to whatever is already in the spec's `bootNodes`
-field.
+Both `--parachain-spec` (parachain) and `--relay-chain-spec` are required.
+Bootnodes in `--bootnodes` are appended to whatever is already in the
+parachain spec's `bootNodes` field.
 
 ## Flags
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--chain-spec` | required | Raw chain spec JSON path. |
-| `--relay-chain-spec` | — | Required if the parachain spec references a relay. |
+| `--parachain-spec` | required | Parachain raw chain spec JSON path. |
+| `--relay-chain-spec` | required | Relay chain raw chain spec JSON path. |
 | `--bootnodes` | — | Comma-separated multiaddrs, appended to the spec. |
 | `--false-positive-rate` | `0.01` | Statement-store affinity bloom filter rate. |
 | `--num-clients` | `100` | Each spawns its own smoldot instance. |
