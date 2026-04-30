@@ -39,6 +39,10 @@ use zombienet_sdk::{
 
 const DEFAULT_TARGET_FINALIZED: u32 = 100;
 
+/// Smoldot triggers real warp sync (vs follow-forward) when the gap between
+/// `lightSyncState` and current head exceeds this many blocks.
+const WARP_SYNC_MINIMUM_GAP: u32 = 32;
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
@@ -47,16 +51,29 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let args = Args::parse()?;
     log::info!(
-        "generate_snapshots: out={} target_finalized=#{}",
+        "generate_snapshots: out={} spec_at=#{} target_finalized=#{} relay_snap={:?} para_snap={:?}",
         args.out.display(),
-        args.target_finalized
+        args.spec_at_finalized,
+        args.target_finalized,
+        args.relay_db_snapshot,
+        args.para_db_snapshot,
     );
 
     std::fs::create_dir_all(&args.out)?;
     let base_dir = resolve_base_dir()?;
     let base_dir_str = base_dir.to_str().expect("UTF-8 path").to_owned();
 
-    let config = build_config(&base_dir_str)?;
+    // Workaround: zombienet caches `with_db_snapshot` by sha256(path) and races
+    // when two sibling nodes share the same source path (TOCTOU between
+    // `exists()` and the copy). Pre-stage per-node copies with distinct
+    // filenames so each gets its own cache slot.
+    let staged = stage_per_node_snapshots(
+        &args.out,
+        args.relay_db_snapshot.as_deref(),
+        args.para_db_snapshot.as_deref(),
+    )?;
+
+    let config = build_config(&base_dir_str, &staged)?;
 
     log::info!("spawning zombienet network");
     let spawn_fn = zombienet_sdk::environment::get_spawn_fn();
@@ -66,28 +83,46 @@ async fn main() -> Result<(), anyhow::Error> {
     log::info!("network is up");
 
     let validator = network.get_node("validator-0")?;
-    let target = args.target_finalized as f64;
-    let timeout_secs = (args.target_finalized as u64 * 12).max(120);
-    log::info!(
-        "waiting for relay finalized to reach #{} (timeout={timeout_secs}s)",
-        args.target_finalized
-    );
-    validator
-        .wait_metric_with_timeout(FINALIZED_METRIC, |h| h >= target, timeout_secs)
-        .await
-        .map_err(|e| {
-            anyhow!(
-                "relay did not reach target finalized #{}: {e}",
-                args.target_finalized
-            )
-        })?;
-    log::info!("relay finalized reached #{}", args.target_finalized);
 
+    // Step 1: capture the spec when finalized reaches `spec_at_finalized`.
+    // Doing this earlier than the snapshot makes the gap between
+    // `lightSyncState` and current head wide enough to trigger smoldot's
+    // real warp sync (gap > WARP_SYNC_MINIMUM_GAP), which handles
+    // GRANDPA authority-set changes via fragments — what follow-forward
+    // does not do.
+    wait_for_finalized(validator, args.spec_at_finalized).await?;
+    gen_sync_spec(
+        network.get_node("validator-0")?,
+        &args.out.join("relay-spec.json"),
+    )
+    .await?;
+    // Cumulus parachains don't expose `sync_state_genSyncSpec` — there's no
+    // independent finality on a parachain, so there's no `lightSyncState`
+    // to bake. Smoldot's cold/warm path for the parachain is automatic
+    // given the relay's `lightSyncState`. Copy the zombienet-emitted raw
+    // spec verbatim.
     let network_base = PathBuf::from(
         network
             .base_dir()
             .ok_or_else(|| anyhow!("no network base_dir"))?,
     );
+    let parachain = network
+        .parachain(PARA_ID)
+        .ok_or_else(|| anyhow!("parachain {PARA_ID} not found"))?;
+    let para_chain_name = parachain.chain_id().unwrap_or(parachain.unique_id());
+    let para_spec_src = network_base.join(format!("{para_chain_name}.json"));
+    let para_spec_dst = args.out.join("para-spec.json");
+    copy_spec_stripping_bootnodes(&para_spec_src, &para_spec_dst)?;
+    log::info!(
+        "copied para spec {} -> {} (bootnodes stripped, {} bytes)",
+        para_spec_src.display(),
+        para_spec_dst.display(),
+        std::fs::metadata(&para_spec_dst)?.len()
+    );
+
+    // Step 2: keep the network running until finalized reaches
+    // `target_finalized`, then snapshot validator-0 + alice DBs.
+    wait_for_finalized(validator, args.target_finalized).await?;
 
     pause_and_tar(
         &network,
@@ -103,30 +138,6 @@ async fn main() -> Result<(), anyhow::Error> {
         &args.out.join("parachain-db.tgz"),
     )
     .await?;
-
-    gen_sync_spec(
-        network.get_node("validator-0")?,
-        &args.out.join("relay-spec.json"),
-    )
-    .await?;
-    // Cumulus parachains don't expose `sync_state_genSyncSpec` — there's no
-    // independent finality on a parachain, so there's no `lightSyncState`
-    // to bake. Smoldot's cold/warm path for the parachain is automatic
-    // given the relay's `lightSyncState`. Copy the zombienet-emitted raw
-    // spec verbatim.
-    let parachain = network
-        .parachain(PARA_ID)
-        .ok_or_else(|| anyhow!("parachain {PARA_ID} not found"))?;
-    let para_chain_name = parachain.chain_id().unwrap_or(parachain.unique_id());
-    let para_spec_src = network_base.join(format!("{para_chain_name}.json"));
-    let para_spec_dst = args.out.join("para-spec.json");
-    copy_spec_stripping_bootnodes(&para_spec_src, &para_spec_dst)?;
-    log::info!(
-        "copied para spec {} -> {} (bootnodes stripped, {} bytes)",
-        para_spec_src.display(),
-        para_spec_dst.display(),
-        std::fs::metadata(&para_spec_dst)?.len()
-    );
 
     dump_smoldot_db(&args.out, &network).await?;
 
@@ -297,6 +308,20 @@ fn sha256_of(path: &Path) -> Result<String, anyhow::Error> {
     Ok(hex.to_string())
 }
 
+async fn wait_for_finalized(node: &NetworkNode, height: u32) -> Result<(), anyhow::Error> {
+    let target = height as f64;
+    let timeout_secs = (height as u64 * 12).max(120);
+    log::info!(
+        "waiting for {} finalized to reach #{height} (timeout={timeout_secs}s)",
+        node.name()
+    );
+    node.wait_metric_with_timeout(FINALIZED_METRIC, |h| h >= target, timeout_secs)
+        .await
+        .map_err(|e| anyhow!("{} did not reach finalized #{height}: {e}", node.name()))?;
+    log::info!("{} finalized reached #{height}", node.name());
+    Ok(())
+}
+
 /// Calls `sync_state_genSyncSpec(true)` on `node` and writes the returned
 /// raw chain spec (with `lightSyncState`) to `out_path`.
 async fn gen_sync_spec(node: &NetworkNode, out_path: &Path) -> Result<(), anyhow::Error> {
@@ -364,12 +389,18 @@ async fn pause_and_tar(
 struct Args {
     out: PathBuf,
     target_finalized: u32,
+    spec_at_finalized: u32,
+    relay_db_snapshot: Option<PathBuf>,
+    para_db_snapshot: Option<PathBuf>,
 }
 
 impl Args {
     fn parse() -> Result<Self, anyhow::Error> {
         let mut out: Option<PathBuf> = None;
         let mut target_finalized: Option<u32> = None;
+        let mut spec_at_finalized: Option<u32> = None;
+        let mut relay_db_snapshot: Option<PathBuf> = None;
+        let mut para_db_snapshot: Option<PathBuf> = None;
 
         let mut iter = std::env::args().skip(1);
         while let Some(arg) = iter.next() {
@@ -386,6 +417,26 @@ impl Args {
                         anyhow!("--target-finalized must be a positive integer: {e}")
                     })?);
                 }
+                "--spec-at-finalized" => {
+                    let v = iter
+                        .next()
+                        .ok_or_else(|| anyhow!("--spec-at-finalized needs a value"))?;
+                    spec_at_finalized = Some(v.parse().map_err(|e| {
+                        anyhow!("--spec-at-finalized must be a positive integer: {e}")
+                    })?);
+                }
+                "--relay-db-snapshot" => {
+                    let v = iter
+                        .next()
+                        .ok_or_else(|| anyhow!("--relay-db-snapshot needs a path"))?;
+                    relay_db_snapshot = Some(PathBuf::from(v));
+                }
+                "--para-db-snapshot" => {
+                    let v = iter
+                        .next()
+                        .ok_or_else(|| anyhow!("--para-db-snapshot needs a path"))?;
+                    para_db_snapshot = Some(PathBuf::from(v));
+                }
                 "-h" | "--help" => {
                     print_help();
                     std::process::exit(0);
@@ -394,49 +445,149 @@ impl Args {
             }
         }
 
+        let target_finalized = target_finalized.unwrap_or(DEFAULT_TARGET_FINALIZED);
+        let spec_at_finalized = spec_at_finalized.unwrap_or_else(|| target_finalized / 2);
+        if spec_at_finalized > target_finalized {
+            return Err(anyhow!(
+                "--spec-at-finalized (#{spec_at_finalized}) must be ≤ --target-finalized (#{target_finalized})"
+            ));
+        }
+        let gap = target_finalized.saturating_sub(spec_at_finalized);
+        if gap > 0 && gap < WARP_SYNC_MINIMUM_GAP {
+            log::warn!(
+                "spec→target gap = {gap} < smoldot's warp_sync_minimum_gap ({WARP_SYNC_MINIMUM_GAP}); \
+                 smoldot will use follow-forward and may stall on GRANDPA rotations"
+            );
+        }
+
         Ok(Self {
             out: out.ok_or_else(|| anyhow!("--out <DIR> is required"))?,
-            target_finalized: target_finalized.unwrap_or(DEFAULT_TARGET_FINALIZED),
+            target_finalized,
+            spec_at_finalized,
+            relay_db_snapshot,
+            para_db_snapshot,
         })
     }
 }
 
 fn print_help() {
     println!(
-        "usage: generate_snapshots --out <DIR> [--target-finalized N]\n\
+        "usage: generate_snapshots --out <DIR> [--target-finalized N] [--spec-at-finalized M]\n\
          \n\
-         Spawns westend-local + people-westend-local from genesis and waits for\n\
-         the relay to reach the target finalized block. Slice A only — produces\n\
-         no artifacts yet.\n\
+         Spawns westend-local + people-westend-local from genesis. Captures the\n\
+         relay sync spec (lightSyncState) at finalized #M, then continues until\n\
+         finalized #N to snapshot the node DBs and run smoldot for a\n\
+         `databaseContent` dump.\n\
+         \n\
+         The M..N gap should exceed smoldot's warp_sync_minimum_gap ({}) so\n\
+         smoldot exercises real warp sync (handles GRANDPA rotations) rather\n\
+         than follow-forward.\n\
          \n\
          options:\n\
-           --out <DIR>             Artifact output directory (created if missing).\n\
-           --target-finalized N    Target relay finalized block. Default: {}.",
-        DEFAULT_TARGET_FINALIZED
+           --out <DIR>              Artifact output directory (created if missing).\n\
+           --target-finalized N     Snapshot block. Default: {}.\n\
+           --spec-at-finalized M    Spec lightSyncState block (M ≤ N). Default: N/2.\n\
+           --relay-db-snapshot P    Resume relay validators from this DB tarball.\n\
+           --para-db-snapshot P     Resume collators from this DB tarball.\n\
+         \n\
+         When the *-db-snapshot flags are passed, the network resumes from the\n\
+         tarball'd state instead of starting at genesis — useful for extending\n\
+         a prior run without paying the cost of re-syncing from #0.",
+        WARP_SYNC_MINIMUM_GAP, DEFAULT_TARGET_FINALIZED
     );
 }
 
-fn build_config(base_dir_str: &str) -> Result<NetworkConfig, anyhow::Error> {
+struct StagedSnapshots {
+    validator_0: Option<String>,
+    validator_1: Option<String>,
+    alice: Option<String>,
+    bob: Option<String>,
+}
+
+fn stage_per_node_snapshots(
+    out: &Path,
+    relay_db: Option<&Path>,
+    para_db: Option<&Path>,
+) -> Result<StagedSnapshots, anyhow::Error> {
+    let stage_dir = out.join("staged-snapshots");
+    if relay_db.is_some() || para_db.is_some() {
+        std::fs::create_dir_all(&stage_dir)?;
+    }
+    let stage = |src: &Path, name: &str| -> Result<String, anyhow::Error> {
+        let dst = stage_dir.join(format!("{name}.tgz"));
+        std::fs::copy(src, &dst)
+            .map_err(|e| anyhow!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+        Ok(dst.to_str().expect("UTF-8 path").to_owned())
+    };
+    let (validator_0, validator_1) = match relay_db {
+        Some(p) => (
+            Some(stage(p, "relay-validator-0")?),
+            Some(stage(p, "relay-validator-1")?),
+        ),
+        None => (None, None),
+    };
+    let (alice, bob) = match para_db {
+        Some(p) => (Some(stage(p, "para-alice")?), Some(stage(p, "para-bob")?)),
+        None => (None, None),
+    };
+    Ok(StagedSnapshots {
+        validator_0,
+        validator_1,
+        alice,
+        bob,
+    })
+}
+
+fn build_config(
+    base_dir_str: &str,
+    staged: &StagedSnapshots,
+) -> Result<NetworkConfig, anyhow::Error> {
     let images = zombienet_sdk::environment::get_images_from_env();
     NetworkConfigBuilder::new()
         .with_relaychain(|r| {
-            r.with_chain("westend-local")
+            let r = r
+                .with_chain("westend-local")
                 .with_default_command("polkadot")
-                .with_default_image(images.polkadot.as_str())
-                .with_validator(|n| n.with_name("validator-0").bootnode(true))
-                .with_validator(|n| n.with_name("validator-1").bootnode(true))
+                .with_default_image(images.polkadot.as_str());
+            r.with_validator(|n| {
+                let n = n.with_name("validator-0").bootnode(true);
+                match staged.validator_0.as_deref() {
+                    Some(p) => n.with_db_snapshot(p),
+                    None => n,
+                }
+            })
+            .with_validator(|n| {
+                let n = n.with_name("validator-1").bootnode(true);
+                match staged.validator_1.as_deref() {
+                    Some(p) => n.with_db_snapshot(p),
+                    None => n,
+                }
+            })
         })
         .with_parachain(|p| {
-            p.with_id(PARA_ID)
+            let p = p
+                .with_id(PARA_ID)
                 .with_default_command("polkadot-parachain")
                 .with_default_image(images.cumulus.as_str())
                 .with_chain("people-westend-local")
                 .with_default_args(vec![
                     "--force-authoring".into(),
                     "--authoring=slot-based".into(),
-                ])
-                .with_collator(|n| n.with_name("alice").bootnode(true))
-                .with_collator(|n| n.with_name("bob").bootnode(true))
+                ]);
+            p.with_collator(|n| {
+                let n = n.with_name("alice").bootnode(true);
+                match staged.alice.as_deref() {
+                    Some(p) => n.with_db_snapshot(p),
+                    None => n,
+                }
+            })
+            .with_collator(|n| {
+                let n = n.with_name("bob").bootnode(true);
+                match staged.bob.as_deref() {
+                    Some(p) => n.with_db_snapshot(p),
+                    None => n,
+                }
+            })
         })
         .with_global_settings(|g| g.with_base_dir(base_dir_str))
         .build()
