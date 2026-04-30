@@ -65,33 +65,7 @@ cargo run --release --bin startup -- \
   --mode warm --target relay --relay-chain-spec polkadot --iterations 5
 ```
 
-### Flags
-
-- `--mode cold|warm` — default `cold`
-- `--iterations N`, `--warmup N` — sample counts
-- `--target relay|para` — which chain's `chainHead_v1_follow` to subscribe
-  to (default `para` — exercises the full flow; `relay` is faster + cleaner
-  baseline)
-- `--relay-chain-spec <PATH|NAME>` / `--para-chain-spec <PATH|NAME>` —
-  skip zombienet and use given specs. Short name resolves to
-  `demo-chain-specs/<name>.json`
-- `--timeout-secs N` — per-iteration timeout (default 120)
-- `--min-finalized-before-bench N` — on zombienet, wait until the relay
-  (and para, when `--target para`) reaches at least block N before starting
-  iterations (default 1). No-op when chain specs are user-supplied.
-- `--finalized-wait-secs N` — max time to wait for the readiness gate above
-  (default 180)
-- `--json` — also emit a machine-readable JSON line
-
-Warm-mode-only:
-
-- `--db-dir PATH` — where to read/write `<chainId>.db`. Defaults to the
-  zombienet base dir for zombienet runs, or a tempdir for user-supplied
-  specs.
-- `--reuse-db` — reuse existing DB files in `--db-dir` instead of
-  regenerating. Useful for fast iteration on a real network; **not**
-  recommended on zombienet (each spawn is a fresh network, the saved DB
-  is stale).
+Run with `--help` for the full flag list.
 
 ### DB scope (warm)
 
