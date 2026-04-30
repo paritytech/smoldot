@@ -1,0 +1,17 @@
+[package]
+name = "smoldot-e2e-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1.0.81"
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
+env_logger = "0.11.2"
+hex = { version = "0.4.3", default-features = false }
+log = "0.4.22"
+serde_json = "1.0.132"
+smoldot = { path = "../lib", default-features = false }
+tempfile = "3.8.1"
+tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "process", "time"] }
+zombienet-sdk = "0.4"
