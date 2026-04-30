@@ -1,16 +1,16 @@
 import { readFile } from "node:fs/promises";
 
-export async function loadChainSpec(path) {
-  return await readFile(path, "utf8");
-}
-
-// `AddChainOptions.chainSpec` has no separate bootnodes field; bootnodes must
-// be embedded in the spec JSON. We append rather than replace so any bootnodes
-// already in the spec (e.g. public ones) keep working alongside CLI-provided ones.
-export function spliceBootnodes(specJson, bootnodes) {
-  if (!bootnodes?.length) return specJson;
-  const spec = JSON.parse(specJson);
-  const existing = Array.isArray(spec.bootNodes) ? spec.bootNodes : [];
-  spec.bootNodes = [...existing, ...bootnodes];
-  return JSON.stringify(spec);
+// Accepts an http(s) URL or a local file path. Bootnodes are expected to be
+// embedded in the spec already (the canonical source is the paritytech/chainspecs
+// repo and smoldot's bundled demo-chain-specs/, both of which ship bootnodes
+// inside the spec).
+export async function loadChainSpec(source) {
+  if (/^https?:\/\//i.test(source)) {
+    const res = await fetch(source);
+    if (!res.ok) {
+      throw new Error(`Failed to fetch ${source}: ${res.status} ${res.statusText}`);
+    }
+    return await res.text();
+  }
+  return await readFile(source, "utf8");
 }

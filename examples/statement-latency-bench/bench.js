@@ -2,7 +2,7 @@
 import { parseArgs } from "node:util";
 import { randomBytes } from "node:crypto";
 import { start } from "smoldot";
-import { loadChainSpec, spliceBootnodes } from "./chainspec.js";
+import { loadChainSpec } from "./chainspec.js";
 import { getKeypair } from "./keypair.js";
 import { SmoldotRpc } from "./smoldot-rpc.js";
 import { runClient } from "./client.js";
@@ -48,7 +48,6 @@ function parseFlags(argv) {
     options: {
       "parachain-spec": { type: "string" },
       "relay-chain-spec": { type: "string" },
-      bootnodes: { type: "string" },
       "false-positive-rate": { type: "string", default: "0.01" },
       "num-clients": { type: "string", default: "100" },
       "num-rounds": { type: "string", default: "1" },
@@ -76,9 +75,8 @@ function parseFlags(argv) {
   if (!(numRounds > 0)) throw new Error(`--num-rounds must be > 0`);
 
   return {
-    parachainSpecPath: values["parachain-spec"],
-    relayChainSpecPath: values["relay-chain-spec"],
-    bootnodes: values.bootnodes ? values.bootnodes.split(",").map((b) => b.trim()).filter(Boolean) : [],
+    parachainSpecSource: values["parachain-spec"],
+    relayChainSpecSource: values["relay-chain-spec"],
     falsePositiveRate: Number.parseFloat(values["false-positive-rate"]),
     numClients,
     numRounds,
@@ -96,9 +94,8 @@ function logConfiguration(log, args) {
   const pattern = args.messagesPattern.map(([c, s]) => `${c}x${s}B`).join(", ");
   log.info(
     `Starting Statement Store Latency Benchmark: ` +
-      `parachain_spec=${args.parachainSpecPath} ` +
-      `relay_chain_spec=${args.relayChainSpecPath} ` +
-      `bootnodes=${args.bootnodes.length} ` +
+      `parachain_spec=${args.parachainSpecSource} ` +
+      `relay_chain_spec=${args.relayChainSpecSource} ` +
       `clients=${args.numClients} rounds=${args.numRounds} ` +
       `interval=${args.intervalMs}ms pattern=[${pattern}]`,
   );
@@ -152,9 +149,10 @@ async function main() {
 
   logConfiguration(log, args);
 
-  const parachainSpecRaw = await loadChainSpec(args.parachainSpecPath);
-  const parachainSpec = spliceBootnodes(parachainSpecRaw, args.bootnodes);
-  const relaySpec = await loadChainSpec(args.relayChainSpecPath);
+  const [parachainSpec, relaySpec] = await Promise.all([
+    loadChainSpec(args.parachainSpecSource),
+    loadChainSpec(args.relayChainSpecSource),
+  ]);
 
   log.info(`Spawning ${args.numClients} client tasks... ${testRunId}`);
 
