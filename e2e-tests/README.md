@@ -37,3 +37,32 @@ What happens inside:
 5. The Rust side reads metrics and checks outcomes over JSON-RPC.
 6. Rust and JS synchronise through a file-backed channel — `SyncFile` and
    `waitForMessage`.
+
+
+## Bulletin / bitswap snapshots (#3232)
+
+The `bitswap_get*` matrix entries (planned) drive smoldot's
+`bitswap_v1_get` JSON-RPC against a polkadot-bulletin-chain network with
+pre-built DB snapshots. Generating the snapshots is too slow for CI, so a
+manual `--ignored` test produces them locally; CI runners later download
+and cache them once the upload destination is wired up (out of scope for
+the current iteration).
+
+### Generating snapshots locally
+
+Prerequisites: `polkadot` and `polkadot-parachain` on `$PATH`. The bulletin
+chain runtime is loaded from the vendored
+[`chain-specs/bulletin-westend-local-spec.json`](chain-specs/bulletin-westend-local-spec.json)
+(generated upstream via
+[`polkadot-bulletin-chain/scripts/create_bulletin_westend_spec.sh`](https://github.com/paritytech/polkadot-bulletin-chain/blob/main/scripts/create_bulletin_westend_spec.sh)).
+Override with `BULLETIN_CHAIN_SPEC=/path/to/spec.json` when iterating on a
+newer bulletin runtime.
+
+```sh
+# Outputs relay.tgz + bulletin.tgz + manifest.json under e2e-tests/target/snapshots/.
+cargo test --manifest-path e2e-tests/Cargo.toml \
+  -- --ignored bulletin_snapshot --nocapture
+```
+
+The `manifest.json` produced is the source of truth for which CIDs the
+CI tests can fetch.
