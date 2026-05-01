@@ -133,9 +133,17 @@ async fn main() -> Result<(), anyhow::Error> {
     .await?;
 
     // Step 2: keep the network running until finalized reaches
-    // `target_finalized`, then snapshot validator-0 + alice DBs.
+    // `target_finalized`, then run smoldot to capture its `databaseContent`
+    // dump while the network is still advancing.
     wait_for_finalized(validator, args.target_finalized).await?;
 
+    dump_smoldot_db(&args.out, &network).await?;
+
+    // Step 3: snapshot validator-0 + alice DBs *after* the dump. Tarring
+    // before would freeze the network DBs at an earlier point than smoldot's
+    // persisted finalized — when the test later spawns from the snapshot,
+    // smoldot's persisted block wouldn't yet exist in the validator's DB and
+    // smoldot would hang on `storage-proof-request-error`.
     pause_and_tar(
         &network,
         "validator-0",
@@ -150,8 +158,6 @@ async fn main() -> Result<(), anyhow::Error> {
         &args.out.join("parachain-db.tgz"),
     )
     .await?;
-
-    dump_smoldot_db(&args.out, &network).await?;
 
     create_bundle(&args.out)?;
     print_manifest(&args.out)?;
@@ -328,7 +334,7 @@ async fn dump_smoldot_db(
             ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
             ("PARA_CHAIN_SPEC", para_spec_str.as_str()),
             ("REQUIRED_BLOCKS", "5"),
-            ("FINALIZED_FLOOR", "0"),
+            ("EXPECTED_INITIAL_FINALIZED", "0"),
             ("SMOLDOT_DB_DUMP_DIR", dump_str.as_str()),
         ],
     )
