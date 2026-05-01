@@ -149,15 +149,16 @@ fn build_network_config(
 ) -> Result<NetworkConfig, anyhow::Error> {
     let images = zombienet_sdk::environment::get_images_from_env();
 
-    let (relay_db_path, para_db_path) = match &cfg.start {
-        StartMode::Fresh => (None, None),
+    // Per-node copies of the snapshot tarballs work around a TOCTOU race in
+    // zombienet-provider's `with_db_snapshot` cache: sibling nodes sharing one
+    // source path corrupt the partially-written file. Each per-node copy gets
+    // its own cache slot (sha256 keyed on path string).
+    let staged = match &cfg.start {
+        StartMode::Fresh => StagedSnapshots::default(),
         StartMode::FromSnapshot {
             relay_db_tgz,
             para_db_tgz,
-        } => (
-            Some(relay_db_tgz.to_str().expect("UTF-8 path").to_owned()),
-            Some(para_db_tgz.to_str().expect("UTF-8 path").to_owned()),
-        ),
+        } => stage_per_node_snapshots(base_dir_str, relay_db_tgz, para_db_tgz)?,
     };
     let (relay_spec_path, para_spec_path) = match &cfg.spec {
         SpecMode::Vanilla => (None, None),
@@ -177,22 +178,20 @@ fn build_network_config(
                 None => r,
                 Some(p) => r.with_chain_spec_path(p),
             };
-            match relay_db_path.as_deref() {
-                None => r
-                    .with_validator(|n| n.with_name("validator-0").bootnode(true))
-                    .with_validator(|n| n.with_name("validator-1").bootnode(true)),
-                Some(path) => r
-                    .with_validator(|n| {
-                        n.with_name("validator-0")
-                            .bootnode(true)
-                            .with_db_snapshot(path)
-                    })
-                    .with_validator(|n| {
-                        n.with_name("validator-1")
-                            .bootnode(true)
-                            .with_db_snapshot(path)
-                    }),
-            }
+            r.with_validator(|n| {
+                let n = n.with_name("validator-0").bootnode(true);
+                match staged.validator_0.as_deref() {
+                    Some(p) => n.with_db_snapshot(p),
+                    None => n,
+                }
+            })
+            .with_validator(|n| {
+                let n = n.with_name("validator-1").bootnode(true);
+                match staged.validator_1.as_deref() {
+                    Some(p) => n.with_db_snapshot(p),
+                    None => n,
+                }
+            })
         })
         .with_parachain(|p| {
             let p = p
@@ -208,14 +207,20 @@ fn build_network_config(
                 None => p,
                 Some(path) => p.with_chain_spec_path(path),
             };
-            match para_db_path.as_deref() {
-                None => p
-                    .with_collator(|n| n.with_name("alice").bootnode(true))
-                    .with_collator(|n| n.with_name("bob").bootnode(true)),
-                Some(path) => p
-                    .with_collator(|n| n.with_name("alice").bootnode(true).with_db_snapshot(path))
-                    .with_collator(|n| n.with_name("bob").bootnode(true).with_db_snapshot(path)),
-            }
+            p.with_collator(|n| {
+                let n = n.with_name("alice").bootnode(true);
+                match staged.alice.as_deref() {
+                    Some(p) => n.with_db_snapshot(p),
+                    None => n,
+                }
+            })
+            .with_collator(|n| {
+                let n = n.with_name("bob").bootnode(true);
+                match staged.bob.as_deref() {
+                    Some(p) => n.with_db_snapshot(p),
+                    None => n,
+                }
+            })
         })
         .with_global_settings(|g| g.with_base_dir(base_dir_str));
 
@@ -245,6 +250,35 @@ async fn wait_for_relay_first_finalized(
         .map_err(|e| anyhow!("relay did not finalize any block: {e}"))?;
     log::info!("relay produced its first finalized block");
     Ok(())
+}
+
+#[derive(Default)]
+struct StagedSnapshots {
+    validator_0: Option<String>,
+    validator_1: Option<String>,
+    alice: Option<String>,
+    bob: Option<String>,
+}
+
+fn stage_per_node_snapshots(
+    base_dir_str: &str,
+    relay_db: &Path,
+    para_db: &Path,
+) -> Result<StagedSnapshots, anyhow::Error> {
+    let stage_dir = PathBuf::from(base_dir_str).join("staged-snapshots");
+    std::fs::create_dir_all(&stage_dir)?;
+    let stage = |src: &Path, name: &str| -> Result<String, anyhow::Error> {
+        let dst = stage_dir.join(format!("{name}.tgz"));
+        std::fs::copy(src, &dst)
+            .map_err(|e| anyhow!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+        Ok(dst.to_str().expect("UTF-8 path").to_owned())
+    };
+    Ok(StagedSnapshots {
+        validator_0: Some(stage(relay_db, "relay-validator-0")?),
+        validator_1: Some(stage(relay_db, "relay-validator-1")?),
+        alice: Some(stage(para_db, "para-alice")?),
+        bob: Some(stage(para_db, "para-bob")?),
+    })
 }
 
 /// Reads `committed_relay` / `committed_para` (port-agnostic artifacts with
@@ -345,13 +379,12 @@ fn parse_finalized_height_from_db(path: &Path) -> Result<u64, anyhow::Error> {
     decode_header_number(header_hex).map_err(|e| anyhow!("{}: {e}", path.display()))
 }
 
-/// Decodes a 0x-prefixed hex SCALE-encoded substrate header and returns its
-/// block number. Uses smoldot's own header decoder, kept consistent with what
-/// smoldot does when consuming the same artifact at runtime.
-fn decode_header_number(hex_with_prefix: &str) -> Result<u64, anyhow::Error> {
-    let stripped = hex_with_prefix
-        .strip_prefix("0x")
-        .ok_or_else(|| anyhow!("header hex missing 0x prefix"))?;
+/// Decodes a hex SCALE-encoded substrate header and returns its block number.
+/// Accepts either a `0x`-prefixed string (chain spec lightSyncState format) or
+/// raw hex (smoldot databaseContent format). Uses smoldot's own header
+/// decoder.
+fn decode_header_number(hex_str: &str) -> Result<u64, anyhow::Error> {
+    let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
     let bytes = hex::decode(stripped).map_err(|e| anyhow!("invalid hex: {e}"))?;
     let header = smoldot::header::decode(&bytes, BLOCK_NUMBER_BYTES)
         .map_err(|e| anyhow!("smoldot header decode: {e}"))?;

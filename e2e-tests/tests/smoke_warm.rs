@@ -40,12 +40,12 @@ async fn smoke_warm() -> Result<(), anyhow::Error> {
             para_db_tgz: snapshot::para_db()?,
         },
         spec: SpecMode::WithLightSyncState {
-            relay: snapshot::relay_spec(),
-            para: snapshot::para_spec(),
+            relay: snapshot::relay_spec()?,
+            para: snapshot::para_spec()?,
         },
         smoldot: SmoldotState::FromDb {
-            relay_db_json: snapshot::smoldot_db_relay(),
-            para_db_json: snapshot::smoldot_db_para(),
+            relay_db_json: snapshot::smoldot_db_relay()?,
+            para_db_json: snapshot::smoldot_db_para()?,
         },
     };
     let live = spawn_scenario(&cfg, &base_dir_str).await?;

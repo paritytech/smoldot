@@ -44,37 +44,29 @@ Versioned as a unit. Bumping the version is a single-line change.
 SNAPSHOT_VERSION = "v1"
 ```
 
-### Hosted on GCS (large)
+### Hosted on GCS (everything)
 
 Bucket: `zombienet-db-snaps`
 Prefix: `zombienet/smoldot_smoke_db/v1/`
 
-- `relaychain-db.tgz`
-- `parachain-db.tgz`
+- `relaychain-db.tgz`         — relay node DB (validator-0), keystore stripped
+- `parachain-db.tgz`          — para node DB (alice), keystore stripped
+- `relay-spec.json`           — westend-local raw spec with `lightSyncState`
+- `para-spec.json`            — people-westend-local raw spec
+- `smoldot-db/relay.json`     — smoldot `chainHead_unstable_finalizedDatabase` for relay
+- `smoldot-db/para.json`      — smoldot `chainHead_unstable_finalizedDatabase` for parachain
 
-URLs:
-- `https://storage.googleapis.com/zombienet-db-snaps/zombienet/smoldot_smoke_db/v1/relaychain-db.tgz`
-- `https://storage.googleapis.com/zombienet-db-snaps/zombienet/smoldot_smoke_db/v1/parachain-db.tgz`
-
-### Committed in repo (small)
-
-Under `e2e-tests/artifacts/v1/`:
-
-- `relay-spec.json`            — westend-local raw spec with `lightSyncState`
-- `para-spec.json`             — people-westend-local raw spec with `lightSyncState`
-- `smoldot-db-relay.json`      — `client.databaseContent(relay)` output
-- `smoldot-db-para.json`       — `client.databaseContent(para)` output
-
-Specs and smoldot-db JSONs are produced together with the GCS tarballs and must match. Mismatch surfaces as a sync failure — that is the right signal.
+All six files are downloaded into `~/.cache/smoldot-e2e/v1/` on first use and SHA256-verified against constants pinned in `e2e-tests/src/snapshot.rs`. Repo carries no binary artifacts.
 
 ### Local override (dev)
 
-Env vars skip the GCS download and SHA check:
+`ARTIFACTS_DIR_OVERRIDE=/path/to/dir` makes every resolver point inside that directory (skipping GCS + SHA verification). The directory layout matches the generator output, so:
 
-- `DB_SNAPSHOT_RELAY_OVERRIDE` — path to local `relaychain-db.tgz`
-- `DB_SNAPSHOT_PARA_OVERRIDE`  — path to local `parachain-db.tgz`
+```bash
+ARTIFACTS_DIR_OVERRIDE=/tmp/smoldot-snap-v1 cargo test --test smoke_cold
+```
 
-Mirrors polkadot-sdk's `full_node_warp_sync` convention.
+works directly against a fresh `generate_snapshots` run.
 
 ## Rust helper surface
 

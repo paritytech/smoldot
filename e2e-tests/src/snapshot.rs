@@ -17,18 +17,20 @@
 
 //! Resolves the artifact set consumed by `smoke_cold` / `smoke_warm`.
 //!
-//! Two artifact classes:
+//! All files (DB tarballs, chain specs with `lightSyncState`, smoldot
+//! `databaseContent` JSONs) are hosted on GCS under
+//! `gs://zombienet-db-snaps/zombienet/smoldot_smoke_db/{ARTIFACTS_VERSION}/`.
+//! Resolvers cache them under `~/.cache/smoldot-e2e/{ARTIFACTS_VERSION}/`,
+//! SHA256-verified against the pinned constants below.
 //!
-//! - **GCS-hosted** (network DB tarballs, ~few-MB each): downloaded into
-//!   `~/.cache/smoldot-e2e/{ARTIFACTS_VERSION}/`, SHA256-verified against
-//!   pinned constants. Bypassed by `DB_SNAPSHOT_*_OVERRIDE` env vars for
-//!   local generator iteration.
-//! - **Committed** (chain specs with `lightSyncState`, smoldot
-//!   `databaseContent` JSONs): live under
-//!   `e2e-tests/artifacts/{ARTIFACTS_VERSION}/` and are referenced by path.
+//! For local iteration (e.g. running the generator and validating cold/warm
+//! before publishing to GCS), set `ARTIFACTS_DIR_OVERRIDE` to a directory
+//! laid out exactly like the generator output (`relaychain-db.tgz`,
+//! `relay-spec.json`, `smoldot-db/relay.json`, …). All resolvers point
+//! inside it; SHA verification is skipped.
 //!
 //! See `e2e-tests/docs/smoke-scenarios.md` for the production / regeneration
-//! procedure and the full layout.
+//! procedure.
 
 use std::path::PathBuf;
 
@@ -39,105 +41,99 @@ pub const ARTIFACTS_VERSION: &str = "v1";
 const GCS_BASE: &str =
     "https://storage.googleapis.com/zombienet-db-snaps/zombienet/smoldot_smoke_db";
 
-// SHA256 constants are filled in when the corresponding `vN` artifact set
-// is published. An empty string means the artifact set hasn't been pinned
-// yet — in that case the resolver requires `DB_SNAPSHOT_*_OVERRIDE` env
-// vars and refuses to download from GCS.
-const RELAY_DB_SHA256: &str = "";
-const PARA_DB_SHA256: &str = "";
+const ARTIFACTS_DIR_OVERRIDE_ENV: &str = "ARTIFACTS_DIR_OVERRIDE";
 
-const RELAY_DB_FILE: &str = "relaychain-db.tgz";
-const PARA_DB_FILE: &str = "parachain-db.tgz";
+// SHA256 constants are filled in when the corresponding `vN` artifact set is
+// published. Empty means not yet pinned — in that case the resolver requires
+// `ARTIFACTS_DIR_OVERRIDE` and refuses to download from GCS.
+const RELAY_DB_SHA256: &str = "eb05f3a037b54ae83e03a1531f4d94034aa9e2b4d4ff64537f5d64811dcc6623";
+const PARA_DB_SHA256: &str = "9314f2da74200ae2e1c6ec297a3ef4767c63611aa12873b4098eaf71a9bd8089";
+const RELAY_SPEC_SHA256: &str = "f8db9c83f097000121c115e5e6041bb1628490b0bd6ac2bc86ddeed0e023d318";
+const PARA_SPEC_SHA256: &str = "0e7b59f081c5e17e94d4a8d64a601f37955c2a23d95a94a462a29f53458d2a74";
+const SMOLDOT_DB_RELAY_SHA256: &str =
+    "871a06ff924d1f6ed603dbbf27788625a21b8e9324710fb5d7a286cf349daabd";
+const SMOLDOT_DB_PARA_SHA256: &str =
+    "6d202ea61aa192e911c4c3e5c91c9da2a4fa6adbe288f32ca40a247f5a50020e";
 
-const RELAY_DB_OVERRIDE_ENV: &str = "DB_SNAPSHOT_RELAY_OVERRIDE";
-const PARA_DB_OVERRIDE_ENV: &str = "DB_SNAPSHOT_PARA_OVERRIDE";
-
-/// Cached DB tarballs (env override → cache → download + SHA-verify).
 pub fn relay_db() -> Result<PathBuf, anyhow::Error> {
-    resolve_db(RELAY_DB_FILE, RELAY_DB_SHA256, RELAY_DB_OVERRIDE_ENV)
+    resolve("relaychain-db.tgz", RELAY_DB_SHA256)
 }
 
 pub fn para_db() -> Result<PathBuf, anyhow::Error> {
-    resolve_db(PARA_DB_FILE, PARA_DB_SHA256, PARA_DB_OVERRIDE_ENV)
+    resolve("parachain-db.tgz", PARA_DB_SHA256)
 }
 
-/// Committed chain spec files. Paths are absolute via `CARGO_MANIFEST_DIR`.
-pub fn relay_spec() -> PathBuf {
-    artifacts_dir().join("relay-spec.json")
+pub fn relay_spec() -> Result<PathBuf, anyhow::Error> {
+    resolve("relay-spec.json", RELAY_SPEC_SHA256)
 }
 
-pub fn para_spec() -> PathBuf {
-    artifacts_dir().join("para-spec.json")
+pub fn para_spec() -> Result<PathBuf, anyhow::Error> {
+    resolve("para-spec.json", PARA_SPEC_SHA256)
 }
 
-/// Committed smoldot `databaseContent` dumps used by the warm scenario.
-pub fn smoldot_db_relay() -> PathBuf {
-    artifacts_dir().join("smoldot-db/relay.json")
+pub fn smoldot_db_relay() -> Result<PathBuf, anyhow::Error> {
+    resolve("smoldot-db/relay.json", SMOLDOT_DB_RELAY_SHA256)
 }
 
-pub fn smoldot_db_para() -> PathBuf {
-    artifacts_dir().join("smoldot-db/para.json")
+pub fn smoldot_db_para() -> Result<PathBuf, anyhow::Error> {
+    resolve("smoldot-db/para.json", SMOLDOT_DB_PARA_SHA256)
 }
 
-fn artifacts_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("artifacts")
-        .join(ARTIFACTS_VERSION)
-}
-
-fn resolve_db(file: &str, sha256: &str, override_env: &str) -> Result<PathBuf, anyhow::Error> {
-    if let Ok(path) = std::env::var(override_env) {
-        let p = PathBuf::from(path);
+fn resolve(rel: &str, sha256: &str) -> Result<PathBuf, anyhow::Error> {
+    if let Ok(dir) = std::env::var(ARTIFACTS_DIR_OVERRIDE_ENV) {
+        let p = PathBuf::from(dir).join(rel);
         if !p.is_file() {
             return Err(anyhow!(
-                "{override_env} points at non-existent file: {}",
+                "{ARTIFACTS_DIR_OVERRIDE_ENV}: {} does not exist",
                 p.display()
             ));
         }
-        log::info!("snapshot {file}: using local override {}", p.display());
+        log::info!("snapshot {rel}: using local override {}", p.display());
         return Ok(p);
     }
 
     if sha256.is_empty() {
         return Err(anyhow!(
-            "{file} SHA256 not pinned for {ARTIFACTS_VERSION} (placeholder); \
-             set {override_env} to a local file"
+            "{rel} SHA256 not pinned for {ARTIFACTS_VERSION} (placeholder); \
+             set {ARTIFACTS_DIR_OVERRIDE_ENV} to a local artifact directory"
         ));
     }
 
-    let cached = cache_dir()?.join(file);
+    let cached = cache_path(rel)?;
     if cached.is_file() {
         match verify_sha256(&cached, sha256) {
             Ok(()) => {
-                log::info!("snapshot {file}: cache hit ({})", cached.display());
+                log::info!("snapshot {rel}: cache hit ({})", cached.display());
                 return Ok(cached);
             }
             Err(e) => {
-                log::warn!("snapshot {file}: cached SHA mismatch ({e}); re-downloading");
+                log::warn!("snapshot {rel}: cached SHA mismatch ({e}); re-downloading");
                 let _ = std::fs::remove_file(&cached);
             }
         }
     }
 
-    let url = format!("{GCS_BASE}/{ARTIFACTS_VERSION}/{file}");
-    log::info!("snapshot {file}: downloading {url}");
+    let url = format!("{GCS_BASE}/{ARTIFACTS_VERSION}/{rel}");
+    log::info!("snapshot {rel}: downloading {url}");
     download(&url, &cached)?;
     verify_sha256(&cached, sha256)?;
     Ok(cached)
 }
 
-fn cache_dir() -> Result<PathBuf, anyhow::Error> {
+fn cache_path(rel: &str) -> Result<PathBuf, anyhow::Error> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .ok_or_else(|| anyhow!("neither XDG_CACHE_HOME nor HOME is set"))?;
-    let dir = base.join("smoldot-e2e").join(ARTIFACTS_VERSION);
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+    let path = base.join("smoldot-e2e").join(ARTIFACTS_VERSION).join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(path)
 }
 
 fn download(url: &str, dst: &std::path::Path) -> Result<(), anyhow::Error> {
-    let tmp = dst.with_extension("tgz.partial");
+    let tmp = dst.with_extension("partial");
     let status = std::process::Command::new("curl")
         .arg("-fL")
         .arg("--retry")
