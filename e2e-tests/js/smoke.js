@@ -39,6 +39,27 @@ if (!relaySpecPath || !paraSpecPath || !Number.isFinite(requiredBlocks)) {
   process.exit(1);
 }
 
+// Decodes the block number from a hex SCALE-encoded substrate header.
+// Layout: parent_hash (32 B) | compact-encoded number | rest. The compact
+// modes 0/1/2 cover block numbers up to 2^30; that's the only range we'll
+// ever assert against.
+function decodeHeaderNumber(hexStr) {
+  const stripped = hexStr.startsWith("0x") ? hexStr.slice(2) : hexStr;
+  const bytes = Buffer.from(stripped, "hex");
+  if (bytes.length < 33) throw new Error(`header hex too short: ${bytes.length} bytes`);
+  const off = 32;
+  const b0 = bytes[off];
+  const mode = b0 & 0b11;
+  if (mode === 0) return b0 >>> 2;
+  if (mode === 1) return (b0 | (bytes[off + 1] << 8)) >>> 2;
+  if (mode === 2) {
+    return (
+      (b0 | (bytes[off + 1] << 8) | (bytes[off + 2] << 16) | (bytes[off + 3] << 24)) >>> 2
+    );
+  }
+  throw new Error(`compact mode 3 not supported in decodeHeaderNumber`);
+}
+
 const client = createSmoldotClient();
 let relay;
 let para;
@@ -59,17 +80,65 @@ try {
   });
   report("addChain parachain", true);
 
+  // Assert smoldot's first reported finalized block ≥ expected. Uses
+  // chainHead_v1: subscribe on the relay, wait for the `initialized` event
+  // (which fires only after warp sync) and decode the newest finalized
+  // header's number. Legacy `chain_getFinalizedHead` would race the
+  // warp-sync gate — smoldot blocks legacy RPCs until the gate opens.
   if (finalizedFloor > 0) {
-    const head = await sendRpcAndWait(relay, "chain_getFinalizedHead", [], 30_000);
-    const header = await sendRpcAndWait(relay, "chain_getHeader", [head], 30_000);
-    const num = Number.parseInt(header.number, 16);
-    const ok = Number.isFinite(num) && num >= finalizedFloor;
+    const relayFollowReqId = sendRpc(relay, "chainHead_v1_follow", [false]).toString();
+    const relaySubId = await readJsonRpcUntil(
+      relay,
+      (msg) => {
+        if (msg.id === relayFollowReqId) {
+          if (msg.error)
+            throw new Error(
+              `relay chainHead_v1_follow failed: ${JSON.stringify(msg.error)}`,
+            );
+          return msg.result;
+        }
+        return undefined;
+      },
+      Date.now() + 30_000,
+    );
+    if (typeof relaySubId !== "string" || !relaySubId) {
+      throw new Error("Unexpected relay follow subscription id");
+    }
+    const finalizedHash = await readJsonRpcUntil(
+      relay,
+      (msg) => {
+        if (msg.method !== "chainHead_v1_followEvent") return undefined;
+        if (msg.params?.subscription !== relaySubId) return undefined;
+        const r = msg.params.result;
+        if (r?.event === "initialized") {
+          const hashes = r.finalizedBlockHashes ?? [];
+          return hashes[hashes.length - 1];
+        }
+        if (r?.event === "stop") throw new Error("relay chainHead follow stopped");
+        return undefined;
+      },
+      Date.now() + 120_000,
+    );
+    if (typeof finalizedHash !== "string") {
+      throw new Error("relay chainHead never reported initialized");
+    }
+    const headerHex = await sendRpcAndWait(
+      relay,
+      "chainHead_v1_header",
+      [relaySubId, finalizedHash],
+      30_000,
+    );
+    const num = decodeHeaderNumber(headerHex);
+    const ok = num >= finalizedFloor;
     report(
       "relay finalized clears floor",
       ok,
       `finalized=#${num} floor=#${finalizedFloor}`,
     );
-    if (!ok) throw new Error(`relay finalized #${num} below floor #${finalizedFloor}`);
+    if (!ok)
+      throw new Error(
+        `relay finalized #${num} below floor #${finalizedFloor}`,
+      );
   }
 
   const followReqId = sendRpc(para, "chainHead_v1_follow", [false]).toString();
@@ -109,7 +178,7 @@ try {
       }
       return undefined;
     },
-    Date.now() + 120_000,
+    Date.now() + 180_000,
   );
 
   const ok = newBlocks >= requiredBlocks;
