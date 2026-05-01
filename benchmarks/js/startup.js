@@ -125,6 +125,10 @@ async function runBench(env) {
     client = wait.client;
     const finalized_ms = wait.tFinalized - tStart;
 
+    // TODO: break down individual stages of the cold path:
+    //   - time to first peer
+    //   - warp-sync time
+    //   - time from para finalized head to tip
     const phases = {
       add_chain_relay_ms: relay.ms,
       wait_finalized_ms: wait.ms,
