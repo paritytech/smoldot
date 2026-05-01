@@ -46,7 +46,7 @@ const ARTIFACTS_DIR_OVERRIDE_ENV: &str = "ARTIFACTS_DIR_OVERRIDE";
 
 /// SHA256 of the published bundle for `ARTIFACTS_VERSION`. Empty means not
 /// yet pinned — in that case the resolver requires `ARTIFACTS_DIR_OVERRIDE`.
-const BUNDLE_SHA256: &str = "";
+const BUNDLE_SHA256: &str = "57b7c07bffcf0a92605d5201ef7ac497ccd1af7615151a709b95b4caa5e0383b";
 
 pub fn relay_db() -> Result<PathBuf, anyhow::Error> {
     resolve("relaychain-db.tgz")
