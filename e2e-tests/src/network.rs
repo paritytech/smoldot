@@ -54,7 +54,17 @@ pub enum StartMode {
 
 pub enum SpecMode {
     Vanilla,
-    WithLightSyncState { relay: PathBuf, para: PathBuf },
+    WithLightSyncState {
+        /// Full chain spec with `genesis.raw`. Passed to substrate via
+        /// `with_chain_spec_path` so node DB extraction matches.
+        relay_full: PathBuf,
+        para_full: PathBuf,
+        /// Spec with `genesis.stateRootHash` only (no full state) plus the
+        /// `lightSyncState` checkpoint — what smoldot loads. Faster init,
+        /// smaller artifact.
+        relay_light_sync_state: PathBuf,
+        para_light_sync_state: PathBuf,
+    },
 }
 
 pub enum SmoldotState {
@@ -118,17 +128,31 @@ pub async fn spawn_scenario(
 
     let (relay_spec, para_spec) = match &cfg.spec {
         SpecMode::Vanilla => extract_emitted_specs(&network)?,
-        SpecMode::WithLightSyncState { relay, para } => {
-            // Committed artifacts have empty `bootNodes` (they're per-spawn
-            // and would invalidate the artifact). Inject current multiaddrs
-            // into runtime copies that smoldot will load.
-            prepare_runtime_specs(&network, relay, para, base_dir_str)?
+        SpecMode::WithLightSyncState {
+            relay_light_sync_state,
+            para_light_sync_state,
+            ..
+        } => {
+            // Light-sync-state specs (genesis.stateRootHash + lightSyncState)
+            // are what smoldot loads. Published artifacts have empty
+            // `bootNodes`; inject current multiaddrs into runtime copies.
+            prepare_runtime_specs(
+                &network,
+                relay_light_sync_state,
+                para_light_sync_state,
+                base_dir_str,
+            )?
         }
     };
 
     let mut finalized_floor = match &cfg.spec {
         SpecMode::Vanilla => 0,
-        SpecMode::WithLightSyncState { relay, .. } => parse_finalized_height_from_spec(relay)?,
+        // lightSyncState is in both full and light-sync-state specs; use the
+        // smaller one.
+        SpecMode::WithLightSyncState {
+            relay_light_sync_state,
+            ..
+        } => parse_finalized_height_from_spec(relay_light_sync_state)?,
     };
     if let SmoldotState::FromDb { relay_db_json, .. } = &cfg.smoldot {
         let persisted = parse_finalized_height_from_db(relay_db_json)?;
@@ -160,11 +184,16 @@ fn build_network_config(
             para_db_tgz,
         } => stage_per_node_snapshots(base_dir_str, relay_db_tgz, para_db_tgz)?,
     };
+    // Substrate gets the *full* spec — it needs `genesis.raw` to bootstrap.
     let (relay_spec_path, para_spec_path) = match &cfg.spec {
         SpecMode::Vanilla => (None, None),
-        SpecMode::WithLightSyncState { relay, para } => (
-            Some(relay.to_str().expect("UTF-8 path").to_owned()),
-            Some(para.to_str().expect("UTF-8 path").to_owned()),
+        SpecMode::WithLightSyncState {
+            relay_full,
+            para_full,
+            ..
+        } => (
+            Some(relay_full.to_str().expect("UTF-8 path").to_owned()),
+            Some(para_full.to_str().expect("UTF-8 path").to_owned()),
         ),
     };
 

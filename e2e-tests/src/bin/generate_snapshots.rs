@@ -96,6 +96,12 @@ async fn main() -> Result<(), anyhow::Error> {
         &args.out.join("relay-spec.json"),
     )
     .await?;
+    write_light_sync_state_spec(
+        network.get_node("validator-0")?,
+        &args.out.join("relay-spec.json"),
+        &args.out.join("relay-spec-lightSyncState.json"),
+    )
+    .await?;
     // Cumulus parachains don't expose `sync_state_genSyncSpec` — there's no
     // independent finality on a parachain, so there's no `lightSyncState`
     // to bake. Smoldot's cold/warm path for the parachain is automatic
@@ -119,6 +125,12 @@ async fn main() -> Result<(), anyhow::Error> {
         para_spec_dst.display(),
         std::fs::metadata(&para_spec_dst)?.len()
     );
+    write_light_sync_state_spec(
+        network.get_node("alice")?,
+        &para_spec_dst,
+        &args.out.join("para-spec-lightSyncState.json"),
+    )
+    .await?;
 
     // Step 2: keep the network running until finalized reaches
     // `target_finalized`, then snapshot validator-0 + alice DBs.
@@ -141,8 +153,91 @@ async fn main() -> Result<(), anyhow::Error> {
 
     dump_smoldot_db(&args.out, &network).await?;
 
+    create_bundle(&args.out)?;
     print_manifest(&args.out)?;
     log::info!("done");
+    Ok(())
+}
+
+/// Bundles every artifact in `out` (DB tarballs + full specs +
+/// light-sync-state specs + smoldot-db dumps) into a single
+/// `bundle.tar.gz`, consumed by `snapshot::ensure_bundle_extracted` at
+/// test time.
+fn create_bundle(out: &Path) -> Result<(), anyhow::Error> {
+    let bundle = out.join("bundle.tar.gz");
+    log::info!("bundling artifacts -> {}", bundle.display());
+    let status = std::process::Command::new("tar")
+        .arg("-czf")
+        .arg(&bundle)
+        .arg("-C")
+        .arg(out)
+        .arg("relaychain-db.tgz")
+        .arg("parachain-db.tgz")
+        .arg("relay-spec.json")
+        .arg("para-spec.json")
+        .arg("relay-spec-lightSyncState.json")
+        .arg("para-spec-lightSyncState.json")
+        .arg("smoldot-db")
+        .status()?;
+    if !status.success() {
+        return Err(anyhow!("tar bundle failed (exit {status})"));
+    }
+    log::info!(
+        "wrote {} ({} bytes)",
+        bundle.display(),
+        std::fs::metadata(&bundle)?.len()
+    );
+    Ok(())
+}
+
+/// Writes a light-sync-state copy of `full_spec_path` to `lss_spec_path`:
+/// replaces `genesis.raw` (full state KV pairs, MB-sized) with
+/// `genesis.stateRootHash` (single hash) so smoldot can load it without
+/// computing the genesis state root from scratch. Smoldot logs an INFO line
+/// suggesting this exact optimization. Substrate nodes still need the full
+/// spec.
+///
+/// The state root is fetched from the genesis header on `node`; matches what
+/// smoldot computes internally.
+async fn write_light_sync_state_spec(
+    node: &NetworkNode,
+    full_spec_path: &Path,
+    lss_spec_path: &Path,
+) -> Result<(), anyhow::Error> {
+    let rpc = node.rpc().await?;
+    let genesis_hash: Value = rpc
+        .request("chain_getBlockHash", rpc_params![0_u32])
+        .await
+        .map_err(|e| anyhow!("chain_getBlockHash(0) on {} failed: {e}", node.name()))?;
+    let genesis_hash_str = genesis_hash
+        .as_str()
+        .ok_or_else(|| anyhow!("chain_getBlockHash returned non-string"))?;
+    let header: Value = rpc
+        .request("chain_getHeader", rpc_params![genesis_hash_str])
+        .await
+        .map_err(|e| anyhow!("chain_getHeader on {} failed: {e}", node.name()))?;
+    let state_root = header
+        .get("stateRoot")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("chain_getHeader missing stateRoot"))?
+        .to_owned();
+
+    let mut spec: Value = serde_json::from_slice(&std::fs::read(full_spec_path)?)?;
+    let genesis = spec
+        .get_mut("genesis")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("{}: missing genesis object", full_spec_path.display()))?;
+    genesis.remove("raw");
+    genesis.insert(
+        "stateRootHash".to_string(),
+        Value::String(state_root.clone()),
+    );
+    std::fs::write(lss_spec_path, serde_json::to_string_pretty(&spec)?)?;
+    log::info!(
+        "wrote {} (stateRootHash={state_root}, {} bytes)",
+        lss_spec_path.display(),
+        std::fs::metadata(lss_spec_path)?.len()
+    );
     Ok(())
 }
 
@@ -264,30 +359,18 @@ async fn dump_smoldot_db(
 /// suggested constant lines for `e2e-tests/src/snapshot.rs`. Uses
 /// `sha256sum` from coreutils.
 fn print_manifest(out: &Path) -> Result<(), anyhow::Error> {
-    let entries = [
-        ("relaychain-db.tgz", "RELAY_DB_SHA256"),
-        ("parachain-db.tgz", "PARA_DB_SHA256"),
-        ("relay-spec.json", "RELAY_SPEC_SHA256"),
-        ("para-spec.json", "PARA_SPEC_SHA256"),
-        ("smoldot-db/relay.json", "SMOLDOT_DB_RELAY_SHA256"),
-        ("smoldot-db/para.json", "SMOLDOT_DB_PARA_SHA256"),
-    ];
+    let bundle = out.join("bundle.tar.gz");
+    if !bundle.is_file() {
+        return Err(anyhow!("manifest: bundle.tar.gz missing"));
+    }
+    let size = std::fs::metadata(&bundle)?.len();
+    let hash = sha256_of(&bundle)?;
 
     println!("\n=== artifact manifest ===");
-    let mut consts = String::new();
-    for (rel, const_name) in entries {
-        let path = out.join(rel);
-        if !path.is_file() {
-            return Err(anyhow!("manifest: missing {}", path.display()));
-        }
-        let size = std::fs::metadata(&path)?.len();
-        let hash = sha256_of(&path)?;
-        println!("  {rel:30}  {size:>10} bytes  {hash}");
-        consts.push_str(&format!("const {const_name}: &str = \"{hash}\";\n"));
-    }
+    println!("  bundle.tar.gz  {size:>10} bytes  {hash}");
     println!("\n=== snapshot.rs constants ===");
     println!("pub const ARTIFACTS_VERSION: &str = \"v1\";");
-    println!("{consts}");
+    println!("const BUNDLE_SHA256: &str = \"{hash}\";");
     Ok(())
 }
 

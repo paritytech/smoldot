@@ -39,8 +39,10 @@ async fn smoke_cold() -> Result<(), anyhow::Error> {
             para_db_tgz: snapshot::para_db()?,
         },
         spec: SpecMode::WithLightSyncState {
-            relay: snapshot::relay_spec()?,
-            para: snapshot::para_spec()?,
+            relay_full: snapshot::relay_spec()?,
+            para_full: snapshot::para_spec()?,
+            relay_light_sync_state: snapshot::relay_spec_light_sync_state()?,
+            para_light_sync_state: snapshot::para_spec_light_sync_state()?,
         },
         smoldot: SmoldotState::None,
     };
