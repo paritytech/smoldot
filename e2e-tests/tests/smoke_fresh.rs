@@ -23,7 +23,7 @@ const REQUIRED_BLOCKS: u32 = 5;
 /// Fresh-startup smoke: spawn westend-local + people-westend-local from
 /// genesis and assert smoldot warp-syncs and sees new parachain blocks.
 #[tokio::test(flavor = "multi_thread")]
-async fn smoke() -> Result<(), anyhow::Error> {
+async fn smoke_fresh() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     );
