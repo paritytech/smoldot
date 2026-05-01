@@ -95,15 +95,17 @@ pub struct LiveNetwork {
     pub network: Network<LocalFileSystem>,
     pub relay_spec: PathBuf,
     pub para_spec: PathBuf,
-    /// Floor that smoldot's first reported finalized block must clear.
-    /// Fresh: 0. Cold: from `lightSyncState`. Warm: max(cold, persisted DB).
-    pub finalized_floor: u64,
+    /// Lower bound on the first finalized block smoldot reports after init.
+    /// Asserts smoldot honoured the artifact checkpoint (didn't fall back
+    /// to genesis). Fresh: 0. Cold: from `lightSyncState`. Warm:
+    /// max(cold, persisted DB).
+    pub expected_initial_finalized: u64,
 }
 
 /// Spawns the network described by `cfg` and returns the artifacts smoldot
-/// needs (spec paths, finalized floor). Builds smoldot + JS deps in parallel
-/// with node startup so the test is ready to drive smoldot as soon as the
-/// network is up.
+/// needs (spec paths, expected initial finalized). Builds smoldot + JS deps
+/// in parallel with node startup so the test is ready to drive smoldot as
+/// soon as the network is up.
 pub async fn spawn_scenario(
     cfg: &ScenarioConfig,
     base_dir_str: &str,
@@ -145,7 +147,7 @@ pub async fn spawn_scenario(
         }
     };
 
-    let mut finalized_floor = match &cfg.spec {
+    let mut expected_initial_finalized = match &cfg.spec {
         SpecMode::Vanilla => 0,
         // lightSyncState is in both full and light-sync-state specs; use the
         // smaller one.
@@ -156,14 +158,14 @@ pub async fn spawn_scenario(
     };
     if let SmoldotState::FromDb { relay_db_json, .. } = &cfg.smoldot {
         let persisted = parse_finalized_height_from_db(relay_db_json)?;
-        finalized_floor = finalized_floor.max(persisted);
+        expected_initial_finalized = expected_initial_finalized.max(persisted);
     }
 
     Ok(LiveNetwork {
         network,
         relay_spec,
         para_spec,
-        finalized_floor,
+        expected_initial_finalized,
     })
 }
 
@@ -421,7 +423,8 @@ fn decode_header_number(hex_str: &str) -> Result<u64, anyhow::Error> {
 }
 
 /// Runs `js/smoke.js` against a live network. Env-injects spec paths, the
-/// finalized floor, and (warm only) smoldot DB content paths.
+/// expected-initial-finalized floor, and (warm only) smoldot DB content
+/// paths.
 pub async fn run_smoke_js(
     live: &LiveNetwork,
     cfg: &ScenarioConfig,
@@ -430,7 +433,7 @@ pub async fn run_smoke_js(
     let relay_spec_str = live.relay_spec.to_str().expect("UTF-8 path");
     let para_spec_str = live.para_spec.to_str().expect("UTF-8 path");
     let required = required_blocks.to_string();
-    let floor = live.finalized_floor.to_string();
+    let expected_finalized = live.expected_initial_finalized.to_string();
 
     let smoldot_db_paths = match &cfg.smoldot {
         SmoldotState::None => None,
@@ -447,7 +450,7 @@ pub async fn run_smoke_js(
         ("RELAY_CHAIN_SPEC", relay_spec_str),
         ("PARA_CHAIN_SPEC", para_spec_str),
         ("REQUIRED_BLOCKS", required.as_str()),
-        ("FINALIZED_FLOOR", floor.as_str()),
+        ("EXPECTED_INITIAL_FINALIZED", expected_finalized.as_str()),
     ];
     if let Some((relay_db, para_db)) = smoldot_db_paths.as_ref() {
         env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
@@ -455,7 +458,7 @@ pub async fn run_smoke_js(
     }
 
     log::info!(
-        "running smoldot JS smoke test (relay_spec={relay_spec_str}, para_spec={para_spec_str}, required_blocks={required_blocks}, floor={floor})"
+        "running smoldot JS smoke test (relay_spec={relay_spec_str}, para_spec={para_spec_str}, required_blocks={required_blocks}, expected_initial_finalized={expected_finalized})"
     );
     crate::run_js_test("js/smoke.js", &env_vars)
         .await

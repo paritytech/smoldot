@@ -29,7 +29,7 @@ import {
 const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
 const paraSpecPath = process.env.PARA_CHAIN_SPEC;
 const requiredBlocks = Number.parseInt(process.env.REQUIRED_BLOCKS, 10);
-const finalizedFloor = Number.parseInt(process.env.FINALIZED_FLOOR ?? "0", 10);
+const expectedInitialFinalized = Number.parseInt(process.env.EXPECTED_INITIAL_FINALIZED ?? "0", 10);
 const dbDumpDir = process.env.SMOLDOT_DB_DUMP_DIR;
 
 if (!relaySpecPath || !paraSpecPath || !Number.isFinite(requiredBlocks)) {
@@ -85,7 +85,7 @@ try {
   // (which fires only after warp sync) and decode the newest finalized
   // header's number. Legacy `chain_getFinalizedHead` would race the
   // warp-sync gate — smoldot blocks legacy RPCs until the gate opens.
-  if (finalizedFloor > 0) {
+  if (expectedInitialFinalized > 0) {
     const relayFollowReqId = sendRpc(relay, "chainHead_v1_follow", [false]).toString();
     const relaySubId = await readJsonRpcUntil(
       relay,
@@ -129,15 +129,15 @@ try {
       30_000,
     );
     const num = decodeHeaderNumber(headerHex);
-    const ok = num >= finalizedFloor;
+    const ok = num >= expectedInitialFinalized;
     report(
-      "relay finalized clears floor",
+      "relay finalized at-or-past expected_initial_finalized",
       ok,
-      `finalized=#${num} floor=#${finalizedFloor}`,
+      `finalized=#${num} expected=#${expectedInitialFinalized}`,
     );
     if (!ok)
       throw new Error(
-        `relay finalized #${num} below floor #${finalizedFloor}`,
+        `relay finalized #${num} below expected_initial_finalized #${expectedInitialFinalized}`,
       );
   }
 
