@@ -367,10 +367,20 @@ async fn pause_and_tar(
             data_dir.display()
         ));
     }
-    log::info!("tarring {} -> {}", data_dir.display(), out_tgz.display());
+    log::info!(
+        "tarring {} -> {} (excluding keystore/)",
+        data_dir.display(),
+        out_tgz.display()
+    );
+    // Exclude `keystore/` so a sibling node consuming this snapshot doesn't end
+    // up with the source node's session keys on top of its own (zombienet
+    // inserts per-node keys via author_insertKey at startup). Otherwise BOTH
+    // nodes can author for the same slot and the chain stalls under
+    // equivocation.
     let status = std::process::Command::new("tar")
         .arg("-czf")
         .arg(out_tgz)
+        .arg("--exclude=keystore")
         .arg("-C")
         .arg(&node_base)
         .arg("data")
