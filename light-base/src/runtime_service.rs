@@ -155,15 +155,6 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             .block_number_bytes()
     }
 
-    /// Resolves once the underlying sync service's warp-sync phase has finished, or immediately
-    /// if it was never needed. See [`sync_service::SyncService::wait_warp_sync_finished`].
-    pub async fn wait_warp_sync_finished(&self) {
-        self.background_task_config
-            .sync_service
-            .wait_warp_sync_finished()
-            .await
-    }
-
     /// Subscribes to the state of the chain: the current state and the new blocks.
     ///
     /// This function only returns once the runtime of the current finalized block is known. This
@@ -837,6 +828,11 @@ async fn run_background<TPlat: PlatformRef>(
             tree,
             runtimes: slab::Slab::with_capacity(2),
             pending_subscriptions: VecDeque::with_capacity(8),
+            warp_sync_finished: false,
+            warp_sync_finished_future: Some(Box::pin({
+                let sync_service = config.sync_service.clone();
+                async move { sync_service.wait_warp_sync_finished().await }
+            })),
             blocks_stream: None,
             runtime_downloads: stream::FuturesUnordered::new(),
             progress_runtime_call_requests: stream::FuturesUnordered::new(),
@@ -850,6 +846,7 @@ async fn run_background<TPlat: PlatformRef>(
 
         enum WakeUpReason<TPlat: PlatformRef> {
             MustSubscribe,
+            WarpSyncFinished,
             StartDownload(async_tree::AsyncOpId, async_tree::NodeIndex),
             TreeAdvanceFinalizedKnown(async_tree::OutputUpdate<Block, Arc<Runtime>>),
             TreeAdvanceFinalizedUnknown(async_tree::OutputUpdate<Block, Option<Arc<Runtime>>>),
@@ -886,8 +883,11 @@ async fn run_background<TPlat: PlatformRef>(
                 Tree::FinalizedBlockRuntimeUnknown { .. } => false,
             };
             let any_pending_subscription = !background.pending_subscriptions.is_empty();
+            let blocks_stream_active = background.blocks_stream.is_some();
             async {
-                if finalized_block_known {
+                // Only serve a pending subscription when the tree was built via `MustSubscribe`
+                // (i.e. `blocks_stream` is `Some`), which ensures that warp sync was finished too.
+                if finalized_block_known && blocks_stream_active {
                     if let Some(pending_subscription) = background.pending_subscriptions.pop_front()
                     {
                         WakeUpReason::StartPendingSubscribeAll(pending_subscription)
@@ -908,13 +908,24 @@ async fn run_background<TPlat: PlatformRef>(
                             WakeUpReason::Notification,
                         )
                     }
-                } else if any_subscription || any_pending_subscription {
+                } else if (any_subscription || any_pending_subscription)
+                    && background.warp_sync_finished
+                {
                     // Only start subscribing to the sync service if there is any pending
-                    // or active runtime service subscription.
+                    // or active runtime service subscription, and the sync service has finished
+                    // its warp-sync phase.
                     // Note that subscriptions to the runtime service aren't destroyed when the
                     // sync service subscriptions is lost but when the sync service is
                     // resubscribed.
                     WakeUpReason::MustSubscribe
+                } else {
+                    future::pending().await
+                }
+            })
+            .or(async {
+                if let Some(fut) = background.warp_sync_finished_future.as_mut() {
+                    fut.as_mut().await;
+                    WakeUpReason::WarpSyncFinished
                 } else {
                     future::pending().await
                 }
@@ -1709,6 +1720,17 @@ async fn run_background<TPlat: PlatformRef>(
                     "sync-subscription-reset"
                 );
                 background.blocks_stream = None;
+            }
+
+            WakeUpReason::WarpSyncFinished => {
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "warp-sync-finished"
+                );
+                background.warp_sync_finished = true;
+                background.warp_sync_finished_future = None;
             }
 
             WakeUpReason::ForegroundClosed => {
@@ -2898,6 +2920,14 @@ struct Background<TPlat: PlatformRef> {
     /// and sent back for each of these senders.
     /// When in the [`Tree::FinalizedBlockRuntimeUnknown`] state, the senders patiently wait here.
     pending_subscriptions: VecDeque<ToBackgroundSubscribeAll<TPlat>>,
+
+    /// Whether the underlying sync service has finished its warp-sync phase. Subscribing to the
+    /// sync service is gated on this so that [`SubscribeAll::finalized_block_scale_encoded_header`]
+    /// is always post-warp.
+    warp_sync_finished: bool,
+
+    /// Future driving [`Background::warp_sync_finished`]. `None` after the flag flips.
+    warp_sync_finished_future: Option<future::BoxFuture<'static, ()>>,
 
     /// Stream of notifications coming from the sync service. `None` if not subscribed yet.
     blocks_stream: Option<Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>>,

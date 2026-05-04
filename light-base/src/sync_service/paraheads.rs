@@ -936,9 +936,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     }),
                     _,
                 ) => {
-                    // Paraheads doesn't run a warp-sync phase of its own; delegate to the relay's
-                    // sync service.
-                    self.relay_chain_sync.wait_warp_sync_finished().await;
+                    // Paraheads is spawned only after the relay's warp sync has finished
                     let _ = send_back.send(());
                 }
 

@@ -1118,63 +1118,23 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
     para_id: u32,
     block_number_bytes: usize,
 ) -> chain::chain_information::ValidChainInformation {
-    // Wait for relay-chain warp sync to finish before trusting the runtime service's initial
-    // finalized block. On cold start with a stale chain-spec checkpoint, that field is the
-    // checkpoint until warp sync promotes it. On warm restart this resolves immediately.
-    log!(
-        platform,
-        Info,
-        log_target,
-        "Waiting for relay chain warp sync to finish..."
-    );
-    relay_chain_sync.wait_warp_sync_finished().await;
     log!(
         platform,
         Debug,
         log_target,
-        "Relay chain warp sync finished."
+        "Subscribing to the relay chain sync..."
     );
-
     let mut subscription = relay_chain_sync
         .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
         .await;
 
-    // Try the already-finalized block first before waiting for new notifications.
-    // Safe now that warp sync has finished — the initial finalized is post-warp.
-    let mut try_initial_finalized = true;
+    // First attempt uses the initial finalized header from `subscribe_all` (which is post-warp
+    // thanks to runtime_service's gate). On failure, wait for the next `Finalized` notification
+    // (or a re-subscribe) before retrying.
+    let mut finalized_hash =
+        header::hash_from_scale_encoded_header(&subscription.finalized_block_scale_encoded_header);
 
     loop {
-        let finalized_hash = if try_initial_finalized {
-            try_initial_finalized = false;
-            header::hash_from_scale_encoded_header(
-                &subscription.finalized_block_scale_encoded_header,
-            )
-        } else {
-            log!(
-                platform,
-                Info,
-                log_target,
-                "Waiting for relay chain to finalize a block..."
-            );
-            loop {
-                match subscription.new_blocks.next().await {
-                    Some(runtime_service::Notification::Finalized { hash, .. }) => {
-                        break hash;
-                    }
-                    Some(_) => continue,
-                    None => {
-                        // Subscription died. Re-subscribe.
-                        subscription = relay_chain_sync
-                            .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
-                            .await;
-                        break header::hash_from_scale_encoded_header(
-                            &subscription.finalized_block_scale_encoded_header,
-                        );
-                    }
-                }
-            }
-        };
-
         log!(
             platform,
             Debug,
@@ -1185,77 +1145,103 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
             )
         );
 
-        let pinned = relay_chain_sync
-            .pin_pinned_block_runtime(subscription.new_blocks.id(), finalized_hash)
-            .await;
-        let (pinned_runtime, block_state_trie_root, block_number) = match pinned {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+        'attempt: {
+            let pinned = match relay_chain_sync
+                .pin_pinned_block_runtime(subscription.new_blocks.id(), finalized_hash)
+                .await
+            {
+                Ok(v) => v,
+                Err(_) => break 'attempt,
+            };
+            let (pinned_runtime, block_state_trie_root, block_number) = pinned;
 
-        let call_result = relay_chain_sync
-            .runtime_call(
-                pinned_runtime,
-                finalized_hash,
-                block_number,
-                block_state_trie_root,
-                String::from(para::PERSISTED_VALIDATION_FUNCTION_NAME),
-                None,
-                para::persisted_validation_data_parameters(
-                    para_id,
-                    para::OccupiedCoreAssumption::TimedOut,
+            let success = match relay_chain_sync
+                .runtime_call(
+                    pinned_runtime,
+                    finalized_hash,
+                    block_number,
+                    block_state_trie_root,
+                    String::from(para::PERSISTED_VALIDATION_FUNCTION_NAME),
+                    None,
+                    para::persisted_validation_data_parameters(
+                        para_id,
+                        para::OccupiedCoreAssumption::TimedOut,
+                    )
+                    .fold(Vec::new(), |mut a, b| {
+                        a.extend_from_slice(b.as_ref());
+                        a
+                    }),
+                    6,
+                    Duration::from_secs(20),
+                    NonZero::<u32>::new(2).unwrap(),
                 )
-                .fold(Vec::new(), |mut a, b| {
-                    a.extend_from_slice(b.as_ref());
-                    a
-                }),
-                6,
-                Duration::from_secs(20),
-                NonZero::<u32>::new(2).unwrap(),
-            )
-            .await;
-        let success = match call_result {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
+                .await
+            {
+                Ok(s) => s,
+                Err(_) => break 'attempt,
+            };
 
-        let pvd = match para::decode_persisted_validation_data_return_value(
-            &success.output,
-            relay_chain_sync.block_number_bytes(),
-        ) {
-            Ok(Some(pvd)) => pvd,
-            _ => continue,
-        };
+            let pvd = match para::decode_persisted_validation_data_return_value(
+                &success.output,
+                relay_chain_sync.block_number_bytes(),
+            ) {
+                Ok(Some(pvd)) => pvd,
+                _ => break 'attempt,
+            };
 
-        let parachain_header_bytes = pvd.parent_head.to_vec();
-        // `parent_head` is documented as opaque data, but for chains built on Cumulus (the vast
-        // majority) it is a SCALE-encoded block header.
-        let decoded_header = match header::decode(&parachain_header_bytes, block_number_bytes) {
-            Ok(h) => h,
-            Err(_) => continue,
-        };
+            let parachain_header_bytes = pvd.parent_head.to_vec();
+            // `parent_head` is documented as opaque data, but for chains built on Cumulus (the
+            // vast majority) it is a SCALE-encoded block header.
+            let decoded_header = match header::decode(&parachain_header_bytes, block_number_bytes) {
+                Ok(h) => h,
+                Err(_) => break 'attempt,
+            };
 
+            log!(
+                platform,
+                Info,
+                log_target,
+                format!(
+                    "Got parachain head from relay chain: block #{}, hash {}",
+                    decoded_header.number,
+                    HashDisplay(&header::hash_from_scale_encoded_header(
+                        &parachain_header_bytes
+                    ))
+                )
+            );
+
+            let chain_info = chain::chain_information::ChainInformation {
+                finalized_block_header: Box::new(decoded_header.into()),
+                consensus: chain::chain_information::ChainInformationConsensus::Unknown,
+                finality: chain::chain_information::ChainInformationFinality::Outsourced,
+            };
+
+            return chain::chain_information::ValidChainInformation::try_from(chain_info)
+                .expect("parachain head from relay chain must be valid");
+        }
+
+        // Attempt failed. Wait for the next finalized block, or re-subscribe if the subscription
+        // was dropped.
         log!(
             platform,
             Info,
             log_target,
-            format!(
-                "Got parachain head from relay chain: block #{}, hash {}",
-                decoded_header.number,
-                HashDisplay(&header::hash_from_scale_encoded_header(
-                    &parachain_header_bytes
-                ))
-            )
+            "Waiting for relay chain to finalize a block..."
         );
-
-        let chain_info = chain::chain_information::ChainInformation {
-            finalized_block_header: Box::new(decoded_header.into()),
-            consensus: chain::chain_information::ChainInformationConsensus::Unknown,
-            finality: chain::chain_information::ChainInformationFinality::Outsourced,
+        finalized_hash = loop {
+            match subscription.new_blocks.next().await {
+                Some(runtime_service::Notification::Finalized { hash, .. }) => break hash,
+                Some(_) => continue,
+                None => {
+                    subscription = relay_chain_sync
+                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
+                        .await;
+                    break header::hash_from_scale_encoded_header(
+                        &subscription.finalized_block_scale_encoded_header,
+                    );
+                }
+            }
         };
-
-        return chain::chain_information::ValidChainInformation::try_from(chain_info)
-            .expect("parachain head from relay chain must be valid");
     }
 }
 
