@@ -48,7 +48,7 @@ The URLs CI fetches from are hardcoded in
 `zombienet-db-snaps` GCS bucket under `smoldot/bulletin_fetch/`. To
 refresh those snapshots, regenerate them with
 `bulletin_generate_snapshot` and upload via `gsutil` (only needed when
-the bulletin runtime or corpus changes).
+the bulletin runtime or `bulletin::payloads()` changes).
 
 ### Generating snapshots locally
 
