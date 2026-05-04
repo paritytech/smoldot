@@ -31,7 +31,7 @@ async fn smoke_fresh() -> Result<(), anyhow::Error> {
     let base_dir = resolve_base_dir()?;
     let base_dir_str = base_dir.to_str().expect("UTF-8 path").to_owned();
 
-    let cfg = ScenarioConfig::fresh();
+    let cfg = Scenario::Fresh;
     let live = spawn_scenario(&cfg, &base_dir_str).await?;
 
     log::info!("checking that alice has ≥{REQUIRED_BLOCKS} parachain blocks (best)");

@@ -22,7 +22,7 @@ pub mod snapshot;
 pub mod statement;
 
 pub use network::{
-    run_smoke_js, spawn_scenario, LiveNetwork, ScenarioConfig, SmoldotState, SpecMode, StartMode,
+    run_smoke_js, spawn_scenario, LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths,
     BEST_METRIC, FINALIZED_METRIC, PARA_ID,
 };
 

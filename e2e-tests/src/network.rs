@@ -44,49 +44,50 @@ pub const BEST_METRIC: &str = "block_height{status=\"best\"}";
 /// downstream smoldot timeout.
 const RELAY_FIRST_FINALIZED_TIMEOUT_SECS: u64 = 120;
 
-pub enum StartMode {
+pub struct SnapshotPaths {
+    /// Substrate-node DB tarballs.
+    pub relay_db_tgz: PathBuf,
+    pub para_db_tgz: PathBuf,
+    /// Full chain spec with `genesis.raw`. Passed to substrate via
+    /// `with_chain_spec_path` so node DB extraction matches.
+    pub relay_full_spec: PathBuf,
+    pub para_full_spec: PathBuf,
+    /// Smoldot-dedicated specs (not what substrate loads): `genesis.stateRootHash`
+    /// only (no full state) plus the `lightSyncState` checkpoint. Faster init,
+    /// smaller artifact than the full spec.
+    pub smoldot_relay_spec: PathBuf,
+    pub smoldot_para_spec: PathBuf,
+}
+
+pub struct SmoldotDbPaths {
+    pub relay_db_json: PathBuf,
+    pub para_db_json: PathBuf,
+}
+
+pub enum Scenario {
+    /// Network from genesis, vanilla spec, no smoldot DB.
     Fresh,
-    FromSnapshot {
-        relay_db_tgz: PathBuf,
-        para_db_tgz: PathBuf,
+    /// Network from snapshot, spec with `lightSyncState`, no smoldot DB.
+    Cold(SnapshotPaths),
+    /// Network from snapshot, spec with `lightSyncState`, smoldot DB preloaded.
+    Warm {
+        snapshot: SnapshotPaths,
+        smoldot_db: SmoldotDbPaths,
     },
 }
 
-pub enum SpecMode {
-    Vanilla,
-    WithLightSyncState {
-        /// Full chain spec with `genesis.raw`. Passed to substrate via
-        /// `with_chain_spec_path` so node DB extraction matches.
-        relay_full: PathBuf,
-        para_full: PathBuf,
-        /// Spec with `genesis.stateRootHash` only (no full state) plus the
-        /// `lightSyncState` checkpoint — what smoldot loads. Faster init,
-        /// smaller artifact.
-        relay_light_sync_state: PathBuf,
-        para_light_sync_state: PathBuf,
-    },
-}
+impl Scenario {
+    fn snapshot(&self) -> Option<&SnapshotPaths> {
+        match self {
+            Scenario::Fresh => None,
+            Scenario::Cold(s) | Scenario::Warm { snapshot: s, .. } => Some(s),
+        }
+    }
 
-pub enum SmoldotState {
-    None,
-    FromDb {
-        relay_db_json: PathBuf,
-        para_db_json: PathBuf,
-    },
-}
-
-pub struct ScenarioConfig {
-    pub start: StartMode,
-    pub spec: SpecMode,
-    pub smoldot: SmoldotState,
-}
-
-impl ScenarioConfig {
-    pub fn fresh() -> Self {
-        Self {
-            start: StartMode::Fresh,
-            spec: SpecMode::Vanilla,
-            smoldot: SmoldotState::None,
+    fn smoldot_db(&self) -> Option<&SmoldotDbPaths> {
+        match self {
+            Scenario::Warm { smoldot_db, .. } => Some(smoldot_db),
+            _ => None,
         }
     }
 }
@@ -107,7 +108,7 @@ pub struct LiveNetwork {
 /// in parallel with node startup so the test is ready to drive smoldot as
 /// soon as the network is up.
 pub async fn spawn_scenario(
-    cfg: &ScenarioConfig,
+    cfg: &Scenario,
     base_dir_str: &str,
 ) -> Result<LiveNetwork, anyhow::Error> {
     let config = build_network_config(cfg, base_dir_str)?;
@@ -124,40 +125,31 @@ pub async fn spawn_scenario(
     network.wait_until_is_up(120).await?;
     log::info!("network is up");
 
-    if matches!(cfg.start, StartMode::Fresh) {
+    if matches!(cfg, Scenario::Fresh) {
         wait_for_relay_first_finalized(&network).await?;
     }
 
-    let (relay_spec, para_spec) = match &cfg.spec {
-        SpecMode::Vanilla => extract_emitted_specs(&network)?,
-        SpecMode::WithLightSyncState {
-            relay_light_sync_state,
-            para_light_sync_state,
-            ..
-        } => {
-            // Light-sync-state specs (genesis.stateRootHash + lightSyncState)
-            // are what smoldot loads. Published artifacts have empty
-            // `bootNodes`; inject current multiaddrs into runtime copies.
-            prepare_runtime_specs(
-                &network,
-                relay_light_sync_state,
-                para_light_sync_state,
-                base_dir_str,
-            )?
-        }
+    let (relay_spec, para_spec) = match cfg.snapshot() {
+        None => extract_emitted_specs(&network)?,
+        // Light-sync-state specs (genesis.stateRootHash + lightSyncState) are
+        // what smoldot loads. Published artifacts have empty `bootNodes`;
+        // inject current multiaddrs into runtime copies.
+        Some(s) => prepare_runtime_specs(
+            &network,
+            &s.smoldot_relay_spec,
+            &s.smoldot_para_spec,
+            base_dir_str,
+        )?,
     };
 
-    let mut expected_initial_finalized = match &cfg.spec {
-        SpecMode::Vanilla => 0,
+    let mut expected_initial_finalized = match cfg.snapshot() {
+        None => 0,
         // lightSyncState is in both full and light-sync-state specs; use the
         // smaller one.
-        SpecMode::WithLightSyncState {
-            relay_light_sync_state,
-            ..
-        } => parse_finalized_height_from_spec(relay_light_sync_state)?,
+        Some(s) => parse_finalized_height_from_spec(&s.smoldot_relay_spec)?,
     };
-    if let SmoldotState::FromDb { relay_db_json, .. } = &cfg.smoldot {
-        let persisted = parse_finalized_height_from_db(relay_db_json)?;
+    if let Some(db) = cfg.smoldot_db() {
+        let persisted = parse_finalized_height_from_db(&db.relay_db_json)?;
         expected_initial_finalized = expected_initial_finalized.max(persisted);
     }
 
@@ -170,7 +162,7 @@ pub async fn spawn_scenario(
 }
 
 fn build_network_config(
-    cfg: &ScenarioConfig,
+    cfg: &Scenario,
     base_dir_str: &str,
 ) -> Result<NetworkConfig, anyhow::Error> {
     let images = zombienet_sdk::environment::get_images_from_env();
@@ -179,23 +171,16 @@ fn build_network_config(
     // zombienet-provider's `with_db_snapshot` cache: sibling nodes sharing one
     // source path corrupt the partially-written file. Each per-node copy gets
     // its own cache slot (sha256 keyed on path string).
-    let staged = match &cfg.start {
-        StartMode::Fresh => StagedSnapshots::default(),
-        StartMode::FromSnapshot {
-            relay_db_tgz,
-            para_db_tgz,
-        } => stage_per_node_snapshots(base_dir_str, relay_db_tgz, para_db_tgz)?,
+    let staged = match cfg.snapshot() {
+        None => StagedSnapshots::default(),
+        Some(s) => stage_per_node_snapshots(base_dir_str, &s.relay_db_tgz, &s.para_db_tgz)?,
     };
     // Substrate gets the *full* spec — it needs `genesis.raw` to bootstrap.
-    let (relay_spec_path, para_spec_path) = match &cfg.spec {
-        SpecMode::Vanilla => (None, None),
-        SpecMode::WithLightSyncState {
-            relay_full,
-            para_full,
-            ..
-        } => (
-            Some(relay_full.to_str().expect("UTF-8 path").to_owned()),
-            Some(para_full.to_str().expect("UTF-8 path").to_owned()),
+    let (relay_spec_path, para_spec_path) = match cfg.snapshot() {
+        None => (None, None),
+        Some(s) => (
+            Some(s.relay_full_spec.to_str().expect("UTF-8 path").to_owned()),
+            Some(s.para_full_spec.to_str().expect("UTF-8 path").to_owned()),
         ),
     };
 
@@ -427,7 +412,7 @@ fn decode_header_number(hex_str: &str) -> Result<u64, anyhow::Error> {
 /// paths.
 pub async fn run_smoke_js(
     live: &LiveNetwork,
-    cfg: &ScenarioConfig,
+    cfg: &Scenario,
     required_blocks: u32,
 ) -> Result<(), anyhow::Error> {
     let relay_spec_str = live.relay_spec.to_str().expect("UTF-8 path");
@@ -435,16 +420,12 @@ pub async fn run_smoke_js(
     let required = required_blocks.to_string();
     let expected_finalized = live.expected_initial_finalized.to_string();
 
-    let smoldot_db_paths = match &cfg.smoldot {
-        SmoldotState::None => None,
-        SmoldotState::FromDb {
-            relay_db_json,
-            para_db_json,
-        } => Some((
-            relay_db_json.to_str().expect("UTF-8 path").to_owned(),
-            para_db_json.to_str().expect("UTF-8 path").to_owned(),
-        )),
-    };
+    let smoldot_db_paths = cfg.smoldot_db().map(|db| {
+        (
+            db.relay_db_json.to_str().expect("UTF-8 path").to_owned(),
+            db.para_db_json.to_str().expect("UTF-8 path").to_owned(),
+        )
+    });
 
     let mut env_vars: Vec<(&str, &str)> = vec![
         ("RELAY_CHAIN_SPEC", relay_spec_str),

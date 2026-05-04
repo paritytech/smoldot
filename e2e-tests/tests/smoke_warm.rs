@@ -34,18 +34,16 @@ async fn smoke_warm() -> Result<(), anyhow::Error> {
     let base_dir = resolve_base_dir()?;
     let base_dir_str = base_dir.to_str().expect("UTF-8 path").to_owned();
 
-    let cfg = ScenarioConfig {
-        start: StartMode::FromSnapshot {
+    let cfg = Scenario::Warm {
+        snapshot: SnapshotPaths {
             relay_db_tgz: snapshot::relay_db()?,
             para_db_tgz: snapshot::para_db()?,
+            relay_full_spec: snapshot::relay_spec()?,
+            para_full_spec: snapshot::para_spec()?,
+            smoldot_relay_spec: snapshot::relay_spec_light_sync_state()?,
+            smoldot_para_spec: snapshot::para_spec_light_sync_state()?,
         },
-        spec: SpecMode::WithLightSyncState {
-            relay_full: snapshot::relay_spec()?,
-            para_full: snapshot::para_spec()?,
-            relay_light_sync_state: snapshot::relay_spec_light_sync_state()?,
-            para_light_sync_state: snapshot::para_spec_light_sync_state()?,
-        },
-        smoldot: SmoldotState::FromDb {
+        smoldot_db: SmoldotDbPaths {
             relay_db_json: snapshot::smoldot_db_relay()?,
             para_db_json: snapshot::smoldot_db_para()?,
         },

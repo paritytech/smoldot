@@ -33,19 +33,14 @@ async fn smoke_cold() -> Result<(), anyhow::Error> {
     let base_dir = resolve_base_dir()?;
     let base_dir_str = base_dir.to_str().expect("UTF-8 path").to_owned();
 
-    let cfg = ScenarioConfig {
-        start: StartMode::FromSnapshot {
-            relay_db_tgz: snapshot::relay_db()?,
-            para_db_tgz: snapshot::para_db()?,
-        },
-        spec: SpecMode::WithLightSyncState {
-            relay_full: snapshot::relay_spec()?,
-            para_full: snapshot::para_spec()?,
-            relay_light_sync_state: snapshot::relay_spec_light_sync_state()?,
-            para_light_sync_state: snapshot::para_spec_light_sync_state()?,
-        },
-        smoldot: SmoldotState::None,
-    };
+    let cfg = Scenario::Cold(SnapshotPaths {
+        relay_db_tgz: snapshot::relay_db()?,
+        para_db_tgz: snapshot::para_db()?,
+        relay_full_spec: snapshot::relay_spec()?,
+        para_full_spec: snapshot::para_spec()?,
+        smoldot_relay_spec: snapshot::relay_spec_light_sync_state()?,
+        smoldot_para_spec: snapshot::para_spec_light_sync_state()?,
+    });
     let live = spawn_scenario(&cfg, &base_dir_str).await?;
 
     log::info!("checking that alice has produced post-snapshot parachain blocks (best)");
