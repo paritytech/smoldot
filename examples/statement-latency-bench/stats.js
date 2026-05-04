@@ -1,4 +1,4 @@
-// Closed set of failure categories. Mirrors bench.rs:118-129.
+// Closed set of failure categories, mirroring the Rust bench's FailureKind enum.
 export const FailureKind = {
   TooManyTopics: "Too many topics",
   SubscribeFailed: "Failed to open RPC subscription",
@@ -11,7 +11,7 @@ export const FailureKind = {
 };
 
 // Logs the failure with bench.rs's wording and returns the kind so callers can
-// `return fail(...)`. Mirrors bench.rs:148-161.
+// `return fail(...)`.
 export function fail(log, clientId, roundInfo, kind, detail) {
   const prefix = roundInfo ? `Round ${roundInfo[0]}/${roundInfo[1]}: ` : "";
   log.warn(`Client ${clientId}: ${prefix}${kind} (${detail})`);

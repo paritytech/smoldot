@@ -301,7 +301,8 @@ async function runAsParent(args, log) {
   const selfPath = fileURLToPath(import.meta.url);
   const childResults = [];
 
-  const children = [];
+  const childProcs = [];
+  const childPromises = [];
   for (let i = 0; i < args.workers; i++) {
     const [start, end] = workerRange(i, args.workers, args.numClients);
     log.info(`Forking worker ${i + 1}/${args.workers}: clients [${start}, ${end})`);
@@ -316,8 +317,9 @@ async function runAsParent(args, log) {
       },
       stdio: ["inherit", "inherit", "inherit", "ipc"],
     });
+    childProcs.push(child);
 
-    children.push(
+    childPromises.push(
       new Promise((resolve, reject) => {
         let result = null;
         child.on("message", (msg) => {
@@ -336,7 +338,19 @@ async function runAsParent(args, log) {
     );
   }
 
-  await Promise.all(children);
+  // If any worker fails, kill the rest so they don't outlive the parent
+  // holding smoldot peers / sockets.
+  try {
+    await Promise.all(childPromises);
+  } catch (e) {
+    for (const c of childProcs) {
+      if (c.exitCode === null && c.signalCode === null) {
+        try { c.kill("SIGTERM"); } catch {}
+      }
+    }
+    await Promise.allSettled(childPromises);
+    throw e;
+  }
 
   const successes = [];
   const failures = [];

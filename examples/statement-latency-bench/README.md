@@ -76,7 +76,9 @@ as `--parachain-spec`.
   confidence. We use a fixed `--warmup-ms` instead and pace rounds by wall clock.
 - **`--seed` removed.** Always derives sr25519 keys via `//StatementClient//${idx}`,
   matching `sc_statement_store::test_utils::get_keypair`.
-- **Output lines** otherwise match `bench.rs` verbatim so log parsers keep
-  working: `Starting Statement Store Latency Benchmark: …`, `Spawning {N}
-  client tasks... {testRunId}`, `Benchmark Results: send_min=…`, `Benchmark
-  Failed: failed_clients=…`, `Benchmark Finished: rounds_with_any_success=…`.
+- **Output line prefixes** match `bench.rs` so log parsers keyed on the leading
+  tokens keep working: `Spawning {N} client tasks... {testRunId}`, `Benchmark
+  Results: send_min=…`, `Benchmark Failed: failed_clients=…`, `Benchmark
+  Finished: rounds_with_any_success=…`. The smoldot port also adds a
+  `Starting Statement Store Latency Benchmark:` config line and an `errors=[…]`
+  segment to `Benchmark Failed`, neither of which exists in `bench.rs`.

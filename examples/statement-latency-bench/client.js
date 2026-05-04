@@ -3,7 +3,8 @@ import { u8aToHex } from "@polkadot/util";
 import { encodeStatement, expiryFromParts } from "./statement.js";
 import { FailureKind, fail } from "./stats.js";
 
-const MAX_TOPICS = 128; // bench.rs:249 — BoundedVec<Topic, ConstU32<128>> on the subscribe side
+// BoundedVec<Topic, ConstU32<128>> on the statement_subscribeStatement filter side.
+const MAX_TOPICS = 128;
 
 const enc = new TextEncoder();
 
@@ -104,7 +105,7 @@ async function executeRound({ round, config, rpc, pair, log }) {
         const expiryTs = Math.floor((Date.now() + statementExpiryMs) / 1000);
         const sequence = (sentCount + 1) * round;
         const expiry = expiryFromParts(expiryTs, sequence);
-        const data = new Uint8Array(size); // zero-filled; bench.rs:283 does the same
+        const data = new Uint8Array(size); // zero-filled, matching the Rust bench
 
         const hex = encodeStatement({ pair, expiry, channel, topic, data });
 
@@ -208,10 +209,6 @@ async function executeRound({ round, config, rpc, pair, log }) {
 export async function runClient({ config, rpc, pair, abortSignal, log }) {
   const successes = [];
   const failures = [];
-
-  // Apply jitter to distribute submission load (bench.rs:423-424).
-  const submissionJitter = (config.clientId * 7) % 1000;
-  await sleep(submissionJitter, abortSignal).catch(() => {});
 
   for (let round = 1; round <= config.numRounds; round++) {
     if (abortSignal?.aborted) {
