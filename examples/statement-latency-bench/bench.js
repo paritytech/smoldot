@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
 import { randomBytes } from "node:crypto";
+import { fork } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { start } from "smoldot";
 import { loadChainSpec } from "./chainspec.js";
 import { getKeypair } from "./keypair.js";
@@ -11,11 +13,11 @@ import { FailureKind, fail, reportResults } from "./stats.js";
 const LEVEL = { ERROR: 1, WARN: 2, INFO: 3, DEBUG: 4, TRACE: 5 };
 const LEVEL_LABEL = { 1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE" };
 
-function makeLogger(maxLevel) {
+function makeLogger(maxLevel, prefix = "") {
   const emit = (lvl, msg) => {
     if (lvl > maxLevel) return;
     const stream = lvl <= LEVEL.WARN ? process.stderr : process.stdout;
-    stream.write(`[${LEVEL_LABEL[lvl]}] ${msg}\n`);
+    stream.write(`${prefix}[${LEVEL_LABEL[lvl]}] ${msg}\n`);
   };
   return {
     error: (msg) => emit(LEVEL.ERROR, msg),
@@ -56,6 +58,7 @@ function parseFlags(argv) {
       "interval-ms": { type: "string", default: "10000" },
       "statement-expiry-ms": { type: "string", default: "600000" },
       "warmup-ms": { type: "string", default: "15000" },
+      workers: { type: "string", default: "1" },
       "fail-fast": { type: "boolean", default: false },
       "log-level": { type: "string", default: "info" },
     },
@@ -71,8 +74,11 @@ function parseFlags(argv) {
 
   const numClients = Number.parseInt(values["num-clients"], 10);
   const numRounds = Number.parseInt(values["num-rounds"], 10);
+  const workers = Number.parseInt(values["workers"], 10);
   if (!(numClients > 0)) throw new Error(`--num-clients must be > 0`);
   if (!(numRounds > 0)) throw new Error(`--num-rounds must be > 0`);
+  if (!(workers > 0)) throw new Error(`--workers must be > 0`);
+  if (workers > numClients) throw new Error(`--workers (${workers}) cannot exceed --num-clients (${numClients})`);
 
   return {
     parachainSpecSource: values["parachain-spec"],
@@ -80,6 +86,7 @@ function parseFlags(argv) {
     falsePositiveRate: Number.parseFloat(values["false-positive-rate"]),
     numClients,
     numRounds,
+    workers,
     messagesPattern: parseMessagesPattern(values["messages-pattern"]),
     receiveTimeoutMs: Number.parseInt(values["receive-timeout-ms"], 10),
     intervalMs: Number.parseInt(values["interval-ms"], 10),
@@ -97,14 +104,37 @@ function logConfiguration(log, args) {
       `parachain_spec=${args.parachainSpecSource} ` +
       `relay_chain_spec=${args.relayChainSpecSource} ` +
       `clients=${args.numClients} rounds=${args.numRounds} ` +
+      `workers=${args.workers} ` +
       `interval=${args.intervalMs}ms pattern=[${pattern}]`,
   );
 }
 
 async function spawnClient({ clientId, args, parachainSpec, relaySpec, log }) {
+  const debugClientId =
+    process.env.BENCH_DEBUG_CLIENT !== undefined
+      ? Number.parseInt(process.env.BENCH_DEBUG_CLIENT, 10)
+      : null;
+  const isDebugClient = debugClientId !== null && debugClientId === clientId;
+
   const smoldot = start({
-    maxLogLevel: 3,
-    logCallback: (lvl, target, msg) => log.forSmoldot(lvl, target, msg),
+    maxLogLevel: isDebugClient ? 4 : 2,
+    logCallback: (lvl, target, msg) => {
+      if (isDebugClient) {
+        log.forSmoldot(lvl, `c${clientId}/${target}`, msg);
+        return;
+      }
+      if (
+        target.startsWith("json-rpc-") &&
+        msg.includes("statement_subscribeStatement")
+      )
+        return;
+      if (
+        target.startsWith("sync-service-") &&
+        msg.startsWith("Error while verifying justification")
+      )
+        return;
+      log.forSmoldot(lvl, target, msg);
+    },
   });
 
   const relayChain = await smoldot.addChain({ chainSpec: relaySpec, disableJsonRpc: true });
@@ -119,11 +149,33 @@ async function spawnClient({ clientId, args, parachainSpec, relaySpec, log }) {
     onUnexpected: (e) => log.warn(`client ${clientId} rpc: ${e.message}`),
   });
 
+  // Optional periodic peer-health probe per client. Enable with
+  // BENCH_HEALTH_INTERVAL_MS=<ms>. Useful to compare succeeding vs
+  // failing clients' connectivity over the run.
+  const healthIntervalMs = Number.parseInt(
+    process.env.BENCH_HEALTH_INTERVAL_MS ?? "0",
+    10,
+  );
+  let healthTimer = null;
+  if (healthIntervalMs > 0) {
+    healthTimer = setInterval(async () => {
+      try {
+        const h = await rpc.request("system_health", []);
+        log.info(
+          `client ${clientId} health: peers=${h.peers} syncing=${h.isSyncing} shouldHavePeers=${h.shouldHavePeers}`,
+        );
+      } catch (e) {
+        log.warn(`client ${clientId} health probe failed: ${e.message}`);
+      }
+    }, healthIntervalMs);
+  }
+
   return {
     smoldot,
     chains,
     rpc,
     cleanup: async () => {
+      if (healthTimer) clearInterval(healthTimer);
       rpc.stop();
       try {
         for (const c of chains) c.remove();
@@ -135,30 +187,19 @@ async function spawnClient({ clientId, args, parachainSpec, relaySpec, log }) {
   };
 }
 
-async function main() {
-  let args;
-  try {
-    args = parseFlags(process.argv.slice(2));
-  } catch (e) {
-    process.stderr.write(`Error: ${e.message}\n`);
-    process.exit(2);
-  }
-
-  const log = makeLogger(args.logLevel);
-  const testRunId = randomBytes(8).readBigUInt64LE(0).toString();
-
-  logConfiguration(log, args);
-
+// Run a contiguous range [clientStart, clientEnd) of clients in this process.
+// Used both by single-process mode (range = [0, numClients)) and by each
+// child worker.
+async function runWorker({ args, clientStart, clientEnd, testRunId, log }) {
   const [parachainSpec, relaySpec] = await Promise.all([
     loadChainSpec(args.parachainSpecSource),
     loadChainSpec(args.relayChainSpecSource),
   ]);
 
-  log.info(`Spawning ${args.numClients} client tasks... ${testRunId}`);
-
   const abortController = new AbortController();
   const handles = [];
-  for (let clientId = 0; clientId < args.numClients; clientId++) {
+
+  for (let clientId = clientStart; clientId < clientEnd; clientId++) {
     handles.push((async () => {
       let resources;
       try {
@@ -219,18 +260,134 @@ async function main() {
   }
 
   const results = await Promise.all(handles);
-  const allSuccesses = [];
-  const allFailures = [];
+  const successes = [];
+  const failures = [];
   for (const r of results) {
-    allSuccesses.push(...r.successes);
-    allFailures.push(...r.failures);
+    successes.push(...r.successes);
+    failures.push(...r.failures);
+  }
+  return { successes, failures };
+}
+
+// Compute [start, end) for worker `i` of `total`, splitting `n` clients
+// evenly with the remainder distributed across the first `n % total` workers.
+function workerRange(i, total, n) {
+  const base = Math.floor(n / total);
+  const rem = n % total;
+  const start = i * base + Math.min(i, rem);
+  const size = base + (i < rem ? 1 : 0);
+  return [start, start + size];
+}
+
+async function runAsParent(args, log) {
+  const testRunId = randomBytes(8).readBigUInt64LE(0).toString();
+  logConfiguration(log, args);
+  log.info(`Spawning ${args.numClients} client tasks... ${testRunId}`);
+
+  if (args.workers === 1) {
+    const { successes, failures } = await runWorker({
+      args,
+      clientStart: 0,
+      clientEnd: args.numClients,
+      testRunId,
+      log,
+    });
+    reportResults(log, successes, failures, args.numClients, args.numRounds);
+    process.exit(failures.length > 0 && successes.length === 0 ? 1 : 0);
   }
 
-  reportResults(log, allSuccesses, allFailures, args.numClients, args.numRounds);
+  // Multi-worker: fork one child process per worker. Each child runs its own
+  // event loop and its own slice of clients in-process.
+  const selfPath = fileURLToPath(import.meta.url);
+  const childResults = [];
 
-  if (allFailures.length > 0 && allSuccesses.length === 0) {
-    process.exit(1);
+  const children = [];
+  for (let i = 0; i < args.workers; i++) {
+    const [start, end] = workerRange(i, args.workers, args.numClients);
+    log.info(`Forking worker ${i + 1}/${args.workers}: clients [${start}, ${end})`);
+    const child = fork(selfPath, process.argv.slice(2), {
+      env: {
+        ...process.env,
+        BENCH_WORKER_ID: String(i),
+        BENCH_WORKER_COUNT: String(args.workers),
+        BENCH_TEST_RUN_ID: testRunId,
+        BENCH_CLIENT_START: String(start),
+        BENCH_CLIENT_END: String(end),
+      },
+      stdio: ["inherit", "inherit", "inherit", "ipc"],
+    });
+
+    children.push(
+      new Promise((resolve, reject) => {
+        let result = null;
+        child.on("message", (msg) => {
+          if (msg && msg.type === "result") result = msg;
+        });
+        child.on("exit", (code) => {
+          if (result) {
+            childResults.push(result);
+            resolve();
+          } else {
+            reject(new Error(`worker ${i} exited with code ${code} without sending a result`));
+          }
+        });
+        child.on("error", reject);
+      }),
+    );
   }
+
+  await Promise.all(children);
+
+  const successes = [];
+  const failures = [];
+  for (const r of childResults) {
+    successes.push(...r.successes);
+    failures.push(...r.failures);
+  }
+  reportResults(log, successes, failures, args.numClients, args.numRounds);
+  process.exit(failures.length > 0 && successes.length === 0 ? 1 : 0);
+}
+
+async function runAsChild(args) {
+  const workerId = Number.parseInt(process.env.BENCH_WORKER_ID, 10);
+  const clientStart = Number.parseInt(process.env.BENCH_CLIENT_START, 10);
+  const clientEnd = Number.parseInt(process.env.BENCH_CLIENT_END, 10);
+  const testRunId = process.env.BENCH_TEST_RUN_ID;
+
+  const log = makeLogger(args.logLevel, `[w${workerId}] `);
+
+  const { successes, failures } = await runWorker({
+    args,
+    clientStart,
+    clientEnd,
+    testRunId,
+    log,
+  });
+
+  if (typeof process.send === "function") {
+    await new Promise((resolve) =>
+      process.send({ type: "result", successes, failures }, undefined, undefined, resolve),
+    );
+  }
+  process.exit(0);
+}
+
+async function main() {
+  let args;
+  try {
+    args = parseFlags(process.argv.slice(2));
+  } catch (e) {
+    process.stderr.write(`Error: ${e.message}\n`);
+    process.exit(2);
+  }
+
+  if (process.env.BENCH_WORKER_ID !== undefined) {
+    await runAsChild(args);
+    return;
+  }
+
+  const log = makeLogger(args.logLevel);
+  await runAsParent(args, log);
 }
 
 main().catch((e) => {

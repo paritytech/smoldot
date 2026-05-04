@@ -51,6 +51,7 @@ as `--parachain-spec`.
 | `--relay-chain-spec` | required | Relay chain raw chain spec — file path or `http(s)://` URL. |
 | `--false-positive-rate` | `0.01` | Statement-store affinity bloom filter rate. |
 | `--num-clients` | `100` | Each spawns its own smoldot instance. |
+| `--workers` | `1` | If >1, fork that many child processes; clients distributed evenly. Use to scale past one event loop's capacity (~150 clients). |
 | `--num-rounds` | `1` | |
 | `--messages-pattern` | `5:512` | `count:size,count:size,…` |
 | `--receive-timeout-ms` | `5000` | |
@@ -67,7 +68,9 @@ as `--parachain-spec`.
   `--rpc-endpoints` as the wiring point.
 - **One smoldot per client.** Smoldot dedupes within a client, so one peer per
   client requires one `start()` per client. Each is ~tens of MB resident; for
-  N=100 expect multi-GB RAM. Use the same K8s-shard pattern as the Rust bench.
+  N=100 expect multi-GB RAM. For larger N, use `--workers <K>` to fork K child
+  processes (each gets its own event loop and runs N/K clients), or follow the
+  same K8s-shard pattern as the Rust bench.
 - **No barrier.** Smoldot startup is variable (5–30s) and gossip readiness is
   not observable from JSON-RPC, so a barrier on a code line gives false
   confidence. We use a fixed `--warmup-ms` instead and pace rounds by wall clock.
