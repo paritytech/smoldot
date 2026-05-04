@@ -38,7 +38,6 @@ use zombienet_sdk::{
     subxt_signer::sr25519::{Keypair, dev},
 };
 
-const BULLETIN_PARA_ID: u32 = bulletin::PARA_ID;
 const RELAY_CHAIN: &str = "westend-local";
 const PARA_BINARY: &str = "polkadot-parachain";
 const RELAY_BINARY: &str = "polkadot";
@@ -51,7 +50,6 @@ const EXTRINSIC_TIMEOUT_SECS: u64 = 60;
 const AUTH_TX_LIMIT: u32 = 1000;
 const AUTH_BYTE_LIMIT: u64 = 100_000_000;
 
-/// Mirrors `polkadot-bulletin-chain/stress-test/src/client.rs`.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 enum BulletinConfig {}
 
@@ -119,8 +117,8 @@ impl SnapshotOpts {
         );
         if !smoke && target_height <= 1000 {
             bail!(
-                "target_height={target_height} must exceed 1000; \
-                 set BULLETIN_SNAPSHOT_SMOKE=1 to bypass"
+                "target_height={target_height} must exceed 1000. \
+                 Set BULLETIN_SNAPSHOT_SMOKE=1 to bypass"
             );
         }
 
@@ -174,7 +172,11 @@ async fn bulletin_generate_snapshot() -> Result<()> {
         emitted_cids.push((payload.label, cid_str));
     }
 
-    let base_dir = network_base_dir(&network)?;
+    let base_dir = PathBuf::from(
+        network
+            .base_dir()
+            .ok_or_else(|| anyhow!("network has no base_dir"))?,
+    );
     let staging_dir = base_dir.join("partial-staging");
 
     info!("forking bulletin DB after {} payloads", phase_1.len());
@@ -270,10 +272,9 @@ async fn fork_collator_db(
 }
 
 /// Pauses every node, copies the relay (alice) and bulletin (collator-1)
-/// directories into `staging/{relay,bulletin}/`, and resumes. Same
-/// rationale as `fork_collator_db`: a paused process is the only safe time
-/// to read RocksDB files. Pause window is short (file copy of ~30 MB) so
-/// the zombienet crash-watcher doesn't fire.
+/// directories into `staging/{relay,bulletin}/`, and resumes. The pause
+/// window is shorter than the zombienet crash-watcher's poll interval so
+/// it doesn't fire `process::exit(1)` on us.
 async fn snapshot_full_state(
     network: &Network<LocalFileSystem>,
     base_dir: &Path,
@@ -350,7 +351,7 @@ async fn spawn_network(chain_spec: &Path) -> Result<Network<LocalFileSystem>> {
                 .with_validator(|node| node.with_name("bob"))
         })
         .with_parachain(|p| {
-            p.with_id(BULLETIN_PARA_ID)
+            p.with_id(bulletin::PARA_ID)
                 .with_chain_spec_path(chain_spec_str.as_str())
                 .cumulus_based(true)
                 .with_collator(|c| {
@@ -482,8 +483,7 @@ async fn submit_store(
 /// Tar/gzips `data` (and optionally `relay_data`) into `archive_path` and
 /// returns the hex-encoded SHA-256 of the archive. Top-level entries are
 /// `data/` and `relay-data/` so zombienet-sdk's auto-extract drops the
-/// contents at the node's expected paths. Matches the polkadot-sdk
-/// warp_sync convention.
+/// contents at the node's expected paths.
 fn pack_node_dirs(
     data: &Path,
     relay_data: Option<&Path>,
@@ -556,9 +556,3 @@ fn build_manifest(
     })
 }
 
-fn network_base_dir(network: &Network<LocalFileSystem>) -> Result<PathBuf> {
-    network
-        .base_dir()
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("network has no base_dir"))
-}

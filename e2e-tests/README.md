@@ -39,14 +39,16 @@ What happens inside:
    `waitForMessage`.
 
 
-## Bulletin / bitswap snapshots (#3232)
+## Bulletin / bitswap snapshots
 
-The `bitswap_get*` matrix entries (planned) drive smoldot's
-`bitswap_v1_get` JSON-RPC against a polkadot-bulletin-chain network with
-pre-built DB snapshots. Generating the snapshots is too slow for CI, so a
-manual `--ignored` test produces them locally; CI runners later download
-and cache them once the upload destination is wired up (out of scope for
-the current iteration).
+The `bulletin_fetch` test drives smoldot's `bitswap_v1_get` JSON-RPC
+against a polkadot-bulletin-chain network with pre-built DB snapshots.
+The URLs CI fetches from are hardcoded in
+[`tests/bulletin_fetch.rs`](tests/bulletin_fetch.rs) and point at the
+`zombienet-db-snaps` GCS bucket under `smoldot/bulletin_fetch/`. To
+refresh those snapshots, regenerate them with
+`bulletin_generate_snapshot` and upload via `gsutil` (only needed when
+the bulletin runtime or corpus changes).
 
 ### Generating snapshots locally
 
@@ -59,10 +61,24 @@ Override with `BULLETIN_CHAIN_SPEC=/path/to/spec.json` when iterating on a
 newer bulletin runtime.
 
 ```sh
-# Outputs relay.tgz + bulletin.tgz + manifest.json under e2e-tests/target/snapshots/.
+# Outputs relay.tgz, bulletin-full.tgz, bulletin-partial.tgz, and
+# manifest.json under e2e-tests/target/snapshots/.
 cargo test --manifest-path e2e-tests/Cargo.toml \
-  -- --ignored bulletin_snapshot --nocapture
+  -- --ignored bulletin_generate_snapshot --nocapture
+
+# Upload to GCS for CI to consume.
+gsutil cp e2e-tests/target/snapshots/{relay,bulletin-full,bulletin-partial}.tgz \
+  gs://zombienet-db-snaps/smoldot/bulletin_fetch/
 ```
 
-The `manifest.json` produced is the source of truth for which CIDs the
-CI tests can fetch.
+### Iterating against local snapshots
+
+`bulletin_fetch` defaults to fetching from GCS. To test against a locally-
+generated snapshot bundle, point the override env vars at file paths:
+
+```sh
+export DB_SNAPSHOT_RELAY_OVERRIDE=$PWD/e2e-tests/target/snapshots/relay.tgz
+export DB_SNAPSHOT_BULLETIN_FULL_OVERRIDE=$PWD/e2e-tests/target/snapshots/bulletin-full.tgz
+export DB_SNAPSHOT_BULLETIN_PARTIAL_OVERRIDE=$PWD/e2e-tests/target/snapshots/bulletin-partial.tgz
+cargo test --manifest-path e2e-tests/Cargo.toml --test bulletin_fetch -- --nocapture
+```

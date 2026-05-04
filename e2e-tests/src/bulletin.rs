@@ -19,8 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use smoldot::libp2p::cid::{Cid, CidPrefix, MultihashType};
 
-/// Para id of the bulletin chain. Matches polkadot-bulletin-chain's own
-/// stress-test fixture.
+/// Para id of the bulletin chain.
 pub const PARA_ID: u32 = 2487;
 
 /// Default snapshot height target. Must exceed 1000 blocks.
@@ -32,7 +31,7 @@ pub const DEFAULT_SNAPSHOT_HEIGHT: u64 = 1024;
 ///
 /// - `bulletin-full.tgz` — every payload in [`payloads`] is injected.
 /// - `bulletin-partial.tgz` — only the first `PARTIAL_FORK_INDEX` payloads
-///   are injected; captured before the rest go in.
+///   are injected, then the partial snapshot is captured.
 ///
 /// The CI test for mixed availability loads `bulletin-full` on one
 /// collator and `bulletin-partial` on another, then fetches a CID that

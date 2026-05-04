@@ -17,10 +17,10 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow};
+use serde::Serialize;
 use smoldot_e2e_tests::{
-    bulletin::{self, BulletinManifest},
-    ensure_js_deps_installed, ensure_smoldot_built, resolve_base_dir, run_js_test,
+    bulletin, ensure_js_deps_installed, ensure_smoldot_built, resolve_base_dir, run_js_test,
 };
 use zombienet_sdk::{LocalFileSystem, Network, NetworkConfigBuilder};
 
@@ -28,38 +28,62 @@ const RELAY_CHAIN: &str = "westend-local";
 const PARA_BINARY: &str = "polkadot-parachain";
 const RELAY_BINARY: &str = "polkadot";
 
-const RELAY_ARCHIVE: &str = "relay.tgz";
-const BULLETIN_FULL_ARCHIVE: &str = "bulletin-full.tgz";
-const BULLETIN_PARTIAL_ARCHIVE: &str = "bulletin-partial.tgz";
+/// GCS URLs for the snapshots produced by `bulletin_generate_snapshot`.
+const DB_SNAPSHOT_RELAY: &str =
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/relay.tgz";
+const DB_SNAPSHOT_BULLETIN_FULL: &str =
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-full.tgz";
+const DB_SNAPSHOT_BULLETIN_PARTIAL: &str =
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-partial.tgz";
 
-/// Smoldot fetches every CID from the manifest, asserts NotFound for an
-/// unrelated CID, and exercises mixed-availability peer selection.
+#[derive(Serialize)]
+struct PayloadJson {
+    label: &'static str,
+    cid: String,
+    sha256: String,
+    size: u64,
+    on_partial: bool,
+}
+
+/// Smoldot fetches every CID in `bulletin::payloads()`, asserts NotFound
+/// for an unrelated CID, and exercises mixed-availability peer selection.
 #[tokio::test(flavor = "multi_thread")]
 async fn bulletin_fetch() -> Result<()> {
     env_logger::try_init().ok();
 
-    let snapshots = SnapshotsDir::resolve()?;
-    let manifest = snapshots.read_manifest()?;
     let chain_spec = bulletin_chain_spec();
-
     let base_dir = resolve_base_dir()?;
-    let network = spawn_with_snapshots(
-        &base_dir,
-        &chain_spec,
-        &snapshots.relay,
-        &snapshots.bulletin_full,
-        &snapshots.bulletin_partial,
-    )
-    .await?;
+
+    let relay = get_snapshot_url(DB_SNAPSHOT_RELAY, "DB_SNAPSHOT_RELAY_OVERRIDE");
+    let bulletin_full =
+        get_snapshot_url(DB_SNAPSHOT_BULLETIN_FULL, "DB_SNAPSHOT_BULLETIN_FULL_OVERRIDE");
+    let bulletin_partial = get_snapshot_url(
+        DB_SNAPSHOT_BULLETIN_PARTIAL,
+        "DB_SNAPSHOT_BULLETIN_PARTIAL_OVERRIDE",
+    );
+
+    let network =
+        spawn_with_snapshots(&base_dir, &chain_spec, &relay, &bulletin_full, &bulletin_partial)
+            .await?;
 
     let (relay_spec, bulletin_spec) = chain_spec_paths(&network)?;
 
     ensure_smoldot_built();
     ensure_js_deps_installed();
 
-    let payloads_json = serde_json::to_string(&manifest.payloads)?;
-    let missing_cid =
-        bulletin::sha256_cid(b"smoldot-bitswap-not-on-chain").to_string();
+    let payloads_json = serde_json::to_string(
+        &bulletin::payloads()
+            .iter()
+            .map(|p| PayloadJson {
+                label: p.label,
+                cid: p.predicted_cid(),
+                sha256: p.sha256_hex(),
+                size: p.size(),
+                on_partial: p.on_partial,
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    let missing_cid = bulletin::sha256_cid(b"smoldot-bitswap-not-on-chain").to_string();
     let relay_spec = relay_spec.to_str().ok_or_else(|| anyhow!("non-utf8 relay spec path"))?;
     let bulletin_spec = bulletin_spec
         .to_str()
@@ -78,47 +102,10 @@ async fn bulletin_fetch() -> Result<()> {
     .map_err(|e| anyhow!("JS test failed: {e}"))
 }
 
-struct SnapshotsDir {
-    root: PathBuf,
-    relay: PathBuf,
-    bulletin_full: PathBuf,
-    bulletin_partial: PathBuf,
-}
-
-impl SnapshotsDir {
-    fn resolve() -> Result<Self> {
-        let root = std::env::var("BULLETIN_SNAPSHOTS_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/snapshots")
-            });
-        let relay = root.join(RELAY_ARCHIVE);
-        let bulletin_full = root.join(BULLETIN_FULL_ARCHIVE);
-        let bulletin_partial = root.join(BULLETIN_PARTIAL_ARCHIVE);
-        for path in [&relay, &bulletin_full, &bulletin_partial] {
-            if !path.is_file() {
-                bail!(
-                    "snapshot {} not found. Generate via:\n  \
-                     cargo test --test bulletin_generate_snapshot \
-                     -- --ignored bulletin_generate_snapshot --nocapture",
-                    path.display()
-                );
-            }
-        }
-        Ok(Self {
-            root,
-            relay,
-            bulletin_full,
-            bulletin_partial,
-        })
-    }
-
-    fn read_manifest(&self) -> Result<BulletinManifest> {
-        let path = self.root.join("manifest.json");
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
-    }
+/// Returns the GCS URL by default, or the contents of `env_var` if set
+/// (so a developer can point at a local `.tgz` for iteration).
+fn get_snapshot_url(default: &str, env_var: &str) -> String {
+    std::env::var(env_var).unwrap_or_else(|_| default.to_string())
 }
 
 fn bulletin_chain_spec() -> PathBuf {
@@ -128,9 +115,9 @@ fn bulletin_chain_spec() -> PathBuf {
 async fn spawn_with_snapshots(
     base_dir: &Path,
     chain_spec: &Path,
-    relay_snap: &Path,
-    bulletin_full_snap: &Path,
-    bulletin_partial_snap: &Path,
+    relay_snap: &str,
+    bulletin_full_snap: &str,
+    bulletin_partial_snap: &str,
 ) -> Result<Network<LocalFileSystem>> {
     let chain_spec_str = chain_spec
         .to_str()
@@ -140,9 +127,9 @@ async fn spawn_with_snapshots(
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 base dir"))?
         .to_string();
-    let relay = relay_snap.to_string_lossy().into_owned();
-    let bulletin_full = bulletin_full_snap.to_string_lossy().into_owned();
-    let bulletin_partial = bulletin_partial_snap.to_string_lossy().into_owned();
+    let relay = relay_snap.to_string();
+    let bulletin_full = bulletin_full_snap.to_string();
+    let bulletin_partial = bulletin_partial_snap.to_string();
 
     let cfg = NetworkConfigBuilder::new()
         .with_relaychain(|rc| {
