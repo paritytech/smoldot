@@ -56,16 +56,22 @@ jobs:
       fail-fast: false
       matrix:
         test:
-          - job-name: "zombienet-smoldot-0000-smoke_fresh"
+          - job-name: "zombienet-smoldot-0001-smoke_fresh"
             test: "smoke_fresh"
             runner-type: "default"
-          - job-name: "zombienet-smoldot-0001-statement_store_submission"
+          - job-name: "zombienet-smoldot-0002-smoke_cold"
+            test: "smoke_cold"
+            runner-type: "default"
+          - job-name: "zombienet-smoldot-0003-smoke_warm"
+            test: "smoke_warm"
+            runner-type: "default"
+          - job-name: "zombienet-smoldot-0004-statement_store_submission"
             test: "statement_store_submission"
             runner-type: "default"
-          - job-name: "zombienet-smoldot-0002-statement_store_reception"
+          - job-name: "zombienet-smoldot-0005-statement_store_reception"
             test: "statement_store_reception"
             runner-type: "default"
-          - job-name: "zombienet-smoldot-0003-statement_store_peer_connection"
+          - job-name: "zombienet-smoldot-0006-statement_store_peer_connection"
             test: "statement_store_peer_connection"
             runner-type: "default"
 
