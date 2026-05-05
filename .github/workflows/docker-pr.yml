@@ -31,6 +31,6 @@ jobs:
       - uses: docker/build-push-action@v6.18.0
         with:
           context: .
-          file: ./full-node/Dockerfile
+          file: ./examples/statement-latency-bench/Dockerfile
           push: ${{ contains(github.event.pull_request.labels.*.name, 'push-debug-image') }}
           tags: paritypr/smoldot:${{ steps.meta.outputs.tag }}
