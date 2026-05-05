@@ -19,7 +19,15 @@
 //!
 //! Builds the artifact set consumed by `smoke_cold` / `smoke_warm` (network
 //! DB tarballs, chain specs with `lightSyncState`, smoldot databaseContent
-//! dumps). Run manually; never invoked from `cargo test`.
+//! dumps). Marked `#[ignore]`: only runs when invoked explicitly with
+//! `cargo test … -- --ignored`.
+//!
+//! Driven by env vars (set when invoking `cargo test`):
+//!   * `SMOKE_SNAPSHOT_OUT`               — output directory (required)
+//!   * `SMOKE_SNAPSHOT_TARGET_FINALIZED`  — snapshot block height (default 100)
+//!   * `SMOKE_SNAPSHOT_SPEC_AT_FINALIZED` — `lightSyncState` block (default target/2)
+//!   * `SMOKE_SNAPSHOT_RELAY_DB`          — resume validators from this tarball
+//!   * `SMOKE_SNAPSHOT_PARA_DB`           — resume collators from this tarball
 //!
 //! See `e2e-tests/docs/smoke-scenarios.md` for the produced layout and
 //! the regeneration procedure.
@@ -37,21 +45,22 @@ use zombienet_sdk::{
     NetworkConfigBuilder, NetworkNode,
 };
 
-const DEFAULT_TARGET_FINALIZED: u32 = 100;
+const DEFAULT_TARGET_FINALIZED: u32 = 2500;
 
 /// Smoldot triggers real warp sync (vs follow-forward) when the gap between
 /// `lightSyncState` and current head exceeds this many blocks.
 const WARP_SYNC_MINIMUM_GAP: u32 = 32;
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<(), anyhow::Error> {
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "produces large DB snapshots and must be run manually"]
+async fn smoke_generate_snapshots() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     );
 
-    let args = Args::parse()?;
+    let args = Args::from_env()?;
     log::info!(
-        "generate_snapshots: out={} spec_at=#{} target_finalized=#{} relay_snap={:?} para_snap={:?}",
+        "smoke_generate_snapshots: out={} spec_at=#{} target_finalized=#{} relay_snap={:?} para_snap={:?}",
         args.out.display(),
         args.spec_at_finalized,
         args.target_finalized,
@@ -494,61 +503,19 @@ struct Args {
 }
 
 impl Args {
-    fn parse() -> Result<Self, anyhow::Error> {
-        let mut out: Option<PathBuf> = None;
-        let mut target_finalized: Option<u32> = None;
-        let mut spec_at_finalized: Option<u32> = None;
-        let mut relay_db_snapshot: Option<PathBuf> = None;
-        let mut para_db_snapshot: Option<PathBuf> = None;
+    fn from_env() -> Result<Self, anyhow::Error> {
+        let out = std::env::var("SMOKE_SNAPSHOT_OUT")
+            .map(PathBuf::from)
+            .map_err(|_| anyhow!("SMOKE_SNAPSHOT_OUT is required (output directory)"))?;
 
-        let mut iter = std::env::args().skip(1);
-        while let Some(arg) = iter.next() {
-            match arg.as_str() {
-                "--out" => {
-                    let v = iter.next().ok_or_else(|| anyhow!("--out needs a value"))?;
-                    out = Some(PathBuf::from(v));
-                }
-                "--target-finalized" => {
-                    let v = iter
-                        .next()
-                        .ok_or_else(|| anyhow!("--target-finalized needs a value"))?;
-                    target_finalized = Some(v.parse().map_err(|e| {
-                        anyhow!("--target-finalized must be a positive integer: {e}")
-                    })?);
-                }
-                "--spec-at-finalized" => {
-                    let v = iter
-                        .next()
-                        .ok_or_else(|| anyhow!("--spec-at-finalized needs a value"))?;
-                    spec_at_finalized = Some(v.parse().map_err(|e| {
-                        anyhow!("--spec-at-finalized must be a positive integer: {e}")
-                    })?);
-                }
-                "--relay-db-snapshot" => {
-                    let v = iter
-                        .next()
-                        .ok_or_else(|| anyhow!("--relay-db-snapshot needs a path"))?;
-                    relay_db_snapshot = Some(PathBuf::from(v));
-                }
-                "--para-db-snapshot" => {
-                    let v = iter
-                        .next()
-                        .ok_or_else(|| anyhow!("--para-db-snapshot needs a path"))?;
-                    para_db_snapshot = Some(PathBuf::from(v));
-                }
-                "-h" | "--help" => {
-                    print_help();
-                    std::process::exit(0);
-                }
-                other => return Err(anyhow!("unknown argument: {other}")),
-            }
-        }
-
-        let target_finalized = target_finalized.unwrap_or(DEFAULT_TARGET_FINALIZED);
-        let spec_at_finalized = spec_at_finalized.unwrap_or_else(|| target_finalized / 2);
+        let target_finalized = parse_env_u32("SMOKE_SNAPSHOT_TARGET_FINALIZED")?
+            .unwrap_or(DEFAULT_TARGET_FINALIZED);
+        let spec_at_finalized = parse_env_u32("SMOKE_SNAPSHOT_SPEC_AT_FINALIZED")?
+            .unwrap_or(target_finalized / 2);
         if spec_at_finalized > target_finalized {
             return Err(anyhow!(
-                "--spec-at-finalized (#{spec_at_finalized}) must be ≤ --target-finalized (#{target_finalized})"
+                "SMOKE_SNAPSHOT_SPEC_AT_FINALIZED (#{spec_at_finalized}) must be ≤ \
+                 SMOKE_SNAPSHOT_TARGET_FINALIZED (#{target_finalized})"
             ));
         }
         let gap = target_finalized.saturating_sub(spec_at_finalized);
@@ -559,8 +526,15 @@ impl Args {
             );
         }
 
+        let relay_db_snapshot = std::env::var("SMOKE_SNAPSHOT_RELAY_DB")
+            .ok()
+            .map(PathBuf::from);
+        let para_db_snapshot = std::env::var("SMOKE_SNAPSHOT_PARA_DB")
+            .ok()
+            .map(PathBuf::from);
+
         Ok(Self {
-            out: out.ok_or_else(|| anyhow!("--out <DIR> is required"))?,
+            out,
             target_finalized,
             spec_at_finalized,
             relay_db_snapshot,
@@ -569,31 +543,13 @@ impl Args {
     }
 }
 
-fn print_help() {
-    println!(
-        "usage: generate_snapshots --out <DIR> [--target-finalized N] [--spec-at-finalized M]\n\
-         \n\
-         Spawns westend-local + people-westend-local from genesis. Captures the\n\
-         relay sync spec (lightSyncState) at finalized #M, then continues until\n\
-         finalized #N to snapshot the node DBs and run smoldot for a\n\
-         `databaseContent` dump.\n\
-         \n\
-         The M..N gap should exceed smoldot's warp_sync_minimum_gap ({}) so\n\
-         smoldot exercises real warp sync (handles GRANDPA rotations) rather\n\
-         than follow-forward.\n\
-         \n\
-         options:\n\
-           --out <DIR>              Artifact output directory (created if missing).\n\
-           --target-finalized N     Snapshot block. Default: {}.\n\
-           --spec-at-finalized M    Spec lightSyncState block (M ≤ N). Default: N/2.\n\
-           --relay-db-snapshot P    Resume relay validators from this DB tarball.\n\
-           --para-db-snapshot P     Resume collators from this DB tarball.\n\
-         \n\
-         When the *-db-snapshot flags are passed, the network resumes from the\n\
-         tarball'd state instead of starting at genesis — useful for extending\n\
-         a prior run without paying the cost of re-syncing from #0.",
-        WARP_SYNC_MINIMUM_GAP, DEFAULT_TARGET_FINALIZED
-    );
+fn parse_env_u32(key: &str) -> Result<Option<u32>, anyhow::Error> {
+    match std::env::var(key) {
+        Ok(v) => Ok(Some(v.parse().map_err(|e| {
+            anyhow!("{key} must be a positive integer: {e}")
+        })?)),
+        Err(_) => Ok(None),
+    }
 }
 
 struct StagedSnapshots {

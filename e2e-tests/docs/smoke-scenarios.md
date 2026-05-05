@@ -45,27 +45,26 @@ Steps (from `e2e-tests/`):
    pub const ARTIFACTS_VERSION: &str = "v2";   // or whatever
    ```
 
-2. **Build the generator** and **run it** to produce a fresh bundle. Either start from genesis (~3 h for `--target-finalized=2000`) or resume from an existing source DB (~50 min):
+2. **Run the generator test** to produce a fresh bundle. Either start from genesis (~3 h for `TARGET_FINALIZED=2000`) or resume from an existing source DB (~50 min):
 
    ```bash
-   cargo build --release --bin generate_snapshots
-
    # from genesis:
-   ./target/release/generate_snapshots \
-     --out /tmp/smoldot-snap-v2 \
-     --target-finalized 2000
+   SMOKE_SNAPSHOT_OUT=/tmp/smoldot-snap-v2 \
+   SMOKE_SNAPSHOT_TARGET_FINALIZED=2000 \
+   cargo test --release --test smoke_generate_snapshots -- --ignored --nocapture
 
    # or resume:
-   ./target/release/generate_snapshots \
-     --out /tmp/smoldot-snap-v2 \
-     --target-finalized 2000 --spec-at-finalized 1525 \
-     --relay-db-snapshot /path/to/old/relaychain-db.tgz \
-     --para-db-snapshot  /path/to/old/parachain-db.tgz
+   SMOKE_SNAPSHOT_OUT=/tmp/smoldot-snap-v2 \
+   SMOKE_SNAPSHOT_TARGET_FINALIZED=2000 \
+   SMOKE_SNAPSHOT_SPEC_AT_FINALIZED=1525 \
+   SMOKE_SNAPSHOT_RELAY_DB=/path/to/old/relaychain-db.tgz \
+   SMOKE_SNAPSHOT_PARA_DB=/path/to/old/parachain-db.tgz \
+   cargo test --release --test smoke_generate_snapshots -- --ignored --nocapture
    ```
 
-   Required: `ZOMBIE_PROVIDER=native`, polkadot/polkadot-parachain on `PATH`. The generator's `--help` lists all flags.
+   Required: `ZOMBIE_PROVIDER=native`, polkadot/polkadot-parachain on `PATH`. The module-level docstring in `tests/generate_snapshots.rs` lists every env var.
 
-   It produces `bundle.tar.gz` under `--out` and prints the SHA256 in the manifest at the end.
+   It produces `bundle.tar.gz` under `SMOKE_SNAPSHOT_OUT` and prints the SHA256 in the manifest at the end.
 
 3. **Verify locally** before publishing:
 

@@ -22,7 +22,7 @@
 //! - **Cold**: network from snapshot, spec with `lightSyncState`, no smoldot DB.
 //! - **Warm**: network from snapshot, spec with `lightSyncState`, smoldot DB preloaded.
 //!
-//! Cold/warm consume the artifact set produced by `generate_snapshots`; see
+//! Cold/warm consume the artifact set produced by `smoke_generate_snapshots`; see
 //! `e2e-tests/docs/smoke-scenarios.md` and `crate::snapshot`.
 
 use std::path::{Path, PathBuf};
