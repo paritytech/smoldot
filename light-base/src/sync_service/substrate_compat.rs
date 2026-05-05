@@ -354,6 +354,13 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 // Since there is a gap in the blocks, all active notifications to all blocks
                 // must be cleared.
                 task.all_notifications.clear();
+
+                //TODO: `hash` and `best_block_hash_if_changed` should be set to `finalized_hash`.
+                task.dispatch_all_subscribers(Notification::Finalized {
+                    hash: todo!(),
+                    best_block_hash_if_changed: Some(todo!()),
+                    pruned_blocks: Vec::new(),
+                });
             }
 
             WakeUpReason::SyncProcess(all::ProcessOne::VerifyWarpSyncFragment(verify)) => {
