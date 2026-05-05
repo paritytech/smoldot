@@ -30,11 +30,11 @@ const RELAY_BINARY: &str = "polkadot";
 
 /// GCS URLs for the snapshots produced by `bulletin_generate_snapshot`.
 const DB_SNAPSHOT_RELAY: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/relay.tgz";
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/relay-2026-05-04.tgz";
 const DB_SNAPSHOT_BULLETIN_FULL: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-full.tgz";
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-full-2026-05-04.tgz";
 const DB_SNAPSHOT_BULLETIN_PARTIAL: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-partial.tgz";
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-partial-2026-05-04.tgz";
 
 #[derive(Serialize)]
 struct PayloadJson {

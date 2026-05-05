@@ -66,9 +66,13 @@ newer bulletin runtime.
 cargo test --manifest-path e2e-tests/Cargo.toml \
   -- --ignored bulletin_generate_snapshot --nocapture
 
-# Upload to GCS for CI to consume.
-gsutil cp e2e-tests/target/snapshots/{relay,bulletin-full,bulletin-partial}.tgz \
-  gs://zombienet-db-snaps/smoldot/bulletin_fetch/
+# Tag the archives with the generation date and upload. Bump the date in
+# the DB_SNAPSHOT_* constants in tests/bulletin_fetch.rs to match.
+DATE=$(date +%F)
+cd e2e-tests/target/snapshots
+for f in relay bulletin-full bulletin-partial; do
+  gsutil cp "$f.tgz" "gs://zombienet-db-snaps/smoldot/bulletin_fetch/$f-$DATE.tgz"
+done
 ```
 
 ### Iterating against local snapshots
