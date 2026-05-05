@@ -130,7 +130,7 @@ pub async fn spawn_scenario(
     }
 
     let (relay_spec, para_spec) = match cfg.snapshot() {
-        None => extract_emitted_specs(&network)?,
+        None => spawned_chain_spec_paths(&network)?,
         // Light-sync-state specs (genesis.stateRootHash + lightSyncState) are
         // what smoldot loads. Published artifacts have empty `bootNodes`;
         // inject current multiaddrs into runtime copies.
@@ -355,7 +355,10 @@ fn write_spec_with_bootnodes(
     Ok(())
 }
 
-fn extract_emitted_specs(
+/// Returns the relay & parachain chain-spec files zombienet emits under
+/// `network.base_dir()` after spawn. Both already include the bootnodes —
+/// no patching required.
+pub fn spawned_chain_spec_paths(
     network: &Network<LocalFileSystem>,
 ) -> Result<(PathBuf, PathBuf), anyhow::Error> {
     let zombienet_base = PathBuf::from(
@@ -369,6 +372,11 @@ fn extract_emitted_specs(
         .ok_or_else(|| anyhow!("parachain {PARA_ID} not found"))?;
     let para_spec_name = parachain.chain_id().unwrap_or(parachain.unique_id());
     let para_spec = zombienet_base.join(format!("{para_spec_name}.json"));
+    log::info!(
+        "Resolved chain-spec paths: relay={}, para={}",
+        relay_spec.display(),
+        para_spec.display()
+    );
     Ok((relay_spec, para_spec))
 }
 

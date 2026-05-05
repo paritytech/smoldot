@@ -163,34 +163,6 @@ pub async fn spawn_network(
     Ok(network)
 }
 
-/// Returns the chain-spec files zombienet emits for the relay chain and the
-/// statement-store parachain. Both already include the bootnodes — no patching
-/// required. Paths live under `network.base_dir()`.
-pub fn spawned_chain_spec_paths(
-    network: &Network<LocalFileSystem>,
-) -> Result<(PathBuf, PathBuf), anyhow::Error> {
-    let base_dir = PathBuf::from(
-        network
-            .base_dir()
-            .ok_or_else(|| anyhow!("network has no base_dir"))?,
-    );
-
-    let relay_chain = network.relaychain().chain();
-    let relay_path = base_dir.join(format!("{relay_chain}.json"));
-
-    let para = network
-        .parachain(PARA_ID)
-        .ok_or_else(|| anyhow!("parachain {PARA_ID} not found"))?;
-    let para_path = base_dir.join(format!("{}.json", para.unique_id()));
-
-    info!(
-        "Resolved chain-spec paths: relay={}, para={}",
-        relay_path.display(),
-        para_path.display()
-    );
-    Ok((relay_path, para_path))
-}
-
 /// Returns a deterministic Ed25519 keypair (seed, public key) for testing.
 pub fn test_keypair() -> ([u8; 32], [u8; 32]) {
     let seed = [1u8; 32];
