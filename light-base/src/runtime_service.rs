@@ -1687,6 +1687,23 @@ async fn run_background<TPlat: PlatformRef>(
                     0 | 1
                 ));
 
+                // Inject a synthetic `Finalized` for the current finalized block so parachain
+                // service, which waits for `Notification::Finalized`, receives such block
+                // immediately.
+                let has_non_finalized_best = non_finalized_blocks_ancestry_order
+                    .iter()
+                    .any(|b| b.is_new_best);
+                let _ = tx.try_send(Notification::Finalized {
+                    hash: finalized_block.hash,
+                    // Do not update best if is already available (eg. Warm start)
+                    best_block_hash_if_changed: if has_non_finalized_best {
+                        None
+                    } else {
+                        Some(finalized_block.hash)
+                    },
+                    pruned_blocks: Vec::new(),
+                });
+
                 all_blocks_subscriptions.insert(
                     subscription_id,
                     (tx, pending_subscription.max_pinned_blocks.get() - 1),
