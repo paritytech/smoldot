@@ -75,7 +75,7 @@ async fn smoke_generate_snapshots() -> Result<(), anyhow::Error> {
     // Workaround: zombienet caches `with_db_snapshot` by sha256(path) and races
     // when two sibling nodes share the same source path (TOCTOU between
     // `exists()` and the copy). Pre-stage per-node copies with distinct
-    // filenames so each gets its own cache slot.
+    // filenames so each gets its own copy.
     let staged = stage_per_node_snapshots(
         &args.out,
         args.relay_db_snapshot.as_deref(),
@@ -508,10 +508,10 @@ impl Args {
             .map(PathBuf::from)
             .map_err(|_| anyhow!("SMOKE_SNAPSHOT_OUT is required (output directory)"))?;
 
-        let target_finalized = parse_env_u32("SMOKE_SNAPSHOT_TARGET_FINALIZED")?
-            .unwrap_or(DEFAULT_TARGET_FINALIZED);
-        let spec_at_finalized = parse_env_u32("SMOKE_SNAPSHOT_SPEC_AT_FINALIZED")?
-            .unwrap_or(target_finalized / 2);
+        let target_finalized =
+            parse_env_u32("SMOKE_SNAPSHOT_TARGET_FINALIZED")?.unwrap_or(DEFAULT_TARGET_FINALIZED);
+        let spec_at_finalized =
+            parse_env_u32("SMOKE_SNAPSHOT_SPEC_AT_FINALIZED")?.unwrap_or(target_finalized / 2);
         if spec_at_finalized > target_finalized {
             return Err(anyhow!(
                 "SMOKE_SNAPSHOT_SPEC_AT_FINALIZED (#{spec_at_finalized}) must be ≤ \
@@ -545,9 +545,11 @@ impl Args {
 
 fn parse_env_u32(key: &str) -> Result<Option<u32>, anyhow::Error> {
     match std::env::var(key) {
-        Ok(v) => Ok(Some(v.parse().map_err(|e| {
-            anyhow!("{key} must be a positive integer: {e}")
-        })?)),
+        Ok(v) => {
+            Ok(Some(v.parse().map_err(|e| {
+                anyhow!("{key} must be a positive integer: {e}")
+            })?))
+        }
         Err(_) => Ok(None),
     }
 }

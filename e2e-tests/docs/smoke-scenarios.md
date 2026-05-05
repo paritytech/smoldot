@@ -49,11 +49,14 @@ Steps (from `e2e-tests/`):
 
    ```bash
    # from genesis:
+   ZOMBIE_PROVIDER=native \
    SMOKE_SNAPSHOT_OUT=/tmp/smoldot-snap-v2 \
-   SMOKE_SNAPSHOT_TARGET_FINALIZED=2000 \
+   SMOKE_SNAPSHOT_TARGET_FINALIZED=2500 \
+   SMOKE_SNAPSHOT_SPEC_AT_FINALIZED=1250 \
    cargo test --release --test smoke_generate_snapshots -- --ignored --nocapture
 
    # or resume:
+   ZOMBIE_PROVIDER=native \
    SMOKE_SNAPSHOT_OUT=/tmp/smoldot-snap-v2 \
    SMOKE_SNAPSHOT_TARGET_FINALIZED=2000 \
    SMOKE_SNAPSHOT_SPEC_AT_FINALIZED=1525 \
@@ -62,7 +65,7 @@ Steps (from `e2e-tests/`):
    cargo test --release --test smoke_generate_snapshots -- --ignored --nocapture
    ```
 
-   Required: `ZOMBIE_PROVIDER=native`, polkadot/polkadot-parachain on `PATH`. The module-level docstring in `tests/generate_snapshots.rs` lists every env var.
+   Required: `ZOMBIE_PROVIDER=native`, polkadot/polkadot-parachain on `PATH`. The module-level docstring in `tests/smoke_generate_snapshots.rs` lists every env var.
 
    It produces `bundle.tar.gz` under `SMOKE_SNAPSHOT_OUT` and prints the SHA256 in the manifest at the end.
 
