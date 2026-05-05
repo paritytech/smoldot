@@ -370,8 +370,10 @@ pub fn spawned_chain_spec_paths(
     let parachain = network
         .parachain(PARA_ID)
         .ok_or_else(|| anyhow!("parachain {PARA_ID} not found"))?;
-    let para_spec_name = parachain.chain_id().unwrap_or(parachain.unique_id());
-    let para_spec = zombienet_base.join(format!("{para_spec_name}.json"));
+    // unique_id is what zombienet uses to name the emitted spec file. The
+    // spec's own `id` field can differ (e.g. the statement-store fixture
+    // sets `id = "people-westend-1004"`), so don't rely on chain_id().
+    let para_spec = zombienet_base.join(format!("{}.json", parachain.unique_id()));
     log::info!(
         "Resolved chain-spec paths: relay={}, para={}",
         relay_spec.display(),
