@@ -526,6 +526,16 @@ define_methods! {
 
     /// Request a data chunk by its CID from one of the connected peers that have it.
     bitswap_v1_get(cid: String) -> HexString,
+    /// Request multiple data chunks by CID in a single call.
+    /// Returns one `[cid, BlockResult]` tuple per input CID, in input order.
+    bitswap_v1_getMany(cids: Vec<String>) -> Vec<BitswapBlockResultEntry>,
+    /// Subscribe to a stream of data chunks. Each input CID produces exactly one
+    /// `bitswap_v1_streamEvent` notification, emitted as soon as that CID resolves
+    /// (in arrival order, not input order).
+    bitswap_v1_stream(cids: Vec<String>) -> Cow<'a, str>,
+    /// Cancel a `bitswap_v1_stream` subscription. No-op if the subscription does
+    /// not exist or has already completed.
+    bitswap_v1_unstream(subscription: Cow<'a, str>) -> (),
 
     // These functions are a custom addition in smoldot. As of the writing of this comment, there
     // is no plan to standardize them. See <https://github.com/paritytech/smoldot/issues/2245> and
@@ -549,6 +559,7 @@ define_methods! {
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_v1_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
     transactionWatch_v1_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
+    bitswap_v1_streamEvent(subscription: Cow<'a, str>, result: BitswapBlockResultEntry) -> (),
 
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
     // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
@@ -1304,6 +1315,35 @@ impl serde::Serialize for HexString {
     {
         self.to_string().serialize(serializer)
     }
+}
+
+/// Per-CID outcome returned by `bitswap_v1_getMany` and `bitswap_v1_streamEvent`.
+///
+/// Serializes to a JSON 2-element array `[cid, BlockResult]`. The `cid` is echoed verbatim from
+/// the input so callers can correlate without keeping the input array around.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BitswapBlockResultEntry(pub String, pub BitswapBlockResult);
+
+/// Per-CID outcome carried inside [`BitswapBlockResultEntry`].
+///
+/// On success, a `0x`-prefixed hex string carrying the chunk data (same encoding as the return
+/// value of `bitswap_v1_get`). On failure, a JSON-RPC error code and human-readable diagnostic
+/// message — the `code` carries the same retry categories as the top-level error of
+/// `bitswap_v1_get`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum BitswapBlockResult {
+    Ok(HexString),
+    Err(BitswapBlockError),
+}
+
+/// Per-CID error embedded inside [`BitswapBlockResult::Err`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BitswapBlockError {
+    /// Error code identifying the retry category. See `bitswap_v1_get` error categories.
+    pub code: i32,
+    /// Human-readable diagnostic message. Not stable for programmatic dispatch.
+    pub message: String,
 }
 
 impl serde::Serialize for RpcMethods {

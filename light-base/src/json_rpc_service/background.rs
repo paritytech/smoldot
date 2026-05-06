@@ -179,6 +179,12 @@ struct Background<TPlat: PlatformRef> {
     /// unsubscribes.
     transactions_subscriptions: hashbrown::HashMap<String, TransactionWatch, fnv::FnvBuildHasher>,
 
+    /// Active `bitswap_v1_stream` subscriptions, keyed by subscription ID. Holds the
+    /// [`bitswap_service::BitswapStreamHandle`] alive — dropping the entry (via
+    /// `bitswap_v1_unstream` or task shutdown) drops the embedded cancel guard, which sends a
+    /// Bitswap Cancel wantlist to peers we contacted on this subscription's behalf.
+    bitswap_subscriptions: hashbrown::HashMap<String, BitswapSubscription, fnv::FnvBuildHasher>,
+
     /// List of all active `state_subscribeStorage` subscriptions, indexed by the subscription ID.
     /// Values are the list of keys requested by this subscription.
     legacy_api_storage_subscriptions: BTreeSet<(Arc<str>, Vec<u8>)>,
@@ -512,6 +518,28 @@ enum Event<TPlat: PlatformRef> {
         request_id_json: String,
         result: Result<Vec<u8>, bitswap_service::BitswapGetError>,
     },
+    BitswapGetManyResult {
+        request_id_json: String,
+        result: Result<
+            Vec<(String, bitswap_service::BlockResult)>,
+            bitswap_service::BitswapGetError,
+        >,
+    },
+    /// One iteration of the `bitswap_v1_stream` events pump. `event` is `None` if the events
+    /// channel closed (no more notifications). The receiver is shipped along so the main loop
+    /// can re-arm the next pump iteration.
+    BitswapStreamEvent {
+        subscription_id: String,
+        event: Option<(String, bitswap_service::BlockResult)>,
+        events_rx: async_channel::Receiver<(String, bitswap_service::BlockResult)>,
+    },
+}
+
+struct BitswapSubscription {
+    /// Holding the handle keeps the underlying batch alive on the bitswap service. When this
+    /// struct is dropped (explicit unsubscribe or whole-task shutdown), the inner
+    /// [`bitswap_service::BatchCancelGuard`] drops too, sending `CancelBatch`.
+    _handle: bitswap_service::BitswapStreamHandle,
 }
 
 struct TransactionWatch {
@@ -588,6 +616,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
         ),
         transactions_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
             2,
+            Default::default(),
+        ),
+        bitswap_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+            0,
             Default::default(),
         ),
         chain_head_follow_subscriptions: hashbrown::HashMap::with_hasher(Default::default()),
@@ -1007,7 +1039,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
                     | methods::MethodCall::sudo_network_unstable_unwatch { .. }
                     | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
-                    | methods::MethodCall::bitswap_v1_get { .. } => {}
+                    | methods::MethodCall::bitswap_v1_get { .. }
+                    | methods::MethodCall::bitswap_v1_getMany { .. }
+                    | methods::MethodCall::bitswap_v1_stream { .. }
+                    | methods::MethodCall::bitswap_v1_unstream { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -1152,6 +1187,100 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 }
                             })
                         });
+                    }
+
+                    methods::MethodCall::bitswap_v1_getMany { cids } => {
+                        log!(
+                            &me.platform,
+                            Debug,
+                            &me.log_target,
+                            format!("Bitswap getMany request: {} cids", cids.len())
+                        );
+
+                        me.background_tasks.push({
+                            let bitswap_service = me.bitswap_service.clone();
+                            let request_id_json = request_id_json.to_owned();
+
+                            Box::pin(async move {
+                                let result = bitswap_service.bitswap_get_many(cids).await;
+
+                                Event::BitswapGetManyResult {
+                                    request_id_json,
+                                    result,
+                                }
+                            })
+                        });
+                    }
+
+                    methods::MethodCall::bitswap_v1_stream { cids } => {
+                        log!(
+                            &me.platform,
+                            Debug,
+                            &me.log_target,
+                            format!("Bitswap stream subscription: {} cids", cids.len())
+                        );
+
+                        match me.bitswap_service.bitswap_stream(cids).await {
+                            Ok(handle) => {
+                                let subscription_id = {
+                                    let mut sub_id = [0u8; 32];
+                                    me.randomness.fill_bytes(&mut sub_id);
+                                    bs58::encode(sub_id).into_string()
+                                };
+
+                                let events_rx = handle.events_rx.clone();
+                                let _prev = me.bitswap_subscriptions.insert(
+                                    subscription_id.clone(),
+                                    BitswapSubscription { _handle: handle },
+                                );
+                                debug_assert!(_prev.is_none());
+
+                                let _ = me
+                                    .responses_tx
+                                    .send(
+                                        methods::Response::bitswap_v1_stream(Cow::Borrowed(
+                                            &subscription_id,
+                                        ))
+                                        .to_json_response(request_id_json),
+                                    )
+                                    .await;
+
+                                // Push the events pump. The pump yields one event per loop and
+                                // re-arms itself; on channel close it ends the chain by
+                                // delivering `event = None`.
+                                me.background_tasks.push(Box::pin(async move {
+                                    let event = events_rx.recv().await.ok();
+                                    Event::BitswapStreamEvent {
+                                        subscription_id,
+                                        event,
+                                        events_rx,
+                                    }
+                                }));
+                            }
+                            Err(error) => {
+                                let _ = me
+                                    .responses_tx
+                                    .send(error.to_json_rpc_error(request_id_json))
+                                    .await;
+                            }
+                        }
+                    }
+
+                    methods::MethodCall::bitswap_v1_unstream { subscription } => {
+                        // Removing the entry drops the embedded `BitswapStreamHandle`, which
+                        // drops the cancel guard, which sends `ToBackground::CancelBatch` to the
+                        // bitswap service. The service then evicts pending slots and emits a
+                        // Bitswap Cancel wantlist to peers we'd contacted.
+                        me.bitswap_subscriptions.remove(&*subscription);
+                        // Per spec: success even if the subscription is unknown or already
+                        // completed.
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::bitswap_v1_unstream(())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
 
                     methods::MethodCall::chain_getBlock { hash } => {
@@ -5958,6 +6087,92 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     Err(error) => error.to_json_rpc_error(&request_id_json),
                 };
                 let _ = me.responses_tx.send(response).await;
+            }
+
+            WakeUpReason::Event(Event::BitswapGetManyResult {
+                request_id_json,
+                result,
+            }) => {
+                let response = match result {
+                    Ok(entries) => {
+                        let result_array: Vec<methods::BitswapBlockResultEntry> = entries
+                            .into_iter()
+                            .map(|(cid, br)| {
+                                let block_result = match br {
+                                    bitswap_service::BlockResult::Ok(bytes) => {
+                                        methods::BitswapBlockResult::Ok(methods::HexString(bytes))
+                                    }
+                                    bitswap_service::BlockResult::Err(err) => {
+                                        let (code, message) = err.to_block_result_err();
+                                        methods::BitswapBlockResult::Err(
+                                            methods::BitswapBlockError { code, message },
+                                        )
+                                    }
+                                };
+                                methods::BitswapBlockResultEntry(cid, block_result)
+                            })
+                            .collect();
+                        methods::Response::bitswap_v1_getMany(result_array)
+                            .to_json_response(&request_id_json)
+                    }
+                    Err(error) => error.to_json_rpc_error(&request_id_json),
+                };
+                let _ = me.responses_tx.send(response).await;
+            }
+
+            WakeUpReason::Event(Event::BitswapStreamEvent {
+                subscription_id,
+                event,
+                events_rx,
+            }) => {
+                // If the JSON-RPC client unsubscribed (or this is a stale event), the
+                // subscription will not be in the map and we must not emit notifications for it.
+                if !me.bitswap_subscriptions.contains_key(&subscription_id) {
+                    continue;
+                }
+
+                match event {
+                    Some((cid, br)) => {
+                        let block_result = match br {
+                            bitswap_service::BlockResult::Ok(bytes) => {
+                                methods::BitswapBlockResult::Ok(methods::HexString(bytes))
+                            }
+                            bitswap_service::BlockResult::Err(err) => {
+                                let (code, message) = err.to_block_result_err();
+                                methods::BitswapBlockResult::Err(methods::BitswapBlockError {
+                                    code,
+                                    message,
+                                })
+                            }
+                        };
+                        let entry = methods::BitswapBlockResultEntry(cid, block_result);
+                        let notification = methods::ServerToClient::bitswap_v1_streamEvent {
+                            subscription: Cow::Borrowed(&subscription_id),
+                            result: entry,
+                        }
+                        .to_json_request_object_parameters(None);
+
+                        let _ = me.responses_tx.send(notification).await;
+
+                        // Re-arm the pump for the next event.
+                        me.background_tasks.push(Box::pin(async move {
+                            let next = events_rx.recv().await.ok();
+                            Event::BitswapStreamEvent {
+                                subscription_id,
+                                event: next,
+                                events_rx,
+                            }
+                        }));
+                    }
+                    None => {
+                        // Channel closed — the bitswap service has emitted exactly one event per
+                        // input CID and dropped its sender. Per spec, the JSON-RPC subscription
+                        // remains addressable until the client calls `bitswap_v1_unstream`; we
+                        // can drop our internal entry early since `unstream` is a no-op for an
+                        // unknown subscription.
+                        me.bitswap_subscriptions.remove(&subscription_id);
+                    }
+                }
             }
 
             WakeUpReason::NotifyFinalizedHeads => {

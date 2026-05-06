@@ -71,11 +71,19 @@ use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
     json_rpc::parse,
     libp2p::cid::{self, Cid, CidPrefix},
-    network::codec::{Block, BlockPresence, BlockPresenceType, WantType, build_bitswap_message},
+    network::codec::{
+        Block, BlockPresence, BlockPresenceType, WantType, build_bitswap_cancel_message,
+        build_bitswap_message,
+    },
 };
 
 // TODO: how many parallel requests to expect?
 const PARALLEL_REQUESTS: usize = 50; // 100 MiB of 2 MiB chunks.
+
+/// Maximum number of CIDs accepted in a single `bitswap_v1_getMany` or `bitswap_v1_stream` call.
+/// Mirrors the limit used by the polkadot-sdk full-node implementation. The spec requires
+/// implementations to accept at least 16 CIDs.
+pub const MAX_CIDS_PER_REQUEST: usize = 64;
 
 /// Configuration for a [`BitswapService`].
 pub struct Config<TPlat: PlatformRef> {
@@ -118,6 +126,7 @@ impl BitswapService {
             pending_block_requests: FuturesUnordered::new(),
             platform: platform.clone(),
             next_request_id_inner: 0,
+            next_batch_id_inner: 0,
             randomness: rand_chacha::ChaCha20Rng::from_seed({
                 let mut seed = [0; 32];
                 platform.fill_random_bytes(&mut seed);
@@ -135,6 +144,10 @@ impl BitswapService {
                     platform.fill_random_bytes(&mut seed);
                     seed
                 }),
+            ),
+            batches: hashbrown::HashMap::with_capacity_and_hasher(
+                PARALLEL_REQUESTS,
+                fnv::FnvBuildHasher::default(),
             ),
         }));
 
@@ -163,6 +176,124 @@ impl BitswapService {
 
         result_rx.await.unwrap()
     }
+
+    /// Request multiple Bitswap blocks in a single batched want-list. Resolves once every CID has
+    /// been decided (Ok block, NotFound, or Timeout). The returned `Vec` echoes input CIDs in input
+    /// order with a [`BlockResult`] per slot.
+    ///
+    /// Top-level errors (`-32602 InvalidParams`): empty input is allowed (returns empty vec);
+    /// duplicate CIDs or batch size > [`MAX_CIDS_PER_REQUEST`] are rejected before any wire I/O.
+    pub async fn bitswap_get_many(
+        &self,
+        cids: Vec<String>,
+    ) -> Result<Vec<(String, BlockResult)>, BitswapGetError> {
+        let entries = parse_and_dedup(cids)?;
+
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let (result_tx, result_rx) = oneshot::channel();
+        let (batch_id_tx, batch_id_rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackground::BitswapBatch {
+                entries,
+                mode: BatchMode::GetMany { result_tx },
+                batch_id_tx,
+            })
+            .await
+            .unwrap();
+
+        let batch_id = batch_id_rx.await.unwrap();
+
+        // RAII guard: if the caller's future is dropped before result_rx resolves, the guard
+        // drops and sends `CancelBatch` to the service so peers receive a Cancel wantlist.
+        let _cancel_guard = BatchCancelGuard {
+            batch_id,
+            messages_tx: self.messages_tx.clone(),
+        };
+
+        Ok(result_rx.await.unwrap())
+    }
+
+    /// Subscribe to a stream of Bitswap blocks. Returns immediately with a [`BitswapStreamHandle`]
+    /// whose `events_rx` yields one `(cid_string, BlockResult)` event per input CID, in arrival
+    /// order (the order in which each CID resolves), not input order.
+    ///
+    /// Dropping the returned handle (explicit unsubscribe or client disconnect) cancels remaining
+    /// work and emits a Bitswap Cancel wantlist to peers we previously contacted.
+    pub async fn bitswap_stream(
+        &self,
+        cids: Vec<String>,
+    ) -> Result<BitswapStreamHandle, BitswapGetError> {
+        let entries = parse_and_dedup(cids)?;
+
+        // Channel size matches typical batch sizes; events_rx is drained promptly by the JSON-RPC
+        // layer so back-pressure here is unlikely.
+        let (events_tx, events_rx) = async_channel::bounded(MAX_CIDS_PER_REQUEST);
+        let (batch_id_tx, batch_id_rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackground::BitswapBatch {
+                entries,
+                mode: BatchMode::Stream { events_tx },
+                batch_id_tx,
+            })
+            .await
+            .unwrap();
+
+        let batch_id = batch_id_rx.await.unwrap();
+
+        Ok(BitswapStreamHandle {
+            events_rx,
+            _cancel_guard: BatchCancelGuard {
+                batch_id,
+                messages_tx: self.messages_tx.clone(),
+            },
+        })
+    }
+}
+
+/// Per-CID outcome of [`BitswapService::bitswap_get_many`] / [`BitswapService::bitswap_stream`].
+#[derive(Debug, Clone)]
+pub enum BlockResult {
+    /// Block bytes received from a peer.
+    Ok(Vec<u8>),
+    /// Per-CID failure. The variant carries the same retry semantics as the top-level error of
+    /// [`BitswapService::bitswap_get`].
+    Err(BitswapGetError),
+}
+
+/// Active subscription handle for [`BitswapService::bitswap_stream`].
+///
+/// `events_rx` yields one event per input CID in arrival order. After all events have been
+/// emitted, the channel closes naturally. Dropping the handle before then signals the service to
+/// abort remaining work and emit a Bitswap Cancel wantlist for in-flight CIDs.
+pub struct BitswapStreamHandle {
+    /// Receiver of per-CID events. `(cid_string, BlockResult)` per spec.
+    pub events_rx: async_channel::Receiver<(String, BlockResult)>,
+    _cancel_guard: BatchCancelGuard,
+}
+
+/// Internal RAII guard that fires `ToBackground::CancelBatch` on drop. Held by both
+/// [`BitswapStreamHandle`] (covers explicit unsubscribe and client disconnect) and the inner
+/// future of [`BitswapService::bitswap_get_many`] (covers caller cancellation mid-await).
+struct BatchCancelGuard {
+    batch_id: BatchId,
+    messages_tx: async_channel::Sender<ToBackground>,
+}
+
+impl Drop for BatchCancelGuard {
+    fn drop(&mut self) {
+        // Best-effort. If the service's channel is closed (service shut down already) or full
+        // (extremely unlikely — bounded(32)), we have no recourse since Drop can't await.
+        // A no-op CancelBatch on an already-finished batch is harmless: the service will look up
+        // the batch_id, find nothing, and ignore the message.
+        let _ = self.messages_tx.try_send(ToBackground::CancelBatch {
+            batch_id: self.batch_id,
+        });
+    }
 }
 
 /// Error by [`BitswapService::bitswap_get`].
@@ -186,6 +317,18 @@ pub enum BitswapGetError {
     /// Request timeout.
     #[display("Request timeout.")]
     Timeout,
+    /// Too many CIDs in a single batch request.
+    #[display("Too many CIDs in batch request: max {max}, got {got}.")]
+    TooManyCids {
+        /// Configured limit.
+        max: usize,
+        /// Number of CIDs in the rejected request.
+        got: usize,
+    },
+    /// Same CID appears more than once in the input. Two-stage detection: literal-string match,
+    /// or two distinct strings decoding to the same content digest.
+    #[display("Input contains duplicate CIDs.")]
+    DuplicateCids,
 }
 
 /// JSON-RPC error categories for `bitswap_v1_get` method.
@@ -226,6 +369,8 @@ impl BitswapGetError {
                 ("QueueFull", Some(BitswapJsonRpcError::FailRetryBackoff))
             }
             BitswapGetError::NoPeers => ("NoPeers", Some(BitswapJsonRpcError::FailRetryBackoff)),
+            BitswapGetError::TooManyCids { .. } => ("TooManyCids", None),
+            BitswapGetError::DuplicateCids => ("DuplicateCids", None),
         };
 
         let data = format!("{{\"variant\":\"{variant}\"}}");
@@ -236,6 +381,26 @@ impl BitswapGetError {
         };
 
         parse::build_error_response(request_id_json, error_response, Some(&data))
+    }
+
+    /// Returns the JSON-RPC `(code, message)` pair to embed inside a per-CID `BlockResult::Err`
+    /// in `bitswap_v1_getMany` / `bitswap_v1_streamEvent`. The code uses the same four categories
+    /// as the top-level error of `bitswap_v1_get`, so callers can reuse retry logic.
+    pub fn to_block_result_err(&self) -> (i32, String) {
+        const INVALID_PARAMS: i32 = -32602;
+        let code = match self {
+            BitswapGetError::InvalidCid(_)
+            | BitswapGetError::TooManyCids { .. }
+            | BitswapGetError::DuplicateCids => INVALID_PARAMS,
+            BitswapGetError::NotFound => BitswapJsonRpcError::Fail as i32,
+            BitswapGetError::BlockRequestFailed | BitswapGetError::Timeout => {
+                BitswapJsonRpcError::FailRetry as i32
+            }
+            BitswapGetError::QueueFull | BitswapGetError::NoPeers => {
+                BitswapJsonRpcError::FailRetryBackoff as i32
+            }
+        };
+        (code, self.to_string())
     }
 }
 
@@ -248,10 +413,77 @@ impl From<SendBitswapMessageError> for BitswapGetError {
     }
 }
 
+/// Validates and de-duplicates the input CIDs of `bitswap_v1_getMany` / `bitswap_v1_stream`.
+///
+/// On success returns one entry per input CID, in input order, preserving the original string and
+/// the parse result. Caller-side per-CID `Err(InvalidCid)` reporting is left to the JSON-RPC layer
+/// since the spec emits invalid CIDs as per-CID errors rather than aborting the whole call.
+///
+/// Failure cases (returned as `Err(_)` so the caller emits a top-level JSON-RPC error):
+/// * `TooManyCids` if the input exceeds [`MAX_CIDS_PER_REQUEST`].
+/// * `DuplicateCids` if two inputs are literally-equal strings, **or** if two valid-but-different
+///   strings decode to the same [`Cid`] (digest collision).
+pub fn parse_and_dedup(
+    cids: Vec<String>,
+) -> Result<Vec<(String, Result<Cid, cid::ParseError>)>, BitswapGetError> {
+    if cids.len() > MAX_CIDS_PER_REQUEST {
+        return Err(BitswapGetError::TooManyCids {
+            max: MAX_CIDS_PER_REQUEST,
+            got: cids.len(),
+        });
+    }
+
+    let mut seen_strings: hashbrown::HashSet<String> =
+        hashbrown::HashSet::with_capacity(cids.len());
+    let mut seen_cids: hashbrown::HashSet<Cid> = hashbrown::HashSet::with_capacity(cids.len());
+    let mut out = Vec::with_capacity(cids.len());
+
+    for cid_str in cids {
+        if !seen_strings.insert(cid_str.clone()) {
+            return Err(BitswapGetError::DuplicateCids);
+        }
+
+        let parsed = Cid::from_str(&cid_str);
+        if let Ok(c) = &parsed {
+            if !seen_cids.insert(c.clone()) {
+                return Err(BitswapGetError::DuplicateCids);
+            }
+        }
+
+        out.push((cid_str, parsed));
+    }
+
+    Ok(out)
+}
+
 enum ToBackground {
     BitswapBlock {
         cid: Cid,
         result_tx: oneshot::Sender<Result<Vec<u8>, BitswapGetError>>,
+    },
+    /// Submit a batched request. The service allocates a [`BatchId`], reports it back via
+    /// `batch_id_tx`, then issues a single Have broadcast covering all valid input CIDs.
+    BitswapBatch {
+        /// Validated and de-duplicated entries from [`parse_and_dedup`]. Per-slot `Err` carries
+        /// an `InvalidCid` ParseError that gets surfaced as a per-CID error event.
+        entries: Vec<(String, Result<Cid, cid::ParseError>)>,
+        mode: BatchMode,
+        batch_id_tx: oneshot::Sender<BatchId>,
+    },
+    /// Cancel an in-flight batch. Idempotent: if the batch already finished, this is a no-op.
+    CancelBatch {
+        batch_id: BatchId,
+    },
+}
+
+/// Mode of a batched request. `GetMany` collects all outcomes and replies once; `Stream` pushes
+/// each outcome to `events_tx` as it becomes available.
+enum BatchMode {
+    GetMany {
+        result_tx: oneshot::Sender<Vec<(String, BlockResult)>>,
+    },
+    Stream {
+        events_tx: async_channel::Sender<(String, BlockResult)>,
     },
 }
 
@@ -263,6 +495,9 @@ impl RequestId {
     const MAX: RequestId = RequestId(u64::MAX);
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct BatchId(u64);
+
 #[derive(Debug)]
 enum RequestStage {
     /// We are waiting for peers to respond to our "have" request. `HashSet<PeerId>` are the peers
@@ -272,19 +507,59 @@ enum RequestStage {
     Block,
 }
 
+/// Per-request output destination. A request resolves into either a single oneshot reply
+/// (for `bitswap_get`) or a slot of a `Batch` (for `bitswap_get_many` / `bitswap_stream`).
+#[derive(Debug)]
+enum SlotOutput {
+    Single(oneshot::Sender<Result<Vec<u8>, BitswapGetError>>),
+    Batch { batch_id: BatchId, slot_idx: usize },
+}
+
 #[derive(Debug)]
 struct Request<TPlat: PlatformRef> {
-    result_tx: oneshot::Sender<Result<Vec<u8>, BitswapGetError>>,
+    result_tx: SlotOutput,
     timeout: TPlat::Instant,
     stage: RequestStage,
     cid: Cid,
 }
 
-type HaveBroadcastResult = (
-    Result<Vec<PeerId>, SendBitswapMessageError>,
-    Cid,
-    oneshot::Sender<Result<Vec<u8>, BitswapGetError>>,
-);
+/// State for an in-flight batch. Allocated when `BitswapBatch` is received and removed once all
+/// slots have been resolved (or the batch is explicitly cancelled).
+struct Batch {
+    mode: BatchMode,
+    /// Per-slot CID strings, indexed by slot index. Echoed back in outcomes/events.
+    cid_strs: Vec<String>,
+    /// `Some(RequestId)` while a slot is in-flight; `None` once the slot has been resolved.
+    /// Invalid-CID slots start as `None` (resolved synchronously when the batch is created).
+    slots: Vec<Option<RequestId>>,
+    /// Per-slot collected outcomes. For `BatchMode::GetMany` this fills in until `pending_count`
+    /// reaches zero, then is drained into the response. For `BatchMode::Stream` outcomes go
+    /// directly to `events_tx` and these slots stay `None` (kept allocated to mirror `cid_strs`
+    /// for diagnostic readability — checked by `pending_count`).
+    outcomes: Vec<Option<BlockResult>>,
+    /// Peers we sent this batch's Have broadcast to. Used to address Cancel wantlist on
+    /// `CancelBatch`. Empty until `HaveBroadcastResult` arrives successfully.
+    peers_for_cancel: Vec<PeerId>,
+    /// Number of slots still pending resolution. When this reaches zero, finalize the batch.
+    pending_count: usize,
+}
+
+/// Outcome of an issued Have broadcast. Carries enough context to either finalize a single
+/// request or register N sub-requests for a batch.
+enum HaveContext {
+    Single {
+        cid: Cid,
+        result_tx: oneshot::Sender<Result<Vec<u8>, BitswapGetError>>,
+    },
+    Batch {
+        batch_id: BatchId,
+        /// Valid (slot_idx, cid) pairs. Invalid-CID slots are pre-resolved before the broadcast
+        /// is queued and don't appear here.
+        cids: Vec<(usize, Cid)>,
+    },
+}
+
+type HaveBroadcastResult = (Result<Vec<PeerId>, SendBitswapMessageError>, HaveContext);
 
 struct BackgroundTask<TPlat: PlatformRef> {
     /// Log target.
@@ -308,6 +583,8 @@ struct BackgroundTask<TPlat: PlatformRef> {
     platform: TPlat,
     /// Next request ID to use.
     next_request_id_inner: u64,
+    /// Next batch ID to use.
+    next_batch_id_inner: u64,
     /// RNG.
     randomness: rand_chacha::ChaCha20Rng,
 
@@ -323,6 +600,8 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// the platform implementation of `now` is monothonic (true for
     /// [`crate::platform::DefaultPlatform`]).
     requests_by_cid: hashbrown::HashMap<Cid, VecDeque<RequestId>, util::SipHasherBuild>,
+    /// In-flight batches. Each entry corresponds to a `bitswap_get_many` / `bitswap_stream` call.
+    batches: hashbrown::HashMap<BatchId, Batch, fnv::FnvBuildHasher>,
 }
 
 impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
@@ -331,6 +610,172 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
         self.next_request_id_inner += 1;
 
         request_id
+    }
+
+    fn allocate_batch_id(&mut self) -> BatchId {
+        let batch_id = BatchId(self.next_batch_id_inner);
+        self.next_batch_id_inner += 1;
+        batch_id
+    }
+
+    /// Final disposition of a single request slot. Routes the resolution either to the original
+    /// `bitswap_get` caller (`Single`) or to the owning batch (`Batch`).
+    fn deliver_slot(&mut self, slot_output: SlotOutput, result: Result<Vec<u8>, BitswapGetError>) {
+        match slot_output {
+            SlotOutput::Single(tx) => {
+                let _ = tx.send(result);
+            }
+            SlotOutput::Batch { batch_id, slot_idx } => {
+                self.deliver_batch_slot(batch_id, slot_idx, result);
+            }
+        }
+    }
+
+    /// Deliver one resolved slot to its owning batch and finalize the batch if all slots are now
+    /// resolved.
+    fn deliver_batch_slot(
+        &mut self,
+        batch_id: BatchId,
+        slot_idx: usize,
+        result: Result<Vec<u8>, BitswapGetError>,
+    ) {
+        let block_result = match result {
+            Ok(data) => BlockResult::Ok(data),
+            Err(e) => BlockResult::Err(e),
+        };
+
+        // Touch state in two passes so we can release the borrow before potentially calling
+        // `cancel_batch` (which also borrows `self.batches`).
+        let (cid_str, should_cancel, should_finalize) = {
+            let Some(batch) = self.batches.get_mut(&batch_id) else {
+                // The batch was already finalized or cancelled; the resolution is stale.
+                return;
+            };
+
+            // Mark this slot as no longer in-flight regardless of mode.
+            batch.slots[slot_idx] = None;
+            batch.pending_count = batch.pending_count.saturating_sub(1);
+
+            let cid_str = batch.cid_strs[slot_idx].clone();
+            let mut should_cancel = false;
+
+            match &mut batch.mode {
+                BatchMode::Stream { events_tx } => {
+                    match events_tx.try_send((cid_str.clone(), block_result)) {
+                        Ok(()) => {}
+                        Err(async_channel::TrySendError::Closed(_)) => {
+                            // Receiver dropped — JSON-RPC client disconnected or unsubscribed.
+                            // Cancel the rest of the batch and emit a Bitswap Cancel wantlist.
+                            should_cancel = true;
+                        }
+                        Err(async_channel::TrySendError::Full(_)) => {
+                            // Bounded channel saturated. With a `bounded(MAX_CIDS_PER_REQUEST)`
+                            // channel and a JSON-RPC pump that drains it eagerly this should be
+                            // unreachable in practice. Log and drop the event rather than
+                            // blocking the service.
+                            log!(
+                                &self.platform,
+                                Warn,
+                                &self.log_target,
+                                "stream events channel full, dropping per-CID event"
+                            );
+                        }
+                    }
+                }
+                BatchMode::GetMany { .. } => {
+                    batch.outcomes[slot_idx] = Some(block_result);
+                }
+            }
+
+            let should_finalize = !should_cancel && batch.pending_count == 0;
+            (cid_str, should_cancel, should_finalize)
+        };
+        let _ = cid_str;
+
+        if should_cancel {
+            self.cancel_batch(batch_id);
+        } else if should_finalize {
+            self.finalize_batch(batch_id);
+        }
+    }
+
+    /// Finalize a batch whose slots have all been resolved. Drains accumulated outcomes for
+    /// `GetMany` mode and closes the events channel for `Stream` mode.
+    fn finalize_batch(&mut self, batch_id: BatchId) {
+        let Some(batch) = self.batches.remove(&batch_id) else {
+            return;
+        };
+        debug_assert_eq!(batch.pending_count, 0);
+
+        match batch.mode {
+            BatchMode::GetMany { result_tx } => {
+                let mut out = Vec::with_capacity(batch.cid_strs.len());
+                for (cid_str, outcome) in batch.cid_strs.into_iter().zip(batch.outcomes.into_iter())
+                {
+                    out.push((
+                        cid_str,
+                        outcome.expect("pending_count == 0 implies all slots resolved; qed"),
+                    ));
+                }
+                let _ = result_tx.send(out);
+            }
+            BatchMode::Stream { events_tx } => {
+                // Dropping the sender closes the channel. The JSON-RPC pump task will see the
+                // channel close and end its loop after the last event has been delivered.
+                drop(events_tx);
+            }
+        }
+    }
+
+    /// Cancel a batch: tear down all its still-pending slots, then send a Bitswap Cancel wantlist
+    /// to every peer we contacted on its behalf. Idempotent.
+    fn cancel_batch(&mut self, batch_id: BatchId) {
+        let Some(batch) = self.batches.remove(&batch_id) else {
+            return;
+        };
+
+        // Walk pending slots, evict their `RequestId`s from the global tracking maps, and gather
+        // the CIDs to be cancelled on the wire.
+        let mut pending_cids: Vec<Cid> = Vec::new();
+        for slot in batch.slots.into_iter() {
+            let Some(request_id) = slot else { continue };
+            let Some(request) = self.requests.remove(&request_id) else {
+                continue;
+            };
+            let _ = self
+                .requests_by_timeout
+                .remove(&(request.timeout, request_id));
+
+            if let hashbrown::hash_map::Entry::Occupied(mut entry) =
+                self.requests_by_cid.entry(request.cid.clone())
+            {
+                entry.get_mut().retain(|id| *id != request_id);
+                if entry.get().is_empty() {
+                    entry.remove();
+                }
+            }
+
+            pending_cids.push(request.cid);
+        }
+
+        if pending_cids.is_empty() || batch.peers_for_cancel.is_empty() {
+            return;
+        }
+
+        // One Cancel wantlist message containing all pending CIDs, sent to every peer this
+        // batch's Have broadcast reached. Cancel for an unknown CID is harmless on the receiver
+        // side — the peer no-ops.
+        let message = build_bitswap_cancel_message(pending_cids.iter());
+
+        for peer in batch.peers_for_cancel {
+            let network_service = self.network_service.clone();
+            let msg = message.clone();
+            // Fire-and-forget. Cancel is best-effort and does not need to be awaited; if it
+            // fails the peer will eventually expire its want-list state on its own.
+            self.platform.spawn_task(self.log_target.clone().into(), async move {
+                let _ = network_service.send_bitswap_message(peer, msg).await;
+            });
+        }
     }
 }
 
@@ -441,55 +886,219 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // Network service can be back-pressuring, so we run this in the background.
                 task.pending_have_broadcast = Some(Box::pin(async move {
                     let result = network_service.broadcast_bitswap_message(message).await;
-                    (result, cid, result_tx)
+                    (result, HaveContext::Single { cid, result_tx })
                 }));
             }
-            WakeUpReason::HaveBroadcastResult((result, cid, result_tx)) => {
-                // We either succeeded or failed in broadcasting the "have" request.
+            WakeUpReason::Message(ToBackground::BitswapBatch {
+                entries,
+                mode,
+                batch_id_tx,
+            }) => {
+                debug_assert!(task.pending_have_broadcast.is_none());
 
-                let broadcast_to = match result {
-                    Ok(peers) => peers,
-                    Err(err) => {
-                        // The request is not tracked yet, so we just report the failure.
-                        let _ = result_tx.send(Err(err.into()));
+                // Allocate the batch up front and report the BatchId back so the caller's RAII
+                // cancel guard can address us if the call is dropped before resolution.
+                let batch_id = task.allocate_batch_id();
+                let _ = batch_id_tx.send(batch_id);
+
+                let total = entries.len();
+                let mut cid_strs: Vec<String> = Vec::with_capacity(total);
+                let mut slots: Vec<Option<RequestId>> = Vec::with_capacity(total);
+                let mut outcomes: Vec<Option<BlockResult>> = Vec::with_capacity(total);
+                // Slots whose CID parsed successfully — these will have their RequestId set
+                // after the Have broadcast lands. (slot_idx, cid).
+                let mut valid_cids: Vec<(usize, Cid)> = Vec::with_capacity(total);
+                // Slots whose CID failed to parse — pre-resolve as `InvalidCid` per spec.
+                // (slot_idx, cid_str, err).
+                let mut invalid_slots: Vec<(usize, String, BitswapGetError)> = Vec::new();
+
+                for (slot_idx, (cid_str, parsed)) in entries.into_iter().enumerate() {
+                    cid_strs.push(cid_str.clone());
+                    slots.push(None);
+                    outcomes.push(None);
+                    match parsed {
+                        Ok(c) => valid_cids.push((slot_idx, c)),
+                        Err(e) => {
+                            invalid_slots.push((slot_idx, cid_str, BitswapGetError::InvalidCid(e)));
+                        }
+                    }
+                }
+
+                let mut batch = Batch {
+                    mode,
+                    cid_strs,
+                    slots,
+                    outcomes,
+                    peers_for_cancel: Vec::new(),
+                    pending_count: total,
+                };
+
+                // Pre-resolve invalid-CID slots. For Stream we push events immediately; for
+                // GetMany we accumulate in `outcomes`.
+                for (slot_idx, cid_str, err) in invalid_slots {
+                    batch.pending_count -= 1;
+                    let block_result = BlockResult::Err(err);
+                    match &mut batch.mode {
+                        BatchMode::Stream { events_tx } => {
+                            let _ = events_tx.try_send((cid_str, block_result));
+                        }
+                        BatchMode::GetMany { .. } => {
+                            batch.outcomes[slot_idx] = Some(block_result);
+                        }
+                    }
+                }
+
+                // Insert the batch before the broadcast: if the caller drops mid-await and a
+                // CancelBatch arrives, it must find an entry to cancel.
+                task.batches.insert(batch_id, batch);
+
+                if valid_cids.is_empty() {
+                    // No wire I/O needed. If everything resolved (all-invalid case), finalize
+                    // immediately. If empty input slipped through somehow, also finalize.
+                    if task
+                        .batches
+                        .get(&batch_id)
+                        .map_or(true, |b| b.pending_count == 0)
+                    {
+                        task.finalize_batch(batch_id);
+                    }
+                    continue;
+                }
+
+                let message = build_bitswap_message(
+                    valid_cids.iter().map(|(_, c)| c),
+                    WantType::Have,
+                    true,
+                    false,
+                );
+                let network_service = task.network_service.clone();
+                task.pending_have_broadcast = Some(Box::pin(async move {
+                    let result = network_service.broadcast_bitswap_message(message).await;
+                    (
+                        result,
+                        HaveContext::Batch {
+                            batch_id,
+                            cids: valid_cids,
+                        },
+                    )
+                }));
+            }
+            WakeUpReason::Message(ToBackground::CancelBatch { batch_id }) => {
+                task.cancel_batch(batch_id);
+            }
+            WakeUpReason::HaveBroadcastResult((result, ctx)) => match ctx {
+                HaveContext::Single { cid, result_tx } => {
+                    let broadcast_to = match result {
+                        Ok(peers) => peers,
+                        Err(err) => {
+                            let _ = result_tx.send(Err(err.into()));
+                            continue;
+                        }
+                    };
+
+                    let request_id = task.allocate_request_id();
+                    let timeout = task.platform.now() + Duration::from_secs(10);
+
+                    let have_peers = {
+                        let mut have_peers = hashbrown::HashSet::with_capacity_and_hasher(
+                            broadcast_to.len(),
+                            util::SipHasherBuild::new({
+                                let mut seed = [0; 16];
+                                task.randomness.fill_bytes(&mut seed);
+                                seed
+                            }),
+                        );
+                        have_peers.extend(broadcast_to.into_iter());
+                        have_peers
+                    };
+
+                    task.requests.insert(
+                        request_id,
+                        Request {
+                            result_tx: SlotOutput::Single(result_tx),
+                            timeout: timeout.clone(),
+                            stage: RequestStage::Have(have_peers),
+                            cid: cid.clone(),
+                        },
+                    );
+                    task.requests_by_timeout.insert((timeout, request_id));
+                    task.requests_by_cid
+                        .entry(cid)
+                        .or_default()
+                        .push_back(request_id);
+                }
+                HaveContext::Batch { batch_id, cids } => {
+                    let broadcast_to = match result {
+                        Ok(peers) => peers,
+                        Err(err) => {
+                            // Whole-broadcast failure: every still-pending slot fails with the
+                            // same error. We resolve them via `deliver_batch_slot` so that
+                            // Stream events fire and GetMany finalizes at zero.
+                            let bsw_err: BitswapGetError = err.into();
+                            for (slot_idx, _) in cids {
+                                task.deliver_batch_slot(
+                                    batch_id,
+                                    slot_idx,
+                                    Err(bsw_err.clone()),
+                                );
+                            }
+                            continue;
+                        }
+                    };
+
+                    if let Some(batch) = task.batches.get_mut(&batch_id) {
+                        batch.peers_for_cancel = broadcast_to.clone();
+                    } else {
+                        // The batch was cancelled while we were broadcasting. Don't bother
+                        // registering per-CID requests; the cancel handler will have cleaned up
+                        // any state already, and we have nothing to track.
                         continue;
                     }
-                };
 
-                // Start tracking the request.
-                let request_id = task.allocate_request_id();
-                let timeout = task.platform.now() + Duration::from_secs(10); // TODO: 5? 20?
+                    // Register one Request per valid slot, sharing the same Have peer set.
+                    let timeout = task.platform.now() + Duration::from_secs(10);
+                    for (slot_idx, cid) in cids {
+                        let request_id = task.allocate_request_id();
+                        let have_peers = {
+                            let mut have_peers = hashbrown::HashSet::with_capacity_and_hasher(
+                                broadcast_to.len(),
+                                util::SipHasherBuild::new({
+                                    let mut seed = [0; 16];
+                                    task.randomness.fill_bytes(&mut seed);
+                                    seed
+                                }),
+                            );
+                            have_peers.extend(broadcast_to.iter().cloned());
+                            have_peers
+                        };
 
-                let have_peers = {
-                    let mut have_peers = hashbrown::HashSet::with_capacity_and_hasher(
-                        broadcast_to.len(),
-                        util::SipHasherBuild::new({
-                            let mut seed = [0; 16];
-                            task.randomness.fill_bytes(&mut seed);
-                            seed
-                        }),
-                    );
-                    have_peers.extend(broadcast_to.into_iter());
-                    have_peers
-                };
+                        task.requests.insert(
+                            request_id,
+                            Request {
+                                result_tx: SlotOutput::Batch { batch_id, slot_idx },
+                                timeout: timeout.clone(),
+                                stage: RequestStage::Have(have_peers),
+                                cid: cid.clone(),
+                            },
+                        );
+                        task.requests_by_timeout.insert((timeout.clone(), request_id));
+                        task.requests_by_cid
+                            .entry(cid)
+                            .or_default()
+                            .push_back(request_id);
 
-                task.requests.insert(
-                    request_id,
-                    Request {
-                        result_tx,
-                        timeout: timeout.clone(),
-                        stage: RequestStage::Have(have_peers),
-                        cid: cid.clone(),
-                    },
-                );
-                task.requests_by_timeout.insert((timeout, request_id));
-                task.requests_by_cid
-                    .entry(cid)
-                    .or_default()
-                    .push_back(request_id);
-            }
+                        if let Some(batch) = task.batches.get_mut(&batch_id) {
+                            batch.slots[slot_idx] = Some(request_id);
+                        }
+                    }
+                }
+            },
             WakeUpReason::NetworkEvent(BitswapEvent::BitswapMessage { peer_id, message }) => {
                 let message = message.decode();
+
+                // Slots that have just resolved and need to be delivered after the per-block-
+                // presence borrow on `task.requests_by_cid` is released.
+                let mut deliveries: Vec<(SlotOutput, Result<Vec<u8>, BitswapGetError>)> = Vec::new();
 
                 for BlockPresence { cid, presence_type } in message.block_presences {
                     let cid = match Cid::from_bytes(cid.to_owned()) {
@@ -547,7 +1156,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                         .remove(&(request.timeout, request_id));
                                     debug_assert!(_was_in);
 
-                                    let _ = request.result_tx.send(Err(BitswapGetError::NotFound));
+                                    // Defer delivery: dispatching now would re-borrow `task` while
+                                    // we still hold `entry` on `task.requests_by_cid`.
+                                    deliveries
+                                        .push((request.result_tx, Err(BitswapGetError::NotFound)));
                                 }
                             }
                             (RequestStage::Block, _) => {}
@@ -604,9 +1216,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 .remove(&(request.timeout, request_id));
                             debug_assert!(_was_in);
 
-                            let _ = request.result_tx.send(Ok(data.to_owned()));
+                            task.deliver_slot(request.result_tx, Ok(data.to_owned()));
                         }
                     }
+                }
+
+                // Dispatch deferred deliveries from the block_presences loop.
+                for (slot_output, result) in deliveries {
+                    task.deliver_slot(slot_output, result);
                 }
             }
             WakeUpReason::BlockRequestResult((result, cid)) => {
@@ -630,7 +1247,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 .remove(&(request.timeout, request_id));
                             debug_assert!(_was_in);
 
-                            let _ = request.result_tx.send(Err(err.clone()));
+                            task.deliver_slot(request.result_tx, Err(err.clone()));
                         }
                     }
                 }
@@ -670,7 +1287,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
                     }
 
-                    let _ = request.result_tx.send(Err(BitswapGetError::Timeout));
+                    task.deliver_slot(request.result_tx, Err(BitswapGetError::Timeout));
                 }
             }
             WakeUpReason::ForegroundClosed => {
@@ -762,5 +1379,108 @@ mod tests {
     fn from_send_error_queue_full() {
         let err: BitswapGetError = SendBitswapMessageError::QueueFull.into();
         assert!(matches!(err, BitswapGetError::QueueFull));
+    }
+
+    #[test]
+    fn error_too_many_cids_maps_to_invalid_params() {
+        let err = BitswapGetError::TooManyCids { max: 64, got: 100 };
+        let json = err.to_json_rpc_error("\"1\"");
+        assert_eq!(extract_error_code(&json), -32602);
+        assert_eq!(extract_variant(&json), "TooManyCids");
+    }
+
+    #[test]
+    fn error_duplicate_cids_maps_to_invalid_params() {
+        let json = BitswapGetError::DuplicateCids.to_json_rpc_error("\"1\"");
+        assert_eq!(extract_error_code(&json), -32602);
+        assert_eq!(extract_variant(&json), "DuplicateCids");
+    }
+
+    #[test]
+    fn block_result_err_codes_match_top_level_codes() {
+        // Per spec, per-CID error codes use the same retry categories as `bitswap_v1_get`.
+        assert_eq!(BitswapGetError::NotFound.to_block_result_err().0, -32810);
+        assert_eq!(BitswapGetError::Timeout.to_block_result_err().0, -32811);
+        assert_eq!(
+            BitswapGetError::BlockRequestFailed.to_block_result_err().0,
+            -32811
+        );
+        assert_eq!(BitswapGetError::QueueFull.to_block_result_err().0, -32812);
+        assert_eq!(BitswapGetError::NoPeers.to_block_result_err().0, -32812);
+        // Invalid CIDs surface as -32602 InvalidParams per the spec.
+        assert_eq!(
+            BitswapGetError::InvalidCid(Cid::from_str("not-a-cid").unwrap_err())
+                .to_block_result_err()
+                .0,
+            -32602
+        );
+    }
+
+    /// A known-valid CIDv1 in base32 multibase encoding (sha2-256 over an empty input).
+    const VALID_CID_A: &str = "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku";
+    const VALID_CID_B: &str = "bafkreigh2akiscaildc3rdvuwhszwgrtgvybsh7lhxavhgqitanwh4kc6q";
+
+    #[test]
+    fn parse_and_dedup_empty_input_is_ok() {
+        let out = parse_and_dedup(vec![]).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn parse_and_dedup_happy_path() {
+        let out = parse_and_dedup(vec![VALID_CID_A.into(), VALID_CID_B.into()]).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, VALID_CID_A);
+        assert!(out[0].1.is_ok());
+        assert_eq!(out[1].0, VALID_CID_B);
+        assert!(out[1].1.is_ok());
+    }
+
+    #[test]
+    fn parse_and_dedup_preserves_invalid_inputs_per_slot() {
+        // Invalid-but-unique strings must not abort the call — they surface as per-CID `Err` later.
+        let out = parse_and_dedup(vec![
+            VALID_CID_A.into(),
+            "garbage".into(),
+            VALID_CID_B.into(),
+        ])
+        .unwrap();
+        assert_eq!(out.len(), 3);
+        assert!(out[0].1.is_ok());
+        assert!(out[1].1.is_err());
+        assert!(out[2].1.is_ok());
+    }
+
+    #[test]
+    fn parse_and_dedup_rejects_literal_string_duplicate() {
+        // Stage 1: identical input strings, both garbage. Caught before parsing.
+        let err = parse_and_dedup(vec!["garbage".into(), "garbage".into()]).unwrap_err();
+        assert!(matches!(err, BitswapGetError::DuplicateCids));
+    }
+
+    #[test]
+    fn parse_and_dedup_rejects_valid_string_duplicate() {
+        // Stage 1: identical valid CID strings.
+        let err = parse_and_dedup(vec![VALID_CID_A.into(), VALID_CID_A.into()]).unwrap_err();
+        assert!(matches!(err, BitswapGetError::DuplicateCids));
+    }
+
+    #[test]
+    fn parse_and_dedup_rejects_too_many_cids() {
+        let cids = (0..MAX_CIDS_PER_REQUEST + 1)
+            .map(|_| VALID_CID_A.into())
+            .collect();
+        let err = parse_and_dedup(cids).unwrap_err();
+        assert!(matches!(
+            err,
+            BitswapGetError::TooManyCids { max: MAX_CIDS_PER_REQUEST, got } if got == MAX_CIDS_PER_REQUEST + 1
+        ));
+    }
+
+    #[test]
+    fn parse_and_dedup_accepts_max_size() {
+        let cids: Vec<String> = (0..MAX_CIDS_PER_REQUEST).map(|i| format!("invalid-{i}")).collect();
+        let out = parse_and_dedup(cids).unwrap();
+        assert_eq!(out.len(), MAX_CIDS_PER_REQUEST);
     }
 }
