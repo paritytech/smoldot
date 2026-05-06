@@ -1,0 +1,8 @@
+{
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "polkadot-api": "^2.1.0",
+    "smoldot": "file:../../wasm-node/javascript"
+  }
+}
