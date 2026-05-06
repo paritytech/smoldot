@@ -707,6 +707,15 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
         };
         debug_assert_eq!(batch.pending_count, 0);
 
+        log!(
+            &self.platform,
+            Trace,
+            &self.log_target,
+            "batch finalized",
+            batch_id = batch_id.0,
+            slots = batch.cid_strs.len()
+        );
+
         match batch.mode {
             BatchMode::GetMany { result_tx } => {
                 let mut out = Vec::with_capacity(batch.cid_strs.len());
@@ -759,8 +768,27 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
         }
 
         if pending_cids.is_empty() || batch.peers_for_cancel.is_empty() {
+            log!(
+                &self.platform,
+                Trace,
+                &self.log_target,
+                "batch cancelled (nothing to cancel on wire)",
+                batch_id = batch_id.0,
+                pending_cids = pending_cids.len(),
+                peers = batch.peers_for_cancel.len()
+            );
             return;
         }
+
+        log!(
+            &self.platform,
+            Trace,
+            &self.log_target,
+            "sending cancel wantlist",
+            batch_id = batch_id.0,
+            cids = ?pending_cids,
+            peers = batch.peers_for_cancel.len()
+        );
 
         // One Cancel wantlist message containing all pending CIDs, sent to every peer this
         // batch's Have broadcast reached. Cancel for an unknown CID is harmless on the receiver
@@ -877,6 +905,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             WakeUpReason::Message(ToBackground::BitswapBlock { cid, result_tx }) => {
                 debug_assert!(task.pending_have_broadcast.is_none());
 
+                log!(
+                    &task.platform,
+                    Trace,
+                    &task.log_target,
+                    "queueing have wantlist (single)",
+                    cid
+                );
+
                 let message = bitswap_have_message(&cid);
                 let network_service = task.network_service.clone();
 
@@ -948,6 +984,17 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
 
+                log!(
+                    &task.platform,
+                    Trace,
+                    &task.log_target,
+                    "batch queued",
+                    batch_id = batch_id.0,
+                    total,
+                    valid = valid_cids.len(),
+                    invalid = total - valid_cids.len()
+                );
+
                 // Insert the batch before the broadcast: if the caller drops mid-await and a
                 // CancelBatch arrives, it must find an entry to cancel.
                 task.batches.insert(batch_id, batch);
@@ -964,6 +1011,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                     continue;
                 }
+
+                log!(
+                    &task.platform,
+                    Trace,
+                    &task.log_target,
+                    "queueing have wantlist (batch)",
+                    batch_id = batch_id.0,
+                    cids = ?valid_cids.iter().map(|(_, c)| c).collect::<Vec<_>>()
+                );
 
                 let message = build_bitswap_message(
                     valid_cids.iter().map(|(_, c)| c),
@@ -984,6 +1040,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }));
             }
             WakeUpReason::Message(ToBackground::CancelBatch { batch_id }) => {
+                log!(
+                    &task.platform,
+                    Trace,
+                    &task.log_target,
+                    "cancel requested",
+                    batch_id = batch_id.0
+                );
                 task.cancel_batch(batch_id);
             }
             WakeUpReason::HaveBroadcastResult((result, ctx)) => match ctx {
@@ -991,10 +1054,27 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let broadcast_to = match result {
                         Ok(peers) => peers,
                         Err(err) => {
+                            log!(
+                                &task.platform,
+                                Trace,
+                                &task.log_target,
+                                "have broadcast failed (single)",
+                                cid,
+                                ?err
+                            );
                             let _ = result_tx.send(Err(err.into()));
                             continue;
                         }
                     };
+
+                    log!(
+                        &task.platform,
+                        Trace,
+                        &task.log_target,
+                        "have broadcast sent (single)",
+                        cid,
+                        peers = broadcast_to.len()
+                    );
 
                     let request_id = task.allocate_request_id();
                     let timeout = task.platform.now() + Duration::from_secs(10);
@@ -1031,6 +1111,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let broadcast_to = match result {
                         Ok(peers) => peers,
                         Err(err) => {
+                            log!(
+                                &task.platform,
+                                Trace,
+                                &task.log_target,
+                                "have broadcast failed (batch)",
+                                batch_id = batch_id.0,
+                                ?err
+                            );
                             // Whole-broadcast failure: every still-pending slot fails with the
                             // same error. We resolve them via `deliver_batch_slot` so that
                             // Stream events fire and GetMany finalizes at zero.
@@ -1045,6 +1133,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             continue;
                         }
                     };
+
+                    log!(
+                        &task.platform,
+                        Trace,
+                        &task.log_target,
+                        "have broadcast sent (batch)",
+                        batch_id = batch_id.0,
+                        cid_count = cids.len(),
+                        peers = broadcast_to.len()
+                    );
 
                     if let Some(batch) = task.batches.get_mut(&batch_id) {
                         batch.peers_for_cancel = broadcast_to.clone();
@@ -1130,6 +1228,19 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         continue;
                     };
 
+                    log!(
+                        &task.platform,
+                        Trace,
+                        &task.log_target,
+                        "presence response",
+                        peer_id,
+                        cid,
+                        presence = match presence_type {
+                            BlockPresenceType::Have => "have",
+                            BlockPresenceType::DontHave => "dont_have",
+                        }
+                    );
+
                     let mut needs_block_request = false;
                     let request_ids = entry.get_mut();
 
@@ -1156,6 +1267,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                         .remove(&(request.timeout, request_id));
                                     debug_assert!(_was_in);
 
+                                    log!(
+                                        &task.platform,
+                                        Trace,
+                                        &task.log_target,
+                                        "all peers dont have, NotFound",
+                                        cid = request.cid
+                                    );
+
                                     // Defer delivery: dispatching now would re-borrow `task` while
                                     // we still hold `entry` on `task.requests_by_cid`.
                                     deliveries
@@ -1175,6 +1294,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
 
                     if needs_block_request {
+                        log!(
+                            &task.platform,
+                            Trace,
+                            &task.log_target,
+                            "sending block request",
+                            peer_id,
+                            cid
+                        );
+
                         let message = bitswap_block_message(&cid);
                         let network_service = task.network_service.clone();
                         let peer_id = peer_id.clone();
@@ -1206,6 +1334,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     let cid = prefix.with_digest_of(data);
 
+                    log!(
+                        &task.platform,
+                        Trace,
+                        &task.log_target,
+                        "block payload received",
+                        peer_id,
+                        cid,
+                        bytes = data.len()
+                    );
+
                     // Respond to requests asking for this CID regardless of the request stage and
                     // remove these requests from internal structures.
                     if let Some(request_ids) = task.requests_by_cid.remove(&cid) {
@@ -1230,6 +1368,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // We either succeeded or failed in sending the "block" request.
                 // Nothing to do on success, but we must respond to requests & cleanup on failure.
                 if let Err(err) = result {
+                    log!(
+                        &task.platform,
+                        Trace,
+                        &task.log_target,
+                        "block request failed",
+                        cid,
+                        ?err
+                    );
+
                     // Requests might have timed out while we were waiting for a response from
                     // network service.
                     if let Some(request_ids) = task.requests_by_cid.remove(&cid) {
@@ -1265,6 +1412,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     task.requests_by_timeout.remove(&(timeout, request_id));
 
                     let request = task.requests.remove(&request_id).unwrap();
+                    let cid = request.cid.clone();
 
                     match task.requests_by_cid.entry(request.cid) {
                         hashbrown::hash_map::Entry::Occupied(mut entry) => {
@@ -1286,6 +1434,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         }
                         hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
                     }
+
+                    log!(
+                        &task.platform,
+                        Trace,
+                        &task.log_target,
+                        "request timeout",
+                        cid
+                    );
 
                     task.deliver_slot(request.result_tx, Err(BitswapGetError::Timeout));
                 }
