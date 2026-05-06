@@ -97,7 +97,7 @@ try {
     const cid = "not-a-cid";
 
     // When
-    await sendRpcAndWait(bulletin, "bitswap_v1_get", [cid], 5_000);
+    await bitswapGetWithRetry(bulletin, cid);
 
     // Then
     report(
