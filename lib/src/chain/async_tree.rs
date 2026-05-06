@@ -374,6 +374,15 @@ where
         self.input_best_block_index
     }
 
+    /// Returns the user data of the current "input" finalized block.
+    ///
+    /// Returns `None` if the input finalized block is the output finalized block (i.e. the
+    /// async_tree's output has caught up to the input).
+    pub fn input_finalized_user_data(&self) -> Option<&TBl> {
+        self.input_finalized_index
+            .map(|idx| &self.non_finalized_blocks.get(idx).unwrap().user_data)
+    }
+
     /// Returns the list of all non-finalized blocks that have been inserted, both input and
     /// output.
     ///
