@@ -1543,6 +1543,11 @@ async fn run_background<TPlat: PlatformRef>(
             WakeUpReason::StartPendingSubscribeAll(pending_subscription) => {
                 // A subscription is waiting to be started.
 
+                // Check if the foreground service is still running and directly stop it here if not.
+                let Some(to_background_tx) = background.to_background_tx.upgrade() else {
+                    continue;
+                };
+
                 // Extract the components of the `FinalizedBlockRuntimeKnown`.
                 let (tree, finalized_block, pinned_blocks, all_blocks_subscriptions) =
                     match &mut background.tree {
@@ -1686,7 +1691,7 @@ async fn run_background<TPlat: PlatformRef>(
                     new_blocks: Subscription {
                         subscription_id,
                         channel: Box::pin(new_blocks_channel),
-                        to_background: background.to_background_tx.upgrade().unwrap(),
+                        to_background: to_background_tx,
                     },
                 });
             }
