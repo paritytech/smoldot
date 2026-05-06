@@ -149,6 +149,14 @@ impl BitswapService {
                 PARALLEL_REQUESTS,
                 fnv::FnvBuildHasher::default(),
             ),
+            bitswap_peers: hashbrown::HashSet::with_capacity_and_hasher(
+                4,
+                util::SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    platform.fill_random_bytes(&mut seed);
+                    seed
+                }),
+            ),
         }));
 
         platform.spawn_task(log_target.clone().into(), {
@@ -602,6 +610,11 @@ struct BackgroundTask<TPlat: PlatformRef> {
     requests_by_cid: hashbrown::HashMap<Cid, VecDeque<RequestId>, util::SipHasherBuild>,
     /// In-flight batches. Each entry corresponds to a `bitswap_get_many` / `bitswap_stream` call.
     batches: hashbrown::HashMap<BatchId, Batch, fnv::FnvBuildHasher>,
+    /// Set of peers with an open Bitswap substream — i.e. the targets of
+    /// `broadcast_bitswap_message`. Maintained from `BitswapEvent::BitswapConnected`/
+    /// `BitswapDisconnected`. Used purely for diagnostic logging; the wire-level set lives in
+    /// the network service.
+    bitswap_peers: hashbrown::HashSet<PeerId, util::SipHasherBuild>,
 }
 
 impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
@@ -1191,6 +1204,30 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             },
+            WakeUpReason::NetworkEvent(BitswapEvent::BitswapConnected { peer_id }) => {
+                let inserted = task.bitswap_peers.insert(peer_id.clone());
+                log!(
+                    &task.platform,
+                    Trace,
+                    &task.log_target,
+                    "bitswap peer joined desired set",
+                    peer_id,
+                    new = inserted,
+                    total = task.bitswap_peers.len()
+                );
+            }
+            WakeUpReason::NetworkEvent(BitswapEvent::BitswapDisconnected { peer_id }) => {
+                let removed = task.bitswap_peers.remove(&peer_id);
+                log!(
+                    &task.platform,
+                    Trace,
+                    &task.log_target,
+                    "bitswap peer left desired set",
+                    peer_id,
+                    was_known = removed,
+                    total = task.bitswap_peers.len()
+                );
+            }
             WakeUpReason::NetworkEvent(BitswapEvent::BitswapMessage { peer_id, message }) => {
                 let message = message.decode();
 
