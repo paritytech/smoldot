@@ -35,6 +35,7 @@ use zombienet_sdk::{LocalFileSystem, Network, NetworkConfig, NetworkConfigBuilde
 const BLOCK_NUMBER_BYTES: usize = 4;
 
 pub const PARA_ID: u32 = 1004;
+pub const PARA_CHAIN: &str = "people-westend-local";
 pub const FINALIZED_METRIC: &str = "block_height{status=\"finalized\"}";
 pub const BEST_METRIC: &str = "block_height{status=\"best\"}";
 
@@ -214,7 +215,7 @@ fn build_network_config(
                 .with_id(PARA_ID)
                 .with_default_command("polkadot-parachain")
                 .with_default_image(images.cumulus.as_str())
-                .with_chain("people-westend-local")
+                .with_chain(PARA_CHAIN)
                 .with_default_args(vec![
                     "--force-authoring".into(),
                     "--authoring=slot-based".into(),
@@ -367,13 +368,9 @@ pub fn spawned_chain_spec_paths(
             .ok_or_else(|| anyhow!("network has no base_dir"))?,
     );
     let relay_spec = zombienet_base.join(format!("{}.json", network.relaychain().chain()));
-    let parachain = network
-        .parachain(PARA_ID)
-        .ok_or_else(|| anyhow!("parachain {PARA_ID} not found"))?;
-    // unique_id is what zombienet uses to name the emitted spec file. The
-    // spec's own `id` field can differ (e.g. the statement-store fixture
-    // sets `id = "people-westend-1004"`), so don't rely on chain_id().
-    let para_spec = zombienet_base.join(format!("{}.json", parachain.unique_id()));
+    // zombienet_sdk::Parachain does not expose chain() getter, so we use const here
+    let para_spec = zombienet_base.join(format!("{PARA_CHAIN}.json"));
+
     log::info!(
         "Resolved chain-spec paths: relay={}, para={}",
         relay_spec.display(),

@@ -32,6 +32,8 @@ use zombienet_sdk::{
     LocalFileSystem, Network, NetworkConfigBuilder, NetworkNode,
 };
 
+use crate::network::PARA_CHAIN;
+
 /// Para id used by the statement-store e2e fixture. Zombienet writes the
 /// final chain-spec (with bootnodes patched in) to `<base_dir>/<para_id>.json`.
 pub const PARA_ID: u32 = 1004;
@@ -119,6 +121,7 @@ pub async fn spawn_network(
         })
         .with_parachain(|p| {
             p.with_id(PARA_ID)
+                .with_chain(PARA_CHAIN)
                 .with_chain_spec_path(para_spec_path.to_str().expect("Valid UTF-8 path"))
                 .with_default_command("polkadot-parachain")
                 .with_default_image(images.cumulus.as_str())
