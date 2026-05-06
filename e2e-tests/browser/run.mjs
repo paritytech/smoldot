@@ -26,9 +26,6 @@
 //      they will push it during initial statement-store sync.
 //   4. PING: page submits stmt_A through smoldot, asserts {status:"new"}.
 //   5. PONG: page waits for stmt_B to arrive on its subscription.
-//
-// `--self-test` skips zombienet and just verifies the page loads and
-// `smoldot.start` is callable in Chromium.
 
 import { chromium } from "playwright";
 import path from "node:path";
@@ -43,18 +40,14 @@ import {
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
-const SELF_TEST = process.argv.includes("--self-test");
-
-if (!SELF_TEST) {
-  requireEnv([
-    "RELAY_CHAIN_SPEC",
-    "PARA_CHAIN_SPEC",
-    "STATEMENT_A_HEX",
-    "STATEMENT_B_HEX",
-    "TOPIC_B",
-    "SYNC_PATH",
-  ]);
-}
+requireEnv([
+  "RELAY_CHAIN_SPEC",
+  "PARA_CHAIN_SPEC",
+  "STATEMENT_A_HEX",
+  "STATEMENT_B_HEX",
+  "TOPIC_B",
+  "SYNC_PATH",
+]);
 
 const pageDir = path.join(__dirname, "page");
 const smoldotPkgDir = path.resolve(
@@ -82,142 +75,135 @@ try {
   await page.waitForFunction(() => window.__ready === true, { timeout: 30_000 });
   report("smoldot browser bundle loaded", true);
 
-  if (SELF_TEST) {
-    const hasStart = await page.evaluate(
-      () => typeof window.__smoldot.start === "function",
-    );
-    report("smoldot.start is callable", hasStart);
-  } else {
-    const relaySpec = await fs.readFile(process.env.RELAY_CHAIN_SPEC, "utf8");
-    const paraSpec = await fs.readFile(process.env.PARA_CHAIN_SPEC, "utf8");
+  const relaySpec = await fs.readFile(process.env.RELAY_CHAIN_SPEC, "utf8");
+  const paraSpec = await fs.readFile(process.env.PARA_CHAIN_SPEC, "utf8");
 
-    // Phase 1: start smoldot, addChain, subscribe. Stash the handles on
-    // `window.__t` so subsequent evaluates can reuse the same client.
-    const subscriptionId = await page.evaluate(
-      async ([relaySpec, paraSpec, topicBHex]) => {
-        const log = (s) => console.log(s);
+  // Phase 1: start smoldot, addChain, subscribe. Stash the handles on
+  // `window.__t` so subsequent evaluates can reuse the same client.
+  const subscriptionId = await page.evaluate(
+    async ([relaySpec, paraSpec, topicBHex]) => {
+      const log = (s) => console.log(s);
 
-        const client = window.__smoldot.start({
-          maxLogLevel: 3,
-          forbidTcp: true,
-          logCallback: (level, target, message) => {
-            log(`[smoldot L${level}][${target}] ${message}`);
-          },
-        });
+      const client = window.__smoldot.start({
+        maxLogLevel: 3,
+        forbidTcp: true,
+        logCallback: (level, target, message) => {
+          log(`[smoldot L${level}][${target}] ${message}`);
+        },
+      });
 
-        const relay = await client.addChain({
-          chainSpec: relaySpec,
-          disableJsonRpc: true,
-        });
-        const para = await client.addChain({
-          chainSpec: paraSpec,
-          potentialRelayChains: [relay],
-          statementStore: {},
-        });
+      const relay = await client.addChain({
+        chainSpec: relaySpec,
+        disableJsonRpc: true,
+      });
+      const para = await client.addChain({
+        chainSpec: paraSpec,
+        potentialRelayChains: [relay],
+        statementStore: {},
+      });
 
-        const buf = [];
-        const waiters = [];
-        (async () => {
-          try {
-            for await (const raw of para.jsonRpcResponses) {
-              buf.push(JSON.parse(raw));
-              for (const w of waiters.splice(0)) w();
-            }
-          } catch (_) {}
-        })();
+      const buf = [];
+      const waiters = [];
+      (async () => {
+        try {
+          for await (const raw of para.jsonRpcResponses) {
+            buf.push(JSON.parse(raw));
+            for (const w of waiters.splice(0)) w();
+          }
+        } catch (_) {}
+      })();
 
-        const waitForResponse = (predicate, timeoutMs) =>
-          new Promise((resolve, reject) => {
-            const deadline = Date.now() + timeoutMs;
-            const tryMatch = () => {
-              for (let i = 0; i < buf.length; i++) {
-                if (predicate(buf[i])) {
-                  const hit = buf[i];
-                  buf.splice(i, 1);
-                  return resolve(hit);
-                }
+      const waitForResponse = (predicate, timeoutMs) =>
+        new Promise((resolve, reject) => {
+          const deadline = Date.now() + timeoutMs;
+          const tryMatch = () => {
+            for (let i = 0; i < buf.length; i++) {
+              if (predicate(buf[i])) {
+                const hit = buf[i];
+                buf.splice(i, 1);
+                return resolve(hit);
               }
-              if (Date.now() >= deadline) return reject(new Error("timeout"));
-              waiters.push(tryMatch);
-              setTimeout(tryMatch, Math.min(500, deadline - Date.now()));
-            };
-            tryMatch();
-          });
+            }
+            if (Date.now() >= deadline) return reject(new Error("timeout"));
+            waiters.push(tryMatch);
+            setTimeout(tryMatch, Math.min(500, deadline - Date.now()));
+          };
+          tryMatch();
+        });
 
-        let nextId = 1;
-        const send = (method, params) => {
-          const id = String(nextId++);
-          para.sendJsonRpc(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
-          return id;
-        };
+      let nextId = 1;
+      const send = (method, params) => {
+        const id = String(nextId++);
+        para.sendJsonRpc(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+        return id;
+      };
 
-        // Subscribe early so we don't miss stmt_B pushed during initial sync.
-        const subReqId = send("statement_subscribeStatement", [
-          { matchAny: [topicBHex] },
-        ]);
-        const subResp = await waitForResponse((m) => m.id === subReqId, 30_000);
-        if (subResp.error) {
-          throw new Error(`subscribe failed: ${JSON.stringify(subResp.error)}`);
+      // Subscribe early so we don't miss stmt_B pushed during initial sync.
+      const subReqId = send("statement_subscribeStatement", [
+        { matchAny: [topicBHex] },
+      ]);
+      const subResp = await waitForResponse((m) => m.id === subReqId, 30_000);
+      if (subResp.error) {
+        throw new Error(`subscribe failed: ${JSON.stringify(subResp.error)}`);
+      }
+
+      window.__t = { client, para, send, waitForResponse };
+      return subResp.result;
+    },
+    [relaySpec, paraSpec, process.env.TOPIC_B],
+  );
+  report("subscribe to topic_B", true, `subId=${subscriptionId}`);
+
+  // Phase 2: wait for the harness to confirm smoldot is peered and stmt_B
+  // is in both collators' stores.
+  await waitForSyncMessage(process.env.SYNC_PATH, "READY", 120_000);
+  report("Rust signalled READY", true);
+
+  // Phase 3: ping (submit stmt_A) + pong (await stmt_B notification).
+  const result = await page.evaluate(
+    async ([stmtAHex, stmtBHex, subscriptionId]) => {
+      const { send, waitForResponse, client } = window.__t;
+
+      let pingResult = null;
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const id = send("statement_submit", [stmtAHex]);
+        const resp = await waitForResponse((m) => m.id === id, 30_000);
+        if (resp.error) {
+          return { stage: "ping", error: JSON.stringify(resp.error) };
         }
-
-        window.__t = { client, para, send, waitForResponse };
-        return subResp.result;
-      },
-      [relaySpec, paraSpec, process.env.TOPIC_B],
-    );
-    report("subscribe to topic_B", true, `subId=${subscriptionId}`);
-
-    // Phase 2: wait for the harness to confirm smoldot is peered and stmt_B
-    // is in both collators' stores.
-    await waitForSyncMessage(process.env.SYNC_PATH, "READY", 120_000);
-    report("Rust signalled READY", true);
-
-    // Phase 3: ping (submit stmt_A) + pong (await stmt_B notification).
-    const result = await page.evaluate(
-      async ([stmtAHex, stmtBHex, subscriptionId]) => {
-        const { send, waitForResponse, client } = window.__t;
-
-        let pingResult = null;
-        for (let attempt = 0; attempt < 10; attempt++) {
-          const id = send("statement_submit", [stmtAHex]);
-          const resp = await waitForResponse((m) => m.id === id, 30_000);
-          if (resp.error) {
-            return { stage: "ping", error: JSON.stringify(resp.error) };
-          }
-          if (resp.result?.status === "new") {
-            pingResult = resp.result;
-            break;
-          }
-          await new Promise((r) => setTimeout(r, 5_000));
+        if (resp.result?.status === "new") {
+          pingResult = resp.result;
+          break;
         }
-        if (pingResult?.status !== "new") {
-          return { stage: "ping", got: pingResult };
-        }
+        await new Promise((r) => setTimeout(r, 5_000));
+      }
+      if (pingResult?.status !== "new") {
+        return { stage: "ping", got: pingResult };
+      }
 
-        await waitForResponse((m) => {
-          if (m.method !== "statement_statement") return false;
-          if (m.params?.subscription !== subscriptionId) return false;
-          const r = m.params.result;
-          if (r?.event !== "newStatements") return false;
-          return (r.data?.statements ?? []).includes(stmtBHex);
-        }, 120_000);
+      await waitForResponse((m) => {
+        if (m.method !== "statement_statement") return false;
+        if (m.params?.subscription !== subscriptionId) return false;
+        const r = m.params.result;
+        if (r?.event !== "newStatements") return false;
+        return (r.data?.statements ?? []).includes(stmtBHex);
+      }, 120_000);
 
-        await client.terminate().catch(() => {});
-        return { stage: "ok" };
-      },
-      [process.env.STATEMENT_A_HEX, process.env.STATEMENT_B_HEX, subscriptionId],
-    );
+      await client.terminate().catch(() => {});
+      return { stage: "ok" };
+    },
+    [process.env.STATEMENT_A_HEX, process.env.STATEMENT_B_HEX, subscriptionId],
+  );
 
-    if (result.stage === "ping") {
-      report("ping: statement_submit returned status=new", false, JSON.stringify(result));
-      passed = false;
-    } else if (result.stage === "ok") {
-      report("ping: statement_submit returned status=new", true);
-      report("pong: stmt_B received via subscription", true);
-    } else {
-      report("browser ping-pong", false, JSON.stringify(result));
-      passed = false;
-    }
+  if (result.stage === "ping") {
+    report("ping: statement_submit returned status=new", false, JSON.stringify(result));
+    passed = false;
+  } else if (result.stage === "ok") {
+    report("ping: statement_submit returned status=new", true);
+    report("pong: stmt_B received via subscription", true);
+  } else {
+    report("browser ping-pong", false, JSON.stringify(result));
+    passed = false;
   }
 } catch (e) {
   report("browser test", false, e.stack || e.message || String(e));
