@@ -2874,10 +2874,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     for addr in addrs {
                         match Multiaddr::from_bytes(addr) {
                             Ok(mut a) => {
-                                // Advertised libp2p addresses canonically end with /p2p/<peer_id>.
-                                // Strip-and-validate the suffix at this discovery boundary,
-                                // matching the convention used for chain-spec bootnodes
-                                // (`smoldot::chain_spec::ChainSpec::boot_nodes`).
                                 if !pop_p2p_if_matches(&mut a, &peer_id) {
                                     log!(
                                         &task.platform,
@@ -3499,16 +3495,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     }
 }
 
-/// If `addr` ends with `Protocol::P2p(<peer_id_bytes>)`, validate that the embedded peer-id
-/// matches `expected_peer.as_bytes()` and pop the component. Returns `false` (caller must discard
-/// the address) on mismatch; `true` otherwise. No-op when the address has no `/p2p/` suffix.
-///
-/// Used on the Kademlia FindNode reply path so that addresses advertised in the canonical
-/// `/<transport>/p2p/<peer_id>` form (libp2p convention) become acceptable to the transport
-/// classifier in [`platform::address_parse::multiaddr_to_address`], which expects the suffix
-/// to have been stripped beforehand. Validating against the announced peer-id mirrors the
-/// inline strip-and-validate idiom used in `smoldot::chain_spec::ChainSpec::boot_nodes` and in
-/// polkadot-sdk's `cumulus/client/bootnodes/src/advertisement.rs`.
+/// Pops a trailing `/p2p/<peer_id>` from `addr` if it matches `expected_peer`. Returns `false`
+/// (caller must discard the address) on mismatch.
 fn pop_p2p_if_matches(
     addr: &mut smoldot::libp2p::multiaddr::Multiaddr,
     expected_peer: &smoldot::libp2p::peer_id::PeerId,

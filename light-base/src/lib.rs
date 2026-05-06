@@ -1148,10 +1148,7 @@ fn start_services<TPlat: platform::PlatformRef>(
 
     let network_service_chain = network_service.add_chain(network_service::ConfigChain {
         log_name: log_name.clone(),
-        // Locally bumped from 4 → 16 to test bitswap_v1_get throughput against
-        // the bulletin-stress-test smoldot scenario (see polkadot-bulletin-chain
-        // workspace `[patch.crates-io]`). Upstream this if results are good.
-        num_out_slots: 16,
+        num_out_slots: 4,
         grandpa_protocol_finalized_block_height: match &config {
             StartServicesChainTy::SubstrateCompatible { chain_information }
                 if matches!(
