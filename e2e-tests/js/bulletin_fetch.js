@@ -75,7 +75,7 @@ try {
     const cid = missingCid;
 
     // When
-    const hex = await sendRpcAndWait(bulletin, "bitswap_v1_get", [cid], 60_000);
+    const hex = await bitswapGetWithRetry(bulletin, cid);
 
     // Then
     report(
@@ -116,27 +116,26 @@ try {
     );
   }
 
-  try {
-    // Given
-    const fullOnly = payloads.find((p) => !p.on_partial);
-    if (!fullOnly) {
-      report("mixed-no-full-only-payload", false, "no on_partial=false payload in manifest");
-    } else {
+  for (const payload of payloads.filter((p) => !p.on_partial)) {
+    try {
+      // Given
+      const cid = payload.cid;
+
       // When
-      const hex = await bitswapGetWithRetry(bulletin, fullOnly.cid);
+      const hex = await bitswapGetWithRetry(bulletin, cid);
 
       // Then
       const bytes = hexToBytes(hex);
       const sha = await sha256Hex(bytes);
-      const ok = bytes.length === fullOnly.size && sha === fullOnly.sha256;
+      const ok = bytes.length === payload.size && sha === payload.sha256;
       report(
-        `mixed-${fullOnly.label}`,
+        `mixed-${payload.label}`,
         ok,
         ok ? `${bytes.length} bytes` : `size/sha256 mismatch`,
       );
+    } catch (err) {
+      report(`mixed-${payload.label}`, false, err.message);
     }
-  } catch (err) {
-    report("mixed", false, err.message);
   }
 } catch (err) {
   console.error(`bulletin_fetch error: ${err?.stack || err}`);
@@ -151,6 +150,8 @@ if (exitCode || process.exitCode) {
   process.exit(exitCode || 1);
 }
 
+// Retries the transient BlockRequestFailed/Timeout and NoPeers/QueueFull
+// errors smoldot returns while its peer set is warming up.
 async function bitswapGetWithRetry(chain, cid, totalBudgetMs = 180_000) {
   const deadline = Date.now() + totalBudgetMs;
   let attempt = 0;
@@ -161,12 +162,7 @@ async function bitswapGetWithRetry(chain, cid, totalBudgetMs = 180_000) {
       throw new Error(`bitswap_v1_get timed out after ${totalBudgetMs}ms`);
     }
     try {
-      return await sendRpcAndWait(
-        chain,
-        "bitswap_v1_get",
-        [cid],
-        Math.min(60_000, remaining),
-      );
+      return await sendRpcAndWait(chain, "bitswap_v1_get", [cid], Math.min(60_000, remaining));
     } catch (err) {
       const code = errorCode(err);
       if (code === ERR_FAIL_BACKOFF || code === ERR_FAIL_RETRY) {

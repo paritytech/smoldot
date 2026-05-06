@@ -20,27 +20,23 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use log::info;
 use smoldot_e2e_tests::bulletin::{
     self, ArchiveChecksums, BulletinManifest, ManifestPayload, Payload,
 };
 use zombienet_sdk::{
-    LocalFileSystem, Network, NetworkConfigBuilder,
     subxt::{
-        OnlineClient,
         config::{
-            Config, DefaultExtrinsicParamsBuilder, substrate::SubstrateConfig,
-            transaction_extensions,
+            substrate::SubstrateConfig, transaction_extensions, Config,
+            DefaultExtrinsicParamsBuilder,
         },
-        dynamic::{Value, tx},
+        dynamic::{tx, Value},
+        OnlineClient,
     },
-    subxt_signer::sr25519::{Keypair, dev},
+    subxt_signer::sr25519::{dev, Keypair},
+    LocalFileSystem, Network, NetworkConfigBuilder,
 };
-
-const RELAY_CHAIN: &str = "westend-local";
-const PARA_BINARY: &str = "polkadot-parachain";
-const RELAY_BINARY: &str = "polkadot";
 
 const SPAWN_TIMEOUT_SECS: u64 = 300;
 const EXTRINSIC_TIMEOUT_SECS: u64 = 60;
@@ -102,9 +98,7 @@ impl SnapshotOpts {
 
         let out_dir = std::env::var("BULLETIN_SNAPSHOT_OUT_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/snapshots")
-            });
+            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/snapshots"));
 
         let target_height: u64 = std::env::var("BULLETIN_SNAPSHOT_TARGET_HEIGHT")
             .ok()
@@ -319,18 +313,19 @@ async fn snapshot_full_state(
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)
-        .with_context(|| format!("creating {}", dst.display()))?;
-    for entry in std::fs::read_dir(src)
-        .with_context(|| format!("reading {}", src.display()))?
-    {
+    std::fs::create_dir_all(dst).with_context(|| format!("creating {}", dst.display()))?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
         let entry = entry?;
         let dst_path = dst.join(entry.file_name());
         if entry.file_type()?.is_dir() {
             copy_dir_all(&entry.path(), &dst_path)?;
         } else {
             std::fs::copy(entry.path(), &dst_path).with_context(|| {
-                format!("copying {} -> {}", entry.path().display(), dst_path.display())
+                format!(
+                    "copying {} -> {}",
+                    entry.path().display(),
+                    dst_path.display()
+                )
             })?;
         }
     }
@@ -345,8 +340,8 @@ async fn spawn_network(chain_spec: &Path) -> Result<Network<LocalFileSystem>> {
 
     let config = NetworkConfigBuilder::new()
         .with_relaychain(|rc| {
-            rc.with_chain(RELAY_CHAIN)
-                .with_default_command(RELAY_BINARY)
+            rc.with_chain(bulletin::RELAY_CHAIN)
+                .with_default_command(bulletin::RELAY_BINARY)
                 .with_validator(|node| node.with_name("alice"))
                 .with_validator(|node| node.with_name("bob"))
         })
@@ -357,7 +352,7 @@ async fn spawn_network(chain_spec: &Path) -> Result<Network<LocalFileSystem>> {
                 .with_collator(|c| {
                     c.with_name("collator-1")
                         .validator(true)
-                        .with_command(PARA_BINARY)
+                        .with_command(bulletin::PARA_BINARY)
                         // `--ipfs-server` exposes bitswap so the eventual
                         // CI test can dial against the snapshot.
                         .with_args(vec!["--ipfs-server".into()])
@@ -365,7 +360,7 @@ async fn spawn_network(chain_spec: &Path) -> Result<Network<LocalFileSystem>> {
                 .with_collator(|c| {
                     c.with_name("collator-2")
                         .validator(true)
-                        .with_command(PARA_BINARY)
+                        .with_command(bulletin::PARA_BINARY)
                         .with_args(vec!["--ipfs-server".into()])
                 })
         })
@@ -425,7 +420,8 @@ async fn authorize_account(
     let params = DefaultExtrinsicParamsBuilder::<BulletinConfig>::new().build();
     let progress = tokio::time::timeout(
         Duration::from_secs(EXTRINSIC_TIMEOUT_SECS),
-        api.tx().sign_and_submit_then_watch(&call, authorizer, params),
+        api.tx()
+            .sign_and_submit_then_watch(&call, authorizer, params),
     )
     .await
     .map_err(|_| anyhow!("authorize_account timed out"))??;
@@ -448,7 +444,12 @@ async fn submit_store(
     payload: &Payload,
 ) -> Result<String> {
     let predicted = payload.predicted_cid();
-    info!("store {} ({} bytes) {}", payload.label, payload.size(), predicted);
+    info!(
+        "store {} ({} bytes) {}",
+        payload.label,
+        payload.size(),
+        predicted
+    );
 
     let call = tx(
         "TransactionStorage",
@@ -484,11 +485,7 @@ async fn submit_store(
 /// returns the hex-encoded SHA-256 of the archive. Top-level entries are
 /// `data/` and `relay-data/` so zombienet-sdk's auto-extract drops the
 /// contents at the node's expected paths.
-fn pack_node_dirs(
-    data: &Path,
-    relay_data: Option<&Path>,
-    archive_path: &Path,
-) -> Result<String> {
+fn pack_node_dirs(data: &Path, relay_data: Option<&Path>, archive_path: &Path) -> Result<String> {
     use sha2::{Digest as _, Sha256};
 
     if !data.is_dir() {
@@ -544,7 +541,8 @@ fn build_manifest(
     Ok(BulletinManifest {
         schema_version: 1,
         snapshot_height: opts.target_height,
-        bulletin_release_tag: std::env::var("BULLETIN_RELEASE_TAG").unwrap_or_else(|_| "dev".into()),
+        bulletin_release_tag: std::env::var("BULLETIN_RELEASE_TAG")
+            .unwrap_or_else(|_| "dev".into()),
         polkadot_release_tag: std::env::var("POLKADOT_RELEASE_TAG")
             .unwrap_or_else(|_| "polkadot-stable2603".into()),
         payloads: manifest_payloads,
@@ -555,4 +553,3 @@ fn build_manifest(
         },
     })
 }
-

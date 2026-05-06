@@ -17,16 +17,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use serde::Serialize;
 use smoldot_e2e_tests::{
     bulletin, ensure_js_deps_installed, ensure_smoldot_built, resolve_base_dir, run_js_test,
 };
 use zombienet_sdk::{LocalFileSystem, Network, NetworkConfigBuilder};
-
-const RELAY_CHAIN: &str = "westend-local";
-const PARA_BINARY: &str = "polkadot-parachain";
-const RELAY_BINARY: &str = "polkadot";
 
 /// GCS URLs for the snapshots produced by `bulletin_generate_snapshot`.
 const DB_SNAPSHOT_RELAY: &str =
@@ -55,16 +51,23 @@ async fn bulletin_fetch() -> Result<()> {
     let base_dir = resolve_base_dir()?;
 
     let relay = get_snapshot_url(DB_SNAPSHOT_RELAY, "DB_SNAPSHOT_RELAY_OVERRIDE");
-    let bulletin_full =
-        get_snapshot_url(DB_SNAPSHOT_BULLETIN_FULL, "DB_SNAPSHOT_BULLETIN_FULL_OVERRIDE");
+    let bulletin_full = get_snapshot_url(
+        DB_SNAPSHOT_BULLETIN_FULL,
+        "DB_SNAPSHOT_BULLETIN_FULL_OVERRIDE",
+    );
     let bulletin_partial = get_snapshot_url(
         DB_SNAPSHOT_BULLETIN_PARTIAL,
         "DB_SNAPSHOT_BULLETIN_PARTIAL_OVERRIDE",
     );
 
-    let network =
-        spawn_with_snapshots(&base_dir, &chain_spec, &relay, &bulletin_full, &bulletin_partial)
-            .await?;
+    let network = spawn_with_snapshots(
+        &base_dir,
+        &chain_spec,
+        &relay,
+        &bulletin_full,
+        &bulletin_partial,
+    )
+    .await?;
 
     let (relay_spec, bulletin_spec) = chain_spec_paths(&network)?;
 
@@ -84,7 +87,9 @@ async fn bulletin_fetch() -> Result<()> {
             .collect::<Vec<_>>(),
     )?;
     let missing_cid = bulletin::sha256_cid(b"smoldot-bitswap-not-on-chain").to_string();
-    let relay_spec = relay_spec.to_str().ok_or_else(|| anyhow!("non-utf8 relay spec path"))?;
+    let relay_spec = relay_spec
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 relay spec path"))?;
     let bulletin_spec = bulletin_spec
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 bulletin spec path"))?;
@@ -133,10 +138,18 @@ async fn spawn_with_snapshots(
 
     let cfg = NetworkConfigBuilder::new()
         .with_relaychain(|rc| {
-            rc.with_chain(RELAY_CHAIN)
-                .with_default_command(RELAY_BINARY)
-                .with_validator(|n| n.with_name("alice").bootnode(true).with_db_snapshot(relay.as_str()))
-                .with_validator(|n| n.with_name("bob").bootnode(true).with_db_snapshot(relay.as_str()))
+            rc.with_chain(bulletin::RELAY_CHAIN)
+                .with_default_command(bulletin::RELAY_BINARY)
+                .with_validator(|n| {
+                    n.with_name("alice")
+                        .bootnode(true)
+                        .with_db_snapshot(relay.as_str())
+                })
+                .with_validator(|n| {
+                    n.with_name("bob")
+                        .bootnode(true)
+                        .with_db_snapshot(relay.as_str())
+                })
         })
         .with_parachain(|p| {
             p.with_id(bulletin::PARA_ID)
@@ -146,7 +159,7 @@ async fn spawn_with_snapshots(
                     c.with_name("collator-1")
                         .validator(true)
                         .bootnode(true)
-                        .with_command(PARA_BINARY)
+                        .with_command(bulletin::PARA_BINARY)
                         .with_db_snapshot(bulletin_full.as_str())
                         .with_args(vec!["--ipfs-server".into()])
                 })
@@ -154,7 +167,7 @@ async fn spawn_with_snapshots(
                     c.with_name("collator-2")
                         .validator(true)
                         .bootnode(true)
-                        .with_command(PARA_BINARY)
+                        .with_command(bulletin::PARA_BINARY)
                         .with_db_snapshot(bulletin_partial.as_str())
                         .with_args(vec!["--ipfs-server".into()])
                 })

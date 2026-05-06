@@ -22,6 +22,14 @@ use smoldot::libp2p::cid::{Cid, CidPrefix, MultihashType};
 /// Para id of the bulletin chain.
 pub const PARA_ID: u32 = 2487;
 
+/// Relay chain spec name used by the generator and fetch tests.
+pub const RELAY_CHAIN: &str = "westend-local";
+/// Polkadot relay binary expected on `$PATH`.
+pub const RELAY_BINARY: &str = "polkadot";
+/// Parachain binary expected on `$PATH`. Loads the bulletin runtime via
+/// the chain spec.
+pub const PARA_BINARY: &str = "polkadot-parachain";
+
 /// Default snapshot height target. Must exceed 1000 blocks.
 pub const DEFAULT_SNAPSHOT_HEIGHT: u64 = 1024;
 
@@ -71,28 +79,30 @@ impl Payload {
 }
 
 /// Deterministic payloads the generator injects and the CI tests assert
-/// on. See [`PARTIAL_FORK_INDEX`] for what `both-*` and `full-only-*`
-/// labels mean. Order matters: items at `[..PARTIAL_FORK_INDEX]` go in
-/// before the partial snapshot is captured.
+/// on. Labels prefixed `all-nodes-*` are present on every bulletin node;
+/// `one-node-*` payloads are present only on the collator that loads
+/// `bulletin-full.tgz`. Order matters: items at
+/// `[..PARTIAL_FORK_INDEX]` go in before the partial snapshot is
+/// captured.
 pub fn payloads() -> Vec<Payload> {
     vec![
         Payload {
-            label: "both-small",
+            label: "all-nodes-with-26b-payload",
             content: b"smoldot-bitswap-both-small",
             on_partial: true,
         },
         Payload {
-            label: "both-4kib",
+            label: "all-nodes-with-4kib-payload",
             content: rand_4k(),
             on_partial: true,
         },
         Payload {
-            label: "full-only-small",
+            label: "one-node-with-31b-payload",
             content: b"smoldot-bitswap-full-only-small",
             on_partial: false,
         },
         Payload {
-            label: "full-only-1mib",
+            label: "one-node-with-1mib-payload",
             content: rand_1m(),
             on_partial: false,
         },
