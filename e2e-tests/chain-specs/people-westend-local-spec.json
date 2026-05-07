@@ -1,6 +1,6 @@
 {
   "name": "Westend People Local",
-  "id": "people-westend-1004",
+  "id": "people-westend-local",
   "chainType": "Local",
   "bootNodes": [
     "/ip4/127.0.0.1/tcp/30333/p2p/12D3KooWPaepNHy4AZVY5FfTwH6YZa5kMPFBcyyZH8BsXyU1WCes"
