@@ -161,21 +161,13 @@ try {
     async ([stmtAHex, stmtBHex, subscriptionId]) => {
       const { send, waitForResponse, client } = window.__t;
 
-      let pingResult = null;
-      for (let attempt = 0; attempt < 10; attempt++) {
-        const id = send("statement_submit", [stmtAHex]);
-        const resp = await waitForResponse((m) => m.id === id, 30_000);
-        if (resp.error) {
-          return { stage: "ping", error: JSON.stringify(resp.error) };
-        }
-        if (resp.result?.status === "new") {
-          pingResult = resp.result;
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 5_000));
+      const id = send("statement_submit", [stmtAHex]);
+      const resp = await waitForResponse((m) => m.id === id, 30_000);
+      if (resp.error) {
+        return { stage: "ping", error: JSON.stringify(resp.error) };
       }
-      if (pingResult?.status !== "new") {
-        return { stage: "ping", got: pingResult };
+      if (resp.result?.status !== "new") {
+        return { stage: "ping", got: resp.result };
       }
 
       await waitForResponse((m) => {

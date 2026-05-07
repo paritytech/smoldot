@@ -30,6 +30,7 @@ use smoldot_e2e_tests::*;
 ///   4. Wait for smoldot to peer with both collators.
 ///   5. Signal READY. The page then submits stmt_A (ping) and waits for
 ///      stmt_B to arrive on its subscription (pong).
+///   6. Verify stmt_A reached alice via gossip.
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_ping_pong() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
@@ -114,8 +115,11 @@ async fn browser_ping_pong() -> Result<(), anyhow::Error> {
     let result = browser_handle.await.expect("browser task panicked");
     result.map_err(|e| anyhow::anyhow!("browser test failed: {e}"))?;
 
-    // Verify stmt_A submitted by the browser reached alice via gossip.
-    let received = receive_statements(1, &mut alice_sub, 120).await?;
+    // Verify stmt_A submitted by the browser reached alice via gossip. Read
+    // two statements: the subscription replays stmt_B (already in alice's
+    // store when the subscription was opened) and stmt_A then arrives via
+    // gossip.
+    let received = receive_statements(2, &mut alice_sub, 180).await?;
     assert!(
         received.contains(&stmt_a_hex),
         "stmt_A submitted from the browser did not reach alice"
