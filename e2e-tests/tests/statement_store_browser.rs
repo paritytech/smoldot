@@ -80,10 +80,10 @@ async fn browser_ping_pong() -> Result<(), anyhow::Error> {
     let stmt_a_hex_js = stmt_a_hex.clone();
     let stmt_b_hex_js = stmt_b_hex.clone();
 
-    info!("Spawning browser test: browser/run.mjs");
+    info!("Spawning browser test: browser/statement_store_browser.js");
     let browser_handle = tokio::spawn(async move {
         run_browser_test(
-            "run.mjs",
+            "statement_store_browser.js",
             &[
                 ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
                 ("PARA_CHAIN_SPEC", para_spec_str.as_str()),

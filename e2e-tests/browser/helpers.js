@@ -17,7 +17,7 @@
 
 // Node-side helpers for the browser sanity test. Mirrors the role of
 // e2e-tests/js/helpers.js for the Node-side scripts: shared utilities used
-// by run.mjs (and any future browser scenarios).
+// by statement_store_browser.js (and any future browser scenarios).
 
 import http from "node:http";
 import path from "node:path";
