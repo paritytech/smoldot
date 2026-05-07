@@ -161,7 +161,10 @@ try {
   }
   report("chainHead_v1_follow accepted", true, `subId=${subId}`);
 
-  const initialBlocks = new Set();
+  // Skip the initial `newBlock` burst (replay of already-known blocks); the
+  // first `bestBlockChanged` marks its end. Otherwise a warm-started smoldot
+  // would satisfy the threshold from cached state alone.
+  let burstDone = false;
   let newBlocks = 0;
   await readJsonRpcUntil(
     para,
@@ -169,9 +172,9 @@ try {
       if (msg.method !== "chainHead_v1_followEvent") return undefined;
       if (msg.params?.subscription !== subId) return undefined;
       const result = msg.params.result;
-      if (result?.event === "initialized") {
-        for (const h of result.finalizedBlockHashes ?? []) initialBlocks.add(h);
-      } else if (result?.event === "newBlock" && !initialBlocks.has(result.blockHash)) {
+      if (result?.event === "bestBlockChanged") {
+        burstDone = true;
+      } else if (result?.event === "newBlock" && burstDone) {
         if (++newBlocks >= requiredBlocks) return true;
       } else if (result?.event === "stop") {
         throw new Error("chainHead follow stopped unexpectedly");
