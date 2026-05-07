@@ -1417,31 +1417,42 @@ async fn run_background<TPlat: PlatformRef>(
                         // `Block` + `Finalized` to subscribers. Not the real chain parent of
                         // the warp-synced block (warp sync skips ancestry); only a tree-level
                         // predecessor. Pruned the moment warp-synced is finalized.
-                        let pre_warp_finalized = match &background.tree {
+                        // `None` when the previous tree has no usable input-finalized block,
+                        // in which case we fall back to the legacy single-block init.
+                        let pre_warp_finalized: Option<Block> = match &background.tree {
                             Tree::FinalizedBlockRuntimeKnown {
                                 finalized_block, ..
-                            } => Block {
+                            } => Some(Block {
                                 hash: finalized_block.hash,
                                 height: finalized_block.height,
                                 scale_encoded_header: finalized_block.scale_encoded_header.clone(),
-                            },
-                            Tree::FinalizedBlockRuntimeUnknown { tree } => tree
-                                .input_finalized_user_data()
-                                .map(|b| Block {
+                            }),
+                            Tree::FinalizedBlockRuntimeUnknown { tree } => {
+                                tree.input_finalized_user_data().map(|b| Block {
                                     hash: b.hash,
                                     height: b.height,
                                     scale_encoded_header: b.scale_encoded_header.clone(),
                                 })
-                                .unwrap_or_else(|| Block {
-                                    hash: warp_synced_hash,
-                                    height: warp_synced_height,
-                                    scale_encoded_header: subscription
-                                        .finalized_block_scale_encoded_header
-                                        .clone(),
-                                }),
+                            }
                         };
-                        // Defensive: if equal, fall back to legacy single-block init.
-                        let use_pre_warp_finalized = pre_warp_finalized.hash != warp_synced_hash;
+                        // Disable when missing or degenerately equal to warp-synced.
+                        let use_pre_warp_finalized = pre_warp_finalized
+                            .as_ref()
+                            .is_some_and(|b| b.hash != warp_synced_hash);
+
+                        log!(
+                            &background.platform,
+                            Debug,
+                            &background.log_target,
+                            "warp-sync-tree-init",
+                            use_pre_warp_finalized,
+                            pre_warp_finalized_hash = if let Some(b) = pre_warp_finalized.as_ref() {
+                                Cow::Owned(HashDisplay(&b.hash).to_string())
+                            } else {
+                                Cow::Borrowed("<none>")
+                            },
+                            warp_synced_hash = HashDisplay(&warp_synced_hash),
+                        );
 
                         // Placeholder runtime: never used (block pruned immediately); calls fail loudly.
                         let pre_warp_finalized_runtime = if use_pre_warp_finalized {
@@ -1464,7 +1475,8 @@ async fn run_background<TPlat: PlatformRef>(
 
                         let (finalized_async_user_data, finalized_block) = if use_pre_warp_finalized
                         {
-                            (pre_warp_finalized_runtime, pre_warp_finalized)
+                            // use_pre_warp_finalized implies pre_warp_finalized.is_some().
+                            (pre_warp_finalized_runtime, pre_warp_finalized.unwrap())
                         } else {
                             (runtime.clone(), warp_synced_block.clone())
                         };
