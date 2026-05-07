@@ -1412,12 +1412,11 @@ async fn run_background<TPlat: PlatformRef>(
                             }
                         }
 
-                        // Pre-warp finalized block: the finalized block from before the warp
-                        // sync. Used as the tree's initial finalized state so that the
-                        // warp-synced block can be inserted as a non-finalized child and then
-                        // finalized, producing the canonical `Notification::Block` then
-                        // `Notification::Finalized` sequence to subscribers. The pre-warp
-                        // finalized block is pruned the moment warp-synced is finalized.
+                        // Used as the tree's initial finalized state so the warp-synced block
+                        // can be inserted as a non-finalized child and then finalized, emitting
+                        // `Block` + `Finalized` to subscribers. Not the real chain parent of
+                        // the warp-synced block (warp sync skips ancestry); only a tree-level
+                        // predecessor. Pruned the moment warp-synced is finalized.
                         let pre_warp_finalized = match &background.tree {
                             Tree::FinalizedBlockRuntimeKnown {
                                 finalized_block, ..
@@ -1441,14 +1440,10 @@ async fn run_background<TPlat: PlatformRef>(
                                         .clone(),
                                 }),
                         };
-                        // If for any reason the pre-warp finalized would equal the warp-synced
-                        // block, fall back to the legacy single-block initialization (no
-                        // synthetic Block/Finalized sequence). This shouldn't happen in practice.
+                        // Defensive: if equal, fall back to legacy single-block init.
                         let use_pre_warp_finalized = pre_warp_finalized.hash != warp_synced_hash;
 
-                        // Placeholder runtime for the pre-warp finalized block. Its runtime
-                        // is never queried for runtime calls because the block is pruned as
-                        // soon as warp-synced is finalized; calls against it fail loudly.
+                        // Placeholder runtime: never used (block pruned immediately); calls fail loudly.
                         let pre_warp_finalized_runtime = if use_pre_warp_finalized {
                             Arc::new(Runtime {
                                 runtime: Err(RuntimeError::CodeNotFound),
@@ -1482,11 +1477,8 @@ async fn run_background<TPlat: PlatformRef>(
                             });
 
                         if use_pre_warp_finalized {
-                            // Insert the warp-synced block as a non-finalized child of the
-                            // pre-warp finalized block (parent=None) and pre-complete its
-                            // runtime download so that the natural tree-advance loop emits
-                            // `OutputUpdate::Block` followed by `OutputUpdate::Finalized`
-                            // to subscribers without waiting for any actual download.
+                            // Pre-complete the runtime so the tree-advance loop emits
+                            // `Block` + `Finalized` without an actual download.
                             let warp_synced_idx = new_tree.input_insert_block(
                                 warp_synced_block.clone(),
                                 None,
@@ -1507,10 +1499,7 @@ async fn run_background<TPlat: PlatformRef>(
                         }
 
                         for block in subscription.non_finalized_blocks_ancestry_order {
-                            // Parent is either the tree's outer finalized block
-                            // (encoded as parent_index = None) or a block already in the tree
-                            // (a previous block in the iteration order, or the warp-synced
-                            // block when use_pre_warp_finalized).
+                            // Parent is the tree's outer finalized (None) or already in the tree.
                             let parent_index = if block.parent_hash == finalized_block.hash {
                                 None
                             } else {
