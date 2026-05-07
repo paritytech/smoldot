@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod bulletin;
 pub mod network;
 pub mod snapshot;
 pub mod statement;
