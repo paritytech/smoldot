@@ -578,9 +578,18 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         // Errors of type `JustificationEngineMismatch` indicate that the chain
                         // uses a finality engine that smoldot doesn't recognize. This is a benign
                         // error that shouldn't lead to a ban.
+                        // 
+                        // Errors of type `UnknownTargetBlock` are expected during the catch-up
+                        // window that follows a warp sync: the non-finalized tree only contains
+                        // the warp-sync target block, so peers may send justifications for
+                        // higher blocks that the local node hasn't downloaded yet.
+                        // Banning these peers would slow down the catch-up.
                         if !matches!(
                             error,
-                            all::JustificationVerifyError::JustificationEngineMismatch
+                            all::JustificationVerifyError::JustificationEngineMismatch |
+                            all::JustificationVerifyError::FinalityVerify(
+                                smoldot::chain::blocks_tree::FinalityVerifyError::UnknownTargetBlock { .. }
+                            )
                         ) {
                             log!(
                                 &task.platform,
