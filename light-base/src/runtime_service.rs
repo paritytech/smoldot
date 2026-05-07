@@ -1467,114 +1467,83 @@ async fn run_background<TPlat: PlatformRef>(
                             scale_encoded_header: subscription.finalized_block_scale_encoded_header,
                         };
 
-                        let (new_tree, finalized_block) = if use_pre_warp_finalized {
-                            let mut tree =
-                                async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
-                                    finalized_async_user_data: pre_warp_finalized_runtime,
-                                    retry_after_failed: Duration::from_secs(4), // TODO: hardcoded
-                                    blocks_capacity: 32,
-                                });
+                        let (finalized_async_user_data, finalized_block) = if use_pre_warp_finalized
+                        {
+                            (pre_warp_finalized_runtime, pre_warp_finalized)
+                        } else {
+                            (runtime.clone(), warp_synced_block.clone())
+                        };
 
+                        let mut new_tree =
+                            async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
+                                finalized_async_user_data,
+                                retry_after_failed: Duration::from_secs(4), // TODO: hardcoded
+                                blocks_capacity: 32,
+                            });
+
+                        if use_pre_warp_finalized {
                             // Insert the warp-synced block as a non-finalized child of the
                             // pre-warp finalized block (parent=None) and pre-complete its
-                            // runtime download so that the natural tree-advance loop will emit
+                            // runtime download so that the natural tree-advance loop emits
                             // `OutputUpdate::Block` followed by `OutputUpdate::Finalized`
                             // to subscribers without waiting for any actual download.
-                            let warp_synced_idx = tree.input_insert_block(
+                            let warp_synced_idx = new_tree.input_insert_block(
                                 warp_synced_block.clone(),
                                 None,
                                 false,
                                 true,
                             );
-                            let async_op =
-                                match tree.next_necessary_async_op(&background.platform.now()) {
-                                    async_tree::NextNecessaryAsyncOp::Ready(op) => op,
-                                    async_tree::NextNecessaryAsyncOp::NotReady { .. } => {
-                                        unreachable!(
-                                            "warp-synced block just inserted with pending async op"
-                                        )
-                                    }
-                                };
+                            let async_op = match new_tree
+                                .next_necessary_async_op(&background.platform.now())
+                            {
+                                async_tree::NextNecessaryAsyncOp::Ready(op) => op,
+                                async_tree::NextNecessaryAsyncOp::NotReady { .. } => unreachable!(
+                                    "warp-synced block just inserted with pending async op"
+                                ),
+                            };
                             debug_assert_eq!(async_op.block_index, warp_synced_idx);
-                            tree.async_op_finished(async_op.id, runtime);
-                            tree.input_finalize(warp_synced_idx);
+                            new_tree.async_op_finished(async_op.id, runtime);
+                            new_tree.input_finalize(warp_synced_idx);
+                        }
 
-                            for block in subscription.non_finalized_blocks_ancestry_order {
-                                let parent_index = tree
-                                    .input_output_iter_unordered()
-                                    .find(|b| b.user_data.hash == block.parent_hash)
-                                    .map(|b| b.id);
-                                let same_runtime_as_parent = same_runtime_as_parent(
-                                    &block.scale_encoded_header,
-                                    background.sync_service.block_number_bytes(),
-                                );
-                                let _ = tree.input_insert_block(
-                                    Block {
-                                        hash: header::hash_from_scale_encoded_header(
-                                            &block.scale_encoded_header,
-                                        ),
-                                        height: header::decode(
-                                            &block.scale_encoded_header,
-                                            background.sync_service.block_number_bytes(),
-                                        )
+                        for block in subscription.non_finalized_blocks_ancestry_order {
+                            // Parent is either the tree's outer finalized block
+                            // (encoded as parent_index = None) or a block already in the tree
+                            // (a previous block in the iteration order, or the warp-synced
+                            // block when use_pre_warp_finalized).
+                            let parent_index = if block.parent_hash == finalized_block.hash {
+                                None
+                            } else {
+                                Some(
+                                    new_tree
+                                        .input_output_iter_unordered()
+                                        .find(|b| b.user_data.hash == block.parent_hash)
                                         .unwrap()
-                                        .number,
-                                        scale_encoded_header: block.scale_encoded_header,
-                                    },
-                                    parent_index,
-                                    same_runtime_as_parent,
-                                    block.is_new_best,
-                                );
-                            }
-
-                            (tree, pre_warp_finalized)
-                        } else {
-                            // Legacy path: warp-synced block is the tree's initial finalized.
-                            // No synthetic Block/Finalized notifications are produced.
-                            let mut tree =
-                                async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
-                                    finalized_async_user_data: runtime,
-                                    retry_after_failed: Duration::from_secs(4),
-                                    blocks_capacity: 32,
-                                });
-
-                            for block in subscription.non_finalized_blocks_ancestry_order {
-                                let parent_index = if block.parent_hash == warp_synced_hash {
-                                    None
-                                } else {
-                                    Some(
-                                        tree.input_output_iter_unordered()
-                                            .find(|b| b.user_data.hash == block.parent_hash)
-                                            .unwrap()
-                                            .id,
+                                        .id,
+                                )
+                            };
+                            let same_runtime_as_parent = same_runtime_as_parent(
+                                &block.scale_encoded_header,
+                                background.sync_service.block_number_bytes(),
+                            );
+                            let _ = new_tree.input_insert_block(
+                                Block {
+                                    hash: header::hash_from_scale_encoded_header(
+                                        &block.scale_encoded_header,
+                                    ),
+                                    height: header::decode(
+                                        &block.scale_encoded_header,
+                                        background.sync_service.block_number_bytes(),
                                     )
-                                };
-
-                                let same_runtime_as_parent = same_runtime_as_parent(
-                                    &block.scale_encoded_header,
-                                    background.sync_service.block_number_bytes(),
-                                );
-                                let _ = tree.input_insert_block(
-                                    Block {
-                                        hash: header::hash_from_scale_encoded_header(
-                                            &block.scale_encoded_header,
-                                        ),
-                                        height: header::decode(
-                                            &block.scale_encoded_header,
-                                            background.sync_service.block_number_bytes(),
-                                        )
-                                        .unwrap()
-                                        .number,
-                                        scale_encoded_header: block.scale_encoded_header,
-                                    },
-                                    parent_index,
-                                    same_runtime_as_parent,
-                                    block.is_new_best,
-                                );
-                            }
-
-                            (tree, warp_synced_block)
-                        };
+                                    .unwrap()
+                                    .number,
+                                    scale_encoded_header: block.scale_encoded_header,
+                                },
+                                parent_index,
+                                same_runtime_as_parent,
+                                block.is_new_best,
+                            );
+                        }
 
                         background.tree = Tree::FinalizedBlockRuntimeKnown {
                             all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
