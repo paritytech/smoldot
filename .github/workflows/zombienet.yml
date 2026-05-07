@@ -68,6 +68,9 @@ jobs:
           - job-name: "zombienet-smoldot-0003-statement_store_peer_connection"
             test: "statement_store_peer_connection"
             runner-type: "default"
+          - job-name: "zombienet-smoldot-0004-statement_store_browser"
+            test: "statement_store_browser"
+            runner-type: "default"
           - job-name: "zombienet-smoldot-0007-bulletin_fetch"
             test: "bulletin_fetch"
             runner-type: "default"
@@ -104,6 +107,20 @@ jobs:
           path: e2e-tests/js/node_modules
           key: e2e-js-nm-${{ hashFiles('e2e-tests/js/package-lock.json') }}
 
+      - name: Cache e2e-tests browser node_modules
+        if: matrix.test.test == 'statement_store_browser'
+        uses: actions/cache@v4
+        with:
+          path: e2e-tests/browser/node_modules
+          key: e2e-browser-nm-${{ hashFiles('e2e-tests/browser/package-lock.json') }}
+
+      - name: Cache Playwright browsers
+        if: matrix.test.test == 'statement_store_browser'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('e2e-tests/browser/package-lock.json') }}
+
       - name: Install smoldot JS deps
         shell: bash
         run: npm ci
@@ -113,6 +130,15 @@ jobs:
         shell: bash
         run: npm ci
         working-directory: e2e-tests/js
+
+      - name: Install browser test deps and Chromium
+        if: matrix.test.test == 'statement_store_browser'
+        shell: bash
+        working-directory: e2e-tests/browser
+        run: |
+          set -euo pipefail
+          npm ci
+          npx playwright install --with-deps chromium
 
       # Pull binaries from the polkadot-sdk release
       - name: Download polkadot binaries
