@@ -190,7 +190,12 @@ async function spawnClient({ clientId, args, parachainSpec, relaySpec, log }) {
 // Run a contiguous range [clientStart, clientEnd) of clients in this process.
 // Used both by single-process mode (range = [0, numClients)) and by each
 // child worker.
-async function runWorker({ args, clientStart, clientEnd, testRunId, log }) {
+//
+// `barrier` synchronises the start of round 1 across all clients (and across
+// workers when multi-worker). After warmup each client calls `barrier.arrive()`
+// then awaits `barrier.waitStart()` before entering the round loop. Subsequent
+// rounds are paced independently by `intervalMs` in `runClient`.
+async function runWorker({ args, clientStart, clientEnd, testRunId, log, barrier }) {
   const [parachainSpec, relaySpec] = await Promise.all([
     loadChainSpec(args.parachainSpecSource),
     loadChainSpec(args.relayChainSpecSource),
@@ -232,6 +237,13 @@ async function runWorker({ args, clientStart, clientEnd, testRunId, log }) {
         // statement-store peer". A fixed sleep is a coarse heuristic; tune via
         // --warmup-ms per network.
         await new Promise((r) => setTimeout(r, args.warmupMs));
+
+        // Synchronise round 1 across all clients globally. Without this each
+        // client enters round 1 as soon as its own warmup completes, drifts on
+        // round-1 receive timeouts, and senders end up emitting statements for
+        // round N+k while receivers are still subscribed for round N.
+        barrier.arrive();
+        await barrier.waitStart();
 
         const result = await runClient({
           config,
@@ -279,18 +291,41 @@ function workerRange(i, total, n) {
   return [start, start + size];
 }
 
+// Barrier that releases once all `expected` participants have arrived. In
+// multi-worker mode, the parent uses one of these to gate the children, and
+// each child uses one of these locally over its own clients before reporting
+// "ready" up to the parent.
+function makeBarrier(expected, onAllArrived) {
+  let arrived = 0;
+  let releaseStart;
+  const startPromise = new Promise((r) => { releaseStart = r; });
+  return {
+    arrive: () => {
+      arrived += 1;
+      if (arrived === expected && onAllArrived) onAllArrived();
+    },
+    waitStart: () => startPromise,
+    release: () => releaseStart(),
+  };
+}
+
 async function runAsParent(args, log) {
   const testRunId = randomBytes(8).readBigUInt64LE(0).toString();
   logConfiguration(log, args);
   log.info(`Spawning ${args.numClients} client tasks... ${testRunId}`);
 
   if (args.workers === 1) {
+    const barrier = makeBarrier(args.numClients, () => {
+      log.info(`All ${args.numClients} clients ready; starting round 1`);
+      barrier.release();
+    });
     const { successes, failures } = await runWorker({
       args,
       clientStart: 0,
       clientEnd: args.numClients,
       testRunId,
       log,
+      barrier,
     });
     reportResults(log, successes, failures, args.numClients, args.numRounds);
     process.exit(failures.length > 0 && successes.length === 0 ? 1 : 0);
@@ -303,6 +338,13 @@ async function runAsParent(args, log) {
 
   const childProcs = [];
   const childPromises = [];
+  // Round-1 barrier across workers: each child sends `worker-ready` once all
+  // its local clients have warmed up; once every child has reported, the
+  // parent broadcasts `start` and all clients begin round 1 simultaneously.
+  const workerBarrier = makeBarrier(args.workers, () => {
+    log.info(`All ${args.workers} workers ready; starting round 1`);
+    for (const c of childProcs) c.send({ type: "start" });
+  });
   for (let i = 0; i < args.workers; i++) {
     const [start, end] = workerRange(i, args.workers, args.numClients);
     log.info(`Forking worker ${i + 1}/${args.workers}: clients [${start}, ${end})`);
@@ -323,7 +365,9 @@ async function runAsParent(args, log) {
       new Promise((resolve, reject) => {
         let result = null;
         child.on("message", (msg) => {
-          if (msg && msg.type === "result") result = msg;
+          if (!msg) return;
+          if (msg.type === "worker-ready") workerBarrier.arrive();
+          else if (msg.type === "result") result = msg;
         });
         child.on("exit", (code) => {
           if (result) {
@@ -370,12 +414,24 @@ async function runAsChild(args) {
 
   const log = makeLogger(args.logLevel, `[w${workerId}] `);
 
+  // Local barrier across this worker's clients: when all have warmed up, tell
+  // the parent. Then wait for the parent's `start` broadcast (issued once
+  // every worker has reported ready) and release the local clients.
+  const localCount = clientEnd - clientStart;
+  const barrier = makeBarrier(localCount, () => {
+    process.send({ type: "worker-ready" });
+  });
+  process.on("message", (msg) => {
+    if (msg && msg.type === "start") barrier.release();
+  });
+
   const { successes, failures } = await runWorker({
     args,
     clientStart,
     clientEnd,
     testRunId,
     log,
+    barrier,
   });
 
   if (typeof process.send === "function") {
