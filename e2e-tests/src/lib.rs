@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod bulletin;
 pub mod statement;
 
 /// A file-backed Rust → JS message channel. Rust appends newline-terminated
