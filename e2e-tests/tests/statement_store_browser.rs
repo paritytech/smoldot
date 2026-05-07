@@ -30,7 +30,8 @@ use smoldot_e2e_tests::*;
 ///   4. Wait for smoldot to peer with both collators.
 ///   5. Signal READY. The page then submits stmt_A (ping) and waits for
 ///      stmt_B to arrive on its subscription (pong).
-///   6. Verify stmt_A reached alice via gossip.
+///   6. Wait for stmt_A to reach alice via gossip, then signal DONE so the
+///      page tears down smoldot and exits.
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_ping_pong() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
@@ -112,19 +113,29 @@ async fn browser_ping_pong() -> Result<(), anyhow::Error> {
     sync.send("READY")?;
     info!("Signalled browser READY");
 
-    let result = browser_handle.await.expect("browser task panicked");
-    result.map_err(|e| anyhow::anyhow!("browser test failed: {e}"))?;
-
-    // Verify stmt_A submitted by the browser reached alice via gossip. Read
-    // two statements: the subscription replays stmt_B (already in alice's
-    // store when the subscription was opened) and stmt_A then arrives via
-    // gossip.
+    // Verify stmt_A submitted by the browser reached alice via gossip *before*
+    // releasing the browser. Outbound gossip from the browser's smoldot
+    // light-client is asynchronous: `statement_submit` returning `status:"new"`
+    // only proves local insertion. If the page calls `client.terminate()`
+    // immediately after the pong arrives, the in-flight gossip of stmt_A is
+    // aborted on slow runners and alice never sees it. So: keep the browser
+    // alive (DONE handshake below) until alice has actually observed stmt_A.
+    //
+    // Read two statements because the subscription replays stmt_B (already in
+    // alice's store when the subscription was opened) before stmt_A arrives.
     let received = receive_statements(2, &mut alice_sub, 180).await?;
     assert!(
         received.contains(&stmt_a_hex),
         "stmt_A submitted from the browser did not reach alice"
     );
     info!("stmt_A confirmed on alice via gossip");
+
+    // Release the browser — it can now terminate the smoldot client and exit.
+    sync.send("DONE")?;
+    info!("Signalled browser DONE");
+
+    let result = browser_handle.await.expect("browser task panicked");
+    result.map_err(|e| anyhow::anyhow!("browser test failed: {e}"))?;
 
     info!("Browser sanity check passed");
     Ok(())

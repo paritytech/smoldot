@@ -178,7 +178,6 @@ try {
         return (r.data?.statements ?? []).includes(stmtBHex);
       }, 120_000);
 
-      await client.terminate().catch(() => {});
       return { stage: "ok" };
     },
     [process.env.STATEMENT_A_HEX, process.env.STATEMENT_B_HEX, subscriptionId],
@@ -193,6 +192,15 @@ try {
   } else {
     report("browser ping-pong", false, JSON.stringify(result));
     passed = false;
+  }
+
+  if (passed) {
+    // Phase 4: keep smoldot alive so its outbound gossip of stmt_A actually
+    // reaches the collators. The harness signals DONE once alice has observed
+    // stmt_A; only then is it safe to tear the client down.
+    await waitForSyncMessage(process.env.SYNC_PATH, "DONE", 240_000);
+    report("Rust signalled DONE", true);
+    await page.evaluate(() => window.__t.client.terminate().catch(() => {}));
   }
 } catch (e) {
   report("browser test", false, e.stack || e.message || String(e));
