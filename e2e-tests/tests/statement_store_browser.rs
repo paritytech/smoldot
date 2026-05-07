@@ -101,6 +101,11 @@ async fn browser_ping_pong() -> Result<(), anyhow::Error> {
     wait_until_peered(alice, 2, 180).await?;
     wait_until_peered(bob, 2, 180).await?;
 
+    // Subscribe on alice before signalling READY so we don't miss stmt_A
+    // gossiped from the browser.
+    let alice_rpc = alice.rpc().await?;
+    let mut alice_sub = subscribe_any(&alice_rpc).await?;
+
     // Smoldot is peered and stmt_B is in both collators' stores; signal the
     // page to perform the ping and start awaiting the pong.
     sync.send("READY")?;
@@ -108,6 +113,14 @@ async fn browser_ping_pong() -> Result<(), anyhow::Error> {
 
     let result = browser_handle.await.expect("browser task panicked");
     result.map_err(|e| anyhow::anyhow!("browser test failed: {e}"))?;
+
+    // Verify stmt_A submitted by the browser reached alice via gossip.
+    let received = receive_statements(1, &mut alice_sub, 120).await?;
+    assert!(
+        received.contains(&stmt_a_hex),
+        "stmt_A submitted from the browser did not reach alice"
+    );
+    info!("stmt_A confirmed on alice via gossip");
 
     info!("Browser sanity check passed");
     Ok(())

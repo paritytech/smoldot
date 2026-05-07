@@ -15,9 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// Node-side helpers for the browser sanity test. Mirrors the role of
-// e2e-tests/js/helpers.js for the Node-side scripts: shared utilities used
-// by statement_store_browser.js (and any future browser scenarios).
+// Node-side helpers for the browser tests.
 
 import http from "node:http";
 import path from "node:path";
@@ -41,8 +39,7 @@ export function requireEnv(names) {
   }
 }
 
-/// Polls `path` until a line equals `expected`, mirroring the JS-side helper
-/// in e2e-tests/js/helpers.js. Pair with `SyncFile` on the Rust side.
+/// Polls `path` until a line equals `expected`. Pair with `SyncFile` on the Rust side.
 export async function waitForSyncMessage(filePath, expected, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

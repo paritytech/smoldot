@@ -16,9 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // Browser sanity check for smoldot statement-store.
-//
-// Flow (mirrors e2e-tests/js/statement_store_reception.js, just inside a real
-// browser via Playwright):
 //   1. Page loads, imports `index-browser.js`, exposes `window.__smoldot`.
 //   2. Page starts smoldot, adds the chains, subscribes to topic_B.
 //   3. Node waits for the harness to write READY into SYNC_PATH — that means
