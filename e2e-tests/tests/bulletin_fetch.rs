@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 use smoldot_e2e_tests::{
-    bulletin, ensure_js_deps_installed, ensure_smoldot_built, resolve_base_dir, run_js_test,
+    bulletin, ensure_js_deps_installed, ensure_smoldot_built, prefetch_snapshot,
+    resolve_base_dir, run_js_test,
 };
 use zombienet_sdk::{LocalFileSystem, Network, NetworkConfigBuilder};
 
@@ -50,22 +51,34 @@ async fn bulletin_fetch() -> Result<()> {
     let chain_spec = bulletin_chain_spec();
     let base_dir = resolve_base_dir()?;
 
-    let relay = get_snapshot_url(DB_SNAPSHOT_RELAY, "DB_SNAPSHOT_RELAY_OVERRIDE");
-    let bulletin_full = get_snapshot_url(
+    let relay = prefetch_snapshot(&get_snapshot_url(
+        DB_SNAPSHOT_RELAY,
+        "DB_SNAPSHOT_RELAY_OVERRIDE",
+    ))?;
+    let bulletin_full = prefetch_snapshot(&get_snapshot_url(
         DB_SNAPSHOT_BULLETIN_FULL,
         "DB_SNAPSHOT_BULLETIN_FULL_OVERRIDE",
-    );
-    let bulletin_partial = get_snapshot_url(
+    ))?;
+    let bulletin_partial = prefetch_snapshot(&get_snapshot_url(
         DB_SNAPSHOT_BULLETIN_PARTIAL,
         "DB_SNAPSHOT_BULLETIN_PARTIAL_OVERRIDE",
-    );
+    ))?;
+    let relay = relay
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 prefetched relay path"))?;
+    let bulletin_full = bulletin_full
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 prefetched bulletin-full path"))?;
+    let bulletin_partial = bulletin_partial
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 prefetched bulletin-partial path"))?;
 
     let network = spawn_with_snapshots(
         &base_dir,
         &chain_spec,
-        &relay,
-        &bulletin_full,
-        &bulletin_partial,
+        relay,
+        bulletin_full,
+        bulletin_partial,
     )
     .await?;
 

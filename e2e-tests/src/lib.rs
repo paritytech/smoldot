@@ -164,6 +164,79 @@ pub async fn run_browser_test(
     }
 }
 
+/// Pre-fetch a snapshot from `source` to a stable local path and return
+/// that path. Pass-through if `source` already points at a local file.
+///
+/// Workaround for a class of CI flakes caused by zombienet-provider
+/// 0.4.11's [`initialize_db_snapshot`]: it calls `reqwest::get(...)
+/// .bytes().await.unwrap()` without checking the HTTP status or
+/// `Content-Length`, so a 5xx-with-HTML-body or a mid-stream connection
+/// close becomes a panic on tar extraction. `curl -fL --retry` handles
+/// both cases (`-f` rejects non-2xx, retry covers transient drops),
+/// `tar -tzf` validates the archive integrity, and we hand zombienet a
+/// local file path that's already known-good.
+///
+/// Cached under `e2e-tests/target/snapshot-cache/<basename>` so repeated
+/// runs reuse the file. Only validated files reach the cache: a failed
+/// download or a corrupt archive is never renamed in.
+pub fn prefetch_snapshot(source: &str) -> Result<PathBuf, anyhow::Error> {
+    if !source.starts_with("http://") && !source.starts_with("https://") {
+        return Ok(PathBuf::from(source));
+    }
+    let cache_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("snapshot-cache");
+    std::fs::create_dir_all(&cache_dir)?;
+    let filename = source
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("no filename in URL: {source}"))?;
+    let path = cache_dir.join(filename);
+    if path.exists() {
+        return Ok(path);
+    }
+    let tmp = cache_dir.join(format!("{filename}.partial"));
+    let _ = std::fs::remove_file(&tmp);
+
+    let status = std::process::Command::new("curl")
+        .args([
+            "-fL",
+            "--retry",
+            "5",
+            "--retry-delay",
+            "2",
+            "--retry-max-time",
+            "120",
+            "--max-time",
+            "300",
+            "-o",
+        ])
+        .arg(&tmp)
+        .arg(source)
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to spawn curl: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::bail!("curl failed for {source}: {status}");
+    }
+
+    let test_status = std::process::Command::new("tar")
+        .arg("-tzf")
+        .arg(&tmp)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to spawn tar: {e}"))?;
+    if !test_status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::bail!("tar -tzf failed for {source}: archive is not a valid gzipped tar");
+    }
+
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
 /// Runs a JS test script with the given environment variables.
 ///
 /// Uses `tokio::process::Command` for async compatibility.
