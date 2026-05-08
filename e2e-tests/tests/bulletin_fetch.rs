@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 use smoldot_e2e_tests::{
-    bulletin, ensure_js_deps_installed, ensure_smoldot_built, resolve_base_dir, run_js_test,
+    bulletin, ensure_js_deps_installed, ensure_smoldot_built, prefetch_snapshot,
+    resolve_base_dir, run_js_test, stage_snapshot,
 };
 use zombienet_sdk::{LocalFileSystem, Network, NetworkConfigBuilder};
 
@@ -50,20 +51,21 @@ async fn bulletin_fetch() -> Result<()> {
     let chain_spec = bulletin_chain_spec();
     let base_dir = resolve_base_dir()?;
 
-    let relay = get_snapshot_url(DB_SNAPSHOT_RELAY, "DB_SNAPSHOT_RELAY_OVERRIDE");
-    let bulletin_full = get_snapshot_url(
-        DB_SNAPSHOT_BULLETIN_FULL,
-        "DB_SNAPSHOT_BULLETIN_FULL_OVERRIDE",
-    );
-    let bulletin_partial = get_snapshot_url(
+    let relay = prefetch_snapshot(DB_SNAPSHOT_RELAY, "DB_SNAPSHOT_RELAY_OVERRIDE")?;
+    let bulletin_full =
+        prefetch_snapshot(DB_SNAPSHOT_BULLETIN_FULL, "DB_SNAPSHOT_BULLETIN_FULL_OVERRIDE")?;
+    let bulletin_partial = prefetch_snapshot(
         DB_SNAPSHOT_BULLETIN_PARTIAL,
         "DB_SNAPSHOT_BULLETIN_PARTIAL_OVERRIDE",
-    );
+    )?;
+    let relay_alice = stage_snapshot(&relay, &base_dir, "relay-alice")?;
+    let relay_bob = stage_snapshot(&relay, &base_dir, "relay-bob")?;
 
     let network = spawn_with_snapshots(
         &base_dir,
         &chain_spec,
-        &relay,
+        &relay_alice,
+        &relay_bob,
         &bulletin_full,
         &bulletin_partial,
     )
@@ -107,12 +109,6 @@ async fn bulletin_fetch() -> Result<()> {
     .map_err(|e| anyhow!("JS test failed: {e}"))
 }
 
-/// Returns the GCS URL by default, or the contents of `env_var` if set
-/// (so a developer can point at a local `.tgz` for iteration).
-fn get_snapshot_url(default: &str, env_var: &str) -> String {
-    std::env::var(env_var).unwrap_or_else(|_| default.to_string())
-}
-
 fn bulletin_chain_spec() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("chain-specs/bulletin-westend-local-spec.json")
 }
@@ -120,7 +116,8 @@ fn bulletin_chain_spec() -> PathBuf {
 async fn spawn_with_snapshots(
     base_dir: &Path,
     chain_spec: &Path,
-    relay_snap: &str,
+    relay_alice_snap: &str,
+    relay_bob_snap: &str,
     bulletin_full_snap: &str,
     bulletin_partial_snap: &str,
 ) -> Result<Network<LocalFileSystem>> {
@@ -132,7 +129,8 @@ async fn spawn_with_snapshots(
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 base dir"))?
         .to_string();
-    let relay = relay_snap.to_string();
+    let relay_alice = relay_alice_snap.to_string();
+    let relay_bob = relay_bob_snap.to_string();
     let bulletin_full = bulletin_full_snap.to_string();
     let bulletin_partial = bulletin_partial_snap.to_string();
 
@@ -143,12 +141,12 @@ async fn spawn_with_snapshots(
                 .with_validator(|n| {
                     n.with_name("alice")
                         .bootnode(true)
-                        .with_db_snapshot(relay.as_str())
+                        .with_db_snapshot(relay_alice.as_str())
                 })
                 .with_validator(|n| {
                     n.with_name("bob")
                         .bootnode(true)
-                        .with_db_snapshot(relay.as_str())
+                        .with_db_snapshot(relay_bob.as_str())
                 })
         })
         .with_parachain(|p| {
