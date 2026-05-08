@@ -448,7 +448,12 @@ pub async fn run_smoke_js(
     log::info!(
         "running smoldot JS smoke test (relay_spec={relay_spec_str}, para_spec={para_spec_str}, required_blocks={required_blocks}, expected_initial_finalized={expected_finalized})"
     );
-    crate::run_js_test("js/smoke.js", &env_vars)
+
+    // crate::run_js_test("js/smoke.js", &env_vars)
+    //     .await
+    //     .map_err(|e| anyhow!("JS test failed: {e}"))
+
+    crate::run_browser_test("smoke.js", &env_vars)
         .await
-        .map_err(|e| anyhow!("JS test failed: {e}"))
+        .map_err(|e| anyhow!("Browser test failed: {e}"))
 }

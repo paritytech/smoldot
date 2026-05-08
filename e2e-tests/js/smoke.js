@@ -24,6 +24,7 @@ import {
   readJsonRpcUntil,
   sendRpcAndWait,
   report,
+  decodeHeaderNumber
 } from "./helpers.js";
 
 const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
