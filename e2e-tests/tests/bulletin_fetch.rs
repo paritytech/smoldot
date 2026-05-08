@@ -63,9 +63,27 @@ async fn bulletin_fetch() -> Result<()> {
         DB_SNAPSHOT_BULLETIN_PARTIAL,
         "DB_SNAPSHOT_BULLETIN_PARTIAL_OVERRIDE",
     ))?;
-    let relay = relay
+
+    // Per-validator copies of the relay snapshot. zombienet-provider
+    // 0.4.11 keys its `with_db_snapshot` cache by `sha256(path)`, so two
+    // sibling nodes sharing one path race writing/reading the same
+    // intermediate `<hash>.tgz` in the namespace dir, producing
+    // `UnexpectedEof` mid-extract. Distinct paths land in distinct cache
+    // slots. (Same workaround the smoke tests use — see
+    // `stage_per_node_snapshots` in `e2e-tests/src/network.rs`.)
+    let stage_dir = base_dir.join("staged-snapshots");
+    std::fs::create_dir_all(&stage_dir)?;
+    let relay_alice = stage_dir.join("relay-alice.tgz");
+    let relay_bob = stage_dir.join("relay-bob.tgz");
+    std::fs::copy(&relay, &relay_alice)?;
+    std::fs::copy(&relay, &relay_bob)?;
+
+    let relay_alice = relay_alice
         .to_str()
-        .ok_or_else(|| anyhow!("non-utf8 prefetched relay path"))?;
+        .ok_or_else(|| anyhow!("non-utf8 staged relay-alice path"))?;
+    let relay_bob = relay_bob
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 staged relay-bob path"))?;
     let bulletin_full = bulletin_full
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 prefetched bulletin-full path"))?;
@@ -76,7 +94,8 @@ async fn bulletin_fetch() -> Result<()> {
     let network = spawn_with_snapshots(
         &base_dir,
         &chain_spec,
-        relay,
+        relay_alice,
+        relay_bob,
         bulletin_full,
         bulletin_partial,
     )
@@ -133,7 +152,8 @@ fn bulletin_chain_spec() -> PathBuf {
 async fn spawn_with_snapshots(
     base_dir: &Path,
     chain_spec: &Path,
-    relay_snap: &str,
+    relay_alice_snap: &str,
+    relay_bob_snap: &str,
     bulletin_full_snap: &str,
     bulletin_partial_snap: &str,
 ) -> Result<Network<LocalFileSystem>> {
@@ -145,7 +165,8 @@ async fn spawn_with_snapshots(
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 base dir"))?
         .to_string();
-    let relay = relay_snap.to_string();
+    let relay_alice = relay_alice_snap.to_string();
+    let relay_bob = relay_bob_snap.to_string();
     let bulletin_full = bulletin_full_snap.to_string();
     let bulletin_partial = bulletin_partial_snap.to_string();
 
@@ -156,12 +177,12 @@ async fn spawn_with_snapshots(
                 .with_validator(|n| {
                     n.with_name("alice")
                         .bootnode(true)
-                        .with_db_snapshot(relay.as_str())
+                        .with_db_snapshot(relay_alice.as_str())
                 })
                 .with_validator(|n| {
                     n.with_name("bob")
                         .bootnode(true)
-                        .with_db_snapshot(relay.as_str())
+                        .with_db_snapshot(relay_bob.as_str())
                 })
         })
         .with_parachain(|p| {
