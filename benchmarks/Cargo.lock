@@ -7283,7 +7283,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "arrayvec 0.7.6",
  "async-lock",
@@ -7354,10 +7354,14 @@ dependencies = [
  "anyhow",
  "ed25519-dalek",
  "env_logger",
+ "flate2",
  "hex",
  "log",
+ "serde",
  "serde_json",
- "smoldot 1.1.0",
+ "sha2 0.10.9",
+ "smoldot 1.1.1",
+ "tar",
  "tempfile",
  "tokio",
  "zombienet-sdk",

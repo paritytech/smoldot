@@ -15,22 +15,24 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
 use anyhow::anyhow;
 use ed25519_dalek::{Signer, SigningKey};
 use log::info;
 use serde_json::Value;
-use smoldot::network::codec::{Proof, Statement, encode_statement};
+use smoldot::network::codec::{encode_statement, Proof, Statement};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use zombienet_sdk::{
-    LocalFileSystem, Network, NetworkConfigBuilder, NetworkNode,
     subxt::{
         backend::rpc::RpcClient,
         ext::subxt_rpcs::{client::RpcSubscription, rpc_params},
     },
+    LocalFileSystem, Network, NetworkConfigBuilder, NetworkNode,
 };
+
+use crate::network::PARA_CHAIN;
 
 /// Para id used by the statement-store e2e fixture. Zombienet writes the
 /// final chain-spec (with bootnodes patched in) to `<base_dir>/<para_id>.json`.
@@ -103,7 +105,10 @@ pub async fn spawn_network(
     para_spec_path: &Path,
 ) -> Result<Network<LocalFileSystem>, anyhow::Error> {
     let images = zombienet_sdk::environment::get_images_from_env();
-    let base_dir_str = base_dir.to_str().expect("base_dir is valid UTF-8").to_owned();
+    let base_dir_str = base_dir
+        .to_str()
+        .expect("base_dir is valid UTF-8")
+        .to_owned();
 
     let config = NetworkConfigBuilder::new()
         .with_relaychain(|r| {
@@ -116,12 +121,13 @@ pub async fn spawn_network(
         })
         .with_parachain(|p| {
             p.with_id(PARA_ID)
+                .with_chain(PARA_CHAIN)
                 .with_chain_spec_path(para_spec_path.to_str().expect("Valid UTF-8 path"))
                 .with_default_command("polkadot-parachain")
                 .with_default_image(images.cumulus.as_str())
                 .with_default_args({
-                    let log_filter = std::env::var("SMOLDOT_E2E_COLLATOR_LOG")
-                        .unwrap_or_else(|_| {
+                    let log_filter =
+                        std::env::var("SMOLDOT_E2E_COLLATOR_LOG").unwrap_or_else(|_| {
                             "info,statement-store=info,statement-gossip=info".to_string()
                         });
                     let log_arg = format!("-l{log_filter}");
@@ -158,34 +164,6 @@ pub async fn spawn_network(
     network.wait_until_is_up(120).await?;
 
     Ok(network)
-}
-
-/// Returns the chain-spec files zombienet emits for the relay chain and the
-/// statement-store parachain. Both already include the bootnodes — no patching
-/// required. Paths live under `network.base_dir()`.
-pub fn spawned_chain_spec_paths(
-    network: &Network<LocalFileSystem>,
-) -> Result<(PathBuf, PathBuf), anyhow::Error> {
-    let base_dir = PathBuf::from(
-        network
-            .base_dir()
-            .ok_or_else(|| anyhow!("network has no base_dir"))?,
-    );
-
-    let relay_chain = network.relaychain().chain();
-    let relay_path = base_dir.join(format!("{relay_chain}.json"));
-
-    let para = network
-        .parachain(PARA_ID)
-        .ok_or_else(|| anyhow!("parachain {PARA_ID} not found"))?;
-    let para_path = base_dir.join(format!("{}.json", para.unique_id()));
-
-    info!(
-        "Resolved chain-spec paths: relay={}, para={}",
-        relay_path.display(),
-        para_path.display()
-    );
-    Ok((relay_path, para_path))
 }
 
 /// Returns a deterministic Ed25519 keypair (seed, public key) for testing.
@@ -245,9 +223,7 @@ pub async fn submit_statement(
 }
 
 /// Subscribes to all statements on a full node.
-pub async fn subscribe_any(
-    rpc: &RpcClient,
-) -> Result<RpcSubscription<Value>, anyhow::Error> {
+pub async fn subscribe_any(rpc: &RpcClient) -> Result<RpcSubscription<Value>, anyhow::Error> {
     let subscription = rpc
         .subscribe::<Value>(
             "statement_subscribeStatement",
@@ -289,10 +265,7 @@ pub async fn receive_statements(
             .map_err(|e| anyhow!("Subscription error: {e}"))?;
 
         // StatementEvent is { "event": "newStatements", "data": { "statements": [...], ... } }
-        if let Some(arr) = item
-            .pointer("/data/statements")
-            .and_then(|s| s.as_array())
-        {
+        if let Some(arr) = item.pointer("/data/statements").and_then(|s| s.as_array()) {
             for v in arr {
                 if let Some(s) = v.as_str() {
                     collected.push(s.to_string());

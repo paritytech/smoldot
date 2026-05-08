@@ -25,7 +25,7 @@ export function createSmoldotClient() {
     logCallback: (level, target, message) => {
       const labels = { 1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE" };
       const label = labels[level] ?? `L${level}`;
-      console.error(`[${label}] [${target}] ${message}`);
+      console.error(`[${new Date().toISOString()}] [${label}] [${target}] ${message}`);
     },
   });
 }
@@ -33,6 +33,12 @@ export function createSmoldotClient() {
 export async function addChainFromSpec(client, specPath, opts = {}) {
   const chainSpec = fs.readFileSync(specPath, "utf8");
   return client.addChain({ chainSpec, ...opts });
+}
+
+export function readDbContentIfSet(envVar) {
+  const path = process.env[envVar];
+  if (!path) return undefined;
+  return fs.readFileSync(path, "utf8");
 }
 
 let nextId = 1;
@@ -132,10 +138,11 @@ export async function readJsonRpcUntil(chain, predicate, deadlineMs) {
 
 export function report(name, passed, detail) {
   const suffix = detail ? `: ${detail}` : "";
+  const ts = new Date().toISOString();
   if (passed) {
-    console.log(`PASS: ${name}${suffix}`);
+    console.log(`[${ts}] PASS: ${name}${suffix}`);
   } else {
-    console.log(`FAIL: ${name}${suffix}`);
+    console.log(`[${ts}] FAIL: ${name}${suffix}`);
     process.exitCode = 1;
   }
 }
