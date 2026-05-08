@@ -1454,32 +1454,28 @@ async fn run_background<TPlat: PlatformRef>(
                             warp_synced_hash = HashDisplay(&warp_synced_hash),
                         );
 
-                        // Placeholder runtime: never used (block pruned immediately); calls fail loudly.
-                        let pre_warp_finalized_runtime = if use_pre_warp_finalized {
-                            Arc::new(Runtime {
-                                runtime: Err(RuntimeError::CodeNotFound),
-                                runtime_code: None,
-                                heap_pages: None,
-                                code_merkle_value: None,
-                                closest_ancestor_excluding: None,
-                            })
-                        } else {
-                            runtime.clone()
-                        };
-
                         let warp_synced_block = Block {
                             hash: warp_synced_hash,
                             height: warp_synced_height,
                             scale_encoded_header: subscription.finalized_block_scale_encoded_header,
                         };
 
-                        let (finalized_async_user_data, finalized_block) = if use_pre_warp_finalized
-                        {
-                            // use_pre_warp_finalized implies pre_warp_finalized.is_some().
-                            (pre_warp_finalized_runtime, pre_warp_finalized.unwrap())
-                        } else {
-                            (runtime.clone(), warp_synced_block.clone())
-                        };
+                        let (finalized_async_user_data, finalized_block) =
+                            if let Some(finalized_block) =
+                                pre_warp_finalized.filter(|_| use_pre_warp_finalized)
+                            {
+                                // Placeholder runtime: never used (block pruned immediately); calls fail loudly.
+                                let pre_warp_finalized_runtime = Arc::new(Runtime {
+                                    runtime: Err(RuntimeError::CodeNotFound),
+                                    runtime_code: None,
+                                    heap_pages: None,
+                                    code_merkle_value: None,
+                                    closest_ancestor_excluding: None,
+                                });
+                                (pre_warp_finalized_runtime, finalized_block)
+                            } else {
+                                (runtime.clone(), warp_synced_block.clone())
+                            };
 
                         let mut new_tree =
                             async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
