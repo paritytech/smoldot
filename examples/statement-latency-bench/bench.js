@@ -57,7 +57,7 @@ function parseFlags(argv) {
       "receive-timeout-ms": { type: "string", default: "5000" },
       "interval-ms": { type: "string", default: "10000" },
       "statement-expiry-ms": { type: "string", default: "600000" },
-      "warmup-ms": { type: "string", default: "15000" },
+      "warmup-ms": { type: "string", default: "120000" },
       workers: { type: "string", default: "1" },
       "fail-fast": { type: "boolean", default: false },
       "log-level": { type: "string", default: "info" },
@@ -233,10 +233,28 @@ async function runWorker({ args, clientStart, clientEnd, testRunId, log, barrier
           failFast: args.failFast,
         };
 
-        // Best-effort warm-up: smoldot has no JSON-RPC signal for "I have a
-        // statement-store peer". A fixed sleep is a coarse heuristic; tune via
-        // --warmup-ms per network.
-        await new Promise((r) => setTimeout(r, args.warmupMs));
+        // Warm-up: smoldot has no JSON-RPC signal for "I have a statement-store
+        // peer", but addChain returns long before the chain has finalized its
+        // first block, and statement_submitStatement just hangs silently on an
+        // unbootstrapped parachain. Poll system_health as a proxy and proceed
+        // once peers > 0 && !isSyncing, capped at --warmup-ms as a safety net.
+        const warmupDeadline = Date.now() + args.warmupMs;
+        let warmupReady = false;
+        while (Date.now() < warmupDeadline) {
+          try {
+            const h = await resources.rpc.request("system_health", []);
+            if (h && h.peers > 0 && h.isSyncing === false) {
+              warmupReady = true;
+              break;
+            }
+          } catch {}
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        if (!warmupReady) {
+          log.warn(
+            `Client ${clientId}: warmup deadline (${args.warmupMs}ms) reached without system_health ready; proceeding anyway`,
+          );
+        }
 
         // Synchronise round 1 across all clients globally. Without this each
         // client enters round 1 as soon as its own warmup completes, drifts on
