@@ -45,7 +45,10 @@ async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
 
     let base_dir = resolve_base_dir()?;
     let para_spec_path = create_para_chain_spec_with_allowances(&[pubkey], &base_dir)?;
-    info!("Parachain chain spec created at {}", para_spec_path.display());
+    info!(
+        "Parachain chain spec created at {}",
+        para_spec_path.display()
+    );
 
     let network = spawn_network(&base_dir, &para_spec_path).await?;
     info!("Network spawned");

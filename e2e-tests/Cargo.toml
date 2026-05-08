@@ -8,10 +8,14 @@ publish = false
 anyhow = "1.0.81"
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 env_logger = "0.11.2"
+flate2 = "1.0"
 hex = { version = "0.4.3", default-features = false }
 log = "0.4.22"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.132"
+sha2 = { version = "0.10", default-features = false }
 smoldot = { path = "../lib", default-features = false }
+tar = "0.4"
 tempfile = "3.8.1"
-tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "process", "time"] }
+tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "process", "time", "fs", "io-util"] }
 zombienet-sdk = "0.4"

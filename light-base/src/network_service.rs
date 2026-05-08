@@ -2873,7 +2873,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let mut valid_addrs = Vec::with_capacity(addrs.len());
                     for addr in addrs {
                         match Multiaddr::from_bytes(addr) {
-                            Ok(a) => {
+                            Ok(mut a) => {
+                                if !pop_p2p_if_matches(&mut a, &peer_id) {
+                                    log!(
+                                        &task.platform,
+                                        Debug,
+                                        "network",
+                                        "discovered-address-peer-id-mismatch",
+                                        chain = &task.network[chain_id].log_name,
+                                        announced_peer_id = peer_id,
+                                        addr = &a,
+                                        obtained_from = requestee_peer_id
+                                    );
+                                    continue;
+                                }
                                 if platform::address_parse::multiaddr_to_address(&a)
                                     .ok()
                                     .map_or(false, |addr| {
@@ -3479,5 +3492,69 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 debug_assert!(_send_result.is_ok());
             }
         }
+    }
+}
+
+/// Pops a trailing `/p2p/<peer_id>` from `addr` if it matches `expected_peer`. Returns `false`
+/// (caller must discard the address) on mismatch.
+fn pop_p2p_if_matches(
+    addr: &mut smoldot::libp2p::multiaddr::Multiaddr,
+    expected_peer: &smoldot::libp2p::peer_id::PeerId,
+) -> bool {
+    use smoldot::libp2p::multiaddr::Protocol;
+    match addr.iter().last() {
+        Some(Protocol::P2p(mh)) => {
+            if mh.into_bytes() == expected_peer.as_bytes() {
+                addr.pop();
+                true
+            } else {
+                false
+            }
+        }
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pop_p2p_if_matches;
+    use smoldot::libp2p::{multiaddr::Multiaddr, peer_id::PeerId};
+
+    // Two distinct, valid PeerIds. The first is reused from existing smoldot tests in
+    // `lib/src/libp2p/multiaddr.rs:629`; the second is the bootnode peer-id observed in the
+    // test environment that motivated this change.
+    const PEER_A: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    const PEER_B: &str = "12D3KooWQk1yQtG1YugyKjiQf6KNk8VjGGAT5xy1FWcnRKN4yXYJ";
+
+    fn peer(s: &str) -> PeerId {
+        PeerId::from_bytes(bs58::decode(s).into_vec().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn no_suffix_passes_through_unchanged() {
+        let mut addr: Multiaddr = "/ip4/127.0.0.1/tcp/30333/ws".parse().unwrap();
+        let before = addr.clone();
+        assert!(pop_p2p_if_matches(&mut addr, &peer(PEER_A)));
+        assert_eq!(addr, before);
+    }
+
+    #[test]
+    fn matching_suffix_is_stripped() {
+        let mut addr: Multiaddr = format!("/ip4/127.0.0.1/tcp/30333/ws/p2p/{PEER_A}")
+            .parse()
+            .unwrap();
+        assert!(pop_p2p_if_matches(&mut addr, &peer(PEER_A)));
+        let expected: Multiaddr = "/ip4/127.0.0.1/tcp/30333/ws".parse().unwrap();
+        assert_eq!(addr, expected);
+    }
+
+    #[test]
+    fn mismatched_suffix_rejects_and_keeps_addr() {
+        let original: Multiaddr = format!("/ip4/127.0.0.1/tcp/30333/ws/p2p/{PEER_A}")
+            .parse()
+            .unwrap();
+        let mut addr = original.clone();
+        assert!(!pop_p2p_if_matches(&mut addr, &peer(PEER_B)));
+        assert_eq!(addr, original);
     }
 }

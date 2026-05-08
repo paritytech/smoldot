@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 3.1.2 - 2026-05-07
+
+### Added
+
+- Log when the statement protocol substream opens, to make peer connectivity easier to diagnose. ([#3154](https://github.com/paritytech/smoldot/pull/3154))
+
+### Fixed
+
+- Strip the trailing `/p2p/<peer_id>` from discovered addresses so peers advertised in this form are no longer rejected as unsupported, restoring peer discovery beyond the configured bootnodes. ([#3245](https://github.com/paritytech/smoldot/pull/3245))
+- Stop continuously re-trying statement-store submissions after a peer rejects them. ([#3230](https://github.com/paritytech/smoldot/pull/3230))
+- Avoid panicking on shutdown when background tasks observe the client being torn down. ([#3243](https://github.com/paritytech/smoldot/pull/3243))
+
 ## 3.1.1 - 2026-04-22
 
 ### Fixed
