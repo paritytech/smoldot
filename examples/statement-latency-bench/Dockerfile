@@ -14,10 +14,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 RUN rustup target add wasm32-unknown-unknown
 
 COPY ./.. /build
-WORKDIR /build/examples/statement-latency-bench
+
+# Build the smoldot npm package first: `npm run build` runs
+# prepare.mjs (compiles Rust → wasm) then tsc, producing dist/.
+# A plain `file:` install of the bench would NOT run these scripts.
+WORKDIR /build/wasm-node/javascript
+RUN npm install
+RUN npm run build
+
 # --install-links materializes the `file:../../wasm-node/javascript`
-# dep as a real copy in node_modules instead of a symlink, so the
-# runtime stage can be a self-contained copy of just this directory.
+# dep as a real copy (including the freshly built dist/) in
+# node_modules instead of a symlink, so the runtime stage can be a
+# self-contained copy of just this directory.
+WORKDIR /build/examples/statement-latency-bench
 RUN npm install --omit=dev --install-links
 
 
