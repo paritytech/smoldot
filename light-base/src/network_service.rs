@@ -2205,40 +2205,44 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     ),
                 );
 
-                let random_peer_id = {
-                    let mut pub_key = [0; 32];
-                    rand_chacha::rand_core::RngCore::fill_bytes(&mut task.randomness, &mut pub_key);
-                    PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
-                };
+                // Iterative-style discovery: instead of a single FindNode against one peer,
+                // dispatch up to ALPHA=3 FindNode requests in parallel to distinct peers,
+                // each with a distinct random target. This gives substantially better DHT
+                // coverage per discovery round (more peers asked, more diverse keyspace
+                // walked) without requiring a per-query state machine.
+                //
+                // Order of preference for the target peer pool:
+                //  1. Peers we know speak this chain's Kad protocol (from Identify).
+                //  2. Peers with an open block-announces gossip substream (best-effort:
+                //     they're connected and likely speak Kad even if we haven't gotten
+                //     Identify yet).
+                const PARALLEL_FIND_NODE_PER_ROUND: usize = 3;
 
-                // TODO: select target closest to the random peer instead
-                let target = task
+                let mut targets: Vec<PeerId> = task
                     .network
-                    .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
-                    .next()
-                    .cloned();
+                    .kademlia_capable_peers(chain_id)
+                    .cloned()
+                    .collect();
+                if targets.len() < PARALLEL_FIND_NODE_PER_ROUND {
+                    for p in task
+                        .network
+                        .gossip_connected_peers(
+                            chain_id,
+                            service::GossipKind::ConsensusTransactions,
+                        )
+                        .cloned()
+                    {
+                        if !targets.contains(&p) {
+                            targets.push(p);
+                            if targets.len() >= PARALLEL_FIND_NODE_PER_ROUND {
+                                break;
+                            }
+                        }
+                    }
+                }
+                targets.truncate(PARALLEL_FIND_NODE_PER_ROUND);
 
-                if let Some(target) = target {
-                    match task.network.start_kademlia_find_node_request(
-                        &target,
-                        chain_id,
-                        &random_peer_id,
-                        Duration::from_secs(20),
-                    ) {
-                        Ok(_) => {}
-                        Err(service::StartRequestError::NoConnection) => unreachable!(),
-                    };
-
-                    log!(
-                        &task.platform,
-                        Debug,
-                        "network",
-                        "discovery-find-node-started",
-                        chain = &task.network[chain_id].log_name,
-                        request_target = target,
-                        requested_peer_id = random_peer_id
-                    );
-                } else {
+                if targets.is_empty() {
                     log!(
                         &task.platform,
                         Debug,
@@ -2246,6 +2250,37 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         "discovery-skipped-no-peer",
                         chain = &task.network[chain_id].log_name
                     );
+                } else {
+                    for target in &targets {
+                        let random_peer_id = {
+                            let mut pub_key = [0; 32];
+                            rand_chacha::rand_core::RngCore::fill_bytes(
+                                &mut task.randomness,
+                                &mut pub_key,
+                            );
+                            PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
+                        };
+
+                        match task.network.start_kademlia_find_node_request(
+                            target,
+                            chain_id,
+                            &random_peer_id,
+                            Duration::from_secs(20),
+                        ) {
+                            Ok(_) => {}
+                            Err(service::StartRequestError::NoConnection) => unreachable!(),
+                        };
+
+                        log!(
+                            &task.platform,
+                            Debug,
+                            "network",
+                            "discovery-find-node-started",
+                            chain = &task.network[chain_id].log_name,
+                            request_target = target,
+                            requested_peer_id = random_peer_id
+                        );
+                    }
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::HandshakeFinished {
@@ -2863,6 +2898,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 response: service::RequestResult::KademliaFindNode(Ok(nodes)),
                 ..
             }) => {
+                // Track whether this response taught us anything new. If so, we reset the
+                // chain's discovery backoff so that the next FindNode round runs at the
+                // initial 2s interval rather than continuing to back off — Kademlia is
+                // making progress, walk the DHT eagerly.
+                let mut any_new_peer = false;
                 for (peer_id, mut addrs) in nodes {
                     // Make sure to not insert too many address for a single peer.
                     // While the .
@@ -2934,6 +2974,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             peer_removed,
                         } = insert_outcome
                         {
+                            any_new_peer = true;
                             if let Some(peer_removed) = peer_removed {
                                 log!(
                                     &task.platform,
@@ -2967,6 +3008,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             basic_peering_strategy::InsertAddressResult::UnknownPeer
                         ));
                     }
+                }
+
+                if any_new_peer {
+                    task.network[chain_id].next_discovery_period = Duration::from_secs(2);
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {

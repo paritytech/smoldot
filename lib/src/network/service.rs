@@ -272,6 +272,14 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
         BitswapSubstreamState,
         collection::SubstreamId,
     )>,
+
+    /// Peers for which an outbound Identify request has been sent (or completed) on at least
+    /// one connection. Used to ensure we issue Identify at most once per peer lifetime.
+    identify_requested_peers: hashbrown::HashSet<PeerIndex, fnv::FnvBuildHasher>,
+
+    /// Peers known to support a chain's Kademlia protocol, as determined by Identify responses.
+    /// Used by [`ChainNetwork::kademlia_capable_peers`].
+    kademlia_capable_peers: BTreeSet<(usize, PeerIndex)>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -477,6 +485,11 @@ where
                 Default::default(),
             ),
             bitswap_substreams_by_peer_id: BTreeSet::new(),
+            identify_requested_peers: hashbrown::HashSet::with_capacity_and_hasher(
+                config.connections_capacity,
+                Default::default(),
+            ),
+            kademlia_capable_peers: BTreeSet::new(),
             chains: slab::Slab::with_capacity(config.chains_capacity),
             chains_by_protocol_info: hashbrown::HashMap::with_capacity_and_hasher(
                 config.chains_capacity,
@@ -718,6 +731,9 @@ where
             // TODO: cancel outgoing requests instead of just ignoring their response
             // TODO: must send back an error to the ingoing requests; this is not a huge deal because requests will time out on the remote's side, but it's very stupid nonetheless
         }
+
+        self.kademlia_capable_peers
+            .retain(|(c, _)| *c != chain_id.0);
 
         // Actually remove the chain. This will panic if the `ChainId` is invalid.
         let chain = self.chains.remove(chain_id.0);
@@ -1542,6 +1558,35 @@ where
                     // Small sanity check.
                     debug_assert!(!self.unconnected_desired.contains(&actual_peer_index));
 
+                    // Auto-fire an outbound Identify request the first time we see this peer.
+                    // The response will populate `kademlia_capable_peers`, which discovery
+                    // logic uses to find Kademlia targets independently of gossip state.
+                    //
+                    // Identify expects a length-prefixed empty body (see inbound handler
+                    // around line 2037, which checks `request_payload.is_empty()`). Passing
+                    // `None` would write nothing at all (not even the length prefix); some
+                    // peer implementations then never reply because they're waiting for the
+                    // framed empty request. Passing `Some(Vec::new())` writes a single `0`
+                    // byte (LEB128(0)) which is the spec-compliant empty Identify request.
+                    if self.identify_requested_peers.insert(actual_peer_index) {
+                        let identify_substream_id = self.inner.start_request(
+                            id,
+                            codec::encode_protocol_name_string(codec::ProtocolName::Identify),
+                            Some(Vec::new()),
+                            // Identify is fast: a generous-but-bounded timeout is fine.
+                            Duration::from_secs(20),
+                            16 * 1024,
+                        );
+                        let _prev = self.substreams.insert(
+                            identify_substream_id,
+                            SubstreamInfo {
+                                connection_id: id,
+                                protocol: Some(Protocol::Identify),
+                            },
+                        );
+                        debug_assert!(_prev.is_none());
+                    }
+
                     return Some(Event::HandshakeFinished {
                         id,
                         expected_peer_id,
@@ -1815,7 +1860,31 @@ where
                     // Decode/verify the response.
                     let (response, chain_index) = match substream_info.protocol {
                         None => continue,
-                        Some(Protocol::Identify) => todo!(), // TODO: we don't send identify requests yet, so it's fine to leave this unimplemented
+                        Some(Protocol::Identify) => {
+                            // Identify is chain-agnostic. Use the response to populate
+                            // `kademlia_capable_peers`: a peer is considered Kad-capable for
+                            // a chain when its self-advertised protocols list contains that
+                            // chain's Kad protocol name. The response is consumed internally
+                            // (no `Event::RequestResult` is emitted for Identify).
+                            if let Ok(payload) = response {
+                                if let Ok(decoded) = codec::decode_identify_response(&payload) {
+                                    let advertised: Vec<&str> = decoded.protocols.collect();
+                                    for (chain_index, chain) in self.chains.iter() {
+                                        let kad_name = codec::ProtocolName::Kad {
+                                            genesis_hash: chain.genesis_hash,
+                                            fork_id: chain.fork_id.as_deref(),
+                                        };
+                                        let kad_name_string =
+                                            codec::encode_protocol_name_string(kad_name);
+                                        if advertised.iter().any(|p| *p == kad_name_string) {
+                                            self.kademlia_capable_peers
+                                                .insert((chain_index, peer_index));
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         Some(Protocol::Sync { chain_index, .. }) => (
                             RequestResult::Blocks(
                                 response.map_err(BlocksRequestError::Request).and_then(
@@ -4082,6 +4151,29 @@ where
         self.inner.respond_in_request(substream_id, response);
     }
 
+    /// Returns the list of peers known to support the Kademlia protocol of the given chain,
+    /// as determined by their Identify protocol response.
+    ///
+    /// Unlike [`ChainNetwork::gossip_connected_peers`], this set is not gated on whether a
+    /// gossip (block-announces) substream is open with the peer. As a result, it can be used
+    /// to drive Kademlia discovery even when no gossip link is currently established.
+    ///
+    /// Identify is sent at most once per peer (on first established connection). Peers that
+    /// connected before [`ChainNetwork::add_chain`] was called for this chain will not appear
+    /// in this set even if their Identify response advertised the chain's Kad protocol — only
+    /// peers whose Identify response is processed *after* the chain was added are inserted.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn kademlia_capable_peers(&self, chain_id: ChainId) -> impl Iterator<Item = &PeerId> {
+        assert!(self.chains.contains(chain_id.0));
+        self.kademlia_capable_peers
+            .range((chain_id.0, PeerIndex(usize::MIN))..=(chain_id.0, PeerIndex(usize::MAX)))
+            .map(|(_, peer_index)| &self.peers[peer_index.0])
+    }
+
     /// Returns the list of all peers for a [`Event::GossipConnected`] event of the given kind has
     /// been emitted.
     /// It is possible to send gossip notifications to these peers.
@@ -5235,6 +5327,12 @@ where
         if self.bitswap_desired_peers.contains(&peer_index) {
             return;
         }
+
+        // Clear Identify-derived state. This must be done before freeing the slab slot,
+        // otherwise a future peer reusing this `PeerIndex` would inherit stale Kad capability.
+        self.identify_requested_peers.remove(&peer_index);
+        self.kademlia_capable_peers
+            .retain(|(_, p)| *p != peer_index);
 
         let peer_id = self.peers.remove(peer_index.0);
         let _was_in = self.peers_by_peer_id.remove(&peer_id);
