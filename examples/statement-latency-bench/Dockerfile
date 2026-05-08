@@ -20,7 +20,7 @@ RUN npm install --omit=dev
 
 FROM alpine:latest
 
-RUN apk add --no-cache nodejs
+RUN apk add --no-cache nodejs bash
 
 WORKDIR /app
 COPY --from=builder /build/examples/statement-latency-bench /app
