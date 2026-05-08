@@ -15,7 +15,10 @@ RUN rustup target add wasm32-unknown-unknown
 
 COPY ./.. /build
 WORKDIR /build/examples/statement-latency-bench
-RUN npm install --omit=dev
+# --install-links materializes the `file:../../wasm-node/javascript`
+# dep as a real copy in node_modules instead of a symlink, so the
+# runtime stage can be a self-contained copy of just this directory.
+RUN npm install --omit=dev --install-links
 
 
 FROM alpine:latest
