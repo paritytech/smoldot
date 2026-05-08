@@ -1,5 +1,6 @@
 /target
 /e2e-tests/target
 /e2e-tests/js/node_modules
+/e2e-tests/browser/node_modules
 /benchmarks/target
 /benchmarks/js/node_modules
