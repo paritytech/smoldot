@@ -49,18 +49,18 @@ fn known_tree(finalized: Block) -> Tree<TestPlat> {
 
 #[test]
 fn attaches_warp_synced_block_under_prior_finalized() {
-    let prev_finalized = block(0x01, 100);
+    let pre_warp_finalized = block(0x01, 100);
     let new_finalized = block(0x02, 101);
 
     let result = build_warp_sync_tree::<TestPlat>(
-        &known_tree(prev_finalized.clone()),
+        &known_tree(pre_warp_finalized.clone()),
         new_finalized.clone(),
         dummy_runtime(),
         vec![],
     );
 
-    assert_eq!(result.finalized_block.hash, prev_finalized.hash);
-    assert_eq!(result.pre_warp_finalized_hash, Some(prev_finalized.hash));
+    assert_eq!(result.finalized_block.hash, pre_warp_finalized.hash);
+    assert_eq!(result.pre_warp_finalized_hash, Some(pre_warp_finalized.hash));
     let in_tree: Vec<_> = result
         .tree
         .input_output_iter_unordered()
@@ -103,12 +103,12 @@ fn falls_back_when_prior_unknown_lacks_input_finalized() {
 
 #[test]
 fn attaches_non_finalized_children() {
-    let prev = block(0x01, 100);
+    let pre_warp_finalized = block(0x01, 100);
     let new_finalized = block(0x02, 101);
     let child = block(0x03, 102);
 
     let result = build_warp_sync_tree::<TestPlat>(
-        &known_tree(prev),
+        &known_tree(pre_warp_finalized),
         new_finalized.clone(),
         dummy_runtime(),
         vec![WarpSyncTreeChild {
@@ -130,12 +130,16 @@ fn attaches_non_finalized_children() {
 
 #[test]
 fn notifies_subscribers_of_warp_synced_block() {
-    let prev = block(0x01, 100);
+    let pre_warp_finalized = block(0x01, 100);
     let new_finalized = block(0x02, 101);
     let new_finalized_hash = new_finalized.hash;
 
-    let mut result =
-        build_warp_sync_tree::<TestPlat>(&known_tree(prev), new_finalized, dummy_runtime(), vec![]);
+    let mut result = build_warp_sync_tree::<TestPlat>(
+        &known_tree(pre_warp_finalized),
+        new_finalized,
+        dummy_runtime(),
+        vec![],
+    );
 
     match result.tree.try_advance_output() {
         Some(async_tree::OutputUpdate::Block(b)) => {
@@ -180,14 +184,14 @@ fn fallback_path_emits_no_notifications() {
 
 #[test]
 fn child_surfaces_after_warp_synced_finalized() {
-    let prev = block(0x01, 100);
+    let pre_warp_finalized = block(0x01, 100);
     let new_finalized = block(0x02, 101);
     let new_finalized_hash = new_finalized.hash;
     let child = block(0x03, 102);
     let child_hash = child.hash;
 
     let mut result = build_warp_sync_tree::<TestPlat>(
-        &known_tree(prev),
+        &known_tree(pre_warp_finalized),
         new_finalized,
         dummy_runtime(),
         vec![WarpSyncTreeChild {
