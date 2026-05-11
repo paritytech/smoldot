@@ -1460,51 +1460,28 @@ async fn run_background<TPlat: PlatformRef>(
                             scale_encoded_header: subscription.finalized_block_scale_encoded_header,
                         };
 
-                        let (finalized_async_user_data, finalized_block) =
-                            if let Some(finalized_block) =
-                                pre_warp_finalized.filter(|_| use_pre_warp_finalized)
-                            {
-                                // Placeholder runtime: never used (block pruned immediately); calls fail loudly.
-                                let pre_warp_finalized_runtime = Arc::new(Runtime {
-                                    runtime: Err(RuntimeError::CodeNotFound),
-                                    runtime_code: None,
-                                    heap_pages: None,
-                                    code_merkle_value: None,
-                                    closest_ancestor_excluding: None,
-                                });
-                                (pre_warp_finalized_runtime, finalized_block)
-                            } else {
-                                (runtime.clone(), warp_synced_block.clone())
-                            };
-
                         let mut new_tree =
                             async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
-                                finalized_async_user_data,
+                                finalized_async_user_data: runtime,
                                 retry_after_failed: Duration::from_secs(4), // TODO: hardcoded
                                 blocks_capacity: 32,
                             });
 
-                        if use_pre_warp_finalized {
+                        let finalized_block = if use_pre_warp_finalized {
                             // Pre-complete the runtime so the tree-advance loop emits
                             // `Block` + `Finalized` without an actual download.
-                            let warp_synced_idx = new_tree.input_insert_block(
-                                warp_synced_block.clone(),
-                                None,
-                                false,
-                                true,
-                            );
-                            let async_op = match new_tree
-                                .next_necessary_async_op(&background.platform.now())
-                            {
-                                async_tree::NextNecessaryAsyncOp::Ready(op) => op,
-                                async_tree::NextNecessaryAsyncOp::NotReady { .. } => unreachable!(
-                                    "warp-synced block just inserted with pending async op"
-                                ),
-                            };
-                            debug_assert_eq!(async_op.block_index, warp_synced_idx);
-                            new_tree.async_op_finished(async_op.id, runtime);
+                            // `pre_warp_finalized`'s real on-chain runtime is unknown and may
+                            // differ from the warp-synced runtime, but `pre_warp_finalized` is
+                            // tree-internal only (never reported to subscribers), so the outer-
+                            // finalized slot holds the warp-synced runtime and the insert below
+                            // copies it onto the warp-synced node via `same_async_op_as_parent`.
+                            let warp_synced_idx =
+                                new_tree.input_insert_block(warp_synced_block, None, true, true);
                             new_tree.input_finalize(warp_synced_idx);
-                        }
+                            pre_warp_finalized.unwrap()
+                        } else {
+                            warp_synced_block
+                        };
 
                         for block in subscription.non_finalized_blocks_ancestry_order {
                             // Parent is the tree's outer finalized (None) or already in the tree.
