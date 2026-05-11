@@ -1355,10 +1355,10 @@ async fn run_background<TPlat: PlatformRef>(
 
                     // TODO: DRY below
                     if let Some(finalized_block_runtime) = subscription.finalized_block_runtime {
-                        let warp_synced_hash = header::hash_from_scale_encoded_header(
+                        let finalized_block_hash = header::hash_from_scale_encoded_header(
                             &subscription.finalized_block_scale_encoded_header,
                         );
-                        let warp_synced_height = header::decode(
+                        let finalized_block_height = header::decode(
                             &subscription.finalized_block_scale_encoded_header,
                             background.sync_service.block_number_bytes(),
                         )
@@ -1434,29 +1434,26 @@ async fn run_background<TPlat: PlatformRef>(
                                     scale_encoded_header: b.scale_encoded_header.clone(),
                                 })
                             }
-                        };
+                        }
                         // Disable when missing or degenerately equal to warp-synced.
-                        let use_pre_warp_finalized = pre_warp_finalized
-                            .as_ref()
-                            .is_some_and(|b| b.hash != warp_synced_hash);
+                        .filter(|b| b.hash != finalized_block_hash);
 
                         log!(
                             &background.platform,
                             Debug,
                             &background.log_target,
                             "warp-sync-tree-init",
-                            use_pre_warp_finalized,
                             pre_warp_finalized_hash = if let Some(b) = pre_warp_finalized.as_ref() {
                                 Cow::Owned(HashDisplay(&b.hash).to_string())
                             } else {
                                 Cow::Borrowed("<none>")
                             },
-                            warp_synced_hash = HashDisplay(&warp_synced_hash),
+                            finalized_block_hash = HashDisplay(&finalized_block_hash),
                         );
 
-                        let warp_synced_block = Block {
-                            hash: warp_synced_hash,
-                            height: warp_synced_height,
+                        let new_finalized_block = Block {
+                            hash: finalized_block_hash,
+                            height: finalized_block_height,
                             scale_encoded_header: subscription.finalized_block_scale_encoded_header,
                         };
 
@@ -1467,20 +1464,18 @@ async fn run_background<TPlat: PlatformRef>(
                                 blocks_capacity: 32,
                             });
 
-                        let finalized_block = if use_pre_warp_finalized {
+                        let finalized_block = if let Some(pre_warp_finalized) = pre_warp_finalized {
                             // Pre-complete the runtime so the tree-advance loop emits
                             // `Block` + `Finalized` without an actual download.
                             // `pre_warp_finalized`'s real on-chain runtime is unknown and may
                             // differ from the warp-synced runtime, but `pre_warp_finalized` is
-                            // tree-internal only (never reported to subscribers), so the outer-
-                            // finalized slot holds the warp-synced runtime and the insert below
-                            // copies it onto the warp-synced node via `same_async_op_as_parent`.
-                            let warp_synced_idx =
-                                new_tree.input_insert_block(warp_synced_block, None, true, true);
-                            new_tree.input_finalize(warp_synced_idx);
-                            pre_warp_finalized.unwrap()
+                            // tree-internal only (never reported to subscribers).
+                            let new_finalized_idx =
+                                new_tree.input_insert_block(new_finalized_block, None, true, true);
+                            new_tree.input_finalize(new_finalized_idx);
+                            pre_warp_finalized
                         } else {
-                            warp_synced_block
+                            new_finalized_block
                         };
 
                         for block in subscription.non_finalized_blocks_ancestry_order {
