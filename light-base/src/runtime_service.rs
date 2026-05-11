@@ -1412,107 +1412,60 @@ async fn run_background<TPlat: PlatformRef>(
                             }
                         }
 
-                        // Used as the tree's initial finalized state so the warp-synced block
-                        // can be inserted as a non-finalized child and then finalized, emitting
-                        // `Block` + `Finalized` to subscribers. Not the real chain parent of
-                        // the warp-synced block (warp sync skips ancestry); only a tree-level
-                        // predecessor. Pruned the moment warp-synced is finalized.
-                        // `None` when the previous tree has no usable input-finalized block,
-                        // in which case we fall back to the legacy single-block init.
-                        let pre_warp_finalized: Option<Block> = match &background.tree {
-                            Tree::FinalizedBlockRuntimeKnown {
-                                finalized_block, ..
-                            } => Some(Block {
-                                hash: finalized_block.hash,
-                                height: finalized_block.height,
-                                scale_encoded_header: finalized_block.scale_encoded_header.clone(),
-                            }),
-                            Tree::FinalizedBlockRuntimeUnknown { tree } => {
-                                tree.input_finalized_user_data().map(|b| Block {
-                                    hash: b.hash,
-                                    height: b.height,
+                        let new_finalized_block = Block {
+                            hash: finalized_block_hash,
+                            height: finalized_block_height,
+                            scale_encoded_header: subscription.finalized_block_scale_encoded_header,
+                        };
+                        let block_number_bytes = background.sync_service.block_number_bytes();
+                        let children = subscription
+                            .non_finalized_blocks_ancestry_order
+                            .into_iter()
+                            .map(|b| WarpSyncTreeChild {
+                                block: Block {
+                                    hash: header::hash_from_scale_encoded_header(
+                                        &b.scale_encoded_header,
+                                    ),
+                                    height: header::decode(
+                                        &b.scale_encoded_header,
+                                        block_number_bytes,
+                                    )
+                                    .unwrap()
+                                    .number,
                                     scale_encoded_header: b.scale_encoded_header.clone(),
-                                })
-                            }
-                        }
-                        // Disable when missing or degenerately equal to warp-synced.
-                        .filter(|b| b.hash != finalized_block_hash);
+                                },
+                                parent_hash: b.parent_hash,
+                                same_runtime_as_parent: same_runtime_as_parent(
+                                    &b.scale_encoded_header,
+                                    block_number_bytes,
+                                ),
+                                is_new_best: b.is_new_best,
+                            })
+                            .collect();
+
+                        let WarpSyncTreeInit {
+                            finalized_block,
+                            tree,
+                            pre_warp_finalized_hash,
+                        } = build_warp_sync_tree(
+                            &background.tree,
+                            new_finalized_block,
+                            runtime,
+                            children,
+                        );
 
                         log!(
                             &background.platform,
                             Debug,
                             &background.log_target,
                             "warp-sync-tree-init",
-                            pre_warp_finalized_hash = if let Some(b) = pre_warp_finalized.as_ref() {
-                                Cow::Owned(HashDisplay(&b.hash).to_string())
+                            pre_warp_finalized_hash = if let Some(h) = pre_warp_finalized_hash {
+                                Cow::Owned(HashDisplay(&h).to_string())
                             } else {
                                 Cow::Borrowed("<none>")
                             },
                             finalized_block_hash = HashDisplay(&finalized_block_hash),
                         );
-
-                        let new_finalized_block = Block {
-                            hash: finalized_block_hash,
-                            height: finalized_block_height,
-                            scale_encoded_header: subscription.finalized_block_scale_encoded_header,
-                        };
-
-                        let mut new_tree =
-                            async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
-                                finalized_async_user_data: runtime,
-                                retry_after_failed: Duration::from_secs(4), // TODO: hardcoded
-                                blocks_capacity: 32,
-                            });
-
-                        let finalized_block = if let Some(pre_warp_finalized) = pre_warp_finalized {
-                            // Pre-complete the runtime so the tree-advance loop emits
-                            // `Block` + `Finalized` without an actual download.
-                            // `pre_warp_finalized`'s real on-chain runtime is unknown and may
-                            // differ from the warp-synced runtime, but `pre_warp_finalized` is
-                            // tree-internal only (never reported to subscribers).
-                            let new_finalized_idx =
-                                new_tree.input_insert_block(new_finalized_block, None, true, true);
-                            new_tree.input_finalize(new_finalized_idx);
-                            pre_warp_finalized
-                        } else {
-                            new_finalized_block
-                        };
-
-                        for block in subscription.non_finalized_blocks_ancestry_order {
-                            // Parent is the tree's outer finalized (None) or already in the tree.
-                            let parent_index = if block.parent_hash == finalized_block.hash {
-                                None
-                            } else {
-                                Some(
-                                    new_tree
-                                        .input_output_iter_unordered()
-                                        .find(|b| b.user_data.hash == block.parent_hash)
-                                        .unwrap()
-                                        .id,
-                                )
-                            };
-                            let same_runtime_as_parent = same_runtime_as_parent(
-                                &block.scale_encoded_header,
-                                background.sync_service.block_number_bytes(),
-                            );
-                            let _ = new_tree.input_insert_block(
-                                Block {
-                                    hash: header::hash_from_scale_encoded_header(
-                                        &block.scale_encoded_header,
-                                    ),
-                                    height: header::decode(
-                                        &block.scale_encoded_header,
-                                        background.sync_service.block_number_bytes(),
-                                    )
-                                    .unwrap()
-                                    .number,
-                                    scale_encoded_header: block.scale_encoded_header,
-                                },
-                                parent_index,
-                                same_runtime_as_parent,
-                                block.is_new_best,
-                            );
-                        }
 
                         background.tree = Tree::FinalizedBlockRuntimeKnown {
                             all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
@@ -1521,7 +1474,7 @@ async fn run_background<TPlat: PlatformRef>(
                             ), // TODO: capacity?
                             pinned_blocks: BTreeMap::new(),
                             finalized_block,
-                            tree: new_tree,
+                            tree,
                         };
                     } else {
                         background.tree = Tree::FinalizedBlockRuntimeUnknown {
@@ -3204,6 +3157,97 @@ fn same_runtime_as_parent(header: &[u8], block_number_bytes: usize) -> bool {
     }
 }
 
+/// Output of [`build_warp_sync_tree`].
+struct WarpSyncTreeInit<TPlat: PlatformRef> {
+    /// Block that goes into the outer wrapper's `finalized_block` slot. In the warp-sync-aware
+    /// path this is the pre-warp finalized; otherwise the new finalized.
+    finalized_block: Block,
+    /// New async_tree. If pre-warp-finalized was used, the new finalized is inserted as a
+    /// non-finalized root with `same_async_op_as_parent` and input-finalized.
+    tree: async_tree::AsyncTree<TPlat::Instant, Block, Arc<Runtime>>,
+    /// Hash of the pre-warp finalized block, for logging. `None` if absent or degenerately equal
+    /// to the new finalized.
+    pre_warp_finalized_hash: Option<[u8; 32]>,
+}
+
+/// A non-finalized child block being inserted into the new tree by [`build_warp_sync_tree`].
+struct WarpSyncTreeChild {
+    block: Block,
+    parent_hash: [u8; 32],
+    same_runtime_as_parent: bool,
+    is_new_best: bool,
+}
+
+/// Builds the `Tree::FinalizedBlockRuntimeKnown` state on `MustSubscribe` when the sync service
+/// delivers a fresh finalized runtime (relay-chain warp sync completion, or first parachain
+/// subscription).
+fn build_warp_sync_tree<TPlat: PlatformRef>(
+    prev_tree: &Tree<TPlat>,
+    new_finalized_block: Block,
+    runtime: Arc<Runtime>,
+    children: Vec<WarpSyncTreeChild>,
+) -> WarpSyncTreeInit<TPlat> {
+    let pre_warp_finalized: Option<Block> = match prev_tree {
+        Tree::FinalizedBlockRuntimeKnown {
+            finalized_block, ..
+        } => Some(Block {
+            hash: finalized_block.hash,
+            height: finalized_block.height,
+            scale_encoded_header: finalized_block.scale_encoded_header.clone(),
+        }),
+        Tree::FinalizedBlockRuntimeUnknown { tree } => {
+            tree.input_finalized_user_data().map(|b| Block {
+                hash: b.hash,
+                height: b.height,
+                scale_encoded_header: b.scale_encoded_header.clone(),
+            })
+        }
+    }
+    // Disable when missing or degenerately equal to the new finalized.
+    .filter(|b| b.hash != new_finalized_block.hash);
+
+    let pre_warp_finalized_hash = pre_warp_finalized.as_ref().map(|b| b.hash);
+
+    let mut tree = async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
+        finalized_async_user_data: runtime,
+        retry_after_failed: Duration::from_secs(4),
+        blocks_capacity: 32,
+    });
+
+    let finalized_block = if let Some(pre_warp_finalized) = pre_warp_finalized {
+        let new_finalized_idx = tree.input_insert_block(new_finalized_block, None, true, true);
+        tree.input_finalize(new_finalized_idx);
+        pre_warp_finalized
+    } else {
+        new_finalized_block
+    };
+
+    for child in children {
+        let parent_index = if child.parent_hash == finalized_block.hash {
+            None
+        } else {
+            Some(
+                tree.input_output_iter_unordered()
+                    .find(|b| b.user_data.hash == child.parent_hash)
+                    .unwrap()
+                    .id,
+            )
+        };
+        let _ = tree.input_insert_block(
+            child.block,
+            parent_index,
+            child.same_runtime_as_parent,
+            child.is_new_best,
+        );
+    }
+
+    WarpSyncTreeInit {
+        finalized_block,
+        tree,
+        pre_warp_finalized_hash,
+    }
+}
+
 fn download_runtime<TPlat: PlatformRef>(
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     block_hash: [u8; 32],
@@ -4035,5 +4079,234 @@ async fn start_storage_request<TPlat: PlatformRef>(
                 state,
             }
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::DefaultPlatform;
+
+    fn dummy_runtime() -> Arc<Runtime> {
+        Arc::new(Runtime {
+            runtime: Err(RuntimeError::CodeNotFound),
+            code_merkle_value: None,
+            closest_ancestor_excluding: None,
+            runtime_code: None,
+            heap_pages: None,
+        })
+    }
+
+    fn block(hash_byte: u8, height: u64) -> Block {
+        Block {
+            hash: [hash_byte; 32],
+            height,
+            scale_encoded_header: vec![],
+        }
+    }
+
+    type TestPlat = Arc<DefaultPlatform>;
+
+    fn empty_unknown_tree() -> Tree<TestPlat> {
+        Tree::FinalizedBlockRuntimeUnknown {
+            tree: async_tree::AsyncTree::new(async_tree::Config {
+                finalized_async_user_data: None,
+                retry_after_failed: Duration::from_secs(4),
+                blocks_capacity: 0,
+            }),
+        }
+    }
+
+    fn known_tree(finalized: Block) -> Tree<TestPlat> {
+        Tree::FinalizedBlockRuntimeKnown {
+            all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                0,
+                Default::default(),
+            ),
+            pinned_blocks: BTreeMap::new(),
+            finalized_block: finalized,
+            tree: async_tree::AsyncTree::new(async_tree::Config {
+                finalized_async_user_data: dummy_runtime(),
+                retry_after_failed: Duration::from_secs(4),
+                blocks_capacity: 0,
+            }),
+        }
+    }
+
+    #[test]
+    fn inserts_new_finalized_under_pre_warp_when_prev_differs() {
+        let prev_finalized = block(0x01, 100);
+        let new_finalized = block(0x02, 101);
+
+        let result = build_warp_sync_tree::<TestPlat>(
+            &known_tree(prev_finalized.clone()),
+            new_finalized.clone(),
+            dummy_runtime(),
+            vec![],
+        );
+
+        assert_eq!(result.finalized_block.hash, prev_finalized.hash);
+        assert_eq!(result.pre_warp_finalized_hash, Some(prev_finalized.hash));
+        let in_tree: Vec<_> = result
+            .tree
+            .input_output_iter_unordered()
+            .map(|b| b.user_data.hash)
+            .collect();
+        assert_eq!(in_tree, vec![new_finalized.hash]);
+    }
+
+    #[test]
+    fn skips_pre_warp_when_prev_finalized_equals_new() {
+        let same = block(0x05, 200);
+
+        let result = build_warp_sync_tree::<TestPlat>(
+            &known_tree(same.clone()),
+            same.clone(),
+            dummy_runtime(),
+            vec![],
+        );
+
+        assert_eq!(result.finalized_block.hash, same.hash);
+        assert_eq!(result.pre_warp_finalized_hash, None);
+        assert_eq!(result.tree.input_output_iter_unordered().count(), 0);
+    }
+
+    #[test]
+    fn skips_pre_warp_when_prev_unknown_has_no_input_finalized() {
+        let new_finalized = block(0x07, 50);
+
+        let result = build_warp_sync_tree::<TestPlat>(
+            &empty_unknown_tree(),
+            new_finalized.clone(),
+            dummy_runtime(),
+            vec![],
+        );
+
+        assert_eq!(result.finalized_block.hash, new_finalized.hash);
+        assert_eq!(result.pre_warp_finalized_hash, None);
+        assert_eq!(result.tree.input_output_iter_unordered().count(), 0);
+    }
+
+    #[test]
+    fn inserts_child_of_new_finalized() {
+        let prev = block(0x01, 100);
+        let new_finalized = block(0x02, 101);
+        let child = block(0x03, 102);
+
+        let result = build_warp_sync_tree::<TestPlat>(
+            &known_tree(prev),
+            new_finalized.clone(),
+            dummy_runtime(),
+            vec![WarpSyncTreeChild {
+                block: child.clone(),
+                parent_hash: new_finalized.hash,
+                same_runtime_as_parent: true,
+                is_new_best: true,
+            }],
+        );
+
+        let hashes: Vec<_> = result
+            .tree
+            .input_output_iter_unordered()
+            .map(|b| b.user_data.hash)
+            .collect();
+        assert!(hashes.contains(&new_finalized.hash));
+        assert!(hashes.contains(&child.hash));
+    }
+
+    #[test]
+    fn tree_emits_block_then_finalized_for_new_finalized() {
+        let prev = block(0x01, 100);
+        let new_finalized = block(0x02, 101);
+        let new_finalized_hash = new_finalized.hash;
+
+        let mut result = build_warp_sync_tree::<TestPlat>(
+            &known_tree(prev),
+            new_finalized,
+            dummy_runtime(),
+            vec![],
+        );
+
+        match result.tree.try_advance_output() {
+            Some(async_tree::OutputUpdate::Block(b)) => {
+                assert_eq!(result.tree[b.index].hash, new_finalized_hash);
+                assert!(b.is_new_best);
+                // new_finalized is a fork_tree root; runtime_service relies on this so the
+                // Block notification's parent_hash falls back to the outer-finalized
+                // (pre_warp_finalized) hash.
+                assert_eq!(result.tree.parent(b.index), None);
+            }
+            _ => panic!("expected OutputUpdate::Block"),
+        }
+
+        match result.tree.try_advance_output() {
+            Some(async_tree::OutputUpdate::Finalized { user_data, .. }) => {
+                assert_eq!(user_data.hash, new_finalized_hash);
+            }
+            _ => panic!("expected OutputUpdate::Finalized"),
+        }
+
+        assert!(result.tree.try_advance_output().is_none());
+    }
+
+    #[test]
+    fn tree_has_nothing_to_advance_without_pre_warp() {
+        let new_finalized = block(0x07, 50);
+        let mut result = build_warp_sync_tree::<TestPlat>(
+            &empty_unknown_tree(),
+            new_finalized,
+            dummy_runtime(),
+            vec![],
+        );
+        assert!(result.tree.try_advance_output().is_none());
+    }
+
+    #[test]
+    fn tree_emits_block_for_child_after_new_finalized_is_finalized() {
+        let prev = block(0x01, 100);
+        let new_finalized = block(0x02, 101);
+        let new_finalized_hash = new_finalized.hash;
+        let child = block(0x03, 102);
+        let child_hash = child.hash;
+
+        let mut result = build_warp_sync_tree::<TestPlat>(
+            &known_tree(prev),
+            new_finalized,
+            dummy_runtime(),
+            vec![WarpSyncTreeChild {
+                block: child,
+                parent_hash: new_finalized_hash,
+                same_runtime_as_parent: true,
+                is_new_best: true,
+            }],
+        );
+
+        // Block(new_finalized) first — Finalized is gated on `reported:true`.
+        match result.tree.try_advance_output() {
+            Some(async_tree::OutputUpdate::Block(b)) => {
+                assert_eq!(result.tree[b.index].hash, new_finalized_hash);
+                assert!(b.is_new_best);
+            }
+            _ => panic!("expected Block(new_finalized)"),
+        }
+
+        // Then Finalized(new_finalized) — prunes new_finalized from the tree.
+        match result.tree.try_advance_output() {
+            Some(async_tree::OutputUpdate::Finalized { user_data, .. }) => {
+                assert_eq!(user_data.hash, new_finalized_hash);
+            }
+            _ => panic!("expected Finalized(new_finalized)"),
+        }
+
+        // Only now Block(child) — its parent (new_finalized) has been pruned, so it's a root.
+        match result.tree.try_advance_output() {
+            Some(async_tree::OutputUpdate::Block(b)) => {
+                assert_eq!(result.tree[b.index].hash, child_hash);
+                assert!(b.is_new_best);
+            }
+            _ => panic!("expected Block(child)"),
+        }
+
+        assert!(result.tree.try_advance_output().is_none());
     }
 }
