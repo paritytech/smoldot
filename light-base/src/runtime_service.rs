@@ -4231,7 +4231,7 @@ mod tests {
             Some(async_tree::OutputUpdate::Block(b)) => {
                 assert_eq!(result.tree[b.index].hash, new_finalized_hash);
                 assert!(b.is_new_best);
-                // new_finalized is a fork_tree root; runtime_service relies on this so the
+                // new_finalized is a root; runtime_service relies on this so the
                 // Block notification's parent_hash falls back to the outer-finalized
                 // (pre_warp_finalized) hash.
                 assert_eq!(result.tree.parent(b.index), None);
@@ -4240,11 +4240,18 @@ mod tests {
         }
 
         match result.tree.try_advance_output() {
-            Some(async_tree::OutputUpdate::Finalized { user_data, .. }) => {
+            Some(async_tree::OutputUpdate::Finalized {
+                user_data,
+                pruned_blocks,
+                ..
+            }) => {
                 assert_eq!(user_data.hash, new_finalized_hash);
+                assert!(pruned_blocks.is_empty());
             }
             _ => panic!("expected OutputUpdate::Finalized"),
         }
+        // new_finalized has been pruned: tree is now empty.
+        assert_eq!(result.tree.input_output_iter_unordered().count(), 0);
 
         assert!(result.tree.try_advance_output().is_none());
     }
@@ -4291,12 +4298,25 @@ mod tests {
         }
 
         // Then Finalized(new_finalized) — prunes new_finalized from the tree.
+        // child is on the canonical line, so it's not in pruned_blocks.
         match result.tree.try_advance_output() {
-            Some(async_tree::OutputUpdate::Finalized { user_data, .. }) => {
+            Some(async_tree::OutputUpdate::Finalized {
+                user_data,
+                pruned_blocks,
+                ..
+            }) => {
                 assert_eq!(user_data.hash, new_finalized_hash);
+                assert!(pruned_blocks.is_empty());
             }
             _ => panic!("expected Finalized(new_finalized)"),
         }
+        // new_finalized has been pruned; child remains as a root.
+        let remaining: Vec<_> = result
+            .tree
+            .input_output_iter_unordered()
+            .map(|b| b.user_data.hash)
+            .collect();
+        assert_eq!(remaining, vec![child_hash]);
 
         // Only now Block(child) — its parent (new_finalized) has been pruned, so it's a root.
         match result.tree.try_advance_output() {
