@@ -48,7 +48,7 @@ fn known_tree(finalized: Block) -> Tree<TestPlat> {
 }
 
 #[test]
-fn inserts_new_finalized_under_pre_warp_when_prev_differs() {
+fn attaches_warp_synced_block_under_prior_finalized() {
     let prev_finalized = block(0x01, 100);
     let new_finalized = block(0x02, 101);
 
@@ -70,7 +70,7 @@ fn inserts_new_finalized_under_pre_warp_when_prev_differs() {
 }
 
 #[test]
-fn skips_pre_warp_when_prev_finalized_equals_new() {
+fn skips_pre_warp_on_self_finalize() {
     let same = block(0x05, 200);
 
     let result = build_warp_sync_tree::<TestPlat>(
@@ -86,7 +86,7 @@ fn skips_pre_warp_when_prev_finalized_equals_new() {
 }
 
 #[test]
-fn skips_pre_warp_when_prev_unknown_has_no_input_finalized() {
+fn falls_back_when_prior_unknown_lacks_input_finalized() {
     let new_finalized = block(0x07, 50);
 
     let result = build_warp_sync_tree::<TestPlat>(
@@ -102,7 +102,7 @@ fn skips_pre_warp_when_prev_unknown_has_no_input_finalized() {
 }
 
 #[test]
-fn inserts_child_of_new_finalized() {
+fn attaches_non_finalized_children() {
     let prev = block(0x01, 100);
     let new_finalized = block(0x02, 101);
     let child = block(0x03, 102);
@@ -129,7 +129,7 @@ fn inserts_child_of_new_finalized() {
 }
 
 #[test]
-fn tree_emits_block_then_finalized_for_new_finalized() {
+fn notifies_subscribers_of_warp_synced_block() {
     let prev = block(0x01, 100);
     let new_finalized = block(0x02, 101);
     let new_finalized_hash = new_finalized.hash;
@@ -167,7 +167,7 @@ fn tree_emits_block_then_finalized_for_new_finalized() {
 }
 
 #[test]
-fn tree_has_nothing_to_advance_without_pre_warp() {
+fn fallback_path_emits_no_notifications() {
     let new_finalized = block(0x07, 50);
     let mut result = build_warp_sync_tree::<TestPlat>(
         &empty_unknown_tree(),
@@ -179,7 +179,7 @@ fn tree_has_nothing_to_advance_without_pre_warp() {
 }
 
 #[test]
-fn tree_emits_block_for_child_after_new_finalized_is_finalized() {
+fn child_surfaces_after_warp_synced_finalized() {
     let prev = block(0x01, 100);
     let new_finalized = block(0x02, 101);
     let new_finalized_hash = new_finalized.hash;
