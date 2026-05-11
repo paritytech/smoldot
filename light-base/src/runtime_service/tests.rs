@@ -60,7 +60,10 @@ fn attaches_warp_synced_block_under_prior_finalized() {
     );
 
     assert_eq!(result.finalized_block.hash, pre_warp_finalized.hash);
-    assert_eq!(result.pre_warp_finalized_hash, Some(pre_warp_finalized.hash));
+    assert_eq!(
+        result.pre_warp_finalized_hash,
+        Some(pre_warp_finalized.hash)
+    );
     let in_tree: Vec<_> = result
         .tree
         .input_output_iter_unordered()
