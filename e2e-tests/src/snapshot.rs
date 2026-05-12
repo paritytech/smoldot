@@ -36,7 +36,7 @@ use std::path::PathBuf;
 
 use anyhow::anyhow;
 
-pub const ARTIFACTS_VERSION: &str = "v1";
+pub const ARTIFACTS_VERSION: &str = "v2";
 
 const GCS_BASE: &str =
     "https://storage.googleapis.com/zombienet-db-snaps/zombienet/smoldot_smoke_db";

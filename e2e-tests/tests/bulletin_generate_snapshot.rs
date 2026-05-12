@@ -22,8 +22,9 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use log::info;
-use smoldot_e2e_tests::bulletin::{
-    self, ArchiveChecksums, BulletinManifest, ManifestPayload, Payload,
+use smoldot_e2e_tests::{
+    bulletin::{self, ArchiveChecksums, BulletinManifest, ManifestPayload, Payload},
+    resolve_base_dir,
 };
 use zombienet_sdk::{
     subxt::{
@@ -153,15 +154,10 @@ async fn bulletin_generate_snapshot() -> Result<()> {
     authorize_account(&api, &alice, &alice).await?;
 
     let payloads = bulletin::payloads();
-    let (phase_1, phase_2) = payloads.split_at(bulletin::PARTIAL_FORK_INDEX);
-    info!(
-        "injecting {} pre-fork + {} post-fork payloads",
-        phase_1.len(),
-        phase_2.len()
-    );
+    info!("injecting {} payloads", payloads.len());
 
     let mut emitted_cids = Vec::new();
-    for payload in phase_1 {
+    for payload in &payloads {
         let cid_str = submit_store(&api, &alice, payload).await?;
         emitted_cids.push((payload.label, cid_str));
     }
@@ -171,15 +167,6 @@ async fn bulletin_generate_snapshot() -> Result<()> {
             .base_dir()
             .ok_or_else(|| anyhow!("network has no base_dir"))?,
     );
-    let staging_dir = base_dir.join("partial-staging");
-
-    info!("forking bulletin DB after {} payloads", phase_1.len());
-    fork_collator_db(&network, &base_dir, &staging_dir).await?;
-
-    for payload in phase_2 {
-        let cid_str = submit_store(&api, &alice, payload).await?;
-        emitted_cids.push((payload.label, cid_str));
-    }
 
     info!("waiting for parachain height >= {}", opts.target_height);
     collator
@@ -191,10 +178,10 @@ async fn bulletin_generate_snapshot() -> Result<()> {
         .await?;
 
     // The full snapshot (relay + bulletin-with-all-payloads) is taken via
-    // the same pause/copy/resume primitive as the partial fork so the on-
-    // disk RocksDB state is consistent. Calling `network.destroy()` instead
-    // would trigger zombienet's crash watcher, which `process::exit(1)`s
-    // before we finish tarring.
+    // the same pause/copy/resume primitive so the on-disk RocksDB state is
+    // consistent. Calling `network.destroy()` instead would trigger
+    // zombienet's crash watcher, which `process::exit(1)`s before we
+    // finish tarring.
     let final_staging = base_dir.join("final-staging");
     info!("snapshotting full state");
     snapshot_full_state(&network, &base_dir, &final_staging).await?;
@@ -205,15 +192,10 @@ async fn bulletin_generate_snapshot() -> Result<()> {
         None,
         &opts.out_dir.join("relay.tgz"),
     )?;
-    let bulletin_full_archive = pack_node_dirs(
+    let bulletin_archive = pack_node_dirs(
         &final_staging.join("bulletin").join("data"),
         Some(&final_staging.join("bulletin").join("relay-data")),
-        &opts.out_dir.join("bulletin-full.tgz"),
-    )?;
-    let bulletin_partial_archive = pack_node_dirs(
-        &staging_dir.join("data"),
-        Some(&staging_dir.join("relay-data")),
-        &opts.out_dir.join("bulletin-partial.tgz"),
+        &opts.out_dir.join("bulletin.tgz"),
     )?;
 
     info!("writing manifest.json");
@@ -222,8 +204,7 @@ async fn bulletin_generate_snapshot() -> Result<()> {
         &emitted_cids,
         &payloads,
         &relay_archive,
-        &bulletin_full_archive,
-        &bulletin_partial_archive,
+        &bulletin_archive,
     )?;
     let manifest_path = opts.out_dir.join("manifest.json");
     std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)
@@ -231,38 +212,6 @@ async fn bulletin_generate_snapshot() -> Result<()> {
 
     info!("snapshots written to {}", opts.out_dir.display());
     Ok(())
-}
-
-/// Pauses both collators (SIGSTOP), copies collator-1's `data/` and
-/// `relay-data/` into `staging`, then resumes the collators (SIGCONT).
-/// The pause window is the only consistent point at which we can fork
-/// RocksDB without risking a torn snapshot.
-async fn fork_collator_db(
-    network: &Network<LocalFileSystem>,
-    base_dir: &Path,
-    staging: &Path,
-) -> Result<()> {
-    let collator1 = network.get_node("collator-1")?;
-    let collator2 = network.get_node("collator-2")?;
-
-    collator1.pause().await?;
-    collator2.pause().await?;
-
-    let copy_result: Result<()> = (|| {
-        let src = base_dir.join("collator-1");
-        std::fs::create_dir_all(staging)
-            .with_context(|| format!("creating {}", staging.display()))?;
-        copy_dir_all(&src.join("data"), &staging.join("data"))?;
-        let relay_data = src.join("relay-data");
-        if relay_data.is_dir() {
-            copy_dir_all(&relay_data, &staging.join("relay-data"))?;
-        }
-        Ok(())
-    })();
-
-    collator1.resume().await?;
-    collator2.resume().await?;
-    copy_result
 }
 
 /// Pauses every node, copies the relay (alice) and bulletin (collator-1)
@@ -337,6 +286,14 @@ async fn spawn_network(chain_spec: &Path) -> Result<Network<LocalFileSystem>> {
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 chain spec path"))?
         .to_string();
+    // Honour `ZOMBIENET_SDK_BASE_DIR` (set by `./g`) so working dirs and
+    // chain-spec outputs land under the project-local `./tmp/g-run/`
+    // instead of `/tmp/zombienet-<pid>/`.
+    let base_dir = resolve_base_dir()?;
+    let base_dir_str = base_dir
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 base dir"))?
+        .to_string();
 
     let config = NetworkConfigBuilder::new()
         .with_relaychain(|rc| {
@@ -349,21 +306,28 @@ async fn spawn_network(chain_spec: &Path) -> Result<Network<LocalFileSystem>> {
             p.with_id(bulletin::PARA_ID)
                 .with_chain_spec_path(chain_spec_str.as_str())
                 .cumulus_based(true)
+                // `--ipfs-server` exposes bitswap so the eventual CI test can
+                // dial against the snapshot. `--relay-chain-rpc-urls` skips
+                // the embedded relay client and proxies relay queries to
+                // alice's RPC, sidestepping the relay-side libp2p discovery
+                // quirks that otherwise leave collators unable to reach the
+                // validators (and the parachain unable to finalise).
+                .with_default_args(vec![
+                    "--ipfs-server".into(),
+                    ("--relay-chain-rpc-urls", "{{ZOMBIE:alice:ws_uri}}").into(),
+                ])
                 .with_collator(|c| {
                     c.with_name("collator-1")
                         .validator(true)
                         .with_command(bulletin::PARA_BINARY)
-                        // `--ipfs-server` exposes bitswap so the eventual
-                        // CI test can dial against the snapshot.
-                        .with_args(vec!["--ipfs-server".into()])
                 })
                 .with_collator(|c| {
                     c.with_name("collator-2")
                         .validator(true)
                         .with_command(bulletin::PARA_BINARY)
-                        .with_args(vec!["--ipfs-server".into()])
                 })
         })
+        .with_global_settings(|g| g.with_base_dir(base_dir_str.as_str()))
         .build()
         .map_err(|e| anyhow!("network config errors: {e:?}"))?;
 
@@ -496,13 +460,11 @@ fn pack_node_dirs(data: &Path, relay_data: Option<&Path>, archive_path: &Path) -
         .with_context(|| format!("creating {}", archive_path.display()))?;
     let gz = flate2::write::GzEncoder::new(f, flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
-    tar.append_dir_all("data", data)
-        .with_context(|| format!("tarring {}", data.display()))?;
+    append_dir_skip_identity(&mut tar, "data", data)?;
 
     if let Some(rd) = relay_data {
         if rd.is_dir() {
-            tar.append_dir_all("relay-data", rd)
-                .with_context(|| format!("tarring {}", rd.display()))?;
+            append_dir_skip_identity(&mut tar, "relay-data", rd)?;
         }
     }
 
@@ -513,13 +475,39 @@ fn pack_node_dirs(data: &Path, relay_data: Option<&Path>, archive_path: &Path) -
     Ok(hex::encode(Sha256::digest(&bytes)))
 }
 
+/// Recursively adds `src` to the archive under `prefix`, skipping any
+/// directory whose name is `keystore` or `network`. We only need db.
+fn append_dir_skip_identity<W: std::io::Write>(
+    tar: &mut tar::Builder<W>,
+    prefix: &str,
+    src: &Path,
+) -> Result<()> {
+    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let archive_path = format!("{prefix}/{}", name.to_string_lossy());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if name == "keystore" || name == "network" {
+                continue;
+            }
+            append_dir_skip_identity(tar, &archive_path, &entry.path())?;
+        } else {
+            tar.append_path_with_name(entry.path(), &archive_path)
+                .with_context(|| {
+                    format!("appending {} as {archive_path}", entry.path().display())
+                })?;
+        }
+    }
+    Ok(())
+}
+
 fn build_manifest(
     opts: &SnapshotOpts,
     emitted: &[(&'static str, String)],
     payloads: &[Payload],
     relay_sha256: &str,
-    bulletin_full_sha256: &str,
-    bulletin_partial_sha256: &str,
+    bulletin_sha256: &str,
 ) -> Result<BulletinManifest> {
     let manifest_payloads = emitted
         .iter()
@@ -533,7 +521,6 @@ fn build_manifest(
                 cid: cid.clone(),
                 sha256: p.sha256_hex(),
                 size: p.size(),
-                on_partial: p.on_partial,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -548,8 +535,7 @@ fn build_manifest(
         payloads: manifest_payloads,
         archives: ArchiveChecksums {
             relay_sha256: relay_sha256.to_string(),
-            bulletin_full_sha256: bulletin_full_sha256.to_string(),
-            bulletin_partial_sha256: bulletin_partial_sha256.to_string(),
+            bulletin_sha256: bulletin_sha256.to_string(),
         },
     })
 }

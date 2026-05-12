@@ -27,10 +27,8 @@ use zombienet_sdk::{LocalFileSystem, Network, NetworkConfigBuilder};
 /// GCS URLs for the snapshots produced by `bulletin_generate_snapshot`.
 const DB_SNAPSHOT_RELAY: &str =
     "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/relay-2026-05-04.tgz";
-const DB_SNAPSHOT_BULLETIN_FULL: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-full-2026-05-04.tgz";
-const DB_SNAPSHOT_BULLETIN_PARTIAL: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-partial-2026-05-04.tgz";
+const DB_SNAPSHOT_BULLETIN: &str =
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-2026-05-04.tgz";
 
 #[derive(Serialize)]
 struct PayloadJson {
@@ -38,11 +36,10 @@ struct PayloadJson {
     cid: String,
     sha256: String,
     size: u64,
-    on_partial: bool,
 }
 
-/// Smoldot fetches every CID in `bulletin::payloads()`, asserts NotFound
-/// for an unrelated CID, and exercises mixed-availability peer selection.
+/// Smoldot fetches every CID in `bulletin::payloads()` and asserts
+/// NotFound for an unrelated CID. Both collators share the same snapshot.
 #[tokio::test(flavor = "multi_thread")]
 async fn bulletin_fetch() -> Result<()> {
     env_logger::try_init().ok();
@@ -51,23 +48,10 @@ async fn bulletin_fetch() -> Result<()> {
     let base_dir = resolve_base_dir()?;
 
     let relay = get_snapshot_url(DB_SNAPSHOT_RELAY, "DB_SNAPSHOT_RELAY_OVERRIDE");
-    let bulletin_full = get_snapshot_url(
-        DB_SNAPSHOT_BULLETIN_FULL,
-        "DB_SNAPSHOT_BULLETIN_FULL_OVERRIDE",
-    );
-    let bulletin_partial = get_snapshot_url(
-        DB_SNAPSHOT_BULLETIN_PARTIAL,
-        "DB_SNAPSHOT_BULLETIN_PARTIAL_OVERRIDE",
-    );
+    let bulletin = get_snapshot_url(DB_SNAPSHOT_BULLETIN, "DB_SNAPSHOT_BULLETIN_OVERRIDE");
 
-    let network = spawn_with_snapshots(
-        &base_dir,
-        &chain_spec,
-        &relay,
-        &bulletin_full,
-        &bulletin_partial,
-    )
-    .await?;
+    let network =
+        spawn_with_snapshots(&base_dir, &chain_spec, &relay, &bulletin).await?;
 
     let (relay_spec, bulletin_spec) = chain_spec_paths(&network)?;
 
@@ -82,7 +66,6 @@ async fn bulletin_fetch() -> Result<()> {
                 cid: p.predicted_cid(),
                 sha256: p.sha256_hex(),
                 size: p.size(),
-                on_partial: p.on_partial,
             })
             .collect::<Vec<_>>(),
     )?;
@@ -94,17 +77,54 @@ async fn bulletin_fetch() -> Result<()> {
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 bulletin spec path"))?;
 
-    run_js_test(
-        "js/bulletin_fetch.js",
-        &[
-            ("RELAY_CHAIN_SPEC", relay_spec),
-            ("BULLETIN_CHAIN_SPEC", bulletin_spec),
-            ("PAYLOADS_JSON", payloads_json.as_str()),
-            ("MISSING_CID", missing_cid.as_str()),
-        ],
-    )
-    .await
-    .map_err(|e| anyhow!("JS test failed: {e}"))
+    let env_pairs = [
+        ("RELAY_CHAIN_SPEC", relay_spec),
+        ("BULLETIN_CHAIN_SPEC", bulletin_spec),
+        ("PAYLOADS_JSON", payloads_json.as_str()),
+        ("MISSING_CID", missing_cid.as_str()),
+    ];
+
+    // `DEV_MODE=1` skips the JS bitswap suite and keeps the network alive
+    // for `KEEP_ALIVE_SECS` seconds (default 36000) so a developer can
+    // run the JS client manually (the printed `node …` invocation has
+    // every env var the test would have set).
+    if std::env::var("DEV_MODE").is_ok() {
+        print_dev_mode_invocation(&env_pairs);
+        let secs: u64 = std::env::var("KEEP_ALIVE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(36000);
+        eprintln!(
+            "DEV_MODE: keeping zombienet alive for {secs}s (set KEEP_ALIVE_SECS to override)..."
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+        return Ok(());
+    }
+
+    run_js_test("js/bulletin_fetch.js", &env_pairs)
+        .await
+        .map_err(|e| anyhow!("JS test failed: {e}"))
+}
+
+/// Emit a copy-pasteable shell command equivalent to what `run_js_test` would
+/// execute. Used in `DEV_MODE` so a developer can iterate on the JS client
+/// against a long-lived zombienet without restarting the cargo harness.
+fn print_dev_mode_invocation(env_pairs: &[(&str, &str)]) {
+    println!();
+    println!("=== DEV_MODE: skipping JS test, run it manually with: ===");
+    println!();
+    println!("cd e2e-tests && \\");
+    for (k, v) in env_pairs {
+        println!("  {}={} \\", k, shell_quote(v));
+    }
+    println!("  node js/bulletin_fetch.js");
+    println!();
+}
+
+/// Single-quote a string for safe shell pasting. Embedded single quotes are
+/// escaped via the standard `'\''` trick.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Returns the GCS URL by default, or the contents of `env_var` if set
@@ -121,8 +141,7 @@ async fn spawn_with_snapshots(
     base_dir: &Path,
     chain_spec: &Path,
     relay_snap: &str,
-    bulletin_full_snap: &str,
-    bulletin_partial_snap: &str,
+    bulletin_snap: &str,
 ) -> Result<Network<LocalFileSystem>> {
     let chain_spec_str = chain_spec
         .to_str()
@@ -133,8 +152,7 @@ async fn spawn_with_snapshots(
         .ok_or_else(|| anyhow!("non-utf8 base dir"))?
         .to_string();
     let relay = relay_snap.to_string();
-    let bulletin_full = bulletin_full_snap.to_string();
-    let bulletin_partial = bulletin_partial_snap.to_string();
+    let bulletin = bulletin_snap.to_string();
 
     let cfg = NetworkConfigBuilder::new()
         .with_relaychain(|rc| {
@@ -155,21 +173,26 @@ async fn spawn_with_snapshots(
             p.with_id(bulletin::PARA_ID)
                 .with_chain_spec_path(chain_spec_str.as_str())
                 .cumulus_based(true)
+                // See `bulletin_generate_snapshot::spawn_network` for why
+                // `--relay-chain-rpc-urls` is used here instead of an
+                // embedded relay client.
+                .with_default_args(vec![
+                    "--ipfs-server".into(),
+                    ("--relay-chain-rpc-urls", "{{ZOMBIE:alice:ws_uri}}").into(),
+                ])
                 .with_collator(|c| {
                     c.with_name("collator-1")
                         .validator(true)
                         .bootnode(true)
                         .with_command(bulletin::PARA_BINARY)
-                        .with_db_snapshot(bulletin_full.as_str())
-                        .with_args(vec!["--ipfs-server".into()])
+                        .with_db_snapshot(bulletin.as_str())
                 })
                 .with_collator(|c| {
                     c.with_name("collator-2")
                         .validator(true)
                         .bootnode(true)
                         .with_command(bulletin::PARA_BINARY)
-                        .with_db_snapshot(bulletin_partial.as_str())
-                        .with_args(vec!["--ipfs-server".into()])
+                        .with_db_snapshot(bulletin.as_str())
                 })
         })
         .with_global_settings(|g| g.with_base_dir(base_dir_str.as_str()))

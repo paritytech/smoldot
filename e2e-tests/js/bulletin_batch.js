@@ -73,9 +73,10 @@ try {
   } catch (_) {}
 }
 
-if (exitCode || process.exitCode) {
-  process.exit(exitCode || 1);
-}
+// Force exit so Node doesn't sit waiting for the smoldot client's underlying
+// WebSocket / TCP handles to drain on their own — that takes a few minutes
+// in practice (graceful close handshakes for the 6 peer connections).
+process.exit(exitCode || process.exitCode || 0);
 
 // ---------- getMany tests ----------
 
