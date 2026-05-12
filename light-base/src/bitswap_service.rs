@@ -189,8 +189,11 @@ impl BitswapService {
     /// been decided (Ok block, NotFound, or Timeout). The returned `Vec` echoes input CIDs in input
     /// order with a [`BlockResult`] per slot.
     ///
-    /// Top-level errors (`-32602 InvalidParams`): empty input is allowed (returns empty vec);
-    /// duplicate CIDs or batch size > [`MAX_CIDS_PER_REQUEST`] are rejected before any wire I/O.
+    /// Top-level errors:
+    /// * `-32602 InvalidParams`: empty input is allowed (returns empty vec); duplicate CIDs or
+    ///   batch size > [`MAX_CIDS_PER_REQUEST`] are rejected before any wire I/O.
+    /// * `-32812 FailRetryBackoff`: the initial Have broadcast had no Bitswap peers to send to, or
+    ///   the network send queue was full. Per spec, retry after a backoff delay (~5s).
     pub async fn bitswap_get_many(
         &self,
         cids: Vec<String>,
@@ -202,18 +205,21 @@ impl BitswapService {
         }
 
         let (result_tx, result_rx) = oneshot::channel();
-        let (batch_id_tx, batch_id_rx) = oneshot::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
 
         self.messages_tx
             .send(ToBackground::BitswapBatch {
                 entries,
                 mode: BatchMode::GetMany { result_tx },
-                batch_id_tx,
+                ready_tx,
             })
             .await
             .unwrap();
 
-        let batch_id = batch_id_rx.await.unwrap();
+        // The service signals broadcast outcome here: `Ok(BatchId)` once the Have broadcast has
+        // landed (or the all-invalid-CID fast path resolves), `Err(...)` if the broadcast failed
+        // wholesale. Wholesale failures surface as top-level JSON-RPC errors per spec.
+        let batch_id = ready_rx.await.unwrap()?;
 
         // RAII guard: if the caller's future is dropped before result_rx resolves, the guard
         // drops and sends `CancelBatch` to the service so peers receive a Cancel wantlist.
@@ -225,9 +231,14 @@ impl BitswapService {
         Ok(result_rx.await.unwrap())
     }
 
-    /// Subscribe to a stream of Bitswap blocks. Returns immediately with a [`BitswapStreamHandle`]
+    /// Subscribe to a stream of Bitswap blocks. On success, returns a [`BitswapStreamHandle`]
     /// whose `events_rx` yields one `(cid_string, BlockResult)` event per input CID, in arrival
     /// order (the order in which each CID resolves), not input order.
+    ///
+    /// Top-level errors mirror [`BitswapService::bitswap_get_many`]: wholesale Have-broadcast
+    /// failures (no peers / queue full) reject the subscription with `-32812 FailRetryBackoff`
+    /// so no events are emitted, per the `bitswap_v1_stream` spec ("whole-call failures cause
+    /// the subscription to be rejected").
     ///
     /// Dropping the returned handle (explicit unsubscribe or client disconnect) cancels remaining
     /// work and emits a Bitswap Cancel wantlist to peers we previously contacted.
@@ -240,18 +251,18 @@ impl BitswapService {
         // Channel size matches typical batch sizes; events_rx is drained promptly by the JSON-RPC
         // layer so back-pressure here is unlikely.
         let (events_tx, events_rx) = async_channel::bounded(MAX_CIDS_PER_REQUEST);
-        let (batch_id_tx, batch_id_rx) = oneshot::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
 
         self.messages_tx
             .send(ToBackground::BitswapBatch {
                 entries,
                 mode: BatchMode::Stream { events_tx },
-                batch_id_tx,
+                ready_tx,
             })
             .await
             .unwrap();
 
-        let batch_id = batch_id_rx.await.unwrap();
+        let batch_id = ready_rx.await.unwrap()?;
 
         Ok(BitswapStreamHandle {
             events_rx,
@@ -469,14 +480,17 @@ enum ToBackground {
         cid: Cid,
         result_tx: oneshot::Sender<Result<Vec<u8>, BitswapGetError>>,
     },
-    /// Submit a batched request. The service allocates a [`BatchId`], reports it back via
-    /// `batch_id_tx`, then issues a single Have broadcast covering all valid input CIDs.
+    /// Submit a batched request. The service allocates a [`BatchId`], issues the Have broadcast,
+    /// and reports the outcome back via `ready_tx`: `Ok(BatchId)` once the broadcast has landed
+    /// (so the caller can construct its cancel guard and start receiving results), or
+    /// `Err(BitswapGetError)` if the broadcast failed wholesale. Wholesale failures surface as
+    /// top-level JSON-RPC errors (`-32812 FailRetryBackoff` for `NoPeers` / `QueueFull`).
     BitswapBatch {
         /// Validated and de-duplicated entries from [`parse_and_dedup`]. Per-slot `Err` carries
         /// an `InvalidCid` ParseError that gets surfaced as a per-CID error event.
         entries: Vec<(String, Result<Cid, cid::ParseError>)>,
         mode: BatchMode,
-        batch_id_tx: oneshot::Sender<BatchId>,
+        ready_tx: oneshot::Sender<Result<BatchId, BitswapGetError>>,
     },
     /// Cancel an in-flight batch. Idempotent: if the batch already finished, this is a no-op.
     CancelBatch {
@@ -564,6 +578,11 @@ enum HaveContext {
         /// Valid (slot_idx, cid) pairs. Invalid-CID slots are pre-resolved before the broadcast
         /// is queued and don't appear here.
         cids: Vec<(usize, Cid)>,
+        /// Channel for signalling broadcast outcome back to the caller of
+        /// [`BitswapService::bitswap_get_many`] / [`BitswapService::bitswap_stream`]. Sent exactly
+        /// once when the broadcast resolves: `Ok(batch_id)` on success (peer set non-empty), or
+        /// `Err(_)` on wholesale failure so the caller surfaces a top-level JSON-RPC error.
+        ready_tx: oneshot::Sender<Result<BatchId, BitswapGetError>>,
     },
 }
 
@@ -941,14 +960,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             WakeUpReason::Message(ToBackground::BitswapBatch {
                 entries,
                 mode,
-                batch_id_tx,
+                ready_tx,
             }) => {
                 debug_assert!(task.pending_have_broadcast.is_none());
 
-                // Allocate the batch up front and report the BatchId back so the caller's RAII
-                // cancel guard can address us if the call is dropped before resolution.
+                // Allocate the batch up front. The BatchId is reported back via `ready_tx` only
+                // after the Have broadcast resolves (success or wholesale failure), so wholesale
+                // failures surface as top-level JSON-RPC errors instead of per-slot ones.
                 let batch_id = task.allocate_batch_id();
-                let _ = batch_id_tx.send(batch_id);
 
                 let total = entries.len();
                 let mut cid_strs: Vec<String> = Vec::with_capacity(total);
@@ -1013,8 +1032,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.batches.insert(batch_id, batch);
 
                 if valid_cids.is_empty() {
-                    // No wire I/O needed. If everything resolved (all-invalid case), finalize
-                    // immediately. If empty input slipped through somehow, also finalize.
+                    // No wire I/O needed. Signal Ok(batch_id) so the caller can construct its
+                    // cancel guard / stream handle, then finalize immediately (all-invalid case)
+                    // or leave the batch to await ordinary resolution paths.
+                    let _ = ready_tx.send(Ok(batch_id));
                     if task
                         .batches
                         .get(&batch_id)
@@ -1048,6 +1069,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         HaveContext::Batch {
                             batch_id,
                             cids: valid_cids,
+                            ready_tx,
                         },
                     )
                 }));
@@ -1120,7 +1142,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .or_default()
                         .push_back(request_id);
                 }
-                HaveContext::Batch { batch_id, cids } => {
+                HaveContext::Batch {
+                    batch_id,
+                    cids,
+                    ready_tx,
+                } => {
                     let broadcast_to = match result {
                         Ok(peers) => peers,
                         Err(err) => {
@@ -1132,17 +1158,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 batch_id = batch_id.0,
                                 ?err
                             );
-                            // Whole-broadcast failure: every still-pending slot fails with the
-                            // same error. We resolve them via `deliver_batch_slot` so that
-                            // Stream events fire and GetMany finalizes at zero.
-                            let bsw_err: BitswapGetError = err.into();
-                            for (slot_idx, _) in cids {
-                                task.deliver_batch_slot(
-                                    batch_id,
-                                    slot_idx,
-                                    Err(bsw_err.clone()),
-                                );
-                            }
+                            // Whole-broadcast failure: surface as a top-level JSON-RPC error to
+                            // the caller. The batch holds no useful state yet (no per-slot
+                            // Requests registered, `peers_for_cancel` empty), so drop it.
+                            task.batches.remove(&batch_id);
+                            let _ = ready_tx.send(Err(err.into()));
                             continue;
                         }
                     };
@@ -1157,12 +1177,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         peers = broadcast_to.len()
                     );
 
+                    // Under the new ready-handshake protocol, the batch cannot have been
+                    // cancelled before this point: cancel requires the caller's
+                    // `BatchCancelGuard`, which is only constructed after we send `Ok(batch_id)`
+                    // below.
+                    debug_assert!(task.batches.contains_key(&batch_id));
                     if let Some(batch) = task.batches.get_mut(&batch_id) {
                         batch.peers_for_cancel = broadcast_to.clone();
                     } else {
-                        // The batch was cancelled while we were broadcasting. Don't bother
-                        // registering per-CID requests; the cancel handler will have cleaned up
-                        // any state already, and we have nothing to track.
+                        // Drop `ready_tx` without sending — the caller's `ready_rx.await.unwrap()`
+                        // will surface the broken invariant.
                         continue;
                     }
 
@@ -1202,6 +1226,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             batch.slots[slot_idx] = Some(request_id);
                         }
                     }
+
+                    // Signal broadcast success only after per-slot Requests are registered, so
+                    // events can resolve immediately once the caller installs its handle.
+                    let _ = ready_tx.send(Ok(batch_id));
                 }
             },
             WakeUpReason::NetworkEvent(BitswapEvent::BitswapConnected { peer_id }) => {
