@@ -1,0 +1,11 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>smoldot browser tests</title></head>
+  <body>
+    <script type="module">
+      import * as smoldot from '/smoldot/dist/mjs/index-browser.js';
+      window.__smoldot = smoldot;
+      window.__ready = true;
+    </script>
+  </body>
+</html>

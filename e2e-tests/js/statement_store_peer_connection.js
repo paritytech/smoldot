@@ -124,12 +124,7 @@ try {
 } catch (e) {
   report("statement_store_peer_connection", false, e.message);
   passed = false;
-} finally {
-  try {
-    await client.terminate();
-  } catch (_) {}
 }
 
-if (!passed || process.exitCode) {
-  process.exit(1);
-}
+// Finish as soon as the result is known
+process.exit(passed && !process.exitCode ? 0 : 1);

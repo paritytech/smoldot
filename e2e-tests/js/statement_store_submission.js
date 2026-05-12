@@ -81,6 +81,11 @@ try {
   report("statement_store_submission", false, e.message);
   passed = false;
 } finally {
+  // Unlike the other statement-store JS tests we cannot exit immediately
+  // here: statement_submit returns once smoldot has accepted the statement
+  // locally, but gossip to peers happens asynchronously. Awaiting
+  // client.terminate() keeps smoldot alive long enough for that propagation
+  // to reach the collators, which is what Rust is asserting on.
   try {
     await client.terminate();
   } catch (_) {}
