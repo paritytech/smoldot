@@ -106,13 +106,23 @@ needs to track the current compatibility range, not the exact version.
 
 ## 4. Regenerate lockfiles
 
+The repo has **three** Cargo workspaces, each with its own `Cargo.lock`. CI
+runs `cargo test --locked` against `e2e-tests/` and `benchmarks/`, so any
+crate version bump in `lib/` or `light-base/` invalidates their lockfiles via
+the `path` deps. Bumping only the root `Cargo.lock` will fail CI on the
+zombienet jobs with `error: cannot update the lock file ... because --locked
+was passed`.
+
 ```sh
-cargo check -p smoldot -p smoldot-light        # updates Cargo.lock
-cd wasm-node/javascript && npm install --package-lock-only && cd -
+cargo check -p smoldot -p smoldot-light        # updates root Cargo.lock
+(cd e2e-tests && cargo check)                  # updates e2e-tests/Cargo.lock
+(cd benchmarks && cargo check)                 # updates benchmarks/Cargo.lock
+(cd wasm-node/javascript && npm install --package-lock-only)
 ```
 
-Both lockfiles must diff to version bumps only. If either pulls in unrelated
-updates, abort and investigate.
+Each lockfile must diff to version bumps only. If any pulls in unrelated
+updates, that lockfile was already stale on `main`; investigate before
+committing — the drift may belong in a separate PR.
 
 ---
 
@@ -170,7 +180,7 @@ Run this **only if `smoldot` is not being bumped**. Otherwise it fails on
 ```sh
 git add lib/Cargo.toml light-base/Cargo.toml wasm-node/rust/Cargo.toml \
         wasm-node/javascript/package.json wasm-node/javascript/package-lock.json \
-        wasm-node/CHANGELOG.md Cargo.lock
+        wasm-node/CHANGELOG.md Cargo.lock e2e-tests/Cargo.lock benchmarks/Cargo.lock
 git --no-gpg-sign commit -m "npm smoldot v<X.Y.Z>"
 git push origin release/npm-smoldot-v<X.Y.Z>
 ```
@@ -308,7 +318,8 @@ Even `suffix=""` produces `dev-<YYYYMMDD>`, not `latest`.
   `lib/Cargo.toml`, `light-base/Cargo.toml`, `wasm-node/rust/Cargo.toml`
   (each `package.version`).
 - Version writes: same four, plus `wasm-node/javascript/package-lock.json`
-  (two occurrences) and `Cargo.lock` (regenerate via `cargo check`).
+  (two occurrences) and three Cargo lockfiles (regenerate via `cargo check`):
+  root `Cargo.lock`, `e2e-tests/Cargo.lock`, `benchmarks/Cargo.lock`.
 - Changelog: insert new section in `wasm-node/CHANGELOG.md` between
   `## Unreleased` and the previous version heading.
 - Scope detection: `git diff --stat <prev-tag>..HEAD -- <path>` for
