@@ -1416,7 +1416,8 @@ async fn run_background<TPlat: PlatformRef>(
                         // can be inserted as a non-finalized child and then finalized, emitting
                         // `Block` + `Finalized` to subscribers. Not the real chain parent of
                         // the warp-synced block (warp sync skips ancestry); only a tree-level
-                        // predecessor. Pruned the moment warp-synced is finalized.
+                        // predecessor. Overwritten in the wrapper's outer-finalized slot the
+                        // moment warp-synced is finalized.
                         // `None` when the previous tree has no usable input-finalized block,
                         // in which case we fall back to the legacy single-block init.
                         let pre_warp_finalized: Option<Block> = match &background.tree {
