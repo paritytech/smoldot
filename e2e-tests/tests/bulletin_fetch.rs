@@ -172,7 +172,10 @@ async fn spawn_with_snapshots(
                         .with_args(vec!["--ipfs-server".into()])
                 })
         })
-        .with_global_settings(|g| g.with_base_dir(base_dir_str.as_str()))
+        .with_global_settings(|g| {
+            g.with_base_dir(base_dir_str.as_str())
+                .with_spawn_concurrency(1) // https://github.com/paritytech/smoldot/pull/3249#issuecomment-4438807458
+        })
         .build()
         .map_err(|e| anyhow!("network config errors: {e:?}"))?;
 
