@@ -7243,7 +7243,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "arrayvec 0.7.6",
  "async-lock",
@@ -7305,7 +7305,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "smoldot 1.1.1",
+ "smoldot 1.1.2",
  "tar",
  "tempfile",
  "tokio",

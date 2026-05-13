@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 3.1.3 - 2026-05-13
+
+### Changed
+
+- Prefer the `wasm32v1-none` Rust target when building the embedded Wasm if it is installed, falling back to `wasm32-unknown-unknown`. ([#3250](https://github.com/paritytech/smoldot/pull/3250))
+
+### Fixed
+
+- Deliver the warp-synced parachain block to `chainHead_v1_follow` subscribers immediately after relay-chain warp sync, removing the ~6–12s wait for the next relay-chain finalization. ([#3246](https://github.com/paritytech/smoldot/pull/3246))
+
 ## 3.1.2 - 2026-05-07
 
 ### Added
