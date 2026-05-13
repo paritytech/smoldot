@@ -13,7 +13,7 @@ memory of past releases.
 - Read `docs/RELEASING.md` first. If it has changed since you last saw
   it, the changes win.
 - Walk the user through steps 1–11 in order. Pause for explicit
-  confirmation before any shared-state action (commit, push, tag push).
+  confirmation before any shared-state action (commit, push).
 - Step 1: use `git log --oneline <prev-tag>..HEAD` and
   `git diff --stat <prev-tag>..HEAD -- lib/ light-base/ wasm-node/ full-node/`
   to detect which packages need bumping. Propose the bump levels via
@@ -36,14 +36,13 @@ memory of past releases.
   shell. smoldot's branch protection on `main` rejects unsigned commits
   and this session cannot sign, so the commit itself must come from the
   user.
-- Pushing and tag pushing: the user runs these in their own shell (SSH
-  keys live there, not in this session). Print the exact commands and
-  wait for them to confirm.
+- Pushing the release branch: the user runs `git push` in their own shell
+  (SSH keys live there, not in this session). Print the exact command
+  and wait for them to confirm.
 - Step 10: before sanity-checking, verify the `deploy.yml` run for the
   merge SHA completed via `gh run list --workflow=deploy.yml --branch=main`.
-- Step 11: tags are lightweight (`git tag <name> <sha>`, no `-a`/`-m`).
-  Create only the tags whose version actually changed; `npm-smoldot-v…`
-  is always created, the CI-pushed `light-js-deno-v…` is not.
+- Step 11: tags are pushed automatically by the `tags-publish` and
+  `deno-publish` jobs. Verify only — don't push any tags manually.
 
 ## Announcement
 

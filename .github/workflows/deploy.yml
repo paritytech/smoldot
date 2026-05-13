@@ -348,10 +348,64 @@ jobs:
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         continue-on-error: true
 
+  tags-publish:
+    # Creates the three release-marker tags (`npm-smoldot-v…`, `smoldot-v…`,
+    # `smoldot-light-v…`) on the merge commit. Per-tag existence check makes
+    # the job idempotent: pushes to main that don't bump a given version are
+    # a no-op for that tag because its name already points at a prior commit.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [npm-publish, deno-publish, crates-io-publish]
+    # Serialize concurrent runs so two back-to-back pushes can't race on
+    # `git push` of the same new tag.
+    concurrency:
+      group: tags-publish
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # Necessary in order to push tags.
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # Necessary below for checking if tags exist.
+      - id: tags
+        name: Compute and validate tag names
+        run: |
+          set -euo pipefail
+          # First `version = "..."` line per Cargo.toml = [package].version.
+          # Yields empty on `version.workspace = true`; caught by the semver
+          # check below before any tag is pushed.
+          NPM_VER=$(jq -r .version ./wasm-node/javascript/package.json)
+          SMOLDOT_VER=$(sed -nE '0,/^version = "(.+)"$/s//\1/p' ./lib/Cargo.toml)
+          LIGHT_VER=$(sed -nE '0,/^version = "(.+)"$/s//\1/p' ./light-base/Cargo.toml)
+          for v in "$NPM_VER" "$SMOLDOT_VER" "$LIGHT_VER"; do
+            [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] \
+              || { echo "::error::version files did not yield a semver: '$v'"; exit 1; }
+          done
+          echo "npm=npm-smoldot-v$NPM_VER"       >> "$GITHUB_OUTPUT"
+          echo "smoldot=smoldot-v$SMOLDOT_VER"   >> "$GITHUB_OUTPUT"
+          echo "light=smoldot-light-v$LIGHT_VER" >> "$GITHUB_OUTPUT"
+          printf 'Computed tags:\n  npm-smoldot-v%s\n  smoldot-v%s\n  smoldot-light-v%s\n' \
+            "$NPM_VER" "$SMOLDOT_VER" "$LIGHT_VER"
+      - name: Push missing release tags
+        run: |
+          set -euo pipefail
+          for TAG in \
+              '${{ steps.tags.outputs.npm }}' \
+              '${{ steps.tags.outputs.smoldot }}' \
+              '${{ steps.tags.outputs.light }}'; do
+            if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+              echo "Tag $TAG already exists; skipping."
+            else
+              git tag "$TAG"
+              git push origin "$TAG"
+              echo "Pushed: $TAG -> $(git rev-parse HEAD)"
+            fi
+          done
+
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [docs-publish, npm-publish, deno-publish, crates-io-publish]
+    needs: [docs-publish, npm-publish, deno-publish, crates-io-publish, tags-publish]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success
