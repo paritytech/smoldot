@@ -1421,25 +1421,27 @@ async fn run_background<TPlat: PlatformRef>(
                         let children = subscription
                             .non_finalized_blocks_ancestry_order
                             .into_iter()
-                            .map(|b| WarpSyncTreeChild {
-                                block: Block {
-                                    hash: header::hash_from_scale_encoded_header(
-                                        &b.scale_encoded_header,
-                                    ),
-                                    height: header::decode(
-                                        &b.scale_encoded_header,
-                                        block_number_bytes,
-                                    )
-                                    .unwrap()
-                                    .number,
-                                    scale_encoded_header: b.scale_encoded_header.clone(),
-                                },
-                                parent_hash: b.parent_hash,
-                                same_runtime_as_parent: same_runtime_as_parent(
+                            .map(|b| {
+                                let hash =
+                                    header::hash_from_scale_encoded_header(&b.scale_encoded_header);
+                                let height =
+                                    header::decode(&b.scale_encoded_header, block_number_bytes)
+                                        .unwrap()
+                                        .number;
+                                let same_runtime_as_parent = same_runtime_as_parent(
                                     &b.scale_encoded_header,
                                     block_number_bytes,
-                                ),
-                                is_new_best: b.is_new_best,
+                                );
+                                WarpSyncTreeChild {
+                                    block: Block {
+                                        hash,
+                                        height,
+                                        scale_encoded_header: b.scale_encoded_header,
+                                    },
+                                    parent_hash: b.parent_hash,
+                                    same_runtime_as_parent,
+                                    is_new_best: b.is_new_best,
+                                }
                             })
                             .collect();
 
@@ -3223,16 +3225,10 @@ fn build_warp_sync_tree<TPlat: PlatformRef>(
     };
 
     for child in children {
-        let parent_index = if child.parent_hash == finalized_block.hash {
-            None
-        } else {
-            Some(
-                tree.input_output_iter_unordered()
-                    .find(|b| b.user_data.hash == child.parent_hash)
-                    .unwrap()
-                    .id,
-            )
-        };
+        let parent_index = tree
+            .input_output_iter_unordered()
+            .find(|b| b.user_data.hash == child.parent_hash)
+            .map(|n| n.id);
         let _ = tree.input_insert_block(
             child.block,
             parent_index,
