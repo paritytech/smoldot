@@ -1435,8 +1435,11 @@ async fn run_background<TPlat: PlatformRef>(
                                 })
                             }
                         }
-                        // Disable when missing or degenerately equal to warp-synced.
-                        .filter(|b| b.hash != finalized_block_hash);
+                        // Disable when missing, degenerately equal to warp-synced or
+                        // not strictly older.
+                        .filter(|b| {
+                            b.hash != finalized_block_hash && b.height < finalized_block_height
+                        });
 
                         log!(
                             &background.platform,
