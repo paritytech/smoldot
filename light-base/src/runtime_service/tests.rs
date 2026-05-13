@@ -163,11 +163,13 @@ fn notifies_subscribers_of_warp_synced_block() {
             ..
         }) => {
             assert_eq!(user_data.hash, new_finalized_hash);
+            // pre_warp_finalized not expected here, because it was never part of the async_tree.
             assert!(pruned_blocks.is_empty());
         }
         _ => panic!("expected OutputUpdate::Finalized"),
     }
-    // new_finalized has been pruned: tree is now empty.
+    // new_finalized is no longer in the tree's non-finalized blocks (it became the output
+    // finalized).
     assert_eq!(result.tree.input_output_iter_unordered().count(), 0);
 
     assert!(result.tree.try_advance_output().is_none());
@@ -214,8 +216,8 @@ fn child_surfaces_after_warp_synced_finalized() {
         _ => panic!("expected Block(new_finalized)"),
     }
 
-    // Then Finalized(new_finalized) — prunes new_finalized from the tree.
-    // child is on the canonical line, so it's not in pruned_blocks.
+    // Then Finalized(new_finalized) — new_finalized becomes the output finalized.
+    // child is on the canonical line, so it's not in `pruned_blocks` either.
     match result.tree.try_advance_output() {
         Some(async_tree::OutputUpdate::Finalized {
             user_data,
@@ -227,7 +229,7 @@ fn child_surfaces_after_warp_synced_finalized() {
         }
         _ => panic!("expected Finalized(new_finalized)"),
     }
-    // new_finalized has been pruned; child remains as a root.
+    // new_finalized is no longer in the tree's non-finalized blocks; child remains as a root.
     let remaining: Vec<_> = result
         .tree
         .input_output_iter_unordered()
