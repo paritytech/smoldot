@@ -163,7 +163,9 @@ fn notifies_subscribers_of_warp_synced_block() {
             ..
         }) => {
             assert_eq!(user_data.hash, new_finalized_hash);
-            // pre_warp_finalized not expected here, because it was never part of the async_tree.
+            // `pruned_blocks` lists forked blocks dropped from the tree at this step.
+            // pre_warp_finalized is the wrapper's outer-finalized slot, not part of the
+            // async_tree — so it does not appear here.
             assert!(pruned_blocks.is_empty());
         }
         _ => panic!("expected OutputUpdate::Finalized"),
@@ -217,7 +219,7 @@ fn child_surfaces_after_warp_synced_finalized() {
     }
 
     // Then Finalized(new_finalized) — new_finalized becomes the output finalized.
-    // child is on the canonical line, so it's not in `pruned_blocks` either.
+    // child is on the canonical path, not a forked block, so it's not in `pruned_blocks`.
     match result.tree.try_advance_output() {
         Some(async_tree::OutputUpdate::Finalized {
             user_data,
