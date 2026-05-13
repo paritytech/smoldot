@@ -3194,6 +3194,13 @@ fn build_warp_sync_tree<TPlat: PlatformRef>(
     runtime: Arc<Runtime>,
     children: Vec<WarpSyncTreeChild>,
 ) -> WarpSyncTreeInit<TPlat> {
+    // Used as the tree's initial outer-finalized state so the new finalized can be inserted
+    // as a non-finalized child and then `input_finalize`d, emitting `Block` + `Finalized` to
+    // subscribers. Not the real chain parent of the new finalized (warp sync skips ancestry);
+    // only a tree-level predecessor. Overwritten in the wrapper's outer-finalized slot the
+    // moment the new finalized is finalized.
+    // `None` when the previous tree has no usable input-finalized block, in which case we
+    // fall back to the legacy single-block init.
     let pre_warp_finalized: Option<Block> = match prev_tree {
         Tree::FinalizedBlockRuntimeKnown {
             finalized_block, ..
