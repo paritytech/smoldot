@@ -1480,17 +1480,10 @@ async fn run_background<TPlat: PlatformRef>(
 
                         for block in subscription.non_finalized_blocks_ancestry_order {
                             // Parent is the tree's outer finalized (None) or already in the tree.
-                            let parent_index = if block.parent_hash == finalized_block.hash {
-                                None
-                            } else {
-                                Some(
-                                    new_tree
-                                        .input_output_iter_unordered()
-                                        .find(|b| b.user_data.hash == block.parent_hash)
-                                        .unwrap()
-                                        .id,
-                                )
-                            };
+                            let parent_index = new_tree
+                                .input_output_iter_unordered()
+                                .find(|b| b.user_data.hash == block.parent_hash)
+                                .map(|n| n.id);
                             let same_runtime_as_parent = same_runtime_as_parent(
                                 &block.scale_encoded_header,
                                 background.sync_service.block_number_bytes(),
