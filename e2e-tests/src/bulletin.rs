@@ -33,6 +33,23 @@ pub const PARA_BINARY: &str = "polkadot-parachain";
 /// Default snapshot height target. Must exceed 1000 blocks.
 pub const DEFAULT_SNAPSHOT_HEIGHT: u64 = 1024;
 
+/// Index after which the partial bulletin snapshot is taken.
+///
+/// The generator produces two bulletin DB snapshots from one network run:
+///
+/// - `bulletin-full.tgz` — every payload in [`payloads`] is injected.
+/// - `bulletin-partial.tgz` — only the first `PARTIAL_FORK_INDEX` payloads
+///   are injected, then the partial snapshot is captured.
+///
+/// The fetch test loads `bulletin-full` on one collator and
+/// `bulletin-partial` on another, then fetches a CID that exists only in
+/// `bulletin-full` to verify smoldot still finds it via gossip when a
+/// peer reports `DontHave`. Bulletin's `transactionStorage` column does
+/// not sync via libp2p block-sync, so a partial-snapshot collator
+/// permanently lacks the blob bytes for CIDs stored after its snapshot
+/// point.
+pub const PARTIAL_FORK_INDEX: usize = 2;
+
 /// CIDv1 multicodec for the `raw` codec.
 const CODEC_RAW: u64 = 0x55;
 
@@ -42,6 +59,11 @@ const CODEC_RAW: u64 = 0x55;
 pub struct Payload {
     pub label: &'static str,
     pub content: &'static [u8],
+    /// `true` for payloads injected before `PARTIAL_FORK_INDEX`. Their
+    /// blob bytes are present on both `bulletin-full` and
+    /// `bulletin-partial` collators; the others are only on
+    /// `bulletin-full`.
+    pub on_partial: bool,
 }
 
 impl Payload {
@@ -62,24 +84,32 @@ impl Payload {
     }
 }
 
-/// Deterministic payloads the generator injects and the CI tests assert on.
+/// Deterministic payloads the generator injects and the CI tests assert
+/// on. Labels prefixed `all-nodes-*` are on both bulletin snapshots;
+/// `one-node-*` payloads are only on `bulletin-full.tgz`. Order matters:
+/// items at `[..PARTIAL_FORK_INDEX]` go in before the partial snapshot
+/// is captured.
 pub fn payloads() -> Vec<Payload> {
     vec![
         Payload {
-            label: "payload-26b",
+            label: "all-nodes-with-26b-payload",
             content: b"smoldot-bitswap-both-small",
+            on_partial: true,
         },
         Payload {
-            label: "payload-4kib",
+            label: "all-nodes-with-4kib-payload",
             content: rand_4k(),
+            on_partial: true,
         },
         Payload {
-            label: "payload-31b",
+            label: "one-node-with-31b-payload",
             content: b"smoldot-bitswap-full-only-small",
+            on_partial: false,
         },
         Payload {
-            label: "payload-1mib",
+            label: "one-node-with-1mib-payload",
             content: rand_1m(),
+            on_partial: false,
         },
     ]
 }
@@ -157,12 +187,14 @@ pub struct ManifestPayload {
     pub cid: String,
     pub sha256: String,
     pub size: u64,
+    pub on_partial: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveChecksums {
     pub relay_sha256: String,
-    pub bulletin_sha256: String,
+    pub bulletin_full_sha256: String,
+    pub bulletin_partial_sha256: String,
 }
 
 /// Manifest emitted alongside the snapshots by the generator. Bumping

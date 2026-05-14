@@ -27,8 +27,10 @@ use zombienet_sdk::{LocalFileSystem, Network, NetworkConfigBuilder};
 /// GCS URLs for the snapshots produced by `bulletin_generate_snapshot`.
 const DB_SNAPSHOT_RELAY: &str =
     "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/relay-2026-05-04.tgz";
-const DB_SNAPSHOT_BULLETIN: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-2026-05-04.tgz";
+const DB_SNAPSHOT_BULLETIN_FULL: &str =
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-full-2026-05-04.tgz";
+const DB_SNAPSHOT_BULLETIN_PARTIAL: &str =
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-partial-2026-05-04.tgz";
 
 #[derive(Serialize)]
 struct PayloadJson {
@@ -36,10 +38,12 @@ struct PayloadJson {
     cid: String,
     sha256: String,
     size: u64,
+    on_partial: bool,
 }
 
-/// Smoldot fetches every CID in `bulletin::payloads()` and asserts
-/// NotFound for an unrelated CID. Both collators share the same snapshot.
+/// Smoldot fetches every CID in `bulletin::payloads()`, asserts NotFound
+/// for an unrelated CID, and exercises mixed-availability peer selection
+/// (some CIDs only on the full-snapshot collator).
 #[tokio::test(flavor = "multi_thread")]
 async fn bulletin_fetch() -> Result<()> {
     env_logger::try_init().ok();
@@ -48,10 +52,23 @@ async fn bulletin_fetch() -> Result<()> {
     let base_dir = resolve_base_dir()?;
 
     let relay = get_snapshot_url(DB_SNAPSHOT_RELAY, "DB_SNAPSHOT_RELAY_OVERRIDE");
-    let bulletin = get_snapshot_url(DB_SNAPSHOT_BULLETIN, "DB_SNAPSHOT_BULLETIN_OVERRIDE");
+    let bulletin_full = get_snapshot_url(
+        DB_SNAPSHOT_BULLETIN_FULL,
+        "DB_SNAPSHOT_BULLETIN_FULL_OVERRIDE",
+    );
+    let bulletin_partial = get_snapshot_url(
+        DB_SNAPSHOT_BULLETIN_PARTIAL,
+        "DB_SNAPSHOT_BULLETIN_PARTIAL_OVERRIDE",
+    );
 
-    let network =
-        spawn_with_snapshots(&base_dir, &chain_spec, &relay, &bulletin).await?;
+    let network = spawn_with_snapshots(
+        &base_dir,
+        &chain_spec,
+        &relay,
+        &bulletin_full,
+        &bulletin_partial,
+    )
+    .await?;
 
     let (relay_spec, bulletin_spec) = chain_spec_paths(&network)?;
 
@@ -66,6 +83,7 @@ async fn bulletin_fetch() -> Result<()> {
                 cid: p.predicted_cid(),
                 sha256: p.sha256_hex(),
                 size: p.size(),
+                on_partial: p.on_partial,
             })
             .collect::<Vec<_>>(),
     )?;
@@ -141,7 +159,8 @@ async fn spawn_with_snapshots(
     base_dir: &Path,
     chain_spec: &Path,
     relay_snap: &str,
-    bulletin_snap: &str,
+    bulletin_full_snap: &str,
+    bulletin_partial_snap: &str,
 ) -> Result<Network<LocalFileSystem>> {
     let chain_spec_str = chain_spec
         .to_str()
@@ -152,7 +171,8 @@ async fn spawn_with_snapshots(
         .ok_or_else(|| anyhow!("non-utf8 base dir"))?
         .to_string();
     let relay = relay_snap.to_string();
-    let bulletin = bulletin_snap.to_string();
+    let bulletin_full = bulletin_full_snap.to_string();
+    let bulletin_partial = bulletin_partial_snap.to_string();
 
     let cfg = NetworkConfigBuilder::new()
         .with_relaychain(|rc| {
@@ -185,14 +205,14 @@ async fn spawn_with_snapshots(
                         .validator(true)
                         .bootnode(true)
                         .with_command(bulletin::PARA_BINARY)
-                        .with_db_snapshot(bulletin.as_str())
+                        .with_db_snapshot(bulletin_full.as_str())
                 })
                 .with_collator(|c| {
                     c.with_name("collator-2")
                         .validator(true)
                         .bootnode(true)
                         .with_command(bulletin::PARA_BINARY)
-                        .with_db_snapshot(bulletin.as_str())
+                        .with_db_snapshot(bulletin_partial.as_str())
                 })
         })
         .with_global_settings(|g| g.with_base_dir(base_dir_str.as_str()))

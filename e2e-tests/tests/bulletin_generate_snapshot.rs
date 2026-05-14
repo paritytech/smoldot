@@ -154,10 +154,15 @@ async fn bulletin_generate_snapshot() -> Result<()> {
     authorize_account(&api, &alice, &alice).await?;
 
     let payloads = bulletin::payloads();
-    info!("injecting {} payloads", payloads.len());
+    let (phase_1, phase_2) = payloads.split_at(bulletin::PARTIAL_FORK_INDEX);
+    info!(
+        "injecting {} pre-fork + {} post-fork payloads",
+        phase_1.len(),
+        phase_2.len()
+    );
 
     let mut emitted_cids = Vec::new();
-    for payload in &payloads {
+    for payload in phase_1 {
         let cid_str = submit_store(&api, &alice, payload).await?;
         emitted_cids.push((payload.label, cid_str));
     }
@@ -167,6 +172,15 @@ async fn bulletin_generate_snapshot() -> Result<()> {
             .base_dir()
             .ok_or_else(|| anyhow!("network has no base_dir"))?,
     );
+    let staging_dir = base_dir.join("partial-staging");
+
+    info!("forking bulletin DB after {} payloads", phase_1.len());
+    fork_collator_db(&network, &base_dir, &staging_dir).await?;
+
+    for payload in phase_2 {
+        let cid_str = submit_store(&api, &alice, payload).await?;
+        emitted_cids.push((payload.label, cid_str));
+    }
 
     info!("waiting for parachain height >= {}", opts.target_height);
     collator
@@ -192,10 +206,18 @@ async fn bulletin_generate_snapshot() -> Result<()> {
         None,
         &opts.out_dir.join("relay.tgz"),
     )?;
-    let bulletin_archive = pack_node_dirs(
+    let bulletin_full_archive = pack_node_dirs(
         &final_staging.join("bulletin").join("data"),
         Some(&final_staging.join("bulletin").join("relay-data")),
-        &opts.out_dir.join("bulletin.tgz"),
+        &opts.out_dir.join("bulletin-full.tgz"),
+    )?;
+    // No `relay-data/` on the partial — collators use
+    // `--relay-chain-rpc-urls`, so the embedded relay client doesn't load
+    // anything from disk anyway.
+    let bulletin_partial_archive = pack_node_dirs(
+        &staging_dir.join("data"),
+        None,
+        &opts.out_dir.join("bulletin-partial.tgz"),
     )?;
 
     info!("writing manifest.json");
@@ -204,7 +226,8 @@ async fn bulletin_generate_snapshot() -> Result<()> {
         &emitted_cids,
         &payloads,
         &relay_archive,
-        &bulletin_archive,
+        &bulletin_full_archive,
+        &bulletin_partial_archive,
     )?;
     let manifest_path = opts.out_dir.join("manifest.json");
     std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)
@@ -212,6 +235,38 @@ async fn bulletin_generate_snapshot() -> Result<()> {
 
     info!("snapshots written to {}", opts.out_dir.display());
     Ok(())
+}
+
+/// Pauses both collators (SIGSTOP), copies collator-1's `data/` into
+/// `staging`, then resumes the collators (SIGCONT). The pause window is
+/// the only consistent point at which we can fork RocksDB without
+/// risking a torn snapshot.
+///
+/// `relay-data/` is intentionally NOT copied: collators run with
+/// `--relay-chain-rpc-urls`, so the embedded relay client doesn't load
+/// anything from disk.
+async fn fork_collator_db(
+    network: &Network<LocalFileSystem>,
+    base_dir: &Path,
+    staging: &Path,
+) -> Result<()> {
+    let collator1 = network.get_node("collator-1")?;
+    let collator2 = network.get_node("collator-2")?;
+
+    collator1.pause().await?;
+    collator2.pause().await?;
+
+    let copy_result: Result<()> = (|| {
+        let src = base_dir.join("collator-1");
+        std::fs::create_dir_all(staging)
+            .with_context(|| format!("creating {}", staging.display()))?;
+        copy_dir_all(&src.join("data"), &staging.join("data"))?;
+        Ok(())
+    })();
+
+    collator1.resume().await?;
+    collator2.resume().await?;
+    copy_result
 }
 
 /// Pauses every node, copies the relay (alice) and bulletin (collator-1)
@@ -507,7 +562,8 @@ fn build_manifest(
     emitted: &[(&'static str, String)],
     payloads: &[Payload],
     relay_sha256: &str,
-    bulletin_sha256: &str,
+    bulletin_full_sha256: &str,
+    bulletin_partial_sha256: &str,
 ) -> Result<BulletinManifest> {
     let manifest_payloads = emitted
         .iter()
@@ -521,6 +577,7 @@ fn build_manifest(
                 cid: cid.clone(),
                 sha256: p.sha256_hex(),
                 size: p.size(),
+                on_partial: p.on_partial,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -535,7 +592,8 @@ fn build_manifest(
         payloads: manifest_payloads,
         archives: ArchiveChecksums {
             relay_sha256: relay_sha256.to_string(),
-            bulletin_sha256: bulletin_sha256.to_string(),
+            bulletin_full_sha256: bulletin_full_sha256.to_string(),
+            bulletin_partial_sha256: bulletin_partial_sha256.to_string(),
         },
     })
 }
