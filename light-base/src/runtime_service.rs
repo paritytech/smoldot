@@ -3217,9 +3217,11 @@ fn build_warp_sync_tree<TPlat: PlatformRef>(
             })
         }
     }
-    // Disable when missing, degenerately equal to the new finalized, or
-    // not strictly older.
-    .filter(|b| b.hash != new_finalized_block.hash && b.height < new_finalized_block.height);
+    // Disable when missing, degenerately equal to the new finalized, not strictly older,
+    // or pointing at genesis
+    .filter(|b| {
+        b.hash != new_finalized_block.hash && b.height < new_finalized_block.height && b.height > 0
+    });
 
     let pre_warp_finalized_hash = pre_warp_finalized.as_ref().map(|b| b.hash);
 
