@@ -114,10 +114,7 @@ pub fn ensure_browser_deps_installed() {
             .current_dir(&browser_dir)
             .status()
             .expect("failed to run npm install for browser tests");
-        assert!(
-            status.success(),
-            "npm install in e2e-tests/browser failed"
-        );
+        assert!(status.success(), "npm install in e2e-tests/browser failed");
     }
     // `playwright install chromium` is idempotent and a no-op if the browser
     // is already cached locally.
@@ -132,10 +129,7 @@ pub fn ensure_browser_deps_installed() {
 /// Runs a Node.js script under `e2e-tests/browser` with the given environment.
 /// Mirrors [`run_js_test`] but the working directory is the browser dir so
 /// that `import { chromium } from 'playwright'` resolves.
-pub async fn run_browser_test(
-    script: &str,
-    env_vars: &[(&str, &str)],
-) -> Result<(), String> {
+pub async fn run_browser_test(script: &str, env_vars: &[(&str, &str)]) -> Result<(), String> {
     let browser_dir = project_root().join("e2e-tests/browser");
     let script_path = browser_dir.join(script);
 
