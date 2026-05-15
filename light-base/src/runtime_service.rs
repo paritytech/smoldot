@@ -3218,7 +3218,9 @@ fn build_warp_sync_tree<TPlat: PlatformRef>(
         }
     }
     // Disable when missing, degenerately equal to the new finalized, not strictly older,
-    // or pointing at genesis
+    // or pointing at genesis. Genesis state isn't reliably served by peers, so clients
+    // would fail storage/runtime calls against the Initialized hash. Relay falls back
+    // here when no checkpoint is set; parachain always falls back at first bootstrap.
     .filter(|b| {
         b.hash != new_finalized_block.hash && b.height < new_finalized_block.height && b.height > 0
     });

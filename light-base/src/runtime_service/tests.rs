@@ -47,6 +47,17 @@ fn known_tree(finalized: Block) -> Tree<TestPlat> {
     }
 }
 
+fn unknown_tree_with_finalized(initial: Block) -> Tree<TestPlat> {
+    let mut tree = async_tree::AsyncTree::new(async_tree::Config {
+        finalized_async_user_data: None,
+        retry_after_failed: Duration::from_secs(4),
+        blocks_capacity: 0,
+    });
+    let idx = tree.input_insert_block(initial, None, false, true);
+    tree.input_finalize(idx);
+    Tree::FinalizedBlockRuntimeUnknown { tree }
+}
+
 #[test]
 fn attaches_warp_synced_block_under_prior_finalized() {
     let pre_warp_finalized = block(0x01, 100);
@@ -175,6 +186,42 @@ fn notifies_subscribers_of_warp_synced_block() {
     assert_eq!(result.tree.input_output_iter_unordered().count(), 0);
 
     assert!(result.tree.try_advance_output().is_none());
+}
+
+#[test]
+fn rejects_genesis_as_pre_warp_finalized() {
+    // Skip genesis as pre_warp_finalized: clients use the Initialized hash for
+    // storage and runtime calls, and genesis state isn't reliably served by peers.
+    let genesis = block(0x00, 0);
+    let new_finalized = block(0x02, 101);
+
+    let result = build_warp_sync_tree::<TestPlat>(
+        &unknown_tree_with_finalized(genesis),
+        new_finalized.clone(),
+        dummy_runtime(),
+        vec![],
+    );
+
+    assert_eq!(result.finalized_block.hash, new_finalized.hash);
+    assert_eq!(result.pre_warp_finalized_hash, None);
+    assert_eq!(result.tree.input_output_iter_unordered().count(), 0);
+}
+
+#[test]
+fn rejects_genesis_in_known_prev_tree() {
+    let genesis = block(0x00, 0);
+    let new_finalized = block(0x02, 101);
+
+    let result = build_warp_sync_tree::<TestPlat>(
+        &known_tree(genesis),
+        new_finalized.clone(),
+        dummy_runtime(),
+        vec![],
+    );
+
+    assert_eq!(result.finalized_block.hash, new_finalized.hash);
+    assert_eq!(result.pre_warp_finalized_hash, None);
+    assert_eq!(result.tree.input_output_iter_unordered().count(), 0);
 }
 
 #[test]
