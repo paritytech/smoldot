@@ -41,8 +41,9 @@ What happens inside:
 
 ## Bulletin / bitswap snapshots
 
-The `bulletin_fetch` test drives smoldot's `bitswap_v1_get` JSON-RPC
-against a polkadot-bulletin-chain network with pre-built DB snapshots.
+The `bulletin_fetch` test drives smoldot's `bitswap_unstable_get` JSON-RPC
+(plus an alias-coverage call to the legacy `bitswap_v1_get` name) against a
+polkadot-bulletin-chain network with pre-built DB snapshots.
 The URLs CI fetches from are hardcoded in
 [`tests/bulletin_fetch.rs`](tests/bulletin_fetch.rs) and point at the
 `zombienet-db-snaps` GCS bucket under `smoldot/bulletin_fetch/`. To

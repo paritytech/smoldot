@@ -18,7 +18,7 @@
 //! Background Bitswap service.
 //!
 //! The role of Bitswap service is to handle Bitswap RPC requests, specifically
-//! `bitswap_v1_get(cid)`.
+//! `bitswap_unstable_get(cid)` and `bitswap_unstable_stream(cids)`.
 //!
 //! In order to handle a request for a Bitswap block with a given CID, [`BitswapService`] issues
 //! Bitswap "have" request to all the connected Bitswap peers, then issues Bitswap "block" request
@@ -80,7 +80,7 @@ use smoldot::{
 // TODO: how many parallel requests to expect?
 const PARALLEL_REQUESTS: usize = 50; // 100 MiB of 2 MiB chunks.
 
-/// Maximum number of CIDs accepted in a single `bitswap_v1_getMany` or `bitswap_v1_stream` call.
+/// Maximum number of CIDs accepted in a single `bitswap_unstable_stream` call.
 /// Mirrors the limit used by the polkadot-sdk full-node implementation. The spec requires
 /// implementations to accept at least 16 CIDs.
 pub const MAX_CIDS_PER_REQUEST: usize = 64;
@@ -185,60 +185,15 @@ impl BitswapService {
         result_rx.await.unwrap()
     }
 
-    /// Request multiple Bitswap blocks in a single batched want-list. Resolves once every CID has
-    /// been decided (Ok block, NotFound, or Timeout). The returned `Vec` echoes input CIDs in input
-    /// order with a [`BlockResult`] per slot.
-    ///
-    /// Top-level errors:
-    /// * `-32602 InvalidParams`: empty input is allowed (returns empty vec); duplicate CIDs or
-    ///   batch size > [`MAX_CIDS_PER_REQUEST`] are rejected before any wire I/O.
-    /// * `-32812 FailRetryBackoff`: the initial Have broadcast had no Bitswap peers to send to, or
-    ///   the network send queue was full. Per spec, retry after a backoff delay (~5s).
-    pub async fn bitswap_get_many(
-        &self,
-        cids: Vec<String>,
-    ) -> Result<Vec<(String, BlockResult)>, BitswapGetError> {
-        let entries = parse_and_dedup(cids)?;
-
-        if entries.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let (result_tx, result_rx) = oneshot::channel();
-        let (ready_tx, ready_rx) = oneshot::channel();
-
-        self.messages_tx
-            .send(ToBackground::BitswapBatch {
-                entries,
-                mode: BatchMode::GetMany { result_tx },
-                ready_tx,
-            })
-            .await
-            .unwrap();
-
-        // The service signals broadcast outcome here: `Ok(BatchId)` once the Have broadcast has
-        // landed (or the all-invalid-CID fast path resolves), `Err(...)` if the broadcast failed
-        // wholesale. Wholesale failures surface as top-level JSON-RPC errors per spec.
-        let batch_id = ready_rx.await.unwrap()?;
-
-        // RAII guard: if the caller's future is dropped before result_rx resolves, the guard
-        // drops and sends `CancelBatch` to the service so peers receive a Cancel wantlist.
-        let _cancel_guard = BatchCancelGuard {
-            batch_id,
-            messages_tx: self.messages_tx.clone(),
-        };
-
-        Ok(result_rx.await.unwrap())
-    }
-
     /// Subscribe to a stream of Bitswap blocks. On success, returns a [`BitswapStreamHandle`]
     /// whose `events_rx` yields one `(cid_string, BlockResult)` event per input CID, in arrival
     /// order (the order in which each CID resolves), not input order.
     ///
-    /// Top-level errors mirror [`BitswapService::bitswap_get_many`]: wholesale Have-broadcast
-    /// failures (no peers / queue full) reject the subscription with `-32812 FailRetryBackoff`
-    /// so no events are emitted, per the `bitswap_v1_stream` spec ("whole-call failures cause
-    /// the subscription to be rejected").
+    /// Top-level errors: wholesale Have-broadcast failures (no peers / queue full) reject the
+    /// subscription with `-32812 FailRetryBackoff` so no events are emitted, per the
+    /// `bitswap_unstable_stream` spec ("whole-call failures cause the subscription to be
+    /// rejected"). Empty/duplicate/oversized inputs are rejected at the top level with
+    /// `-32802 EmptyCids` / `-32803 DuplicateCids` / `-32801 TooManyCids` respectively.
     ///
     /// Dropping the returned handle (explicit unsubscribe or client disconnect) cancels remaining
     /// work and emits a Bitswap Cancel wantlist to peers we previously contacted.
@@ -256,7 +211,7 @@ impl BitswapService {
         self.messages_tx
             .send(ToBackground::BitswapBatch {
                 entries,
-                mode: BatchMode::Stream { events_tx },
+                events_tx,
                 ready_tx,
             })
             .await
@@ -274,7 +229,7 @@ impl BitswapService {
     }
 }
 
-/// Per-CID outcome of [`BitswapService::bitswap_get_many`] / [`BitswapService::bitswap_stream`].
+/// Per-CID outcome of [`BitswapService::bitswap_stream`].
 #[derive(Debug, Clone)]
 pub enum BlockResult {
     /// Block bytes received from a peer.
@@ -295,9 +250,8 @@ pub struct BitswapStreamHandle {
     _cancel_guard: BatchCancelGuard,
 }
 
-/// Internal RAII guard that fires `ToBackground::CancelBatch` on drop. Held by both
-/// [`BitswapStreamHandle`] (covers explicit unsubscribe and client disconnect) and the inner
-/// future of [`BitswapService::bitswap_get_many`] (covers caller cancellation mid-await).
+/// Internal RAII guard that fires `ToBackground::CancelBatch` on drop. Held by
+/// [`BitswapStreamHandle`] (covers explicit unsubscribe and client disconnect).
 struct BatchCancelGuard {
     batch_id: BatchId,
     messages_tx: async_channel::Sender<ToBackground>,
@@ -344,17 +298,30 @@ pub enum BitswapGetError {
         /// Number of CIDs in the rejected request.
         got: usize,
     },
+    /// Input array is empty.
+    #[display("Input array is empty.")]
+    EmptyCids,
     /// Same CID appears more than once in the input. Two-stage detection: literal-string match,
     /// or two distinct strings decoding to the same content digest.
     #[display("Input contains duplicate CIDs.")]
     DuplicateCids,
 }
 
-/// JSON-RPC error categories for `bitswap_v1_get` method.
+/// JSON-RPC error codes used by the `bitswap_*` namespace.
 ///
-/// Clients should use the error code to determine recovery action,
-/// not parse the human-readable message string.
+/// Clients should use the numeric code to determine recovery action, not parse the
+/// human-readable message string. Top-level batch-input validation codes
+/// (`TooManyCids`, `EmptyCids`, `DuplicateCids`) only appear as top-level errors of
+/// `bitswap_unstable_stream`. Per-request/per-event codes (`Fail`, `FailRetry`,
+/// `FailRetryBackoff`) appear both as the top-level error of `bitswap_unstable_get`
+/// and inside `streamItemError` events.
 enum BitswapJsonRpcError {
+    /// Batch-input validation: `cids.len()` exceeds the implementation maximum.
+    TooManyCids = -32801,
+    /// Batch-input validation: `cids` is empty.
+    EmptyCids = -32802,
+    /// Batch-input validation: duplicate CID in input.
+    DuplicateCids = -32803,
     /// Permanent failure for this request. E.g., there is no requested data in the network.
     /// Doesn't make sense to retry until you put the data on chain.
     Fail = -32810,
@@ -374,49 +341,61 @@ impl BitswapGetError {
     pub fn to_json_rpc_error(&self, request_id_json: &str) -> String {
         let message = self.to_string();
 
-        // Even though the spec says the error variants like `NoPeers` etc. are not stable and
-        // provided for debugging purposes only, any changes to the variant names should be avoided
-        // to not surprise anybody.
-        let (variant, category) = match self {
-            BitswapGetError::InvalidCid(_) => ("InvalidCid", None),
-            BitswapGetError::NotFound => ("NotFound", Some(BitswapJsonRpcError::Fail)),
-            BitswapGetError::BlockRequestFailed => {
-                ("BlockRequestFailed", Some(BitswapJsonRpcError::FailRetry))
+        let error_response = match self {
+            BitswapGetError::InvalidCid(_) => parse::ErrorResponse::InvalidParams(Some(&message)),
+            BitswapGetError::NotFound => {
+                parse::ErrorResponse::ApplicationDefined(BitswapJsonRpcError::Fail as i64, &message)
             }
-            BitswapGetError::Timeout => ("Timeout", Some(BitswapJsonRpcError::FailRetry)),
-            BitswapGetError::QueueFull => {
-                ("QueueFull", Some(BitswapJsonRpcError::FailRetryBackoff))
+            BitswapGetError::BlockRequestFailed | BitswapGetError::Timeout => {
+                parse::ErrorResponse::ApplicationDefined(
+                    BitswapJsonRpcError::FailRetry as i64,
+                    &message,
+                )
             }
-            BitswapGetError::NoPeers => ("NoPeers", Some(BitswapJsonRpcError::FailRetryBackoff)),
-            BitswapGetError::TooManyCids { .. } => ("TooManyCids", None),
-            BitswapGetError::DuplicateCids => ("DuplicateCids", None),
+            BitswapGetError::QueueFull | BitswapGetError::NoPeers => {
+                parse::ErrorResponse::ApplicationDefined(
+                    BitswapJsonRpcError::FailRetryBackoff as i64,
+                    &message,
+                )
+            }
+            BitswapGetError::TooManyCids { .. } => parse::ErrorResponse::ApplicationDefined(
+                BitswapJsonRpcError::TooManyCids as i64,
+                &message,
+            ),
+            BitswapGetError::EmptyCids => parse::ErrorResponse::ApplicationDefined(
+                BitswapJsonRpcError::EmptyCids as i64,
+                &message,
+            ),
+            BitswapGetError::DuplicateCids => parse::ErrorResponse::ApplicationDefined(
+                BitswapJsonRpcError::DuplicateCids as i64,
+                &message,
+            ),
         };
 
-        let data = format!("{{\"variant\":\"{variant}\"}}");
-
-        let error_response = match category {
-            None => parse::ErrorResponse::InvalidParams(Some(&message)),
-            Some(cat) => parse::ErrorResponse::ApplicationDefined(cat as i64, &message),
-        };
-
-        parse::build_error_response(request_id_json, error_response, Some(&data))
+        parse::build_error_response(request_id_json, error_response, None)
     }
 
-    /// Returns the JSON-RPC `(code, message)` pair to embed inside a per-CID `BlockResult::Err`
-    /// in `bitswap_v1_getMany` / `bitswap_v1_streamEvent`. The code uses the same four categories
-    /// as the top-level error of `bitswap_v1_get`, so callers can reuse retry logic.
+    /// Returns the JSON-RPC `(code, message)` pair to embed inside a per-CID `streamItemError`
+    /// event of `bitswap_unstable_streamEvent`. The code uses the same retry categories as the
+    /// top-level error of `bitswap_unstable_get`, so callers can reuse retry logic.
+    ///
+    /// The top-level batch-validation variants (`TooManyCids`, `EmptyCids`, `DuplicateCids`)
+    /// never appear per-event — they reject the subscription before any event is emitted.
     pub fn to_block_result_err(&self) -> (i32, String) {
         const INVALID_PARAMS: i32 = -32602;
         let code = match self {
-            BitswapGetError::InvalidCid(_)
-            | BitswapGetError::TooManyCids { .. }
-            | BitswapGetError::DuplicateCids => INVALID_PARAMS,
+            BitswapGetError::InvalidCid(_) => INVALID_PARAMS,
             BitswapGetError::NotFound => BitswapJsonRpcError::Fail as i32,
             BitswapGetError::BlockRequestFailed | BitswapGetError::Timeout => {
                 BitswapJsonRpcError::FailRetry as i32
             }
             BitswapGetError::QueueFull | BitswapGetError::NoPeers => {
                 BitswapJsonRpcError::FailRetryBackoff as i32
+            }
+            BitswapGetError::TooManyCids { .. }
+            | BitswapGetError::EmptyCids
+            | BitswapGetError::DuplicateCids => {
+                unreachable!("top-level batch-validation error, never emitted per-CID")
             }
         };
         (code, self.to_string())
@@ -432,7 +411,7 @@ impl From<SendBitswapMessageError> for BitswapGetError {
     }
 }
 
-/// Validates and de-duplicates the input CIDs of `bitswap_v1_getMany` / `bitswap_v1_stream`.
+/// Validates and de-duplicates the input CIDs of `bitswap_unstable_stream`.
 ///
 /// On success returns one entry per input CID, in input order, preserving the original string and
 /// the parse result. Caller-side per-CID `Err(InvalidCid)` reporting is left to the JSON-RPC layer
@@ -445,6 +424,9 @@ impl From<SendBitswapMessageError> for BitswapGetError {
 pub fn parse_and_dedup(
     cids: Vec<String>,
 ) -> Result<Vec<(String, Result<Cid, cid::ParseError>)>, BitswapGetError> {
+    if cids.is_empty() {
+        return Err(BitswapGetError::EmptyCids);
+    }
     if cids.len() > MAX_CIDS_PER_REQUEST {
         return Err(BitswapGetError::TooManyCids {
             max: MAX_CIDS_PER_REQUEST,
@@ -489,23 +471,13 @@ enum ToBackground {
         /// Validated and de-duplicated entries from [`parse_and_dedup`]. Per-slot `Err` carries
         /// an `InvalidCid` ParseError that gets surfaced as a per-CID error event.
         entries: Vec<(String, Result<Cid, cid::ParseError>)>,
-        mode: BatchMode,
+        /// Per-CID outcomes are pushed here as they become available, in arrival order.
+        events_tx: async_channel::Sender<(String, BlockResult)>,
         ready_tx: oneshot::Sender<Result<BatchId, BitswapGetError>>,
     },
     /// Cancel an in-flight batch. Idempotent: if the batch already finished, this is a no-op.
     CancelBatch {
         batch_id: BatchId,
-    },
-}
-
-/// Mode of a batched request. `GetMany` collects all outcomes and replies once; `Stream` pushes
-/// each outcome to `events_tx` as it becomes available.
-enum BatchMode {
-    GetMany {
-        result_tx: oneshot::Sender<Vec<(String, BlockResult)>>,
-    },
-    Stream {
-        events_tx: async_channel::Sender<(String, BlockResult)>,
     },
 }
 
@@ -530,7 +502,7 @@ enum RequestStage {
 }
 
 /// Per-request output destination. A request resolves into either a single oneshot reply
-/// (for `bitswap_get`) or a slot of a `Batch` (for `bitswap_get_many` / `bitswap_stream`).
+/// (for `bitswap_get`) or a slot of a `Batch` (for `bitswap_stream`).
 #[derive(Debug)]
 enum SlotOutput {
     Single(oneshot::Sender<Result<Vec<u8>, BitswapGetError>>),
@@ -548,17 +520,14 @@ struct Request<TPlat: PlatformRef> {
 /// State for an in-flight batch. Allocated when `BitswapBatch` is received and removed once all
 /// slots have been resolved (or the batch is explicitly cancelled).
 struct Batch {
-    mode: BatchMode,
-    /// Per-slot CID strings, indexed by slot index. Echoed back in outcomes/events.
+    /// Sender for per-CID outcomes, in arrival order. Dropping it closes the channel, signalling
+    /// end-of-stream to the JSON-RPC pump.
+    events_tx: async_channel::Sender<(String, BlockResult)>,
+    /// Per-slot CID strings, indexed by slot index. Echoed back in events.
     cid_strs: Vec<String>,
     /// `Some(RequestId)` while a slot is in-flight; `None` once the slot has been resolved.
     /// Invalid-CID slots start as `None` (resolved synchronously when the batch is created).
     slots: Vec<Option<RequestId>>,
-    /// Per-slot collected outcomes. For `BatchMode::GetMany` this fills in until `pending_count`
-    /// reaches zero, then is drained into the response. For `BatchMode::Stream` outcomes go
-    /// directly to `events_tx` and these slots stay `None` (kept allocated to mirror `cid_strs`
-    /// for diagnostic readability — checked by `pending_count`).
-    outcomes: Vec<Option<BlockResult>>,
     /// Peers we sent this batch's Have broadcast to. Used to address Cancel wantlist on
     /// `CancelBatch`. Empty until `HaveBroadcastResult` arrives successfully.
     peers_for_cancel: Vec<PeerId>,
@@ -579,7 +548,7 @@ enum HaveContext {
         /// is queued and don't appear here.
         cids: Vec<(usize, Cid)>,
         /// Channel for signalling broadcast outcome back to the caller of
-        /// [`BitswapService::bitswap_get_many`] / [`BitswapService::bitswap_stream`]. Sent exactly
+        /// [`BitswapService::bitswap_stream`]. Sent exactly
         /// once when the broadcast resolves: `Ok(batch_id)` on success (peer set non-empty), or
         /// `Err(_)` on wholesale failure so the caller surfaces a top-level JSON-RPC error.
         ready_tx: oneshot::Sender<Result<BatchId, BitswapGetError>>,
@@ -627,7 +596,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// the platform implementation of `now` is monothonic (true for
     /// [`crate::platform::DefaultPlatform`]).
     requests_by_cid: hashbrown::HashMap<Cid, VecDeque<RequestId>, util::SipHasherBuild>,
-    /// In-flight batches. Each entry corresponds to a `bitswap_get_many` / `bitswap_stream` call.
+    /// In-flight batches. Each entry corresponds to a `bitswap_stream` call.
     batches: hashbrown::HashMap<BatchId, Batch, fnv::FnvBuildHasher>,
     /// Set of peers with an open Bitswap substream — i.e. the targets of
     /// `broadcast_bitswap_message`. Maintained from `BitswapEvent::BitswapConnected`/
@@ -691,31 +660,24 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
             let cid_str = batch.cid_strs[slot_idx].clone();
             let mut should_cancel = false;
 
-            match &mut batch.mode {
-                BatchMode::Stream { events_tx } => {
-                    match events_tx.try_send((cid_str.clone(), block_result)) {
-                        Ok(()) => {}
-                        Err(async_channel::TrySendError::Closed(_)) => {
-                            // Receiver dropped — JSON-RPC client disconnected or unsubscribed.
-                            // Cancel the rest of the batch and emit a Bitswap Cancel wantlist.
-                            should_cancel = true;
-                        }
-                        Err(async_channel::TrySendError::Full(_)) => {
-                            // Bounded channel saturated. With a `bounded(MAX_CIDS_PER_REQUEST)`
-                            // channel and a JSON-RPC pump that drains it eagerly this should be
-                            // unreachable in practice. Log and drop the event rather than
-                            // blocking the service.
-                            log!(
-                                &self.platform,
-                                Warn,
-                                &self.log_target,
-                                "stream events channel full, dropping per-CID event"
-                            );
-                        }
-                    }
+            match batch.events_tx.try_send((cid_str.clone(), block_result)) {
+                Ok(()) => {}
+                Err(async_channel::TrySendError::Closed(_)) => {
+                    // Receiver dropped — JSON-RPC client disconnected or unsubscribed.
+                    // Cancel the rest of the batch and emit a Bitswap Cancel wantlist.
+                    should_cancel = true;
                 }
-                BatchMode::GetMany { .. } => {
-                    batch.outcomes[slot_idx] = Some(block_result);
+                Err(async_channel::TrySendError::Full(_)) => {
+                    // Bounded channel saturated. With a `bounded(MAX_CIDS_PER_REQUEST)`
+                    // channel and a JSON-RPC pump that drains it eagerly this should be
+                    // unreachable in practice. Log and drop the event rather than
+                    // blocking the service.
+                    log!(
+                        &self.platform,
+                        Warn,
+                        &self.log_target,
+                        "stream events channel full, dropping per-CID event"
+                    );
                 }
             }
 
@@ -731,8 +693,8 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
         }
     }
 
-    /// Finalize a batch whose slots have all been resolved. Drains accumulated outcomes for
-    /// `GetMany` mode and closes the events channel for `Stream` mode.
+    /// Finalize a batch whose slots have all been resolved. Closes the events channel so the
+    /// JSON-RPC pump can emit the spec-required `streamDone` event.
     fn finalize_batch(&mut self, batch_id: BatchId) {
         let Some(batch) = self.batches.remove(&batch_id) else {
             return;
@@ -748,24 +710,9 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
             slots = batch.cid_strs.len()
         );
 
-        match batch.mode {
-            BatchMode::GetMany { result_tx } => {
-                let mut out = Vec::with_capacity(batch.cid_strs.len());
-                for (cid_str, outcome) in batch.cid_strs.into_iter().zip(batch.outcomes.into_iter())
-                {
-                    out.push((
-                        cid_str,
-                        outcome.expect("pending_count == 0 implies all slots resolved; qed"),
-                    ));
-                }
-                let _ = result_tx.send(out);
-            }
-            BatchMode::Stream { events_tx } => {
-                // Dropping the sender closes the channel. The JSON-RPC pump task will see the
-                // channel close and end its loop after the last event has been delivered.
-                drop(events_tx);
-            }
-        }
+        // Dropping the sender closes the channel. The JSON-RPC pump task will see the channel
+        // close and end its loop after the last event has been delivered.
+        drop(batch.events_tx);
     }
 
     /// Cancel a batch: tear down all its still-pending slots, then send a Bitswap Cancel wantlist
@@ -959,7 +906,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::Message(ToBackground::BitswapBatch {
                 entries,
-                mode,
+                events_tx,
                 ready_tx,
             }) => {
                 debug_assert!(task.pending_have_broadcast.is_none());
@@ -972,48 +919,36 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let total = entries.len();
                 let mut cid_strs: Vec<String> = Vec::with_capacity(total);
                 let mut slots: Vec<Option<RequestId>> = Vec::with_capacity(total);
-                let mut outcomes: Vec<Option<BlockResult>> = Vec::with_capacity(total);
                 // Slots whose CID parsed successfully — these will have their RequestId set
                 // after the Have broadcast lands. (slot_idx, cid).
                 let mut valid_cids: Vec<(usize, Cid)> = Vec::with_capacity(total);
                 // Slots whose CID failed to parse — pre-resolve as `InvalidCid` per spec.
-                // (slot_idx, cid_str, err).
-                let mut invalid_slots: Vec<(usize, String, BitswapGetError)> = Vec::new();
+                // (cid_str, err).
+                let mut invalid_slots: Vec<(String, BitswapGetError)> = Vec::new();
 
                 for (slot_idx, (cid_str, parsed)) in entries.into_iter().enumerate() {
                     cid_strs.push(cid_str.clone());
                     slots.push(None);
-                    outcomes.push(None);
                     match parsed {
                         Ok(c) => valid_cids.push((slot_idx, c)),
                         Err(e) => {
-                            invalid_slots.push((slot_idx, cid_str, BitswapGetError::InvalidCid(e)));
+                            invalid_slots.push((cid_str, BitswapGetError::InvalidCid(e)));
                         }
                     }
                 }
 
                 let mut batch = Batch {
-                    mode,
+                    events_tx,
                     cid_strs,
                     slots,
-                    outcomes,
                     peers_for_cancel: Vec::new(),
                     pending_count: total,
                 };
 
-                // Pre-resolve invalid-CID slots. For Stream we push events immediately; for
-                // GetMany we accumulate in `outcomes`.
-                for (slot_idx, cid_str, err) in invalid_slots {
+                // Pre-resolve invalid-CID slots by pushing them straight into the events channel.
+                for (cid_str, err) in invalid_slots {
                     batch.pending_count -= 1;
-                    let block_result = BlockResult::Err(err);
-                    match &mut batch.mode {
-                        BatchMode::Stream { events_tx } => {
-                            let _ = events_tx.try_send((cid_str, block_result));
-                        }
-                        BatchMode::GetMany { .. } => {
-                            batch.outcomes[slot_idx] = Some(block_result);
-                        }
-                    }
+                    let _ = batch.events_tx.try_send((cid_str, BlockResult::Err(err)));
                 }
 
                 log!(
@@ -1529,13 +1464,14 @@ mod tests {
         parsed["error"]["code"].as_i64().unwrap()
     }
 
-    /// Parse the data.variant field from the JSON-RPC error response string.
-    fn extract_variant(json: &str) -> String {
+    /// Assert that the JSON-RPC error response carries no `data` field. Per the revised spec,
+    /// bitswap errors are bare `{ code, message }` like every other method in this repo.
+    fn assert_no_error_data(json: &str) {
         let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
-        parsed["error"]["data"]["variant"]
-            .as_str()
-            .unwrap()
-            .to_owned()
+        assert!(
+            parsed["error"].get("data").is_none(),
+            "error object must not carry `data`: {json}"
+        );
     }
 
     #[test]
@@ -1543,42 +1479,42 @@ mod tests {
         let err = BitswapGetError::InvalidCid(Cid::from_str("not-a-cid").unwrap_err());
         let json = err.to_json_rpc_error("\"1\"");
         assert_eq!(extract_error_code(&json), -32602); // InvalidParams
-        assert_eq!(extract_variant(&json), "InvalidCid");
+        assert_no_error_data(&json);
     }
 
     #[test]
     fn error_not_found_maps_to_fail() {
         let json = BitswapGetError::NotFound.to_json_rpc_error("\"1\"");
         assert_eq!(extract_error_code(&json), -32810); // Fail
-        assert_eq!(extract_variant(&json), "NotFound");
+        assert_no_error_data(&json);
     }
 
     #[test]
     fn error_block_request_failed_maps_to_fail_retry() {
         let json = BitswapGetError::BlockRequestFailed.to_json_rpc_error("\"1\"");
         assert_eq!(extract_error_code(&json), -32811); // FailRetry
-        assert_eq!(extract_variant(&json), "BlockRequestFailed");
+        assert_no_error_data(&json);
     }
 
     #[test]
     fn error_timeout_maps_to_fail_retry() {
         let json = BitswapGetError::Timeout.to_json_rpc_error("\"1\"");
         assert_eq!(extract_error_code(&json), -32811); // FailRetry
-        assert_eq!(extract_variant(&json), "Timeout");
+        assert_no_error_data(&json);
     }
 
     #[test]
     fn error_queue_full_maps_to_fail_retry_backoff() {
         let json = BitswapGetError::QueueFull.to_json_rpc_error("\"1\"");
         assert_eq!(extract_error_code(&json), -32812); // FailRetryBackoff
-        assert_eq!(extract_variant(&json), "QueueFull");
+        assert_no_error_data(&json);
     }
 
     #[test]
     fn error_no_peers_maps_to_fail_retry_backoff() {
         let json = BitswapGetError::NoPeers.to_json_rpc_error("\"1\"");
         assert_eq!(extract_error_code(&json), -32812); // FailRetryBackoff
-        assert_eq!(extract_variant(&json), "NoPeers");
+        assert_no_error_data(&json);
     }
 
     #[test]
@@ -1603,23 +1539,33 @@ mod tests {
     }
 
     #[test]
-    fn error_too_many_cids_maps_to_invalid_params() {
+    fn error_too_many_cids_maps_to_too_many_cids() {
         let err = BitswapGetError::TooManyCids { max: 64, got: 100 };
         let json = err.to_json_rpc_error("\"1\"");
-        assert_eq!(extract_error_code(&json), -32602);
-        assert_eq!(extract_variant(&json), "TooManyCids");
+        assert_eq!(extract_error_code(&json), -32801); // TooManyCids
+        assert_no_error_data(&json);
     }
 
     #[test]
-    fn error_duplicate_cids_maps_to_invalid_params() {
+    fn error_empty_cids_maps_to_empty_cids() {
+        let json = BitswapGetError::EmptyCids.to_json_rpc_error("\"1\"");
+        assert_eq!(extract_error_code(&json), -32802); // EmptyCids
+        assert_no_error_data(&json);
+    }
+
+    #[test]
+    fn error_duplicate_cids_maps_to_duplicate_cids() {
         let json = BitswapGetError::DuplicateCids.to_json_rpc_error("\"1\"");
-        assert_eq!(extract_error_code(&json), -32602);
-        assert_eq!(extract_variant(&json), "DuplicateCids");
+        assert_eq!(extract_error_code(&json), -32803); // DuplicateCids
+        assert_no_error_data(&json);
     }
 
     #[test]
     fn block_result_err_codes_match_top_level_codes() {
-        // Per spec, per-CID error codes use the same retry categories as `bitswap_v1_get`.
+        // Per-CID error codes use the same retry categories as `bitswap_unstable_get`.
+        // Top-level batch-validation variants (TooManyCids / EmptyCids / DuplicateCids) are
+        // intentionally absent here — they reject the subscription before any per-CID event is
+        // emitted.
         assert_eq!(BitswapGetError::NotFound.to_block_result_err().0, -32810);
         assert_eq!(BitswapGetError::Timeout.to_block_result_err().0, -32811);
         assert_eq!(
@@ -1642,9 +1588,11 @@ mod tests {
     const VALID_CID_B: &str = "bafkreigh2akiscaildc3rdvuwhszwgrtgvybsh7lhxavhgqitanwh4kc6q";
 
     #[test]
-    fn parse_and_dedup_empty_input_is_ok() {
-        let out = parse_and_dedup(vec![]).unwrap();
-        assert!(out.is_empty());
+    fn parse_and_dedup_empty_input_is_rejected() {
+        // Per the revised spec, an empty `cids` array is rejected at the top level with
+        // -32802 EmptyCids.
+        let err = parse_and_dedup(vec![]).unwrap_err();
+        assert!(matches!(err, BitswapGetError::EmptyCids));
     }
 
     #[test]

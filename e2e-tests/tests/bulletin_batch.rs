@@ -45,10 +45,11 @@ struct PayloadJson {
     on_partial: bool,
 }
 
-/// Drives `bitswap_v1_getMany` and `bitswap_v1_stream` against a real bulletin
-/// chain. Both methods are exercised in the same JS run on the same chain
-/// handle: happy path, dedup rejection, too-many rejection, per-CID errors,
-/// and mixed-availability (some CIDs only on the full-snapshot collator).
+/// Drives `bitswap_unstable_stream` against a real bulletin chain. The JS run
+/// exercises: happy path, dedup rejection (-32803), too-many rejection
+/// (-32801), empty-input rejection (-32802), per-CID errors, mixed-availability
+/// (some CIDs only on the full-snapshot collator), and the spec requirement
+/// that `bitswap_unstable_unstream` mid-stream silently suppresses `streamDone`.
 #[tokio::test(flavor = "multi_thread")]
 async fn bulletin_batch() -> Result<()> {
     env_logger::try_init().ok();

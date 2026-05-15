@@ -525,17 +525,16 @@ define_methods! {
     transactionWatch_v1_unwatch(subscription: Cow<'a, str>) -> (),
 
     /// Request a data chunk by its CID from one of the connected peers that have it.
-    bitswap_v1_get(cid: String) -> HexString,
-    /// Request multiple data chunks by CID in a single call.
-    /// Returns one `[cid, BlockResult]` tuple per input CID, in input order.
-    bitswap_v1_getMany(cids: Vec<String>) -> Vec<BitswapBlockResultEntry>,
+    /// `bitswap_v1_get` is accepted as a legacy alias.
+    bitswap_unstable_get(cid: String) -> HexString [bitswap_v1_get],
     /// Subscribe to a stream of data chunks. Each input CID produces exactly one
-    /// `bitswap_v1_streamEvent` notification, emitted as soon as that CID resolves
-    /// (in arrival order, not input order).
-    bitswap_v1_stream(cids: Vec<String>) -> Cow<'a, str>,
-    /// Cancel a `bitswap_v1_stream` subscription. No-op if the subscription does
-    /// not exist or has already completed.
-    bitswap_v1_unstream(subscription: Cow<'a, str>) -> (),
+    /// `bitswap_unstable_streamEvent` notification, emitted as soon as that CID
+    /// resolves (in arrival order, not input order). After all per-CID events
+    /// have been emitted, a single `streamDone` event marks end-of-stream.
+    bitswap_unstable_stream(cids: Vec<String>) -> Cow<'a, str>,
+    /// Cancel a `bitswap_unstable_stream` subscription. No-op if the subscription
+    /// does not exist or has already completed.
+    bitswap_unstable_unstream(subscription: Cow<'a, str>) -> (),
 
     // These functions are a custom addition in smoldot. As of the writing of this comment, there
     // is no plan to standardize them. See <https://github.com/paritytech/smoldot/issues/2245> and
@@ -559,7 +558,7 @@ define_methods! {
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_v1_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
     transactionWatch_v1_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
-    bitswap_v1_streamEvent(subscription: Cow<'a, str>, result: BitswapBlockResultEntry) -> (),
+    bitswap_unstable_streamEvent(subscription: Cow<'a, str>, result: BitswapStreamEvent<'a>) -> (),
 
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
     // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
@@ -1317,33 +1316,36 @@ impl serde::Serialize for HexString {
     }
 }
 
-/// Per-CID outcome returned by `bitswap_v1_getMany` and `bitswap_v1_streamEvent`.
+/// Event payload of a `bitswap_unstable_streamEvent` notification.
 ///
-/// Serializes to a JSON 2-element array `[cid, BlockResult]`. The `cid` is echoed verbatim from
-/// the input so callers can correlate without keeping the input array around.
+/// Serializes as a flat tagged object: every variant carries a top-level
+/// `"event"` discriminator string and its fields appear next to it at the same
+/// level (e.g. `{"event":"streamItem","cid":"...","value":"0x..."}`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BitswapBlockResultEntry(pub String, pub BitswapBlockResult);
-
-/// Per-CID outcome carried inside [`BitswapBlockResultEntry`].
-///
-/// On success, a `0x`-prefixed hex string carrying the chunk data (same encoding as the return
-/// value of `bitswap_v1_get`). On failure, a JSON-RPC error code and human-readable diagnostic
-/// message — the `code` carries the same retry categories as the top-level error of
-/// `bitswap_v1_get`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(untagged)]
-pub enum BitswapBlockResult {
-    Ok(HexString),
-    Err(BitswapBlockError),
-}
-
-/// Per-CID error embedded inside [`BitswapBlockResult::Err`].
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BitswapBlockError {
-    /// Error code identifying the retry category. See `bitswap_v1_get` error categories.
-    pub code: i32,
-    /// Human-readable diagnostic message. Not stable for programmatic dispatch.
-    pub message: String,
+#[serde(tag = "event", rename_all = "camelCase")]
+pub enum BitswapStreamEvent<'a> {
+    /// A chunk for one of the input CIDs has been received successfully.
+    StreamItem {
+        /// The CID, echoed verbatim from the input.
+        cid: Cow<'a, str>,
+        /// The chunk data, hex-encoded with a `0x` prefix.
+        value: HexString,
+    },
+    /// One of the input CIDs could not be resolved. The stream continues for
+    /// the remaining CIDs.
+    StreamItemError {
+        /// The CID, echoed verbatim from the input.
+        cid: Cow<'a, str>,
+        /// JSON-RPC error code identifying the retry category. See
+        /// `bitswap_unstable_get` error categories.
+        code: i32,
+        /// Human-readable diagnostic message. Not stable for programmatic dispatch.
+        message: Cow<'a, str>,
+    },
+    /// End-of-stream marker. Emitted exactly once after all per-CID events,
+    /// only on natural completion (not on `bitswap_unstable_unstream`
+    /// cancellation or client disconnect).
+    StreamDone,
 }
 
 impl serde::Serialize for RpcMethods {
@@ -1698,5 +1700,52 @@ mod tests {
             .map(|i| [i as u8; 32])
             .collect();
         assert!(super::TopicFilter::match_any(topics).is_err());
+    }
+
+    #[test]
+    fn bitswap_stream_event_stream_item_serialization() {
+        // Spec: `{"event":"streamItem","cid":"...","value":"0x..."}` — flat object, no nesting.
+        let evt = super::BitswapStreamEvent::StreamItem {
+            cid: "abc".into(),
+            value: super::HexString(vec![0x48, 0x69]),
+        };
+        assert_eq!(
+            serde_json::to_string(&evt).unwrap(),
+            r#"{"event":"streamItem","cid":"abc","value":"0x4869"}"#
+        );
+    }
+
+    #[test]
+    fn bitswap_stream_event_stream_item_error_serialization() {
+        // Spec: `code` and `message` appear at the top level of `result`, alongside `event` and
+        // `cid`. They are NOT nested under a sub-object.
+        let evt = super::BitswapStreamEvent::StreamItemError {
+            cid: "abc".into(),
+            code: -32811,
+            message: "request timeout".into(),
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            json,
+            r#"{"event":"streamItemError","cid":"abc","code":-32811,"message":"request timeout"}"#
+        );
+        // Belt-and-braces: assert the structure explicitly so a future serde change that
+        // accidentally re-nests is caught.
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"], "streamItemError");
+        assert_eq!(parsed["cid"], "abc");
+        assert_eq!(parsed["code"], -32811);
+        assert!(parsed["message"].is_string());
+        assert!(parsed.get("data").is_none());
+    }
+
+    #[test]
+    fn bitswap_stream_event_stream_done_serialization() {
+        // Spec: `{"event":"streamDone"}` — no other fields.
+        let evt = super::BitswapStreamEvent::StreamDone;
+        assert_eq!(
+            serde_json::to_string(&evt).unwrap(),
+            r#"{"event":"streamDone"}"#
+        );
     }
 }
