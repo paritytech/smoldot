@@ -163,13 +163,14 @@ cargo check -p smoldot -p smoldot-light
 Optional dry-runs:
 
 ```sh
-cargo publish --dry-run --locked -p smoldot
+cargo publish --dry-run --locked --allow-dirty -p smoldot
 ```
 
 Run this every release; it only validates packaging and local build.
+`--allow-dirty` because the version bumps aren't committed yet (step 7).
 
 ```sh
-cargo publish --dry-run --locked -p smoldot-light
+cargo publish --dry-run --locked --allow-dirty -p smoldot-light
 ```
 
 Run this **only if `smoldot` is not being bumped**. Otherwise it fails on
