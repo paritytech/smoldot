@@ -55,6 +55,10 @@ try {
   });
 
   // ===== bitswap_unstable_stream =====
+  // MUST be first: relies on the freshly-created smoldot client having no
+  // Bitswap peers connected yet, which exercises the wholesale Have-broadcast
+  // failure path.
+  await runStreamColdStartOpensSubscription(bulletin);
   await runStreamHappy(bulletin);
   await runStreamDedup(bulletin);
   await runStreamTooMany(bulletin);
@@ -78,10 +82,98 @@ process.exit(exitCode || process.exitCode || 0);
 
 // ---------- stream tests ----------
 
+/// Asserts that on a freshly-created smoldot client (no Bitswap peers yet),
+/// `bitswap_unstable_stream` STILL opens the subscription successfully and
+/// fans the wholesale-broadcast-failure out as per-CID `streamItemError`
+/// events followed by `streamDone` — per the revised
+/// `bitswap_unstable_stream` spec, which forbids top-level `-32812`.
+///
+/// MUST run before any other stream test: subsequent tests run a small retry
+/// loop that warms the peer set up as a side effect, so the cold-start path
+/// only fires on the first call.
+///
+/// Subscribes via `sendRpcAndWait` DIRECTLY (no `subscribeWithRetry`) so that
+/// a regression — top-level error coming back instead of the spec-mandated
+/// per-CID fanout — is surfaced as a thrown error rather than silently
+/// retried away.
+async function runStreamColdStartOpensSubscription(chain) {
+  const cids = [payloads[0].cid];
+  let subscription;
+  try {
+    subscription = await sendRpcAndWait(chain, "bitswap_unstable_stream", [cids], 30_000);
+  } catch (err) {
+    // Pre-(1)-fix this was the normal path: cold smoldot → top-level -32812.
+    // Post-(1)-fix this MUST NOT happen.
+    report(
+      "st-cold-open",
+      false,
+      `subscription rejected at top level (regression of wholesale-failure fanout): ${err.message}`,
+    );
+    return;
+  }
+  // Subscription opened — now drain to streamDone and check shape.
+  const deadline = Date.now() + 60_000;
+  const collected = [];
+  let sawStreamDone = false;
+  while (!sawStreamDone) {
+    const got = await readJsonRpcUntil(
+      chain,
+      (msg) => streamEventResult(msg, subscription),
+      deadline,
+    );
+    if (got === undefined) {
+      report("st-cold-open", false, `timed out before streamDone (collected ${collected.length})`);
+      return;
+    }
+    switch (got.event) {
+      case "streamItem":
+        collected.push({ kind: "ok", cid: got.cid });
+        break;
+      case "streamItemError":
+        collected.push({ kind: "err", cid: got.cid, code: got.code });
+        break;
+      case "streamDone":
+        sawStreamDone = true;
+        break;
+      default:
+        report("st-cold-open", false, `unknown event: ${JSON.stringify(got)}`);
+        return;
+    }
+  }
+  if (collected.length !== cids.length) {
+    report(
+      "st-cold-open",
+      false,
+      `streamDone after ${collected.length} per-CID events, expected ${cids.length}`,
+    );
+    return;
+  }
+  // Two acceptable outcomes here:
+  //   1. The peer set happened to come up fast and we got a streamItem.
+  //   2. We got streamItemError(-32812 / -32811) — the warm-up path the (1)
+  //      fix turned into per-CID errors. This is the case we care about.
+  const entry = collected[0];
+  if (entry.kind === "ok") {
+    report("st-cold-open", true, "got streamItem immediately (peer set was already up)");
+  } else if (entry.code === ERR_FAIL_BACKOFF || entry.code === ERR_FAIL_RETRY) {
+    report(
+      "st-cold-open",
+      true,
+      `warm-up path exercised: streamItemError(${entry.code}) + streamDone, no top-level error`,
+    );
+  } else {
+    report(
+      "st-cold-open",
+      false,
+      `unexpected first-event code on cold start: ${entry.code}`,
+    );
+  }
+}
+
 async function runStreamHappy(chain) {
   const cids = payloads.map((p) => p.cid);
   try {
-    const events = await streamCollect(chain, cids);
+    const events = await streamCollectWithRetry(chain, cids);
     const checkErr = await verifyStreamMap(events, payloads);
     report("st-happy", checkErr === null, checkErr ?? `${cids.length} events`);
   } catch (err) {
@@ -175,7 +267,7 @@ async function runStreamMixed(chain) {
   }
   const cids = fullOnly.map((p) => p.cid);
   try {
-    const events = await streamCollect(chain, cids);
+    const events = await streamCollectWithRetry(chain, cids);
     const checkErr = await verifyStreamMap(events, fullOnly);
     report("st-mixed", checkErr === null, checkErr ?? `${cids.length} events`);
   } catch (err) {
@@ -236,6 +328,33 @@ async function runStreamUnstreamSuppressesStreamDone(chain) {
 }
 
 // ---------- subscription helper ----------
+
+/// Wraps `streamCollect`. If every per-CID outcome is a transient/retryable
+/// error (`-32811 FailRetry` or `-32812 FailRetryBackoff`), back off and
+/// re-subscribe. Otherwise return the result as-is.
+///
+/// Per the revised spec, the smoldot "peers warming up" condition no longer
+/// surfaces as a top-level subscription rejection — it arrives as N retryable
+/// `streamItemError` events followed by `streamDone`. This wrapper turns that
+/// into the same effective retry behaviour the old top-level retry gave us.
+async function streamCollectWithRetry(chain, cids, totalBudgetMs = 180_000) {
+  const deadline = Date.now() + totalBudgetMs;
+  let attempt = 0;
+  while (true) {
+    attempt += 1;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error(`bitswap_unstable_stream timed out after ${totalBudgetMs}ms`);
+    }
+    const events = await streamCollect(chain, cids, remaining);
+    const allRetryable = [...events.values()].every(
+      (e) => isErrEntry(e) && (e.code === ERR_FAIL_BACKOFF || e.code === ERR_FAIL_RETRY),
+    );
+    if (!allRetryable) return events;
+    const backoff = Math.min(5_000, 500 * 2 ** Math.min(attempt - 1, 3));
+    await new Promise((r) => setTimeout(r, backoff));
+  }
+}
 
 /// Subscribes via bitswap_unstable_stream, collects events until `streamDone`,
 /// then asserts that exactly `cids.length` per-CID events arrived before the

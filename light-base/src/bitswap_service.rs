@@ -149,14 +149,6 @@ impl BitswapService {
                 PARALLEL_REQUESTS,
                 fnv::FnvBuildHasher::default(),
             ),
-            bitswap_peers: hashbrown::HashSet::with_capacity_and_hasher(
-                4,
-                util::SipHasherBuild::new({
-                    let mut seed = [0; 16];
-                    platform.fill_random_bytes(&mut seed);
-                    seed
-                }),
-            ),
         }));
 
         platform.spawn_task(log_target.clone().into(), {
@@ -189,11 +181,12 @@ impl BitswapService {
     /// whose `events_rx` yields one `(cid_string, BlockResult)` event per input CID, in arrival
     /// order (the order in which each CID resolves), not input order.
     ///
-    /// Top-level errors: wholesale Have-broadcast failures (no peers / queue full) reject the
-    /// subscription with `-32812 FailRetryBackoff` so no events are emitted, per the
-    /// `bitswap_unstable_stream` spec ("whole-call failures cause the subscription to be
-    /// rejected"). Empty/duplicate/oversized inputs are rejected at the top level with
-    /// `-32802 EmptyCids` / `-32803 DuplicateCids` / `-32801 TooManyCids` respectively.
+    /// Top-level errors: only the batch-input validation cases — `-32801 TooManyCids`,
+    /// `-32802 EmptyCids`, `-32803 DuplicateCids` — are surfaced at the top level. Wholesale
+    /// Have-broadcast failures (no peers connected / network send queue full) are NOT top-level
+    /// errors per the `bitswap_unstable_stream` spec: the subscription opens normally and the
+    /// failure fans out as one `streamItemError(-32812 FailRetryBackoff)` per remaining valid
+    /// CID, followed by `streamDone`.
     ///
     /// Dropping the returned handle (explicit unsubscribe or client disconnect) cancels remaining
     /// work and emits a Bitswap Cancel wantlist to peers we previously contacted.
@@ -547,10 +540,12 @@ enum HaveContext {
         /// Valid (slot_idx, cid) pairs. Invalid-CID slots are pre-resolved before the broadcast
         /// is queued and don't appear here.
         cids: Vec<(usize, Cid)>,
-        /// Channel for signalling broadcast outcome back to the caller of
-        /// [`BitswapService::bitswap_stream`]. Sent exactly
-        /// once when the broadcast resolves: `Ok(batch_id)` on success (peer set non-empty), or
-        /// `Err(_)` on wholesale failure so the caller surfaces a top-level JSON-RPC error.
+        /// Channel for signalling subscription readiness back to the caller of
+        /// [`BitswapService::bitswap_stream`]. Always sent as `Ok(batch_id)` exactly once when
+        /// the broadcast resolves: on success because the peer set is non-empty, or on wholesale
+        /// failure because the spec mandates the subscription open regardless (the failure is
+        /// reported via per-CID `streamItemError` events in `events_tx` instead). The `Result`
+        /// type is kept for structural symmetry with `bitswap_get`'s error path.
         ready_tx: oneshot::Sender<Result<BatchId, BitswapGetError>>,
     },
 }
@@ -598,11 +593,6 @@ struct BackgroundTask<TPlat: PlatformRef> {
     requests_by_cid: hashbrown::HashMap<Cid, VecDeque<RequestId>, util::SipHasherBuild>,
     /// In-flight batches. Each entry corresponds to a `bitswap_stream` call.
     batches: hashbrown::HashMap<BatchId, Batch, fnv::FnvBuildHasher>,
-    /// Set of peers with an open Bitswap substream — i.e. the targets of
-    /// `broadcast_bitswap_message`. Maintained from `BitswapEvent::BitswapConnected`/
-    /// `BitswapDisconnected`. Used purely for diagnostic logging; the wire-level set lives in
-    /// the network service.
-    bitswap_peers: hashbrown::HashSet<PeerId, util::SipHasherBuild>,
 }
 
 impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
@@ -647,7 +637,7 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
 
         // Touch state in two passes so we can release the borrow before potentially calling
         // `cancel_batch` (which also borrows `self.batches`).
-        let (cid_str, should_cancel, should_finalize) = {
+        let (should_cancel, should_finalize) = {
             let Some(batch) = self.batches.get_mut(&batch_id) else {
                 // The batch was already finalized or cancelled; the resolution is stale.
                 return;
@@ -660,7 +650,7 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
             let cid_str = batch.cid_strs[slot_idx].clone();
             let mut should_cancel = false;
 
-            match batch.events_tx.try_send((cid_str.clone(), block_result)) {
+            match batch.events_tx.try_send((cid_str, block_result)) {
                 Ok(()) => {}
                 Err(async_channel::TrySendError::Closed(_)) => {
                     // Receiver dropped — JSON-RPC client disconnected or unsubscribed.
@@ -668,23 +658,22 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
                     should_cancel = true;
                 }
                 Err(async_channel::TrySendError::Full(_)) => {
-                    // Bounded channel saturated. With a `bounded(MAX_CIDS_PER_REQUEST)`
-                    // channel and a JSON-RPC pump that drains it eagerly this should be
-                    // unreachable in practice. Log and drop the event rather than
-                    // blocking the service.
+                    // Invariant: parse_and_dedup caps entries.len() at MAX_CIDS_PER_REQUEST
+                    // and events_tx is bounded(MAX_CIDS_PER_REQUEST). At most `total` items
+                    // are ever pushed for a batch, so the buffer cannot saturate.
                     log!(
                         &self.platform,
-                        Warn,
+                        Error,
                         &self.log_target,
-                        "stream events channel full, dropping per-CID event"
+                        "BUG: stream events channel full — invariant violated"
                     );
+                    unreachable!()
                 }
             }
 
             let should_finalize = !should_cancel && batch.pending_count == 0;
-            (cid_str, should_cancel, should_finalize)
+            (should_cancel, should_finalize)
         };
-        let _ = cid_str;
 
         if should_cancel {
             self.cancel_batch(batch_id);
@@ -946,9 +935,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 };
 
                 // Pre-resolve invalid-CID slots by pushing them straight into the events channel.
+                // try_send cannot fail here: events_tx is bounded(MAX_CIDS_PER_REQUEST) and the
+                // total events ever pushed for this batch is bounded by entries.len(); the
+                // receiver is also held by BitswapStreamHandle so the channel cannot be Closed.
                 for (cid_str, err) in invalid_slots {
                     batch.pending_count -= 1;
-                    let _ = batch.events_tx.try_send((cid_str, BlockResult::Err(err)));
+                    batch
+                        .events_tx
+                        .try_send((cid_str, BlockResult::Err(err)))
+                        .unwrap_or_else(|_| unreachable!());
                 }
 
                 log!(
@@ -1085,19 +1080,46 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let broadcast_to = match result {
                         Ok(peers) => peers,
                         Err(err) => {
+                            let err: BitswapGetError = err.into();
                             log!(
                                 &task.platform,
                                 Trace,
                                 &task.log_target,
-                                "have broadcast failed (batch)",
+                                "have broadcast failed (batch), fanning out per-CID errors",
                                 batch_id = batch_id.0,
                                 ?err
                             );
-                            // Whole-broadcast failure: surface as a top-level JSON-RPC error to
-                            // the caller. The batch holds no useful state yet (no per-slot
-                            // Requests registered, `peers_for_cancel` empty), so drop it.
-                            task.batches.remove(&batch_id);
-                            let _ = ready_tx.send(Err(err.into()));
+                            // Per spec (bitswap_unstable_stream.md): a wholesale broadcast
+                            // failure is NOT a top-level subscription rejection. The
+                            // subscription opens normally, one streamItemError per remaining
+                            // valid CID is emitted, then streamDone.
+                            //
+                            // Invalid CIDs have already been pre-resolved at batch creation
+                            // and their per-CID events are already in events_tx. We only need
+                            // to fan out for the valid slots (those in `cids`). The per-CID
+                            // code mapping for NoPeers / QueueFull → -32812 is locked by
+                            // `to_block_result_err` and the
+                            // `block_result_err_codes_match_top_level_codes` unit test.
+                            if let Some(batch) = task.batches.remove(&batch_id) {
+                                for (slot_idx, _cid) in cids {
+                                    let cid_str = batch.cid_strs[slot_idx].clone();
+                                    match batch
+                                        .events_tx
+                                        .try_send((cid_str, BlockResult::Err(err.clone())))
+                                    {
+                                        Ok(())
+                                        | Err(async_channel::TrySendError::Closed(_)) => {}
+                                        Err(async_channel::TrySendError::Full(_)) => {
+                                            // Invariant: see deliver_batch_slot's Full arm.
+                                            unreachable!()
+                                        }
+                                    }
+                                }
+                                // Dropping events_tx closes the channel — the JSON-RPC pump
+                                // sees the close and emits the spec-required streamDone.
+                                drop(batch.events_tx);
+                            }
+                            let _ = ready_tx.send(Ok(batch_id));
                             continue;
                         }
                     };
@@ -1126,17 +1148,22 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
 
                     // Register one Request per valid slot, sharing the same Have peer set.
+                    // SipHasher seed drawn once per batch — each slot's HashSet uses the same
+                    // randomness. Reseeding per slot would only add cost: the seed is for
+                    // intra-set collision distribution, not cross-set isolation, and the
+                    // contents (broadcast peer IDs) aren't secrets.
                     let timeout = task.platform.now() + Duration::from_secs(10);
+                    let have_peers_seed = {
+                        let mut seed = [0; 16];
+                        task.randomness.fill_bytes(&mut seed);
+                        seed
+                    };
                     for (slot_idx, cid) in cids {
                         let request_id = task.allocate_request_id();
                         let have_peers = {
                             let mut have_peers = hashbrown::HashSet::with_capacity_and_hasher(
                                 broadcast_to.len(),
-                                util::SipHasherBuild::new({
-                                    let mut seed = [0; 16];
-                                    task.randomness.fill_bytes(&mut seed);
-                                    seed
-                                }),
+                                util::SipHasherBuild::new(have_peers_seed),
                             );
                             have_peers.extend(broadcast_to.iter().cloned());
                             have_peers
@@ -1167,30 +1194,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let _ = ready_tx.send(Ok(batch_id));
                 }
             },
-            WakeUpReason::NetworkEvent(BitswapEvent::BitswapConnected { peer_id }) => {
-                let inserted = task.bitswap_peers.insert(peer_id.clone());
-                log!(
-                    &task.platform,
-                    Trace,
-                    &task.log_target,
-                    "bitswap peer joined desired set",
-                    peer_id,
-                    new = inserted,
-                    total = task.bitswap_peers.len()
-                );
-            }
-            WakeUpReason::NetworkEvent(BitswapEvent::BitswapDisconnected { peer_id }) => {
-                let removed = task.bitswap_peers.remove(&peer_id);
-                log!(
-                    &task.platform,
-                    Trace,
-                    &task.log_target,
-                    "bitswap peer left desired set",
-                    peer_id,
-                    was_known = removed,
-                    total = task.bitswap_peers.len()
-                );
-            }
             WakeUpReason::NetworkEvent(BitswapEvent::BitswapMessage { peer_id, message }) => {
                 let message = message.decode();
 

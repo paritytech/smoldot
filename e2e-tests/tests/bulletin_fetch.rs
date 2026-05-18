@@ -15,22 +15,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::path::{Path, PathBuf};
-
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 use smoldot_e2e_tests::{
-    bulletin, ensure_js_deps_installed, ensure_smoldot_built, resolve_base_dir, run_js_test,
+    bulletin, ensure_js_deps_installed, ensure_smoldot_built,
+    harness::{
+        bulletin_chain_spec, chain_spec_paths, get_snapshot_url, print_dev_mode_invocation,
+        spawn_with_snapshots, SnapshotUrls, DB_SNAPSHOT_BULLETIN_FULL,
+        DB_SNAPSHOT_BULLETIN_PARTIAL, DB_SNAPSHOT_RELAY,
+    },
+    resolve_base_dir, run_js_test,
 };
-use zombienet_sdk::{LocalFileSystem, Network, NetworkConfigBuilder};
-
-/// GCS URLs for the snapshots produced by `bulletin_generate_snapshot`.
-const DB_SNAPSHOT_RELAY: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/relay-2026-05-04.tgz";
-const DB_SNAPSHOT_BULLETIN_FULL: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-full-2026-05-04.tgz";
-const DB_SNAPSHOT_BULLETIN_PARTIAL: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-partial-2026-05-04.tgz";
 
 #[derive(Serialize)]
 struct PayloadJson {
@@ -64,9 +59,12 @@ async fn bulletin_fetch() -> Result<()> {
     let network = spawn_with_snapshots(
         &base_dir,
         &chain_spec,
-        &relay,
-        &bulletin_full,
-        &bulletin_partial,
+        SnapshotUrls {
+            relay: &relay,
+            bulletin_full: &bulletin_full,
+            bulletin_partial: &bulletin_partial,
+        },
+        &[],
     )
     .await?;
 
@@ -107,7 +105,7 @@ async fn bulletin_fetch() -> Result<()> {
     // run the JS client manually (the printed `node …` invocation has
     // every env var the test would have set).
     if std::env::var("DEV_MODE").is_ok() {
-        print_dev_mode_invocation(&env_pairs);
+        print_dev_mode_invocation(&env_pairs, "js/bulletin_fetch.js");
         let secs: u64 = std::env::var("KEEP_ALIVE_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -122,123 +120,4 @@ async fn bulletin_fetch() -> Result<()> {
     run_js_test("js/bulletin_fetch.js", &env_pairs)
         .await
         .map_err(|e| anyhow!("JS test failed: {e}"))
-}
-
-/// Emit a copy-pasteable shell command equivalent to what `run_js_test` would
-/// execute. Used in `DEV_MODE` so a developer can iterate on the JS client
-/// against a long-lived zombienet without restarting the cargo harness.
-fn print_dev_mode_invocation(env_pairs: &[(&str, &str)]) {
-    println!();
-    println!("=== DEV_MODE: skipping JS test, run it manually with: ===");
-    println!();
-    println!("cd e2e-tests && \\");
-    for (k, v) in env_pairs {
-        println!("  {}={} \\", k, shell_quote(v));
-    }
-    println!("  node js/bulletin_fetch.js");
-    println!();
-}
-
-/// Single-quote a string for safe shell pasting. Embedded single quotes are
-/// escaped via the standard `'\''` trick.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// Returns the GCS URL by default, or the contents of `env_var` if set
-/// (so a developer can point at a local `.tgz` for iteration).
-fn get_snapshot_url(default: &str, env_var: &str) -> String {
-    std::env::var(env_var).unwrap_or_else(|_| default.to_string())
-}
-
-fn bulletin_chain_spec() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("chain-specs/bulletin-westend-local-spec.json")
-}
-
-async fn spawn_with_snapshots(
-    base_dir: &Path,
-    chain_spec: &Path,
-    relay_snap: &str,
-    bulletin_full_snap: &str,
-    bulletin_partial_snap: &str,
-) -> Result<Network<LocalFileSystem>> {
-    let chain_spec_str = chain_spec
-        .to_str()
-        .ok_or_else(|| anyhow!("non-utf8 chain spec path"))?
-        .to_string();
-    let base_dir_str = base_dir
-        .to_str()
-        .ok_or_else(|| anyhow!("non-utf8 base dir"))?
-        .to_string();
-    let relay = relay_snap.to_string();
-    let bulletin_full = bulletin_full_snap.to_string();
-    let bulletin_partial = bulletin_partial_snap.to_string();
-
-    let cfg = NetworkConfigBuilder::new()
-        .with_relaychain(|rc| {
-            rc.with_chain(bulletin::RELAY_CHAIN)
-                .with_default_command(bulletin::RELAY_BINARY)
-                .with_validator(|n| {
-                    n.with_name("alice")
-                        .bootnode(true)
-                        .with_db_snapshot(relay.as_str())
-                })
-                .with_validator(|n| {
-                    n.with_name("bob")
-                        .bootnode(true)
-                        .with_db_snapshot(relay.as_str())
-                })
-        })
-        .with_parachain(|p| {
-            p.with_id(bulletin::PARA_ID)
-                .with_chain_spec_path(chain_spec_str.as_str())
-                .cumulus_based(true)
-                // See `bulletin_generate_snapshot::spawn_network` for why
-                // `--relay-chain-rpc-urls` is used here instead of an
-                // embedded relay client.
-                .with_default_args(vec![
-                    "--ipfs-server".into(),
-                    ("--relay-chain-rpc-urls", "{{ZOMBIE:alice:ws_uri}}").into(),
-                ])
-                .with_collator(|c| {
-                    c.with_name("collator-1")
-                        .validator(true)
-                        .bootnode(true)
-                        .with_command(bulletin::PARA_BINARY)
-                        .with_db_snapshot(bulletin_full.as_str())
-                })
-                .with_collator(|c| {
-                    c.with_name("collator-2")
-                        .validator(true)
-                        .bootnode(true)
-                        .with_command(bulletin::PARA_BINARY)
-                        .with_db_snapshot(bulletin_partial.as_str())
-                })
-        })
-        .with_global_settings(|g| g.with_base_dir(base_dir_str.as_str()))
-        .build()
-        .map_err(|e| anyhow!("network config errors: {e:?}"))?;
-
-    let spawn_fn = zombienet_sdk::environment::get_spawn_fn();
-    let network = spawn_fn(cfg).await?;
-    network.detach().await;
-    network.wait_until_is_up(180).await?;
-    Ok(network)
-}
-
-/// Returns the raw chain-spec files zombienet emits for the relay and the
-/// bulletin parachain. Smoldot consumes these directly.
-fn chain_spec_paths(network: &Network<LocalFileSystem>) -> Result<(PathBuf, PathBuf)> {
-    let base_dir = PathBuf::from(
-        network
-            .base_dir()
-            .ok_or_else(|| anyhow!("network has no base_dir"))?,
-    );
-    let relay_chain = network.relaychain().chain();
-    let relay_path = base_dir.join(format!("{relay_chain}.json"));
-    let para = network
-        .parachain(bulletin::PARA_ID)
-        .ok_or_else(|| anyhow!("parachain {} not found", bulletin::PARA_ID))?;
-    let para_path = base_dir.join(format!("{}.json", para.unique_id()));
-    Ok((relay_path, para_path))
 }

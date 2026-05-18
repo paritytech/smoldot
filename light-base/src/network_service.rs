@@ -259,6 +259,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             event_senders: either::Left(Vec::new()),
             pending_new_subscriptions: Vec::new(),
             bitswap_event_pending_send: None,
+            bitswap_connected_peers: 0,
             bitswap_event_senders: either::Left(Vec::new()),
             pending_new_bitswap_subscriptions: Vec::new(),
             important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
@@ -819,11 +820,6 @@ pub enum BitswapEvent {
         peer_id: PeerId,
         message: service::EncodedBitswapMessage,
     },
-    /// A peer has joined the set of peers we have an open Bitswap substream with. Subsequent
-    /// [`NetworkServiceChain::broadcast_bitswap_message`] calls will reach this peer.
-    BitswapConnected { peer_id: PeerId },
-    /// A peer has left the Bitswap-desired set; subsequent broadcasts will skip it.
-    BitswapDisconnected { peer_id: PeerId },
 }
 
 /// Error returned by [`NetworkServiceChain::blocks_request`].
@@ -1079,6 +1075,12 @@ struct BackgroundTask<TPlat: PlatformRef> {
 
     /// Bitswap event about to be sent on the senders of [`BackgroundTask::bitswap_event_senders`].
     bitswap_event_pending_send: Option<BitswapEvent>,
+
+    /// Running count of peers with an open Bitswap substream. Maintained from
+    /// `service::Event::BitswapConnected` / `BitswapDisconnected`. Used for diagnostic logging
+    /// only; the authoritative per-peer state lives in
+    /// [`BackgroundTask::bitswap_peering_strategy`].
+    bitswap_connected_peers: usize,
 
     /// Sending events through the public API.
     ///
@@ -2601,16 +2603,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
             }
             WakeUpReason::NetworkEvent(service::Event::BitswapConnected { peer_id }) => {
+                task.bitswap_connected_peers = task.bitswap_connected_peers.saturating_add(1);
                 log!(
                     &task.platform,
                     Debug,
                     "network",
                     "bitswap-open-success",
-                    peer_id
+                    peer_id,
+                    total = task.bitswap_connected_peers
                 );
-                debug_assert!(task.bitswap_event_pending_send.is_none());
-                task.bitswap_event_pending_send =
-                    Some(BitswapEvent::BitswapConnected { peer_id });
             }
             WakeUpReason::NetworkEvent(service::Event::BitswapOpenFailed { peer_id, error }) => {
                 log!(
@@ -2656,12 +2657,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     Some(BitswapEvent::BitswapMessage { peer_id, message });
             }
             WakeUpReason::NetworkEvent(service::Event::BitswapDisconnected { peer_id }) => {
-                log!(&task.platform, Debug, "network", "bitswap-closed", peer_id);
-                debug_assert!(task.bitswap_event_pending_send.is_none());
-                task.bitswap_event_pending_send =
-                    Some(BitswapEvent::BitswapDisconnected {
-                        peer_id: peer_id.clone(),
-                    });
+                debug_assert!(task.bitswap_connected_peers > 0);
+                task.bitswap_connected_peers = task.bitswap_connected_peers.saturating_sub(1);
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-closed",
+                    peer_id,
+                    total = task.bitswap_connected_peers
+                );
                 let ban_duration = Duration::from_secs(10);
                 if matches!(
                     task.bitswap_peering_strategy
