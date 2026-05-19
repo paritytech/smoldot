@@ -429,7 +429,11 @@ pub fn parse_and_dedup(
 
     let mut seen_strings: hashbrown::HashSet<String> =
         hashbrown::HashSet::with_capacity(cids.len());
-    let mut seen_cids: hashbrown::HashSet<Cid> = hashbrown::HashSet::with_capacity(cids.len());
+    // Dedup by 32-byte content digest, matching the literal spec wording (and the polkadot-sdk
+    // reference impl). Two cosmetically different CID strings that decode to the same digest
+    // collide here, regardless of multicodec or multihash type.
+    let mut seen_digests: hashbrown::HashSet<[u8; 32]> =
+        hashbrown::HashSet::with_capacity(cids.len());
     let mut out = Vec::with_capacity(cids.len());
 
     for cid_str in cids {
@@ -439,7 +443,7 @@ pub fn parse_and_dedup(
 
         let parsed = Cid::from_str(&cid_str);
         if let Ok(c) = &parsed {
-            if !seen_cids.insert(c.clone()) {
+            if !seen_digests.insert(*c.digest()) {
                 return Err(BitswapGetError::DuplicateCids);
             }
         }
@@ -704,15 +708,20 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
         drop(batch.events_tx);
     }
 
-    /// Cancel a batch: tear down all its still-pending slots, then send a Bitswap Cancel wantlist
-    /// to every peer we contacted on its behalf. Idempotent.
+    /// Cancel a batch: tear down its still-pending slots, then send a wire-level `Cancel(cid)`
+    /// for each CID this batch was the *last* local requester of. Idempotent.
+    ///
+    /// Only the last-reference case emits a Cancel — `requests_by_cid` is a multi-map and peers
+    /// track want-state per-CID, not per-requester, so an unconditional Cancel would starve any
+    /// concurrent batch or `bitswap_get` waiting on the same CID.
     fn cancel_batch(&mut self, batch_id: BatchId) {
         let Some(batch) = self.batches.remove(&batch_id) else {
             return;
         };
 
         // Walk pending slots, evict their `RequestId`s from the global tracking maps, and gather
-        // the CIDs to be cancelled on the wire.
+        // the CIDs whose last local reference just went away (those are the ones safe to Cancel
+        // on the wire).
         let mut pending_cids: Vec<Cid> = Vec::new();
         for slot in batch.slots.into_iter() {
             let Some(request_id) = slot else { continue };
@@ -729,10 +738,9 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
                 entry.get_mut().retain(|id| *id != request_id);
                 if entry.get().is_empty() {
                     entry.remove();
+                    pending_cids.push(request.cid);
                 }
             }
-
-            pending_cids.push(request.cid);
         }
 
         if pending_cids.is_empty() || batch.peers_for_cancel.is_empty() {
