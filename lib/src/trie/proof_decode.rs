@@ -1792,3 +1792,174 @@ impl<'a, T> fmt::Binary for Children<'a, T> {
         Ok(())
     }
 }
+
+/// Verifies a Substrate-style compact Merkle proof.
+///
+/// Compact proofs (produced by `sp_trie::generate_trie_proof`) replace path children with an
+/// empty inline placeholder and omit the target leaf's value. Both are reconstructed during
+/// verification from `expected_value`, which for state version V1 is hashed when its length is
+/// 32 bytes or more.
+pub fn verify_compact_trie_proof(
+    proof: &[u8],
+    root: &[u8; 32],
+    key: &[u8],
+    expected_value: &[u8],
+    state_version: TrieEntryVersion,
+) -> bool {
+    let entries: Vec<&[u8]> = match decode_proof(proof) {
+        Ok(it) => it.collect(),
+        Err(_) => return false,
+    };
+    let mut iter = entries.into_iter();
+    let root_node = match iter.next() {
+        Some(n) => n,
+        None => return false,
+    };
+
+    let key_nibbles: Vec<nibble::Nibble> = nibble::bytes_to_nibbles(key.iter().copied()).collect();
+    let mut key_pos = 0usize;
+
+    let computed = match compact_proof_compute_merkle(
+        root_node,
+        &mut iter,
+        &key_nibbles[..],
+        &mut key_pos,
+        expected_value,
+        state_version,
+        true,
+    ) {
+        Some(m) => m,
+        None => return false,
+    };
+
+    match computed {
+        CompactMerkleValue::Hash(h) => h[..] == root[..],
+        CompactMerkleValue::Inline(_) => false,
+    }
+}
+
+enum CompactMerkleValue {
+    Hash([u8; 32]),
+    Inline(Vec<u8>),
+}
+
+enum CompactStorageValueOwned {
+    Unhashed(Vec<u8>),
+    Hashed([u8; 32]),
+    None,
+}
+
+fn compact_proof_compute_merkle<'a, I: Iterator<Item = &'a [u8]>>(
+    node_bytes: &[u8],
+    proof_iter: &mut I,
+    key: &[nibble::Nibble],
+    key_pos: &mut usize,
+    expected_value: &[u8],
+    state_version: TrieEntryVersion,
+    is_root: bool,
+) -> Option<CompactMerkleValue> {
+    let decoded = trie_node::decode(node_bytes).ok()?;
+
+    let partial_key: Vec<nibble::Nibble> = decoded.partial_key.clone().collect();
+    for pk_nibble in &partial_key {
+        if *key_pos >= key.len() {
+            return None;
+        }
+        if key[*key_pos] != *pk_nibble {
+            return None;
+        }
+        *key_pos += 1;
+    }
+
+    let mut new_children: [Option<Vec<u8>>; 16] =
+        core::array::from_fn(|i| decoded.children[i].map(|c| c.to_vec()));
+    let new_storage_value;
+
+    if *key_pos == key.len() {
+        new_storage_value = inject_compact_value(expected_value, state_version);
+    } else {
+        let child_nibble = key[*key_pos];
+        *key_pos += 1;
+        let child_index = u8::from(child_nibble) as usize;
+        let child = decoded.children[child_index]?;
+
+        // Compact encoding: an empty inline reference marks a path child whose subtree is
+        // the next proof entry; a sub-32-byte reference is the inlined child node itself;
+        // a 32-byte reference points outside the proven path, so descending into it means
+        // the proof can't prove this key.
+        let child_merkle = if child.is_empty() {
+            let next_node = proof_iter.next()?;
+            compact_proof_compute_merkle(
+                next_node,
+                proof_iter,
+                key,
+                key_pos,
+                expected_value,
+                state_version,
+                false,
+            )?
+        } else if child.len() < 32 {
+            compact_proof_compute_merkle(
+                child,
+                proof_iter,
+                key,
+                key_pos,
+                expected_value,
+                state_version,
+                false,
+            )?
+        } else {
+            return None;
+        };
+
+        new_children[child_index] = Some(match child_merkle {
+            CompactMerkleValue::Hash(h) => h.to_vec(),
+            CompactMerkleValue::Inline(b) => b,
+        });
+        new_storage_value = match decoded.storage_value {
+            trie_node::StorageValue::Unhashed(v) => CompactStorageValueOwned::Unhashed(v.to_vec()),
+            trie_node::StorageValue::Hashed(h) => CompactStorageValueOwned::Hashed(*h),
+            trie_node::StorageValue::None => CompactStorageValueOwned::None,
+        };
+    }
+
+    let sv_view = match &new_storage_value {
+        CompactStorageValueOwned::Unhashed(v) => trie_node::StorageValue::Unhashed(&v[..]),
+        CompactStorageValueOwned::Hashed(h) => trie_node::StorageValue::Hashed(h),
+        CompactStorageValueOwned::None => trie_node::StorageValue::None,
+    };
+    let children_view: [Option<&[u8]>; 16] = core::array::from_fn(|i| new_children[i].as_deref());
+
+    let encoded = trie_node::encode_to_vec(trie_node::Decoded {
+        partial_key: partial_key.into_iter(),
+        children: children_view,
+        storage_value: sv_view,
+    })
+    .ok()?;
+
+    if encoded.len() < 32 && !is_root {
+        Some(CompactMerkleValue::Inline(encoded))
+    } else {
+        let h = blake2_rfc::blake2b::blake2b(32, &[], &encoded);
+        let arr = <[u8; 32]>::try_from(h.as_bytes()).ok()?;
+        Some(CompactMerkleValue::Hash(arr))
+    }
+}
+
+fn inject_compact_value(
+    expected_value: &[u8],
+    state_version: TrieEntryVersion,
+) -> CompactStorageValueOwned {
+    match state_version {
+        TrieEntryVersion::V0 => CompactStorageValueOwned::Unhashed(expected_value.to_vec()),
+        TrieEntryVersion::V1 => {
+            if expected_value.len() < 32 {
+                CompactStorageValueOwned::Unhashed(expected_value.to_vec())
+            } else {
+                let h = blake2_rfc::blake2b::blake2b(32, &[], expected_value);
+                let arr = <[u8; 32]>::try_from(h.as_bytes()).expect("blake2b 32 bytes; qed");
+                CompactStorageValueOwned::Hashed(arr)
+            }
+        }
+    }
+}

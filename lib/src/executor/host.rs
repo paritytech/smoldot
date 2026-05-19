@@ -2108,8 +2108,35 @@ impl ReadyToRun {
                     },
                 }
             }
-            HostFunction::ext_trie_blake2_256_verify_proof_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_trie_blake2_256_verify_proof_version_2 => host_fn_not_implemented!(),
+            HostFunction::ext_trie_blake2_256_verify_proof_version_1
+            | HostFunction::ext_trie_blake2_256_verify_proof_version_2 => {
+                let state_version = if matches!(
+                    host_fn,
+                    HostFunction::ext_trie_blake2_256_verify_proof_version_2
+                ) {
+                    expect_state_version!(4)
+                } else {
+                    TrieEntryVersion::V0
+                };
+
+                let root = expect_pointer_constant_size!(0, 32);
+                let proof = expect_pointer_size!(1).as_ref().to_vec();
+                let key = expect_pointer_size!(2).as_ref().to_vec();
+                let value = expect_pointer_size!(3).as_ref().to_vec();
+
+                let outcome = trie::proof_decode::verify_compact_trie_proof(
+                    &proof,
+                    &root,
+                    &key,
+                    &value,
+                    state_version,
+                );
+
+                HostVm::ReadyToRun(ReadyToRun {
+                    resume_value: Some(vm::WasmValue::I32(if outcome { 1 } else { 0 })),
+                    inner: self.inner,
+                })
+            }
             HostFunction::ext_trie_keccak_256_verify_proof_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_trie_keccak_256_verify_proof_version_2 => host_fn_not_implemented!(),
             HostFunction::ext_misc_print_num_version_1 => {
