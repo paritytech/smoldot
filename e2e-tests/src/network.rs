@@ -168,22 +168,12 @@ fn build_network_config(
 ) -> Result<NetworkConfig, anyhow::Error> {
     let images = zombienet_sdk::environment::get_images_from_env();
 
-    // Per-node copies of the snapshot tarballs work around a TOCTOU race in
-    // zombienet-provider's `with_db_snapshot` cache: sibling nodes sharing one
-    // source path corrupt the partially-written file. Each per-node copy gets
-    // its own cache slot (sha256 keyed on path string).
-    let staged = match cfg.snapshot() {
-        None => StagedSnapshots::default(),
-        Some(s) => stage_per_node_snapshots(base_dir_str, &s.relay_db_tgz, &s.para_db_tgz)?,
-    };
+    let snap = cfg.snapshot();
+    let relay_db = snap.map(|s| s.relay_db_tgz.to_str().expect("UTF-8 path").to_owned());
+    let para_db = snap.map(|s| s.para_db_tgz.to_str().expect("UTF-8 path").to_owned());
     // Substrate gets the *full* spec — it needs `genesis.raw` to bootstrap.
-    let (relay_spec_path, para_spec_path) = match cfg.snapshot() {
-        None => (None, None),
-        Some(s) => (
-            Some(s.relay_full_spec.to_str().expect("UTF-8 path").to_owned()),
-            Some(s.para_full_spec.to_str().expect("UTF-8 path").to_owned()),
-        ),
-    };
+    let relay_spec_path = snap.map(|s| s.relay_full_spec.to_str().expect("UTF-8 path").to_owned());
+    let para_spec_path = snap.map(|s| s.para_full_spec.to_str().expect("UTF-8 path").to_owned());
 
     let builder = NetworkConfigBuilder::new()
         .with_relaychain(|r| {
@@ -197,14 +187,14 @@ fn build_network_config(
             };
             r.with_validator(|n| {
                 let n = n.with_name("validator-0").bootnode(true);
-                match staged.validator_0.as_deref() {
+                match relay_db.as_deref() {
                     Some(p) => n.with_db_snapshot(p),
                     None => n,
                 }
             })
             .with_validator(|n| {
                 let n = n.with_name("validator-1").bootnode(true);
-                match staged.validator_1.as_deref() {
+                match relay_db.as_deref() {
                     Some(p) => n.with_db_snapshot(p),
                     None => n,
                 }
@@ -226,20 +216,22 @@ fn build_network_config(
             };
             p.with_collator(|n| {
                 let n = n.with_name("alice").bootnode(true);
-                match staged.alice.as_deref() {
+                match para_db.as_deref() {
                     Some(p) => n.with_db_snapshot(p),
                     None => n,
                 }
             })
             .with_collator(|n| {
                 let n = n.with_name("bob").bootnode(true);
-                match staged.bob.as_deref() {
+                match para_db.as_deref() {
                     Some(p) => n.with_db_snapshot(p),
                     None => n,
                 }
             })
         })
-        .with_global_settings(|g| g.with_base_dir(base_dir_str));
+        .with_global_settings(|g| {
+            g.with_base_dir(base_dir_str).with_spawn_concurrency(1) // https://github.com/paritytech/smoldot/pull/3249#issuecomment-4438807458
+        });
 
     builder.build().map_err(|errs| {
         anyhow!(
@@ -267,35 +259,6 @@ async fn wait_for_relay_first_finalized(
         .map_err(|e| anyhow!("relay did not finalize any block: {e}"))?;
     log::info!("relay produced its first finalized block");
     Ok(())
-}
-
-#[derive(Default)]
-struct StagedSnapshots {
-    validator_0: Option<String>,
-    validator_1: Option<String>,
-    alice: Option<String>,
-    bob: Option<String>,
-}
-
-fn stage_per_node_snapshots(
-    base_dir_str: &str,
-    relay_db: &Path,
-    para_db: &Path,
-) -> Result<StagedSnapshots, anyhow::Error> {
-    let stage_dir = PathBuf::from(base_dir_str).join("staged-snapshots");
-    std::fs::create_dir_all(&stage_dir)?;
-    let stage = |src: &Path, name: &str| -> Result<String, anyhow::Error> {
-        let dst = stage_dir.join(format!("{name}.tgz"));
-        std::fs::copy(src, &dst)
-            .map_err(|e| anyhow!("copy {} -> {}: {e}", src.display(), dst.display()))?;
-        Ok(dst.to_str().expect("UTF-8 path").to_owned())
-    };
-    Ok(StagedSnapshots {
-        validator_0: Some(stage(relay_db, "relay-validator-0")?),
-        validator_1: Some(stage(relay_db, "relay-validator-1")?),
-        alice: Some(stage(para_db, "para-alice")?),
-        bob: Some(stage(para_db, "para-bob")?),
-    })
 }
 
 /// Reads `committed_relay` / `committed_para` (port-agnostic artifacts with
