@@ -1123,7 +1123,6 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
     let mut next_hash = Some(header::hash_from_scale_encoded_header(
         &subscription.finalized_block_scale_encoded_header,
     ));
-    let mut waiting_logged = false;
 
     loop {
         let finalized_hash = if let Some(h) = next_hash.take() {
@@ -1138,15 +1137,12 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
             );
             h
         } else {
-            if !waiting_logged {
-                log!(
-                    platform,
-                    Info,
-                    log_target,
-                    "Waiting for relay chain to finalize a block..."
-                );
-                waiting_logged = true;
-            }
+            log!(
+                platform,
+                Info,
+                log_target,
+                "Waiting for relay chain to finalize a block..."
+            );
             loop {
                 match subscription.new_blocks.next().await {
                     Some(runtime_service::Notification::Finalized { hash, .. }) => {
