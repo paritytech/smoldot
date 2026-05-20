@@ -17,7 +17,7 @@
 
 use super::{
     BlockNotification, ConfigSubstrateCompatibleRuntimeCodeHint, FinalizedBlockRuntime,
-    Notification, SubscribeAll, ToBackground,
+    FinishedReason, Notification, SubscribeAll, ToBackground, WarpSyncState,
 };
 use crate::{log, network_service, platform::PlatformRef, util};
 
@@ -103,6 +103,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             platform.sleep(Duration::from_secs(10)),
         ))
         .fuse(),
+        warp_sync_state: WarpSyncState::NotStarted,
+        all_forks_verifies_while_not_started: 0,
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         log_target,
         from_network_service: None,
@@ -354,6 +356,14 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 // Since there is a gap in the blocks, all active notifications to all blocks
                 // must be cleared.
                 task.all_notifications.clear();
+
+                log!(
+                    &task.platform,
+                    Debug,
+                    &task.log_target,
+                    "warp-sync-state-transition; to=Finished(Success)"
+                );
+                task.warp_sync_state = WarpSyncState::Finished(FinishedReason::Success);
             }
 
             WakeUpReason::SyncProcess(all::ProcessOne::VerifyWarpSyncFragment(verify)) => {
@@ -384,6 +394,20 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             verified_hash = HashDisplay(&fragment_hash),
                             verified_height = fragment_number
                         );
+                        if task.warp_sync_state == WarpSyncState::NotStarted {
+                            log!(
+                                &task.platform,
+                                Debug,
+                                &task.log_target,
+                                "warp-sync-state-transition; to=InProgress (first fragment)"
+                            );
+                            task.warp_sync_state = WarpSyncState::InProgress;
+                            // Force re-subscribe to drop any in-flight pre-warp runtime download.
+                            // If such a download completes, `TreeAdvanceFinalizedUnknown::Finalized` fires
+                            // → tree transitions to `Known(pre-warp)` → `subscribe_all` returns the
+                            // checkpoint hash, which is now stale since warp sync has started.
+                            task.all_notifications.clear();
+                        }
                     }
                     Err(err) => {
                         log!(
@@ -422,6 +446,24 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             WakeUpReason::SyncProcess(all::ProcessOne::VerifyBlock(verify)) => {
                 // Header to verify.
                 let verified_hash = verify.hash();
+
+                // If only AllForks only works and warp sync not even started then we are
+                // very close to the chain tip, so warp sync not needed.
+                if matches!(task.warp_sync_state, WarpSyncState::NotStarted) {
+                    task.all_forks_verifies_while_not_started =
+                        task.all_forks_verifies_while_not_started.saturating_add(1);
+                    if task.all_forks_verifies_while_not_started >= 10 {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "warp-sync-state-transition; to=Finished(Terminated)"
+                        );
+                        task.warp_sync_state = WarpSyncState::Finished(FinishedReason::Terminated);
+                        task.all_notifications.clear();
+                    }
+                }
+
                 match verify.verify_header(task.platform.now_from_unix_epoch()) {
                     all::HeaderVerifyOutcome::Success {
                         success,
@@ -578,9 +620,18 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         // Errors of type `JustificationEngineMismatch` indicate that the chain
                         // uses a finality engine that smoldot doesn't recognize. This is a benign
                         // error that shouldn't lead to a ban.
+                        //
+                        // Errors of type `UnknownTargetBlock` are expected during the catch-up
+                        // window that follows a warp sync: the non-finalized tree only contains
+                        // the warp-sync target block, so peers may send justifications for
+                        // higher blocks that the local node hasn't downloaded yet.
+                        // Banning these peers would slow down the catch-up.
                         if !matches!(
                             error,
-                            all::JustificationVerifyError::JustificationEngineMismatch
+                            all::JustificationVerifyError::JustificationEngineMismatch |
+                            all::JustificationVerifyError::FinalityVerify(
+                                smoldot::chain::blocks_tree::FinalityVerifyError::UnknownTargetBlock { .. }
+                            )
                         ) {
                             log!(
                                 &task.platform,
@@ -935,6 +986,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     },
                     non_finalized_blocks_ancestry_order,
                     new_blocks,
+                    warp_sync_state: task.warp_sync_state,
                 });
             }
 
@@ -1451,6 +1503,13 @@ struct Task<TPlat: PlatformRef> {
     pending_requests: stream::FuturesUnordered<
         future::BoxFuture<'static, (all::RequestId, Result<RequestOutcome, future::Aborted>)>,
     >,
+
+    /// Current state of GrandPa warp sync.
+    warp_sync_state: WarpSyncState,
+
+    /// Number of AllForks block verifications observed while [`Task::warp_sync_state`] is
+    /// [`WarpSyncState::NotStarted`]. Used as the "warp sync is not needed" tiebreaker.
+    all_forks_verifies_while_not_started: u32,
 }
 
 enum RequestOutcome {

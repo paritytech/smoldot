@@ -1117,6 +1117,26 @@ pub struct SubscribeAll {
     /// Channel onto which new blocks are sent. The channel gets closed if it is full when a new
     /// block needs to be reported.
     pub new_blocks: async_channel::Receiver<Notification>,
+
+    /// State of GrandPa warp sync at the time of subscription.
+    pub warp_sync_state: WarpSyncState,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum WarpSyncState {
+    /// Chain doesn't run warp sync at this layer (parachain / paraheads).
+    NotApplicable,
+    NotStarted,
+    InProgress,
+    Finished(FinishedReason),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum FinishedReason {
+    /// `WarpSyncFinished` fired.
+    Success,
+    /// Determined unnecessary at runtime (AllForks-only progress tiebreaker).
+    Terminated,
 }
 
 /// See [`SubscribeAll::finalized_block_runtime`].

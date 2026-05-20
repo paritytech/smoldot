@@ -980,6 +980,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         finalized_block_runtime: None,
                         non_finalized_blocks_ancestry_order: Vec::new(),
                         new_blocks,
+                        warp_sync_state: super::WarpSyncState::NotApplicable,
                     });
 
                     all_subscriptions.push(tx);
@@ -1098,6 +1099,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 list.into_iter().map(|(_, v)| v).collect()
                             },
                             new_blocks,
+                            warp_sync_state: super::WarpSyncState::NotApplicable,
                         });
                     } else {
                         // No known finalized parahead.
@@ -1108,6 +1110,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             finalized_block_runtime: None,
                             non_finalized_blocks_ancestry_order: Vec::new(),
                             new_blocks,
+                            warp_sync_state: super::WarpSyncState::NotApplicable,
                         });
                     }
 

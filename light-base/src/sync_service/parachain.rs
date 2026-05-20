@@ -589,6 +589,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     },
                     non_finalized_blocks_ancestry_order,
                     new_blocks,
+                    warp_sync_state: super::WarpSyncState::NotApplicable,
                 });
             }
 
@@ -1117,28 +1118,55 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
         .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
         .await;
 
-    log!(
-        platform,
-        Info,
-        log_target,
-        "Waiting for relay chain to finalize a block..."
-    );
+    // runtime_service withholds the response until warp sync is not `InProgress`, so the
+    // initial header is post-warp and safe to use directly.
+    let mut next_hash = Some(header::hash_from_scale_encoded_header(
+        &subscription.finalized_block_scale_encoded_header,
+    ));
+    let mut waiting_logged = false;
 
     loop {
-        let finalized_hash = loop {
-            match subscription.new_blocks.next().await {
-                Some(runtime_service::Notification::Finalized { hash, .. }) => {
-                    break hash;
-                }
-                Some(_) => continue,
-                None => {
-                    // Subscription died. Re-subscribe.
-                    subscription = relay_chain_sync
-                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
-                        .await;
-                    break header::hash_from_scale_encoded_header(
-                        &subscription.finalized_block_scale_encoded_header,
-                    );
+        let finalized_hash = if let Some(h) = next_hash.take() {
+            log!(
+                platform,
+                Debug,
+                log_target,
+                format!(
+                    "Using subscription's initial finalized header {}",
+                    HashDisplay(&h)
+                )
+            );
+            h
+        } else {
+            if !waiting_logged {
+                log!(
+                    platform,
+                    Info,
+                    log_target,
+                    "Waiting for relay chain to finalize a block..."
+                );
+                waiting_logged = true;
+            }
+            loop {
+                match subscription.new_blocks.next().await {
+                    Some(runtime_service::Notification::Finalized { hash, .. }) => {
+                        break hash;
+                    }
+                    Some(_) => continue,
+                    None => {
+                        log!(
+                            platform,
+                            Debug,
+                            log_target,
+                            "Re-subscribing to the relay channel"
+                        );
+                        subscription = relay_chain_sync
+                            .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
+                            .await;
+                        break header::hash_from_scale_encoded_header(
+                            &subscription.finalized_block_scale_encoded_header,
+                        );
+                    }
                 }
             }
         };

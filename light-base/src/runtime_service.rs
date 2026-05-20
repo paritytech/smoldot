@@ -831,6 +831,7 @@ async fn run_background<TPlat: PlatformRef>(
             blocks_stream: None,
             runtime_downloads: stream::FuturesUnordered::new(),
             progress_runtime_call_requests: stream::FuturesUnordered::new(),
+            warp_sync_state: sync_service::WarpSyncState::NotStarted,
         }
     };
 
@@ -946,6 +947,17 @@ async fn run_background<TPlat: PlatformRef>(
                         let async_op = match &mut background.tree {
                             Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
                                 tree.next_necessary_async_op(&background.platform.now())
+                            }
+                            // Suppress pre-warp runtime downloads while warp sync is running.
+                            // If such a download completes, `TreeAdvanceFinalizedUnknown::Finalized`
+                            // fires → tree transitions to `Known(pre-warp)` → `subscribe_all`
+                            // returns the checkpoint hash, which is now stale since warp sync has
+                            // started.
+                            Tree::FinalizedBlockRuntimeUnknown { .. }
+                                if background.warp_sync_state
+                                    == sync_service::WarpSyncState::InProgress =>
+                            {
+                                async_tree::NextNecessaryAsyncOp::NotReady { when: None }
                             }
                             Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
                                 tree.next_necessary_async_op(&background.platform.now())
@@ -1326,6 +1338,7 @@ async fn run_background<TPlat: PlatformRef>(
                 // Note that this `await` freezes the entire runtime service background task,
                 // but the sync service guarantees that `subscribe_all` returns very quickly.
                 let subscription = background.sync_service.subscribe_all(32, true).await;
+                background.warp_sync_state = subscription.warp_sync_state;
 
                 log!(
                     &background.platform,
@@ -2923,6 +2936,10 @@ struct Background<TPlat: PlatformRef> {
     /// List of actions to perform to progress runtime calls requested by the frontend.
     progress_runtime_call_requests:
         stream::FuturesUnordered<future::BoxFuture<'static, ProgressRuntimeCallRequest>>,
+
+    /// Latest [`sync_service::SubscribeAll::warp_sync_state`]. Suppresses runtime downloads
+    /// while it equals `InProgress`.
+    warp_sync_state: sync_service::WarpSyncState,
 }
 
 enum Tree<TPlat: PlatformRef> {
