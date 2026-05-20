@@ -2937,8 +2937,7 @@ struct Background<TPlat: PlatformRef> {
     progress_runtime_call_requests:
         stream::FuturesUnordered<future::BoxFuture<'static, ProgressRuntimeCallRequest>>,
 
-    /// Latest [`sync_service::SubscribeAll::warp_sync_state`]. Suppresses runtime downloads
-    /// while it equals `InProgress`.
+    /// Latest [`sync_service::SubscribeAll::warp_sync_state`] received from `MustSubscribe`.
     warp_sync_state: sync_service::WarpSyncState,
 }
 
