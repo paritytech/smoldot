@@ -452,6 +452,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 if matches!(task.warp_sync_state, WarpSyncState::NotStarted) {
                     task.all_forks_verifies_while_not_started =
                         task.all_forks_verifies_while_not_started.saturating_add(1);
+                    // TODO: after how many forks set assume warp-sync terminated?
                     if task.all_forks_verifies_while_not_started >= 10 {
                         log!(
                             &task.platform,
