@@ -436,8 +436,8 @@ mod tests {
 
     #[test]
     fn from_topics_applies_minimum_floor() {
-        let reference =
-            AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, MIN_EXPECTED_ITEMS).encode_to_vec();
+        let reference = AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, MIN_EXPECTED_ITEMS)
+            .encode_to_vec();
 
         for topic_count in [0usize, 1, MIN_EXPECTED_ITEMS / 2, MIN_EXPECTED_ITEMS] {
             let topics: Vec<[u8; 32]> = (0..topic_count)
@@ -447,11 +447,8 @@ mod tests {
                     key
                 })
                 .collect();
-            let filter = AffinityFilter::from_topics(
-                topics.iter(),
-                TEST_SEED,
-                BLOOM_FALSE_POS_RATE,
-            );
+            let filter =
+                AffinityFilter::from_topics(topics.iter(), TEST_SEED, BLOOM_FALSE_POS_RATE);
             assert_eq!(
                 filter.encode_to_vec().len(),
                 reference.len(),
@@ -467,8 +464,7 @@ mod tests {
                 key
             })
             .collect();
-        let filter =
-            AffinityFilter::from_topics(topics.iter(), TEST_SEED, BLOOM_FALSE_POS_RATE);
+        let filter = AffinityFilter::from_topics(topics.iter(), TEST_SEED, BLOOM_FALSE_POS_RATE);
         assert!(
             filter.encode_to_vec().len() > reference.len(),
             "filter sized above the floor must produce a larger encoding",
