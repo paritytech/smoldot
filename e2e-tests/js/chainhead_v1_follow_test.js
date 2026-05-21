@@ -39,6 +39,11 @@ const minFinalized = Number.parseInt(process.env.MIN_FINALIZED_EVENTS ?? "2", 10
 const testResubscribe = (process.env.TEST_RESUBSCRIBE ?? "true") === "true";
 const overallTimeoutMs = Number.parseInt(process.env.OVERALL_TIMEOUT_MS ?? "300000", 10);
 const perSubTimeoutMs = Number.parseInt(process.env.PER_SUB_TIMEOUT_MS ?? "180000", 10);
+const relayBestAtLaunch = Number.parseInt(process.env.RELAY_BEST_AT_LAUNCH ?? "0", 10);
+const relayFinalizedAtLaunch = Number.parseInt(process.env.RELAY_FINALIZED_AT_LAUNCH ?? "0", 10);
+const paraBestAtLaunch = Number.parseInt(process.env.PARA_BEST_AT_LAUNCH ?? "0", 10);
+const paraFinalizedAtLaunch = Number.parseInt(process.env.PARA_FINALIZED_AT_LAUNCH ?? "0", 10);
+const initialLagTolerance = Number.parseInt(process.env.INITIAL_LAG_TOLERANCE ?? "50", 10);
 
 if (!relaySpecPath || !paraSpecPath) {
   console.error("Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC");
@@ -368,6 +373,14 @@ class ChainHeadValidator {
         `new initial finalized #${n} < previous last finalized #${this.previousSub.lastFinalizedNumber}`,
       );
     }
+    if (
+      paraFinalizedAtLaunch > 0 &&
+      n + initialLagTolerance < paraFinalizedAtLaunch
+    ) {
+      this.regression(
+        `initial finalized #${n} lags more than ${initialLagTolerance} behind para finalized at launch #${paraFinalizedAtLaunch}`,
+      );
+    }
   }
 
   recordLastFinalizedNumber(n) {
@@ -490,6 +503,10 @@ let exitOk = false;
 try {
   const relayDbContent = readDbContentIfSet("SMOLDOT_DB_RELAY");
   const paraDbContent = readDbContentIfSet("SMOLDOT_DB_PARA");
+
+  console.log(
+    `network at launch: relay best=#${relayBestAtLaunch} finalized=#${relayFinalizedAtLaunch} | para best=#${paraBestAtLaunch} finalized=#${paraFinalizedAtLaunch} (lag tolerance=${initialLagTolerance})`,
+  );
 
   relay = await addChainFromSpec(client, relaySpecPath, { databaseContent: relayDbContent });
   report("addChain relay", true);
