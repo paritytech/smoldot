@@ -22,7 +22,6 @@
 // reports a regression if the new initial finalized number is below the
 // previous subscription's last finalized number.
 
-import * as fs from "node:fs";
 import {
   createSmoldotClient,
   addChainFromSpec,
@@ -171,8 +170,8 @@ class JsonRpcMux {
 class ChainHeadValidator {
   constructor(opts) {
     this.withRuntime = opts.withRuntime;
+    this.subscriptionCount = 0;
     this.counters = {
-      subscriptions: 0,
       initialized: 0,
       newBlock: 0,
       bestBlockChanged: 0,
@@ -186,7 +185,8 @@ class ChainHeadValidator {
   }
 
   _resetSubState() {
-    this.subLabel = `sub#${this.counters.subscriptions}`;
+    for (const k of Object.keys(this.counters)) this.counters[k] = 0;
+    this.subLabel = `sub#${this.subscriptionCount}`;
     this.knownHashes = new Set();
     this.parents = new Map();
     this.heights = new Map();
@@ -207,7 +207,7 @@ class ChainHeadValidator {
         initialFinalizedNumber: this.initialFinalizedNumber,
       };
     }
-    this.counters.subscriptions += 1;
+    this.subscriptionCount += 1;
     this._resetSubState();
   }
 
@@ -451,7 +451,7 @@ function logEvent(label, event, validator) {
   }
 }
 
-async function followSubscription(chain, mux) {
+async function followSubscription(mux) {
   const subId = await mux.request("chainHead_v1_follow", [withRuntime], 30_000);
   if (typeof subId !== "string" || !subId) {
     throw new Error(`Unexpected follow subscription id: ${JSON.stringify(subId)}`);
@@ -459,7 +459,7 @@ async function followSubscription(chain, mux) {
   return subId;
 }
 
-async function runSubscription(chain, mux, validator, subId, perSubDeadline) {
+async function runSubscription(mux, validator, subId, perSubDeadline, isDone) {
   // First event must be `initialized`.
   const first = await mux.nextEvent(subId, perSubDeadline - Date.now());
   validator.onEvent(first);
@@ -474,14 +474,13 @@ async function runSubscription(chain, mux, validator, subId, perSubDeadline) {
   validator.recordInitialFinalizedNumber(initialNumber);
   logEvent(validator.subLabel, first, validator);
 
-  // Drain events until thresholds met, stop, or timeout.
   while (!validator.stopped && Date.now() < perSubDeadline) {
-    if (validator.thresholdsMet()) break;
+    if (isDone()) return { reason: "done" };
     let ev;
     try {
       ev = await mux.nextEvent(subId, Math.max(1, perSubDeadline - Date.now()));
     } catch (e) {
-      return { reason: "per_sub_timeout", lastFinalizedHash: validator.lastFinalizedHash };
+      return { reason: "per_sub_timeout" };
     }
     validator.onEvent(ev);
     switch (ev.event) {
@@ -502,12 +501,8 @@ async function runSubscription(chain, mux, validator, subId, perSubDeadline) {
     logEvent(validator.subLabel, ev, validator);
   }
 
-  if (validator.stopped) {
-    return { reason: "stop" };
-  }
-  if (validator.thresholdsMet()) {
-    return { reason: "thresholds_met" };
-  }
+  if (validator.stopped) return { reason: "stop" };
+  if (isDone()) return { reason: "done" };
   return { reason: "per_sub_timeout" };
 }
 
@@ -537,31 +532,25 @@ try {
   const validator = new ChainHeadValidator({ withRuntime });
   const overallDeadline = Date.now() + overallTimeoutMs;
 
-  // Phase 1: primary subscription.
+  // Phase 1: primary subscription. Auto-resubscribe on `stop` until thresholds met or budget gone.
   validator.beginNewSubscription();
-  let subId = await followSubscription(para, mux);
+  let subId = await followSubscription(mux);
   report("chainHead_v1_follow accepted", true, `subId=${subId}`);
-  let result = await runSubscription(
-    para,
-    mux,
-    validator,
-    subId,
-    Math.min(Date.now() + perSubTimeoutMs, overallDeadline),
-  );
-
-  // Soft-recover from any `stop` events: resubscribe and continue counting.
-  while (result.reason === "stop" && Date.now() < overallDeadline) {
-    console.log(`[${validator.subLabel}] received stop, resubscribing`);
-    validator.beginNewSubscription();
-    subId = await followSubscription(para, mux);
+  let result;
+  do {
+    if (result?.reason === "stop") {
+      console.log(`[${validator.subLabel}] received stop, resubscribing`);
+      validator.beginNewSubscription();
+      subId = await followSubscription(mux);
+    }
     result = await runSubscription(
-      para,
       mux,
       validator,
       subId,
       Math.min(Date.now() + perSubTimeoutMs, overallDeadline),
+      () => validator.thresholdsMet(),
     );
-  }
+  } while (result.reason === "stop" && Date.now() < overallDeadline);
 
   const primaryOk = validator.thresholdsMet();
   report(
@@ -570,7 +559,7 @@ try {
     `newBlock=${validator.counters.newBlock}/${minNewBlocks} finalized=${validator.counters.finalized}/${minFinalized}`,
   );
 
-  // Phase 2: explicit resubscribe.
+  // Phase 2: explicit resubscribe. Same thresholds; counters reset per sub.
   if (testResubscribe && primaryOk && Date.now() < overallDeadline) {
     try {
       await mux.request("chainHead_v1_unfollow", [subId], 30_000);
@@ -579,53 +568,38 @@ try {
       report("chainHead_v1_unfollow accepted", false, e.message);
     }
     validator.beginNewSubscription();
-    const newSubId = await followSubscription(para, mux);
-    report("chainHead_v1_follow after unfollow accepted", true, `subId=${newSubId}`);
-    const reducedNewBlocks = Math.max(1, Math.floor(minNewBlocks / 2));
-    const reducedFinalized = Math.max(1, Math.floor(minFinalized / 2));
-    const origCounters = { ...validator.counters };
-    const origThresholds = validator.thresholdsMet.bind(validator);
-    validator.thresholdsMet = () =>
-      validator.counters.newBlock - origCounters.newBlock >= reducedNewBlocks &&
-      validator.counters.finalized - origCounters.finalized >= reducedFinalized;
-    const phase2Result = await runSubscription(
-      para,
-      mux,
-      validator,
-      newSubId,
-      Math.min(Date.now() + perSubTimeoutMs, overallDeadline),
-    );
-    validator.thresholdsMet = origThresholds;
-    const phase2Ok =
-      validator.counters.newBlock - origCounters.newBlock >= reducedNewBlocks &&
-      validator.counters.finalized - origCounters.finalized >= reducedFinalized;
+    let phase2SubId = await followSubscription(mux);
+    report("chainHead_v1_follow after unfollow accepted", true, `subId=${phase2SubId}`);
+    let phase2Result;
+    do {
+      if (phase2Result?.reason === "stop") {
+        console.log(`[${validator.subLabel}] received stop, resubscribing`);
+        validator.beginNewSubscription();
+        phase2SubId = await followSubscription(mux);
+      }
+      phase2Result = await runSubscription(
+        mux,
+        validator,
+        phase2SubId,
+        Math.min(Date.now() + perSubTimeoutMs, overallDeadline),
+        () => validator.thresholdsMet(),
+      );
+    } while (phase2Result.reason === "stop" && Date.now() < overallDeadline);
+    const phase2Ok = validator.thresholdsMet();
     report(
       "resubscribe phase thresholds met",
       phase2Ok,
-      `delta_newBlock=${validator.counters.newBlock - origCounters.newBlock}/${reducedNewBlocks} delta_finalized=${validator.counters.finalized - origCounters.finalized}/${reducedFinalized} reason=${phase2Result.reason}`,
+      `newBlock=${validator.counters.newBlock}/${minNewBlocks} finalized=${validator.counters.finalized}/${minFinalized}`,
     );
   }
 
-  // Final reporting.
-  report(
-    "no spec violations",
-    validator.violations.length === 0,
-    validator.violations.length === 0
-      ? `subs=${validator.counters.subscriptions}`
-      : validator.violations.join(" | "),
-  );
-  report(
-    "no regressions",
-    validator.regressions.length === 0,
-    validator.regressions.length === 0
-      ? `subs=${validator.counters.subscriptions}`
-      : validator.regressions.join(" | "),
-  );
-  report(
-    "event counters",
-    true,
-    JSON.stringify(validator.counters),
-  );
+  const reportList = (name, items) => {
+    const suffix = `${items.length} issue${items.length === 1 ? "" : "s"}`;
+    report(name, items.length === 0, suffix);
+    for (const item of items) console.log(`  ${item}`);
+  };
+  reportList("no spec violations", validator.violations);
+  reportList("no regressions", validator.regressions);
 
   exitOk =
     validator.violations.length === 0 &&
