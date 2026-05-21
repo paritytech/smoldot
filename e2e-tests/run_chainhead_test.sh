@@ -22,7 +22,6 @@ case "${network}" in
     relay_spec="${SPECS_DIR}/paseo.json"
     para_spec="${SPECS_DIR}/paseo_asset_hub.json"
     para_rpc="https://asset-hub-paseo-rpc.n.dwellir.com"
-    para_rpc=""
     ;;
   polkadot)
     relay_spec="${SPECS_DIR}/polkadot.json"
@@ -93,12 +92,31 @@ if [[ "${PARA_FINALIZED_AT_LAUNCH}" == "0" ]]; then
   echo "Lag-regression check disabled (no PARA_FINALIZED_AT_LAUNCH)." >&2
 fi
 
+# Opt-in DB caching: set SMOLDOT_DB_DUMP_DIR to dump on success and to auto-load
+# any previously-dumped DBs from the same directory on subsequent runs.
+if [[ -n "${SMOLDOT_DB_DUMP_DIR:-}" ]]; then
+  if [[ -z "${SMOLDOT_DB_RELAY:-}" && -f "${SMOLDOT_DB_DUMP_DIR}/relay.json" ]]; then
+    SMOLDOT_DB_RELAY="${SMOLDOT_DB_DUMP_DIR}/relay.json"
+  fi
+  if [[ -z "${SMOLDOT_DB_PARA:-}" && -f "${SMOLDOT_DB_DUMP_DIR}/para.json" ]]; then
+    SMOLDOT_DB_PARA="${SMOLDOT_DB_DUMP_DIR}/para.json"
+  fi
+  if [[ -n "${SMOLDOT_DB_RELAY:-}" || -n "${SMOLDOT_DB_PARA:-}" ]]; then
+    echo "Warm-loading smoldot DBs from ${SMOLDOT_DB_DUMP_DIR}" >&2
+  else
+    echo "Cold start. DBs will be dumped to ${SMOLDOT_DB_DUMP_DIR} on success." >&2
+  fi
+fi
+
 cd "${SCRIPT_DIR}"
 exec env \
   RELAY_CHAIN_SPEC="${RELAY_CHAIN_SPEC}" \
   PARA_CHAIN_SPEC="${PARA_CHAIN_SPEC}" \
   PARA_FINALIZED_AT_LAUNCH="${PARA_FINALIZED_AT_LAUNCH}" \
   PARA_BEST_AT_LAUNCH="${PARA_BEST_AT_LAUNCH}" \
+  SMOLDOT_DB_RELAY="${SMOLDOT_DB_RELAY:-}" \
+  SMOLDOT_DB_PARA="${SMOLDOT_DB_PARA:-}" \
+  SMOLDOT_DB_DUMP_DIR="${SMOLDOT_DB_DUMP_DIR:-}" \
   MIN_NEW_BLOCKS="${MIN_NEW_BLOCKS:-5}" \
   MIN_FINALIZED_EVENTS="${MIN_FINALIZED_EVENTS:-2}" \
   PER_SUB_TIMEOUT_MS="${PER_SUB_TIMEOUT_MS:-600000}" \
