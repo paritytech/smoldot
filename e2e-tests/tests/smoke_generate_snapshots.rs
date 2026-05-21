@@ -72,17 +72,11 @@ async fn smoke_generate_snapshots() -> Result<(), anyhow::Error> {
     let base_dir = resolve_base_dir()?;
     let base_dir_str = base_dir.to_str().expect("UTF-8 path").to_owned();
 
-    // Workaround: zombienet caches `with_db_snapshot` by sha256(path) and races
-    // when two sibling nodes share the same source path (TOCTOU between
-    // `exists()` and the copy). Pre-stage per-node copies with distinct
-    // filenames so each gets its own copy.
-    let staged = stage_per_node_snapshots(
-        &args.out,
+    let config = build_config(
+        &base_dir_str,
         args.relay_db_snapshot.as_deref(),
         args.para_db_snapshot.as_deref(),
     )?;
-
-    let config = build_config(&base_dir_str, &staged)?;
 
     log::info!("spawning zombienet network");
     let spawn_fn = zombienet_sdk::environment::get_spawn_fn();
@@ -554,52 +548,14 @@ fn parse_env_u32(key: &str) -> Result<Option<u32>, anyhow::Error> {
     }
 }
 
-struct StagedSnapshots {
-    validator_0: Option<String>,
-    validator_1: Option<String>,
-    alice: Option<String>,
-    bob: Option<String>,
-}
-
-fn stage_per_node_snapshots(
-    out: &Path,
-    relay_db: Option<&Path>,
-    para_db: Option<&Path>,
-) -> Result<StagedSnapshots, anyhow::Error> {
-    let stage_dir = out.join("staged-snapshots");
-    if relay_db.is_some() || para_db.is_some() {
-        std::fs::create_dir_all(&stage_dir)?;
-    }
-    let stage = |src: &Path, name: &str| -> Result<String, anyhow::Error> {
-        let dst = stage_dir.join(format!("{name}.tgz"));
-        std::fs::copy(src, &dst)
-            .map_err(|e| anyhow!("copy {} -> {}: {e}", src.display(), dst.display()))?;
-        Ok(dst.to_str().expect("UTF-8 path").to_owned())
-    };
-    let (validator_0, validator_1) = match relay_db {
-        Some(p) => (
-            Some(stage(p, "relay-validator-0")?),
-            Some(stage(p, "relay-validator-1")?),
-        ),
-        None => (None, None),
-    };
-    let (alice, bob) = match para_db {
-        Some(p) => (Some(stage(p, "para-alice")?), Some(stage(p, "para-bob")?)),
-        None => (None, None),
-    };
-    Ok(StagedSnapshots {
-        validator_0,
-        validator_1,
-        alice,
-        bob,
-    })
-}
-
 fn build_config(
     base_dir_str: &str,
-    staged: &StagedSnapshots,
+    relay_db: Option<&Path>,
+    para_db: Option<&Path>,
 ) -> Result<NetworkConfig, anyhow::Error> {
     let images = zombienet_sdk::environment::get_images_from_env();
+    let relay_db = relay_db.map(|p| p.to_str().expect("UTF-8 path").to_owned());
+    let para_db = para_db.map(|p| p.to_str().expect("UTF-8 path").to_owned());
     NetworkConfigBuilder::new()
         .with_relaychain(|r| {
             let r = r
@@ -608,14 +564,14 @@ fn build_config(
                 .with_default_image(images.polkadot.as_str());
             r.with_validator(|n| {
                 let n = n.with_name("validator-0").bootnode(true);
-                match staged.validator_0.as_deref() {
+                match relay_db.as_deref() {
                     Some(p) => n.with_db_snapshot(p),
                     None => n,
                 }
             })
             .with_validator(|n| {
                 let n = n.with_name("validator-1").bootnode(true);
-                match staged.validator_1.as_deref() {
+                match relay_db.as_deref() {
                     Some(p) => n.with_db_snapshot(p),
                     None => n,
                 }
@@ -633,20 +589,22 @@ fn build_config(
                 ]);
             p.with_collator(|n| {
                 let n = n.with_name("alice").bootnode(true);
-                match staged.alice.as_deref() {
+                match para_db.as_deref() {
                     Some(p) => n.with_db_snapshot(p),
                     None => n,
                 }
             })
             .with_collator(|n| {
                 let n = n.with_name("bob").bootnode(true);
-                match staged.bob.as_deref() {
+                match para_db.as_deref() {
                     Some(p) => n.with_db_snapshot(p),
                     None => n,
                 }
             })
         })
-        .with_global_settings(|g| g.with_base_dir(base_dir_str))
+        .with_global_settings(|g| {
+            g.with_base_dir(base_dir_str).with_spawn_concurrency(1) // https://github.com/paritytech/smoldot/pull/3249#issuecomment-4438807458
+        })
         .build()
         .map_err(|errs| {
             anyhow!(

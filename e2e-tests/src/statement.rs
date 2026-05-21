@@ -147,6 +147,7 @@ pub async fn spawn_network(
                 // that `NetworkNode::restart` works under CI — otherwise a kill
                 // during restart is treated as a fatal failure.
                 .with_tear_down_on_failure(false)
+                .with_spawn_concurrency(1) // https://github.com/paritytech/smoldot/pull/3249#issuecomment-4438807458
         })
         .build()
         .map_err(|e| {
