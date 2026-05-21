@@ -31,6 +31,7 @@ import {
   report,
 } from "./helpers.js";
 
+// TODO: refactor env hell
 const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
 const paraSpecPath = process.env.PARA_CHAIN_SPEC;
 const withRuntime = (process.env.WITH_RUNTIME ?? "true") === "true";
