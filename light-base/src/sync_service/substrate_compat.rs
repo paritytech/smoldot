@@ -403,10 +403,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                                 &task.log_target,
                                 "warp-sync-state-transition; to=InProgress (first fragment)"
                             );
-                            // Force re-subscribe to drop any in-flight pre-warp runtime download.
-                            // If such a download completes, `TreeAdvanceFinalizedUnknown::Finalized` fires
-                            // → tree transitions to `Known(pre-warp)` → `subscribe_all` returns the
-                            // checkpoint hash, which is now stale since warp sync has started.
+                            // Drop any in-flight pre-warp runtime download so it can't
+                            // complete and stale the subscribe_all hash.
                             task.all_notifications.clear();
                         }
                     }
@@ -448,8 +446,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 // Header to verify.
                 let verified_hash = verify.hash();
 
-                // If only AllForks works and warp sync hasn't even started then we are
-                // very close to the chain tip, so warp sync not needed.
+                // AllForks-only progress near chain tip: warp sync is unnecessary.
                 let effects = task
                     .warp_sync
                     .on_event(WarpSyncEvent::AllForksBlockVerified);
@@ -1494,7 +1491,7 @@ struct Task<TPlat: PlatformRef> {
         future::BoxFuture<'static, (all::RequestId, Result<RequestOutcome, future::Aborted>)>,
     >,
 
-    /// Tracker for GrandPa warp sync state and the AllForks early-termination counter.
+    /// Warp sync state + AllForks early-termination counter.
     warp_sync: WarpSyncTracker,
 }
 

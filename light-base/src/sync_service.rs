@@ -1140,34 +1140,31 @@ pub enum FinishedReason {
     Terminated,
 }
 
-/// Number of AllForks block verifications observed while [`WarpSyncState::NotStarted`]
-/// after which warp sync is considered unnecessary and the tracker terminates it.
+/// AllForks verifications observed while [`WarpSyncState::NotStarted`] after which
+/// warp sync is considered unnecessary.
 pub(crate) const WARP_SYNC_NOT_NEEDED_AFTER_ALLFORKS_VERIFIES: u32 = 10;
 
-/// Events observed by the sync task that drive [`WarpSyncTracker`] transitions.
+/// Events driving [`WarpSyncTracker`] transitions.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) enum WarpSyncEvent {
     /// `VerifyWarpSyncFragment` returned `Ok`.
     WarpSyncFragmentVerified,
-    /// An AllForks `VerifyBlock` was processed.
+    /// AllForks `VerifyBlock` was processed.
     AllForksBlockVerified,
     /// `WarpSyncFinished` fired.
     WarpSyncFinished,
 }
 
-/// Side effects the caller must apply after [`WarpSyncTracker::on_event`].
+/// Side effects to apply after [`WarpSyncTracker::on_event`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[must_use]
 pub(crate) struct WarpSyncEffect {
-    /// True when the warp-sync state machine requires
-    /// `task.all_notifications.clear()` so consumers re-subscribe and drop any
-    /// in-flight pre-warp runtime download.
+    /// Caller must `all_notifications.clear()` to force a re-subscribe.
     pub force_resubscribe: bool,
 }
 
 impl WarpSyncEffect {
-    /// Returned by [`WarpSyncTracker::on_event`] when an event does not require
-    /// any action by the caller.
+    /// No action required.
     pub(crate) const fn none() -> Self {
         Self {
             force_resubscribe: false,
@@ -1175,10 +1172,7 @@ impl WarpSyncEffect {
     }
 }
 
-/// Pure state-machine tracking [`WarpSyncState`] independent of the surrounding task plumbing.
-///
-/// Split out so the transitions can be unit-tested without a `PlatformRef` /
-/// network stack.
+/// Pure state-machine for [`WarpSyncState`], testable without `PlatformRef`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct WarpSyncTracker {
     state: WarpSyncState,
@@ -1401,8 +1395,7 @@ mod tests {
             tracker.state(),
             WarpSyncState::Finished(FinishedReason::Success)
         );
-        // The gap-driven `all_notifications.clear()` is unrelated to the state
-        // machine; the tracker itself should not request a resubscribe here.
+        // Gap-driven clear() is the caller's, not the tracker's.
         assert_eq!(effects, WarpSyncEffect::none());
     }
 
@@ -1446,7 +1439,7 @@ mod tests {
     fn all_forks_counter_frozen_once_warp_sync_is_in_progress() {
         let mut tracker = WarpSyncTracker::new();
         let _ = tracker.on_event(WarpSyncEvent::WarpSyncFragmentVerified);
-        // Far more AllForks ticks than the termination threshold should not flip the state.
+        // Counter must not advance once past NotStarted.
         for _ in 0..(WARP_SYNC_NOT_NEEDED_AFTER_ALLFORKS_VERIFIES * 3) {
             let effects = tracker.on_event(WarpSyncEvent::AllForksBlockVerified);
             assert_eq!(tracker.state(), WarpSyncState::InProgress);
@@ -1461,7 +1454,7 @@ mod tests {
             WarpSyncState::Finished(FinishedReason::Terminated),
         ] {
             let mut tracker = WarpSyncTracker::new();
-            // Drive the tracker into the target finished state.
+            // Drive to the target finished state.
             match finished {
                 WarpSyncState::Finished(FinishedReason::Success) => {
                     let _ = tracker.on_event(WarpSyncEvent::WarpSyncFinished);
