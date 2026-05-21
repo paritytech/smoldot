@@ -377,6 +377,38 @@ fn decode_header_number(hex_str: &str) -> Result<u64, anyhow::Error> {
     Ok(header.number)
 }
 
+/// Runs `js/chainhead_v1_follow_test.js` against a live network.
+pub async fn run_chainhead_v1_follow_js(
+    live: &LiveNetwork,
+    cfg: &Scenario,
+) -> Result<(), anyhow::Error> {
+    let relay_spec_str = live.relay_spec.to_str().expect("UTF-8 path");
+    let para_spec_str = live.para_spec.to_str().expect("UTF-8 path");
+
+    let smoldot_db_paths = cfg.smoldot_db().map(|db| {
+        (
+            db.relay_db_json.to_str().expect("UTF-8 path").to_owned(),
+            db.para_db_json.to_str().expect("UTF-8 path").to_owned(),
+        )
+    });
+
+    let mut env_vars: Vec<(&str, &str)> = vec![
+        ("RELAY_CHAIN_SPEC", relay_spec_str),
+        ("PARA_CHAIN_SPEC", para_spec_str),
+    ];
+    if let Some((relay_db, para_db)) = smoldot_db_paths.as_ref() {
+        env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
+        env_vars.push(("SMOLDOT_DB_PARA", para_db.as_str()));
+    }
+
+    log::info!(
+        "running chainHead_v1_follow JS driver (relay_spec={relay_spec_str}, para_spec={para_spec_str})"
+    );
+    crate::run_js_test("js/chainhead_v1_follow_test.js", &env_vars)
+        .await
+        .map_err(|e| anyhow!("JS test failed: {e}"))
+}
+
 /// Runs `js/smoke.js` against a live network. Env-injects spec paths, the
 /// expected-initial-finalized floor, and (warm only) smoldot DB content
 /// paths.
