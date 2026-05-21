@@ -186,7 +186,6 @@ class ChainHeadValidator {
     this.knownHashes = new Set();
     this.parents = new Map();
     this.heights = new Map();
-    this.initializedHashes = [];
     this.currentBest = null;
     this.initialFinalizedHash = null;
     this.lastFinalizedHash = null;
@@ -265,7 +264,6 @@ class ChainHeadValidator {
       this.violation("initialized.finalizedBlockRuntime missing with withRuntime=true");
     }
     for (const h of hashes) this.knownHashes.add(h);
-    this.initializedHashes = [...hashes];
     this.initialFinalizedHash = hashes[hashes.length - 1];
     this.lastFinalizedHash = this.initialFinalizedHash;
     this.initialized = true;
@@ -289,10 +287,6 @@ class ChainHeadValidator {
     }
     this.knownHashes.add(event.blockHash);
     this.parents.set(event.blockHash, event.parentBlockHash);
-    const parentHeight = this.heights.get(event.parentBlockHash);
-    if (parentHeight != null) {
-      this.heights.set(event.blockHash, parentHeight + 1);
-    }
     this.counters.newBlock += 1;
   }
 
@@ -351,20 +345,13 @@ class ChainHeadValidator {
       this.heights.delete(h);
     }
     this.lastFinalizedHash = finalizedHashes[finalizedHashes.length - 1];
-    const lastFinalizedHeight = this.heights.get(this.lastFinalizedHash);
-    if (lastFinalizedHeight != null) {
-      this.lastFinalizedNumber = lastFinalizedHeight;
-    }
     this.counters.finalized += 1;
   }
 
   recordInitialFinalizedNumber(n) {
     this.initialFinalizedNumber = n;
     this.lastFinalizedNumber = n;
-    // Seed heights for the contiguous chain ending at the last initialized hash.
-    for (let i = this.initializedHashes.length - 1, h = n; i >= 0; i--, h--) {
-      this.heights.set(this.initializedHashes[i], h);
-    }
+    this.heights.set(this.initialFinalizedHash, n);
     if (
       this.previousSub &&
       this.previousSub.lastFinalizedNumber != null &&
@@ -384,8 +371,11 @@ class ChainHeadValidator {
     }
   }
 
-  recordLastFinalizedNumber(n) {
-    this.lastFinalizedNumber = n;
+  setHeight(hash, n) {
+    this.heights.set(hash, n);
+    if (hash === this.lastFinalizedHash) {
+      this.lastFinalizedNumber = n;
+    }
   }
 
   thresholdsMet() {
@@ -398,6 +388,12 @@ class ChainHeadValidator {
 async function fetchBlockNumber(mux, subId, hash) {
   const headerHex = await mux.request("chainHead_v1_header", [subId, hash], 30_000);
   return decodeHeaderNumber(headerHex);
+}
+
+async function populateHeight(mux, subId, validator, hash) {
+  if (!hash || validator.heights.has(hash)) return;
+  const n = await fetchBlockNumber(mux, subId, hash);
+  validator.setHeight(hash, n);
 }
 
 function shortHash(h) {
@@ -475,18 +471,24 @@ async function runSubscription(chain, mux, validator, subId, perSubDeadline) {
       return { reason: "per_sub_timeout", lastFinalizedHash: validator.lastFinalizedHash };
     }
     validator.onEvent(ev);
+    switch (ev.event) {
+      case "newBlock":
+        await populateHeight(mux, subId, validator, ev.blockHash);
+        break;
+      case "bestBlockChanged":
+        await populateHeight(mux, subId, validator, ev.bestBlockHash);
+        break;
+      case "finalized": {
+        const f = ev.finalizedBlockHashes ?? [];
+        await populateHeight(mux, subId, validator, f[f.length - 1]);
+        break;
+      }
+      default:
+        break;
+    }
     logEvent(validator.subLabel, ev, validator);
   }
 
-  // Fetch the final last-finalized number while the sub may still be alive.
-  if (!validator.stopped) {
-    try {
-      const n = await fetchBlockNumber(mux, subId, validator.lastFinalizedHash);
-      validator.recordLastFinalizedNumber(n);
-    } catch (e) {
-      console.error(`[${validator.subLabel}] failed to fetch last finalized number: ${e.message}`);
-    }
-  }
   if (validator.stopped) {
     return { reason: "stop" };
   }
