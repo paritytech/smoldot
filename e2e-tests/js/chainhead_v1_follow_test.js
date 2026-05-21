@@ -51,22 +51,26 @@ if (!relaySpecPath || !paraSpecPath) {
   process.exit(1);
 }
 
-// Decodes the block number from a hex SCALE-encoded substrate header.
-function decodeHeaderNumber(hexStr) {
+// Decodes a hex SCALE-encoded substrate header and returns its parent hash
+// and block number. Header layout: parent_hash (32 B) | compact-encoded
+// number | state_root (32 B) | extrinsics_root (32 B) | digest.
+function decodeHeader(hexStr) {
   const stripped = hexStr.startsWith("0x") ? hexStr.slice(2) : hexStr;
   const bytes = Buffer.from(stripped, "hex");
   if (bytes.length < 33) throw new Error(`header hex too short: ${bytes.length} bytes`);
+  const parentHash = "0x" + bytes.subarray(0, 32).toString("hex");
   const off = 32;
   const b0 = bytes[off];
   const mode = b0 & 0b11;
-  if (mode === 0) return b0 >>> 2;
-  if (mode === 1) return (b0 | (bytes[off + 1] << 8)) >>> 2;
-  if (mode === 2) {
-    return (
-      (b0 | (bytes[off + 1] << 8) | (bytes[off + 2] << 16) | (bytes[off + 3] << 24)) >>> 2
-    );
+  let number;
+  if (mode === 0) number = b0 >>> 2;
+  else if (mode === 1) number = (b0 | (bytes[off + 1] << 8)) >>> 2;
+  else if (mode === 2) {
+    number = (b0 | (bytes[off + 1] << 8) | (bytes[off + 2] << 16) | (bytes[off + 3] << 24)) >>> 2;
+  } else {
+    throw new Error("compact mode 3 not supported");
   }
-  throw new Error("compact mode 3 not supported");
+  return { number, parentHash };
 }
 
 // Multiplexes a smoldot chain's JSON-RPC stream. One pump loop classifies each
@@ -385,15 +389,20 @@ class ChainHeadValidator {
   }
 }
 
-async function fetchBlockNumber(mux, subId, hash) {
+async function fetchBlockHeader(mux, subId, hash) {
   const headerHex = await mux.request("chainHead_v1_header", [subId, hash], 30_000);
-  return decodeHeaderNumber(headerHex);
+  return decodeHeader(headerHex);
 }
 
-async function populateHeight(mux, subId, validator, hash) {
+async function populateHeader(mux, subId, validator, hash, announcedParent) {
   if (!hash || validator.heights.has(hash)) return;
-  const n = await fetchBlockNumber(mux, subId, hash);
-  validator.setHeight(hash, n);
+  const { number, parentHash } = await fetchBlockHeader(mux, subId, hash);
+  validator.setHeight(hash, number);
+  if (announcedParent != null && announcedParent !== parentHash) {
+    validator.violation(
+      `announced parent ${shortHash(announcedParent)} for block ${shortHash(hash)} #${number} mismatches header parent ${shortHash(parentHash)}`,
+    );
+  }
 }
 
 function shortHash(h) {
@@ -457,7 +466,11 @@ async function runSubscription(chain, mux, validator, subId, perSubDeadline) {
   if (first.event !== "initialized") {
     throw new Error(`first event was ${first.event}, expected initialized`);
   }
-  const initialNumber = await fetchBlockNumber(mux, subId, validator.initialFinalizedHash);
+  const { number: initialNumber } = await fetchBlockHeader(
+    mux,
+    subId,
+    validator.initialFinalizedHash,
+  );
   validator.recordInitialFinalizedNumber(initialNumber);
   logEvent(validator.subLabel, first, validator);
 
@@ -473,14 +486,14 @@ async function runSubscription(chain, mux, validator, subId, perSubDeadline) {
     validator.onEvent(ev);
     switch (ev.event) {
       case "newBlock":
-        await populateHeight(mux, subId, validator, ev.blockHash);
+        await populateHeader(mux, subId, validator, ev.blockHash, ev.parentBlockHash);
         break;
       case "bestBlockChanged":
-        await populateHeight(mux, subId, validator, ev.bestBlockHash);
+        await populateHeader(mux, subId, validator, ev.bestBlockHash, null);
         break;
       case "finalized": {
         const f = ev.finalizedBlockHashes ?? [];
-        await populateHeight(mux, subId, validator, f[f.length - 1]);
+        await populateHeader(mux, subId, validator, f[f.length - 1], null);
         break;
       }
       default:
