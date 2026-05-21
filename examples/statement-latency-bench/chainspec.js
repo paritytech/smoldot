@@ -4,9 +4,12 @@ import { readFile } from "node:fs/promises";
 // embedded in the spec already (the canonical source is the paritytech/chainspecs
 // repo and smoldot's bundled demo-chain-specs/, both of which ship bootnodes
 // inside the spec).
+const FETCH_TIMEOUT_MS = 30000;
+
 export async function loadChainSpec(source) {
   if (/^https?:\/\//i.test(source)) {
-    const res = await fetch(source);
+    // Time out hung HTTP servers rather than blocking startup forever.
+    const res = await fetch(source, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) {
       throw new Error(`Failed to fetch ${source}: ${res.status} ${res.statusText}`);
     }

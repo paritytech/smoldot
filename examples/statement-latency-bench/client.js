@@ -42,17 +42,21 @@ function sleep(ms, signal) {
   });
 }
 
-function withTimeout(promise, ms) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error("timeout")), ms);
-  });
-  return Promise.race([promise.then((v) => v), timeout]).finally(() =>
-    clearTimeout(timer),
-  );
+// Calls `fn(signal)` and aborts the signal after `ms` so the callee can
+// clean up (e.g. remove its waiter from a subscription queue). Rethrows the
+// callee's error as a `timeout` Error if the abort was the cause.
+function withTimeout(fn, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error("timeout")), ms);
+  return Promise.resolve(fn(ctrl.signal))
+    .catch((e) => {
+      if (ctrl.signal.aborted) throw new Error("timeout");
+      throw e;
+    })
+    .finally(() => clearTimeout(timer));
 }
 
-async function executeRound({ round, config, rpc, pair, log }) {
+async function executeRound({ round, config, rpc, pair, log, sequenceCounter }) {
   const {
     clientId,
     neighbourId,
@@ -103,7 +107,11 @@ async function executeRound({ round, config, rpc, pair, log }) {
         const topic = generateTopic(testRunId, clientId, round, sentCount);
         const channel = blake2AsU8a(u32LeBytes(sentCount), 256);
         const expiryTs = Math.floor((Date.now() + statementExpiryMs) / 1000);
-        const sequence = (sentCount + 1) * round;
+        // Monotonic per-client sequence across rounds; combined with the
+        // expiry timestamp this makes the (timestamp, sequence) priority key
+        // unique within the statement store.
+        sequenceCounter.value += 1;
+        const sequence = sequenceCounter.value;
         const expiry = expiryFromParts(expiryTs, sequence);
         const data = new Uint8Array(size); // zero-filled, matching the Rust bench
 
@@ -137,7 +145,7 @@ async function executeRound({ round, config, rpc, pair, log }) {
     while (receivedCount < expectedCount) {
       let payload;
       try {
-        payload = await withTimeout(subscription.next(), receiveTimeoutMs);
+        payload = await withTimeout((signal) => subscription.next(signal), receiveTimeoutMs);
       } catch (e) {
         return fail(
           log,
@@ -200,8 +208,9 @@ async function executeRound({ round, config, rpc, pair, log }) {
   } finally {
     try {
       await rpc.unsubscribe("statement_unsubscribeStatement", subscription.id);
-    } catch {
+    } catch (e) {
       // best-effort; if the subscription is already gone we don't care
+      log.debug(`Client ${clientId}: unsubscribe failed: ${e.message}`);
     }
   }
 }
@@ -209,15 +218,18 @@ async function executeRound({ round, config, rpc, pair, log }) {
 export async function runClient({ config, rpc, pair, abortSignal, log }) {
   const successes = [];
   const failures = [];
+  const sequenceCounter = { value: 0 };
 
   for (let round = 1; round <= config.numRounds; round++) {
     if (abortSignal?.aborted) {
+      // Another client failed and triggered fail-fast; this client itself
+      // hasn't necessarily failed, but it's cancelled.
       failures.push(FailureKind.PeerFailed);
       break;
     }
 
     const roundStart = performance.now();
-    const result = await executeRound({ round, config, rpc, pair, log });
+    const result = await executeRound({ round, config, rpc, pair, log, sequenceCounter });
 
     if (typeof result === "string") {
       failures.push(result);
@@ -231,8 +243,14 @@ export async function runClient({ config, rpc, pair, abortSignal, log }) {
       if (elapsedMs < config.intervalMs) {
         try {
           await sleep(config.intervalMs - elapsedMs, abortSignal);
-        } catch {
-          failures.push(FailureKind.PeerFailed);
+        } catch (e) {
+          if (abortSignal?.aborted) {
+            failures.push(FailureKind.PeerFailed);
+          } else {
+            failures.push(
+              fail(log, config.clientId, [round, config.numRounds], FailureKind.TaskPanicked, `inter-round sleep failed: ${e.message}`),
+            );
+          }
           break;
         }
       } else if (isLeader(config.clientId)) {

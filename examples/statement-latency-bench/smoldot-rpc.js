@@ -25,19 +25,36 @@ export class SmoldotRpc {
     return promise;
   }
 
-  // Subscribe and return { id, next: () => Promise<value | null> }.
+  // Subscribe and return { id, next: (signal?) => Promise<value | null> }.
   // `next()` resolves with the next notification payload, or `null` once the
-  // subscription is closed.
+  // subscription is closed. If `signal` is supplied and aborts before a
+  // notification arrives, the waiter is removed from the queue (so it can't
+  // swallow a later notification) and the promise rejects with `signal.reason`.
   async subscribe(subscribeMethod, params) {
     const id = await this.request(subscribeMethod, params);
     const sub = { queue: [], waiters: [], closed: false };
     this.subs.set(id, sub);
     return {
       id,
-      next: () => {
+      next: (signal) => {
         if (sub.queue.length > 0) return Promise.resolve(sub.queue.shift());
         if (sub.closed) return Promise.resolve(null);
-        return new Promise((resolve) => sub.waiters.push(resolve));
+        return new Promise((resolve, reject) => {
+          if (signal?.aborted) return reject(signal.reason ?? new Error("aborted"));
+          const waiter = (payload) => resolve(payload);
+          sub.waiters.push(waiter);
+          if (signal) {
+            signal.addEventListener(
+              "abort",
+              () => {
+                const idx = sub.waiters.indexOf(waiter);
+                if (idx >= 0) sub.waiters.splice(idx, 1);
+                reject(signal.reason ?? new Error("aborted"));
+              },
+              { once: true },
+            );
+          }
+        });
       },
       close: () => this.#closeSub(id),
     };
@@ -76,6 +93,10 @@ export class SmoldotRpc {
         raw = await this.chain.nextJsonRpcResponse();
       } catch (e) {
         if (!this.stopped) this.onUnexpected(e);
+        // Reject pending requests and close subs so callers don't hang
+        // waiting on a loop that has exited. statement_submit in particular
+        // has no timeout, so a silent exit here would deadlock the bench.
+        this.stop();
         return;
       }
       let msg;

@@ -57,7 +57,7 @@ as `--parachain-spec`.
 | `--receive-timeout-ms` | `5000` | |
 | `--interval-ms` | `10000` | Wall-clock pacing between rounds. |
 | `--statement-expiry-ms` | `600000` | |
-| `--warmup-ms` | `15000` | Fixed sleep after `addChain` before round 1. |
+| `--warmup-ms` | `120000` | Max wait for `system_health` to report `peers > 0 && !isSyncing` before round 1; on timeout the client proceeds anyway. |
 | `--fail-fast` | `false` | First failure aborts all clients via AbortController. |
 | `--log-level` | `info` | error/warn/info/debug/trace |
 
@@ -71,9 +71,12 @@ as `--parachain-spec`.
   N=100 expect multi-GB RAM. For larger N, use `--workers <K>` to fork K child
   processes (each gets its own event loop and runs N/K clients), or follow the
   same K8s-shard pattern as the Rust bench.
-- **No barrier.** Smoldot startup is variable (5–30s) and gossip readiness is
-  not observable from JSON-RPC, so a barrier on a code line gives false
-  confidence. We use a fixed `--warmup-ms` instead and pace rounds by wall clock.
+- **Warmup + barrier.** Smoldot startup is variable (5–30s) and gossip
+  readiness isn't directly observable from JSON-RPC. Each client polls
+  `system_health` until `peers > 0 && !isSyncing` (capped by `--warmup-ms`),
+  then arrives at a global barrier so round 1 starts on every client at the
+  same time (across worker children too). Subsequent rounds are paced by
+  `--interval-ms` per client.
 - **`--seed` removed.** Always derives sr25519 keys via `//StatementClient//${idx}`,
   matching `sc_statement_store::test_utils::get_keypair`.
 - **Output line prefixes** match `bench.rs` so log parsers keyed on the leading

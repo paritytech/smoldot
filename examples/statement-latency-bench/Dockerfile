@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 
 RUN rustup target add wasm32-unknown-unknown
 
-COPY ./.. /build
+COPY . /build
 
 # Build the smoldot npm package first: `npm run build` runs
 # prepare.mjs (compiles Rust → wasm) then tsc, producing dist/.

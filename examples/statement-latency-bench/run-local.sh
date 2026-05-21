@@ -161,7 +161,6 @@ exec node bench.js \
     --messages-pattern "${MESSAGES_PATTERN:-3:128}" \
     --receive-timeout-ms "${RECEIVE_TIMEOUT_MS:-30000}" \
     --interval-ms "${INTERVAL_MS:-5000}" \
-    --warmup-ms "${WARMUP_MS:-15000}" \
     --workers "${WORKERS:-1}" \
     --log-level "${LOG_LEVEL:-info}" \
     "$@"

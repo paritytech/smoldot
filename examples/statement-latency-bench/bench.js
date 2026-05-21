@@ -137,13 +137,26 @@ async function spawnClient({ clientId, args, parachainSpec, relaySpec, log }) {
     },
   });
 
-  const relayChain = await smoldot.addChain({ chainSpec: relaySpec, disableJsonRpc: true });
-  const parachain = await smoldot.addChain({
-    chainSpec: parachainSpec,
-    potentialRelayChains: [relayChain],
-    statementStore: { falsePositiveRate: args.falsePositiveRate },
-  });
-  const chains = [relayChain, parachain];
+  // Track partial state so we can tear down smoldot + any chains already
+  // added if a later addChain throws (otherwise we leak a smoldot instance
+  // per failed client — at hundreds of clients this is severe).
+  const chains = [];
+  let parachain;
+  try {
+    chains.push(await smoldot.addChain({ chainSpec: relaySpec, disableJsonRpc: true }));
+    parachain = await smoldot.addChain({
+      chainSpec: parachainSpec,
+      potentialRelayChains: [chains[0]],
+      statementStore: { falsePositiveRate: args.falsePositiveRate },
+    });
+    chains.push(parachain);
+  } catch (e) {
+    for (const c of chains) {
+      try { c.remove(); } catch (err) { log.debug(`client ${clientId} chain.remove on rollback: ${err.message}`); }
+    }
+    try { await smoldot.terminate(); } catch (err) { log.debug(`client ${clientId} smoldot.terminate on rollback: ${err.message}`); }
+    throw e;
+  }
 
   const rpc = new SmoldotRpc(parachain, {
     onUnexpected: (e) => log.warn(`client ${clientId} rpc: ${e.message}`),
@@ -177,12 +190,14 @@ async function spawnClient({ clientId, args, parachainSpec, relaySpec, log }) {
     cleanup: async () => {
       if (healthTimer) clearInterval(healthTimer);
       rpc.stop();
-      try {
-        for (const c of chains) c.remove();
-      } catch {}
+      for (const c of chains) {
+        try { c.remove(); } catch (e) { log.debug(`client ${clientId} chain.remove: ${e.message}`); }
+      }
       try {
         await smoldot.terminate();
-      } catch {}
+      } catch (e) {
+        log.debug(`client ${clientId} smoldot.terminate: ${e.message}`);
+      }
     },
   };
 }
@@ -206,10 +221,22 @@ async function runWorker({ args, clientStart, clientEnd, testRunId, log, barrier
 
   for (let clientId = clientStart; clientId < clientEnd; clientId++) {
     handles.push((async () => {
+      // Each client owns one barrier arrival. If the client fails before its
+      // normal arrival point (e.g. smoldot start, addChain, getKeypair), it
+      // still arrives in `finally` — otherwise a single failing client would
+      // deadlock every other client in `barrier.waitStart()`.
+      let arrived = false;
+      const arriveOnce = () => {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive();
+      };
+
       let resources;
       try {
         resources = await spawnClient({ clientId, args, parachainSpec, relaySpec, log });
       } catch (e) {
+        arriveOnce();
         return {
           successes: [],
           failures: [
@@ -247,7 +274,9 @@ async function runWorker({ args, clientStart, clientEnd, testRunId, log, barrier
               warmupReady = true;
               break;
             }
-          } catch {}
+          } catch (e) {
+            log.debug(`Client ${clientId} warmup system_health: ${e.message}`);
+          }
           await new Promise((r) => setTimeout(r, 1000));
         }
         if (!warmupReady) {
@@ -260,7 +289,7 @@ async function runWorker({ args, clientStart, clientEnd, testRunId, log, barrier
         // client enters round 1 as soon as its own warmup completes, drifts on
         // round-1 receive timeouts, and senders end up emitting statements for
         // round N+k while receivers are still subscribed for round N.
-        barrier.arrive();
+        arriveOnce();
         await barrier.waitStart();
 
         const result = await runClient({
@@ -284,6 +313,7 @@ async function runWorker({ args, clientStart, clientEnd, testRunId, log, barrier
           ],
         };
       } finally {
+        arriveOnce();
         await resources.cleanup();
       }
     })());
@@ -407,7 +437,11 @@ async function runAsParent(args, log) {
   } catch (e) {
     for (const c of childProcs) {
       if (c.exitCode === null && c.signalCode === null) {
-        try { c.kill("SIGTERM"); } catch {}
+        try {
+          c.kill("SIGTERM");
+        } catch (err) {
+          log.warn(`failed to SIGTERM worker pid=${c.pid}: ${err.message}`);
+        }
       }
     }
     await Promise.allSettled(childPromises);
