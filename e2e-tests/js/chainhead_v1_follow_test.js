@@ -22,11 +22,13 @@
 // reports a regression if the new initial finalized number is below the
 // previous subscription's last finalized number.
 
+import * as fs from "node:fs";
 import {
   createSmoldotClient,
   addChainFromSpec,
   readDbContentIfSet,
   sendRpc,
+  sendRpcAndWait,
   report,
 } from "./helpers.js";
 
@@ -44,6 +46,7 @@ const relayFinalizedAtLaunch = Number.parseInt(process.env.RELAY_FINALIZED_AT_LA
 const paraBestAtLaunch = Number.parseInt(process.env.PARA_BEST_AT_LAUNCH ?? "0", 10);
 const paraFinalizedAtLaunch = Number.parseInt(process.env.PARA_FINALIZED_AT_LAUNCH ?? "0", 10);
 const initialLagTolerance = Number.parseInt(process.env.INITIAL_LAG_TOLERANCE ?? "50", 10);
+const dbDumpDir = process.env.SMOLDOT_DB_DUMP_DIR || null;
 
 if (!relaySpecPath || !paraSpecPath) {
   console.error("Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC");
@@ -389,18 +392,24 @@ class ChainHeadValidator {
   }
 }
 
+// Returns `null` when smoldot reports the block as not available (spec-legal:
+// the block is part of the announced chain but smoldot has no header for it
+// at this moment — transient pin/unpin state). Caller skips height tracking
+// and the parent-hash cross-check for that block.
 async function fetchBlockHeader(mux, subId, hash) {
   const headerHex = await mux.request("chainHead_v1_header", [subId, hash], 30_000);
+  if (headerHex == null) return null;
   return decodeHeader(headerHex);
 }
 
 async function populateHeader(mux, subId, validator, hash, announcedParent) {
   if (!hash || validator.heights.has(hash)) return;
-  const { number, parentHash } = await fetchBlockHeader(mux, subId, hash);
-  validator.setHeight(hash, number);
-  if (announcedParent != null && announcedParent !== parentHash) {
+  const header = await fetchBlockHeader(mux, subId, hash);
+  if (header == null) return;
+  validator.setHeight(hash, header.number);
+  if (announcedParent != null && announcedParent !== header.parentHash) {
     validator.violation(
-      `announced parent ${shortHash(announcedParent)} for block ${shortHash(hash)} #${number} mismatches header parent ${shortHash(parentHash)}`,
+      `announced parent ${shortHash(announcedParent)} for block ${shortHash(hash)} #${header.number} mismatches header parent ${shortHash(header.parentHash)}`,
     );
   }
 }
@@ -466,12 +475,14 @@ async function runSubscription(mux, validator, subId, perSubDeadline, isDone) {
   if (first.event !== "initialized") {
     throw new Error(`first event was ${first.event}, expected initialized`);
   }
-  const { number: initialNumber } = await fetchBlockHeader(
-    mux,
-    subId,
-    validator.initialFinalizedHash,
-  );
-  validator.recordInitialFinalizedNumber(initialNumber);
+  const initialHeader = await fetchBlockHeader(mux, subId, validator.initialFinalizedHash);
+  if (initialHeader != null) {
+    validator.recordInitialFinalizedNumber(initialHeader.number);
+  } else {
+    console.error(
+      `[${validator.subLabel}] chainHead_v1_header returned null for initial finalized; number-based checks for this sub skipped`,
+    );
+  }
   logEvent(validator.subLabel, first, validator);
 
   while (!validator.stopped && Date.now() < perSubDeadline) {
@@ -600,6 +611,20 @@ try {
   };
   reportList("no spec violations", validator.violations);
   reportList("no regressions", validator.regressions);
+
+  if (dbDumpDir && validator.violations.length === 0) {
+    try {
+      fs.mkdirSync(dbDumpDir, { recursive: true });
+      // Relay has no mux, so use sendRpcAndWait directly. Para is muxed.
+      const relayDb = await sendRpcAndWait(relay, "chainHead_unstable_finalizedDatabase", [], 30_000);
+      const paraDb = await mux.request("chainHead_unstable_finalizedDatabase", [], 30_000);
+      fs.writeFileSync(`${dbDumpDir}/relay.json`, relayDb);
+      fs.writeFileSync(`${dbDumpDir}/para.json`, paraDb);
+      report("dumped smoldot databaseContent", true, dbDumpDir);
+    } catch (e) {
+      report("dumped smoldot databaseContent", false, e.message);
+    }
+  }
 
   exitOk =
     validator.violations.length === 0 &&
