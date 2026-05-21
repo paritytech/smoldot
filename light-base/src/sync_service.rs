@@ -1352,7 +1352,7 @@ enum ToBackground {
 #[cfg(test)]
 mod tests {
     use super::{
-        FinishedReason, WarpSyncEffect, WARP_SYNC_NOT_NEEDED_AFTER_ALLFORKS_VERIFIES,
+        FinishedReason, WARP_SYNC_NOT_NEEDED_AFTER_ALLFORKS_VERIFIES, WarpSyncEffect,
         WarpSyncEvent, WarpSyncState, WarpSyncTracker,
     };
 
