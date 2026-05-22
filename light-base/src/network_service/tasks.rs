@@ -20,7 +20,7 @@ use crate::{
     platform::{PlatformRef, SubstreamDirection},
 };
 
-use alloc::{boxed::Box, string::String};
+use alloc::{boxed::Box, string::String, sync::Arc};
 use core::{pin, time::Duration};
 use futures_lite::FutureExt as _;
 use futures_util::{StreamExt as _, future, stream::FuturesUnordered};
@@ -251,6 +251,11 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     let mut next_substream_id = 0;
     // We need to pin the receiver, as the type doesn't implement `Unpin`.
     let mut coordinator_to_connection = pin::pin!(coordinator_to_connection);
+    // Shared event used to wake up all substream wait futures when
+    // `inject_coordinator_message` queues write data (e.g. AcceptInNotifications).
+    // Without this, the substream would never be re-polled since the platform's
+    // `wait_read_write_again` only wakes on incoming data or timers.
+    let coordinator_write_ready = Arc::new(event_listener::Event::new());
 
     loop {
         // Start opening new outbound substreams, if needed.
@@ -347,6 +352,12 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         match wake_up_reason {
             WakeUpReason::CoordinatorMessage(message) => {
                 connection_task.inject_coordinator_message(&platform.now(), message);
+                // Wake up all substream wait futures so they get re-polled.
+                // This is necessary because inject_coordinator_message may have
+                // queued write data (e.g. AcceptInNotifications queues a handshake
+                // response) but the platform's wait_read_write_again only wakes on
+                // incoming data or timers -- not on pending writes.
+                coordinator_write_ready.notify(usize::MAX);
             }
             WakeUpReason::CoordinatorDead => {
                 log!(
@@ -453,8 +464,16 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 if let SubstreamFate::Continue = substream_fate {
                     when_substreams_rw_ready.push({
                         let platform = platform.clone();
+                        let write_ready = coordinator_write_ready.clone();
                         Box::pin(async move {
-                            platform.wait_read_write_again(socket.as_mut()).await;
+                            // Wait for either platform data or a coordinator write
+                            // notification (e.g. after AcceptInNotifications queues a
+                            // handshake response that needs to be flushed).
+                            let write_listener = write_ready.listen();
+                            platform
+                                .wait_read_write_again(socket.as_mut())
+                                .or(write_listener)
+                                .await;
                             (socket, substream_id)
                         })
                     });

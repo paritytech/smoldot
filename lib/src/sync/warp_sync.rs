@@ -640,15 +640,17 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
 
     /// Add a source to the list of sources.
     ///
-    /// The source has a finalized block height of 0, which should later be updated using
-    /// [`WarpSync::set_source_finality_state`].
-    pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
+    /// `best_block_number` is used as the initial finalized block height for this source.
+    /// It can later be updated using [`WarpSync::set_source_finality_state`].
+    pub fn add_source(&mut self, user_data: TSrc, best_block_number: u64) -> SourceId {
         let source_id = SourceId(self.sources.insert(Source {
             user_data,
-            finalized_block_height: 0,
+            finalized_block_height: best_block_number,
         }));
 
-        let _inserted = self.sources_by_finalized_height.insert((0, source_id));
+        let _inserted = self
+            .sources_by_finalized_height
+            .insert((best_block_number, source_id));
         debug_assert!(_inserted);
         debug_assert!(self.sources.len() >= self.sources_by_finalized_height.len());
 
