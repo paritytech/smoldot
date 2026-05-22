@@ -21,21 +21,25 @@ case "${network}" in
   paseo)
     relay_spec="${SPECS_DIR}/paseo.json"
     para_spec="${SPECS_DIR}/paseo_asset_hub.json"
+    relay_rpc="https://paseo-rpc.n.dwellir.com"
     para_rpc="https://asset-hub-paseo-rpc.n.dwellir.com"
     ;;
   polkadot)
     relay_spec="${SPECS_DIR}/polkadot.json"
     para_spec="${SPECS_DIR}/polkadot_asset_hub.json"
+    relay_rpc=""  # TODO: set Polkadot relay RPC URL
     para_rpc=""  # TODO: set Polkadot Asset Hub RPC URL
     ;;
   kusama)
     relay_spec="${SPECS_DIR}/ksmcc3.json"
     para_spec="${SPECS_DIR}/ksmcc3_asset_hub.json"
+    relay_rpc=""  # TODO: set Kusama relay RPC URL
     para_rpc=""  # TODO: set Kusama Asset Hub RPC URL
     ;;
   westend)
     relay_spec="${SPECS_DIR}/westend2.json"
     para_spec="${SPECS_DIR}/westend2_asset_hub.json"
+    relay_rpc=""  # TODO: set Westend relay RPC URL
     para_rpc=""  # TODO: set Westend Asset Hub RPC URL
     ;;
   *)
@@ -47,6 +51,7 @@ esac
 
 RELAY_CHAIN_SPEC="${RELAY_CHAIN_SPEC:-${relay_spec}}"
 PARA_CHAIN_SPEC="${PARA_CHAIN_SPEC:-${para_spec}}"
+RELAY_RPC_URL="${RELAY_RPC_URL:-${relay_rpc}}"
 PARA_RPC_URL="${PARA_RPC_URL:-${para_rpc}}"
 
 if [[ ! -f "${RELAY_CHAIN_SPEC}" ]]; then
@@ -74,6 +79,24 @@ fetch_head_number() {
   printf '%d' "${number_hex}"
 }
 
+RELAY_FINALIZED_AT_LAUNCH="${RELAY_FINALIZED_AT_LAUNCH:-0}"
+RELAY_BEST_AT_LAUNCH="${RELAY_BEST_AT_LAUNCH:-0}"
+if [[ -n "${RELAY_RPC_URL}" ]]; then
+  echo "Fetching relay best + finalized from ${RELAY_RPC_URL}..." >&2
+  if [[ "${RELAY_FINALIZED_AT_LAUNCH}" == "0" ]]; then
+    RELAY_FINALIZED_AT_LAUNCH=$(fetch_head_number "${RELAY_RPC_URL}" "chain_getFinalizedHead")
+    RELAY_FINALIZED_AT_LAUNCH="${RELAY_FINALIZED_AT_LAUNCH:-0}"
+  fi
+  if [[ "${RELAY_BEST_AT_LAUNCH}" == "0" ]]; then
+    RELAY_BEST_AT_LAUNCH=$(fetch_head_number "${RELAY_RPC_URL}" "chain_getHead")
+    RELAY_BEST_AT_LAUNCH="${RELAY_BEST_AT_LAUNCH:-0}"
+  fi
+  echo "Relay at launch: best=#${RELAY_BEST_AT_LAUNCH} finalized=#${RELAY_FINALIZED_AT_LAUNCH}" >&2
+fi
+if [[ "${RELAY_FINALIZED_AT_LAUNCH}" == "0" ]]; then
+  echo "Relay lag-regression check disabled (no RELAY_FINALIZED_AT_LAUNCH)." >&2
+fi
+
 PARA_FINALIZED_AT_LAUNCH="${PARA_FINALIZED_AT_LAUNCH:-0}"
 PARA_BEST_AT_LAUNCH="${PARA_BEST_AT_LAUNCH:-0}"
 if [[ -n "${PARA_RPC_URL}" ]]; then
@@ -89,7 +112,7 @@ if [[ -n "${PARA_RPC_URL}" ]]; then
   echo "Para at launch: best=#${PARA_BEST_AT_LAUNCH} finalized=#${PARA_FINALIZED_AT_LAUNCH}" >&2
 fi
 if [[ "${PARA_FINALIZED_AT_LAUNCH}" == "0" ]]; then
-  echo "Lag-regression check disabled (no PARA_FINALIZED_AT_LAUNCH)." >&2
+  echo "Para lag-regression check disabled (no PARA_FINALIZED_AT_LAUNCH)." >&2
 fi
 
 # Opt-in DB caching: set SMOLDOT_DB_DUMP_DIR to dump on success and to auto-load
@@ -112,6 +135,8 @@ cd "${SCRIPT_DIR}"
 exec env \
   RELAY_CHAIN_SPEC="${RELAY_CHAIN_SPEC}" \
   PARA_CHAIN_SPEC="${PARA_CHAIN_SPEC}" \
+  RELAY_FINALIZED_AT_LAUNCH="${RELAY_FINALIZED_AT_LAUNCH}" \
+  RELAY_BEST_AT_LAUNCH="${RELAY_BEST_AT_LAUNCH}" \
   PARA_FINALIZED_AT_LAUNCH="${PARA_FINALIZED_AT_LAUNCH}" \
   PARA_BEST_AT_LAUNCH="${PARA_BEST_AT_LAUNCH}" \
   SMOLDOT_DB_RELAY="${SMOLDOT_DB_RELAY:-}" \
