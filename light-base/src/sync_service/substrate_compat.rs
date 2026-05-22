@@ -24,12 +24,14 @@ use crate::{log, network_service, platform::PlatformRef, util};
 use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
+    collections::VecDeque,
     format,
     string::String,
     sync::Arc,
     vec::Vec,
 };
 use core::{cmp, iter, num::NonZero, pin::Pin, time::Duration};
+use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{FutureExt as _, StreamExt as _, future, stream};
 use hashbrown::HashMap;
@@ -40,6 +42,15 @@ use smoldot::{
     network::{self, codec},
     sync::all,
 };
+
+/// Gap above which the sync service commits to WarpAhead mode and holds off emitting a
+/// chain-spec finalized block to subscribers until warp-sync completes. Matches
+/// `warp_sync_minimum_gap` in `lib/src/sync/all.rs` so the mode decision aligns with
+/// warp-sync's own willingness to engage a source.
+const MODE_DECISION_WARP_GAP_THRESHOLD: u64 = 32;
+
+/// Maximum wait for a peer to report its best block before committing to AllForksOnly.
+const MODE_DECISION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Starts a sync service background task to synchronize a chain (relay chain or not) that is
 /// built with Substrate.
@@ -103,6 +114,12 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             platform.sleep(Duration::from_secs(10)),
         ))
         .fuse(),
+        mode: ModeState::Deciding,
+        mode_decision_deadline: future::Either::Left(Box::pin(
+            platform.sleep(MODE_DECISION_TIMEOUT),
+        ))
+        .fuse(),
+        pending_subscriptions: VecDeque::new(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         log_target,
         from_network_service: None,
@@ -143,6 +160,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             ObsoleteRequest(all::RequestId),
             RequestFinished(all::RequestId, Result<RequestOutcome, future::Aborted>),
             WarpSyncTakingLongTimeWarning,
+            ModeDecisionDeadline,
         }
 
         let wake_up_reason = {
@@ -192,6 +210,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     future::Either::Left(Box::pin(task.platform.sleep(Duration::from_secs(10))))
                         .fuse();
                 WakeUpReason::WarpSyncTakingLongTimeWarning
+            })
+            .or(async {
+                (&mut task.mode_decision_deadline).await;
+                WakeUpReason::ModeDecisionDeadline
             })
             .or({
                 let sync = &mut task.sync;
@@ -354,6 +376,18 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 // Since there is a gap in the blocks, all active notifications to all blocks
                 // must be cleared.
                 task.all_notifications.clear();
+
+                if matches!(task.mode, ModeState::AwaitingWarp | ModeState::Deciding) {
+                    task.mode = ModeState::Ready;
+                    task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();
+                    log!(
+                        &task.platform,
+                        Debug,
+                        &task.log_target,
+                        "mode-decision; transition=Ready (WarpSyncFinished)",
+                    );
+                    drain_pending_subscriptions(&mut task);
+                }
             }
 
             WakeUpReason::SyncProcess(all::ProcessOne::VerifyWarpSyncFragment(verify)) => {
@@ -644,6 +678,42 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 best_block_number,
                 best_block_hash,
             }) => {
+                if matches!(task.mode, ModeState::Deciding) {
+                    let local_finalized = task
+                        .sync
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!())
+                        .finalized_block_number();
+                    let gap = best_block_number.saturating_sub(local_finalized);
+                    if gap >= MODE_DECISION_WARP_GAP_THRESHOLD {
+                        task.mode = ModeState::AwaitingWarp;
+                        task.mode_decision_deadline =
+                            future::Either::Right(future::pending()).fuse();
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "mode-decision; committed=WarpAhead",
+                            local_finalized,
+                            peer_best = best_block_number,
+                            gap,
+                        );
+                    } else {
+                        task.mode = ModeState::Ready;
+                        task.mode_decision_deadline =
+                            future::Either::Right(future::pending()).fuse();
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "mode-decision; committed=AllForksOnly",
+                            local_finalized,
+                            peer_best = best_block_number,
+                            gap,
+                        );
+                        drain_pending_subscriptions(&mut task);
+                    }
+                }
                 task.peers_source_id_map.insert(
                     peer_id.clone(),
                     task.sync
@@ -911,40 +981,21 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 buffer_size,
                 runtime_interest,
             }) => {
-                // Frontend would like to subscribe to events.
-
-                let Some(sync) = &task.sync else {
-                    unreachable!()
-                };
-
-                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
-                task.all_notifications.push(tx);
-
-                let non_finalized_blocks_ancestry_order = {
-                    sync.non_finalized_blocks_ancestry_order()
-                        .map(|h| {
-                            let scale_encoding = h.scale_encoding_vec(sync.block_number_bytes());
-                            BlockNotification {
-                                is_new_best: header::hash_from_scale_encoded_header(
-                                    &scale_encoding,
-                                ) == *sync.best_block_hash(),
-                                scale_encoded_header: scale_encoding,
-                                parent_hash: *h.parent_hash,
-                            }
-                        })
-                        .collect()
-                };
-
-                let _ = send_back.send(SubscribeAll {
-                    finalized_block_scale_encoded_header: sync.finalized_block_header().to_owned(),
-                    finalized_block_runtime: if runtime_interest {
-                        task.known_finalized_runtime.take()
-                    } else {
-                        None
-                    },
-                    non_finalized_blocks_ancestry_order,
-                    new_blocks,
-                });
+                // Frontend would like to subscribe to events. While the mode-decision is
+                // pending, the initial finalized block exposed by the sync service may not
+                // yet be authoritative (could still be the chain-spec checkpoint while
+                // warp-sync is going to deliver a much newer block). Queue the request and
+                // respond once the mode is committed and the first finalized block is
+                // emitted.
+                if matches!(task.mode, ModeState::Ready) {
+                    respond_subscribe_all(&mut task, send_back, buffer_size, runtime_interest);
+                } else {
+                    task.pending_subscriptions.push_back(PendingSubscribeAll {
+                        send_back,
+                        buffer_size,
+                        runtime_interest,
+                    });
+                }
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::PeersAssumedKnowBlock {
@@ -1409,8 +1460,42 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     }
                 };
             }
+
+            WakeUpReason::ModeDecisionDeadline => {
+                task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();
+                if matches!(task.mode, ModeState::Deciding) {
+                    task.mode = ModeState::Ready;
+                    log!(
+                        &task.platform,
+                        Debug,
+                        &task.log_target,
+                        "mode-decision; committed=AllForksOnly (timeout, no peers)",
+                    );
+                    drain_pending_subscriptions(&mut task);
+                }
+            }
         }
     }
+}
+
+/// Bootstrap mode decision. See `docs/SYNC_MODE_DECISION.md`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum ModeState {
+    /// No peer has reported a best block yet and the deadline has not fired.
+    /// `SubscribeAll` requests are queued.
+    Deciding,
+    /// Mode committed to WarpAhead. Waiting for `WarpSyncFinished` before responding to
+    /// queued subscribers.
+    AwaitingWarp,
+    /// First finalized block is authoritative for the chosen mode. Queued subscribers
+    /// have been (or will immediately be) responded to.
+    Ready,
+}
+
+struct PendingSubscribeAll {
+    send_back: oneshot::Sender<SubscribeAll>,
+    buffer_size: usize,
+    runtime_interest: bool,
 }
 
 struct Task<TPlat: PlatformRef> {
@@ -1428,6 +1513,18 @@ struct Task<TPlat: PlatformRef> {
     ///
     /// Always `Some`, except for temporary extraction.
     sync: Option<all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>>,
+
+    /// Bootstrap mode-decision state. See `docs/SYNC_MODE_DECISION.md`.
+    mode: ModeState,
+
+    /// Fires when [`MODE_DECISION_TIMEOUT`] elapses while still in [`ModeState::Deciding`].
+    /// Replaced with a pending future on commit so it never fires again.
+    mode_decision_deadline:
+        future::Fuse<future::Either<Pin<Box<TPlat::Delay>>, future::Pending<()>>>,
+
+    /// `SubscribeAll` requests that arrived before the mode-commit emitted a first
+    /// authoritative finalized block. Drained on transition to [`ModeState::Ready`].
+    pending_subscriptions: VecDeque<PendingSubscribeAll>,
 
     /// If `Some`, contains the runtime of the current finalized block.
     known_finalized_runtime: Option<FinalizedBlockRuntime>,
@@ -1487,5 +1584,54 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
             self.all_notifications.push(subscription);
         }
+    }
+}
+
+fn respond_subscribe_all<TPlat: PlatformRef>(
+    task: &mut Task<TPlat>,
+    send_back: oneshot::Sender<SubscribeAll>,
+    buffer_size: usize,
+    runtime_interest: bool,
+) {
+    let Some(sync) = &task.sync else {
+        unreachable!()
+    };
+
+    let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
+    task.all_notifications.push(tx);
+
+    let non_finalized_blocks_ancestry_order = sync
+        .non_finalized_blocks_ancestry_order()
+        .map(|h| {
+            let scale_encoding = h.scale_encoding_vec(sync.block_number_bytes());
+            BlockNotification {
+                is_new_best: header::hash_from_scale_encoded_header(&scale_encoding)
+                    == *sync.best_block_hash(),
+                scale_encoded_header: scale_encoding,
+                parent_hash: *h.parent_hash,
+            }
+        })
+        .collect();
+
+    let _ = send_back.send(SubscribeAll {
+        finalized_block_scale_encoded_header: sync.finalized_block_header().to_owned(),
+        finalized_block_runtime: if runtime_interest {
+            task.known_finalized_runtime.take()
+        } else {
+            None
+        },
+        non_finalized_blocks_ancestry_order,
+        new_blocks,
+    });
+}
+
+fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
+    while let Some(pending) = task.pending_subscriptions.pop_front() {
+        respond_subscribe_all(
+            task,
+            pending.send_back,
+            pending.buffer_size,
+            pending.runtime_interest,
+        );
     }
 }
