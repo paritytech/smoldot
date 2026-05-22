@@ -17,7 +17,7 @@
 
 use super::{
     BlockNotification, ConfigSubstrateCompatibleRuntimeCodeHint, FinalizedBlockRuntime,
-    Notification, SubscribeAll, ToBackground,
+    Notification, SubscribeAll, ToBackground, WarpSyncEvent, WarpSyncTracker,
 };
 use crate::{log, network_service, platform::PlatformRef, util};
 
@@ -103,6 +103,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             platform.sleep(Duration::from_secs(10)),
         ))
         .fuse(),
+        warp_sync: WarpSyncTracker::new(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         log_target,
         from_network_service: None,
@@ -354,6 +355,14 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 // Since there is a gap in the blocks, all active notifications to all blocks
                 // must be cleared.
                 task.all_notifications.clear();
+
+                let _ = task.warp_sync.on_event(WarpSyncEvent::WarpSyncFinished);
+                log!(
+                    &task.platform,
+                    Debug,
+                    &task.log_target,
+                    "warp-sync-state-transition; to=Finished(Success)"
+                );
             }
 
             WakeUpReason::SyncProcess(all::ProcessOne::VerifyWarpSyncFragment(verify)) => {
@@ -384,6 +393,20 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             verified_hash = HashDisplay(&fragment_hash),
                             verified_height = fragment_number
                         );
+                        let effects = task
+                            .warp_sync
+                            .on_event(WarpSyncEvent::WarpSyncFragmentVerified);
+                        if effects.force_resubscribe {
+                            log!(
+                                &task.platform,
+                                Debug,
+                                &task.log_target,
+                                "warp-sync-state-transition; to=InProgress (first fragment)"
+                            );
+                            // Drop any in-flight pre-warp runtime download so it can't
+                            // complete and stale the subscribe_all hash.
+                            task.all_notifications.clear();
+                        }
                     }
                     Err(err) => {
                         log!(
@@ -422,6 +445,21 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             WakeUpReason::SyncProcess(all::ProcessOne::VerifyBlock(verify)) => {
                 // Header to verify.
                 let verified_hash = verify.hash();
+
+                // AllForks-only progress near chain tip: warp sync is unnecessary.
+                let effects = task
+                    .warp_sync
+                    .on_event(WarpSyncEvent::AllForksBlockVerified);
+                if effects.force_resubscribe {
+                    log!(
+                        &task.platform,
+                        Debug,
+                        &task.log_target,
+                        "warp-sync-state-transition; to=Finished(Terminated)"
+                    );
+                    task.all_notifications.clear();
+                }
+
                 match verify.verify_header(task.platform.now_from_unix_epoch()) {
                     all::HeaderVerifyOutcome::Success {
                         success,
@@ -944,6 +982,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     },
                     non_finalized_blocks_ancestry_order,
                     new_blocks,
+                    warp_sync_state: task.warp_sync.state(),
                 });
             }
 
@@ -1460,6 +1499,9 @@ struct Task<TPlat: PlatformRef> {
     pending_requests: stream::FuturesUnordered<
         future::BoxFuture<'static, (all::RequestId, Result<RequestOutcome, future::Aborted>)>,
     >,
+
+    /// Warp sync state + AllForks early-termination counter.
+    warp_sync: WarpSyncTracker,
 }
 
 enum RequestOutcome {

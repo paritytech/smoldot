@@ -1117,6 +1117,112 @@ pub struct SubscribeAll {
     /// Channel onto which new blocks are sent. The channel gets closed if it is full when a new
     /// block needs to be reported.
     pub new_blocks: async_channel::Receiver<Notification>,
+
+    /// State of GrandPa warp sync at the time of subscription.
+    pub warp_sync_state: WarpSyncState,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum WarpSyncState {
+    /// Chain doesn't run warp sync at this layer (parachain / paraheads).
+    NotApplicable,
+    NotStarted,
+    InProgress,
+    Finished(FinishedReason),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum FinishedReason {
+    /// `WarpSyncFinished` fired.
+    Success,
+    /// Terminated at runtime because AllForks alone made enough progress that warp sync
+    /// was deemed unnecessary.
+    Terminated,
+}
+
+/// AllForks verifications observed while [`WarpSyncState::NotStarted`] after which
+/// warp sync is considered unnecessary.
+pub(crate) const WARP_SYNC_NOT_NEEDED_AFTER_ALLFORKS_VERIFIES: u32 = 10;
+
+/// Events driving [`WarpSyncTracker`] transitions.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum WarpSyncEvent {
+    /// `VerifyWarpSyncFragment` returned `Ok`.
+    WarpSyncFragmentVerified,
+    /// AllForks `VerifyBlock` was processed.
+    AllForksBlockVerified,
+    /// `WarpSyncFinished` fired.
+    WarpSyncFinished,
+}
+
+/// Side effects to apply after [`WarpSyncTracker::on_event`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[must_use]
+pub(crate) struct WarpSyncEffect {
+    /// Caller must `all_notifications.clear()` to force a re-subscribe.
+    pub force_resubscribe: bool,
+}
+
+impl WarpSyncEffect {
+    /// No action required.
+    pub(crate) const fn none() -> Self {
+        Self {
+            force_resubscribe: false,
+        }
+    }
+}
+
+/// Pure state-machine for [`WarpSyncState`], testable without `PlatformRef`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) struct WarpSyncTracker {
+    state: WarpSyncState,
+    all_forks_verifies_while_not_started: u32,
+}
+
+impl WarpSyncTracker {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: WarpSyncState::NotStarted,
+            all_forks_verifies_while_not_started: 0,
+        }
+    }
+
+    pub(crate) fn state(&self) -> WarpSyncState {
+        self.state
+    }
+
+    pub(crate) fn on_event(&mut self, event: WarpSyncEvent) -> WarpSyncEffect {
+        match (self.state, event) {
+            (WarpSyncState::NotStarted, WarpSyncEvent::WarpSyncFragmentVerified) => {
+                self.state = WarpSyncState::InProgress;
+                WarpSyncEffect {
+                    force_resubscribe: true,
+                }
+            }
+            (WarpSyncState::NotStarted, WarpSyncEvent::AllForksBlockVerified) => {
+                self.all_forks_verifies_while_not_started =
+                    self.all_forks_verifies_while_not_started.saturating_add(1);
+                if self.all_forks_verifies_while_not_started
+                    >= WARP_SYNC_NOT_NEEDED_AFTER_ALLFORKS_VERIFIES
+                {
+                    self.state = WarpSyncState::Finished(FinishedReason::Terminated);
+                    WarpSyncEffect {
+                        force_resubscribe: true,
+                    }
+                } else {
+                    WarpSyncEffect::none()
+                }
+            }
+            (
+                WarpSyncState::NotStarted | WarpSyncState::InProgress,
+                WarpSyncEvent::WarpSyncFinished,
+            ) => {
+                self.state = WarpSyncState::Finished(FinishedReason::Success);
+                WarpSyncEffect::none()
+            }
+            _ => WarpSyncEffect::none(),
+        }
+    }
 }
 
 /// See [`SubscribeAll::finalized_block_runtime`].
@@ -1241,4 +1347,139 @@ enum ToBackground {
     SerializeChainInformation {
         send_back: oneshot::Sender<Option<chain::chain_information::ValidChainInformation>>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        FinishedReason, WARP_SYNC_NOT_NEEDED_AFTER_ALLFORKS_VERIFIES, WarpSyncEffect,
+        WarpSyncEvent, WarpSyncState, WarpSyncTracker,
+    };
+
+    #[test]
+    fn fresh_tracker_starts_in_not_started() {
+        let tracker = WarpSyncTracker::new();
+        assert_eq!(tracker.state(), WarpSyncState::NotStarted);
+    }
+
+    #[test]
+    fn first_fragment_moves_not_started_to_in_progress_and_forces_resubscribe() {
+        let mut tracker = WarpSyncTracker::new();
+        let effects = tracker.on_event(WarpSyncEvent::WarpSyncFragmentVerified);
+        assert_eq!(tracker.state(), WarpSyncState::InProgress);
+        assert_eq!(
+            effects,
+            WarpSyncEffect {
+                force_resubscribe: true
+            }
+        );
+    }
+
+    #[test]
+    fn subsequent_fragments_in_progress_are_noop() {
+        let mut tracker = WarpSyncTracker::new();
+        let _ = tracker.on_event(WarpSyncEvent::WarpSyncFragmentVerified);
+        for _ in 0..5 {
+            let effects = tracker.on_event(WarpSyncEvent::WarpSyncFragmentVerified);
+            assert_eq!(tracker.state(), WarpSyncState::InProgress);
+            assert_eq!(effects, WarpSyncEffect::none());
+        }
+    }
+
+    #[test]
+    fn warp_sync_finished_from_in_progress_transitions_to_finished_success() {
+        let mut tracker = WarpSyncTracker::new();
+        let _ = tracker.on_event(WarpSyncEvent::WarpSyncFragmentVerified);
+        let effects = tracker.on_event(WarpSyncEvent::WarpSyncFinished);
+        assert_eq!(
+            tracker.state(),
+            WarpSyncState::Finished(FinishedReason::Success)
+        );
+        // Gap-driven clear() is the caller's, not the tracker's.
+        assert_eq!(effects, WarpSyncEffect::none());
+    }
+
+    #[test]
+    fn warp_sync_finished_directly_from_not_started_also_transitions_to_finished_success() {
+        let mut tracker = WarpSyncTracker::new();
+        let effects = tracker.on_event(WarpSyncEvent::WarpSyncFinished);
+        assert_eq!(
+            tracker.state(),
+            WarpSyncState::Finished(FinishedReason::Success)
+        );
+        assert_eq!(effects, WarpSyncEffect::none());
+    }
+
+    #[test]
+    fn all_forks_verifies_trip_terminated_at_threshold() {
+        let mut tracker = WarpSyncTracker::new();
+        for n in 1..WARP_SYNC_NOT_NEEDED_AFTER_ALLFORKS_VERIFIES {
+            let effects = tracker.on_event(WarpSyncEvent::AllForksBlockVerified);
+            assert_eq!(
+                tracker.state(),
+                WarpSyncState::NotStarted,
+                "should still be NotStarted after {n} verifications",
+            );
+            assert_eq!(effects, WarpSyncEffect::none());
+        }
+        let effects = tracker.on_event(WarpSyncEvent::AllForksBlockVerified);
+        assert_eq!(
+            tracker.state(),
+            WarpSyncState::Finished(FinishedReason::Terminated)
+        );
+        assert_eq!(
+            effects,
+            WarpSyncEffect {
+                force_resubscribe: true
+            }
+        );
+    }
+
+    #[test]
+    fn all_forks_counter_frozen_once_warp_sync_is_in_progress() {
+        let mut tracker = WarpSyncTracker::new();
+        let _ = tracker.on_event(WarpSyncEvent::WarpSyncFragmentVerified);
+        // Counter must not advance once past NotStarted.
+        for _ in 0..(WARP_SYNC_NOT_NEEDED_AFTER_ALLFORKS_VERIFIES * 3) {
+            let effects = tracker.on_event(WarpSyncEvent::AllForksBlockVerified);
+            assert_eq!(tracker.state(), WarpSyncState::InProgress);
+            assert_eq!(effects, WarpSyncEffect::none());
+        }
+    }
+
+    #[test]
+    fn finished_states_are_terminal() {
+        for finished in [
+            WarpSyncState::Finished(FinishedReason::Success),
+            WarpSyncState::Finished(FinishedReason::Terminated),
+        ] {
+            let mut tracker = WarpSyncTracker::new();
+            // Drive to the target finished state.
+            match finished {
+                WarpSyncState::Finished(FinishedReason::Success) => {
+                    let _ = tracker.on_event(WarpSyncEvent::WarpSyncFinished);
+                }
+                WarpSyncState::Finished(FinishedReason::Terminated) => {
+                    for _ in 0..WARP_SYNC_NOT_NEEDED_AFTER_ALLFORKS_VERIFIES {
+                        let _ = tracker.on_event(WarpSyncEvent::AllForksBlockVerified);
+                    }
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(tracker.state(), finished);
+            for ev in [
+                WarpSyncEvent::WarpSyncFragmentVerified,
+                WarpSyncEvent::AllForksBlockVerified,
+                WarpSyncEvent::WarpSyncFinished,
+            ] {
+                let effects = tracker.on_event(ev);
+                assert_eq!(
+                    tracker.state(),
+                    finished,
+                    "event {ev:?} should not change a finished state",
+                );
+                assert_eq!(effects, WarpSyncEffect::none());
+            }
+        }
+    }
 }
