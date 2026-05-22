@@ -52,9 +52,9 @@ export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
     // avoid storing in memory addresses that it knows it can't connect to.
     // The condition below is a hint, and false-positives or false-negatives are not fundamentally
     // an issue.
-    if ((typeof isSecureContext === 'boolean' && isSecureContext) && typeof location !== undefined) {
-        const loc = location.toString();
-        if (loc.indexOf('localhost') !== -1 && loc.indexOf('127.0.0.1') !== -1 && loc.indexOf('::1') !== -1) {
+    if ((typeof isSecureContext === 'boolean' && isSecureContext) && typeof location !== 'undefined') {
+        const hostname = location.hostname;
+        if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '[::1]' && hostname !== '::1') {
             options.forbidNonLocalWs = true;
         }
     }
