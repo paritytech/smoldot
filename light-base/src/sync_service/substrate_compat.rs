@@ -711,6 +711,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             peer_best = best_block_number,
                             gap,
                         );
+                        cancel_warp_sync_and_abort(&mut task);
                         drain_pending_subscriptions(&mut task);
                     }
                 }
@@ -1471,6 +1472,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         &task.log_target,
                         "mode-decision; committed=AllForksOnly (timeout, no peers)",
                     );
+                    cancel_warp_sync_and_abort(&mut task);
                     drain_pending_subscriptions(&mut task);
                 }
             }
@@ -1632,6 +1634,29 @@ fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
             pending.send_back,
             pending.buffer_size,
             pending.runtime_interest,
+        );
+    }
+}
+
+/// Drops the warp-sync state machine in [`Task::sync`] and aborts the outer futures of
+/// any in-flight warp-sync requests. Called on the AllForksOnly mode commit.
+fn cancel_warp_sync_and_abort<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
+    let aborted = task
+        .sync
+        .as_mut()
+        .unwrap_or_else(|| unreachable!())
+        .cancel_warp_sync();
+    let n = aborted.len();
+    for handle in aborted {
+        handle.abort();
+    }
+    if n > 0 {
+        log!(
+            &task.platform,
+            Debug,
+            &task.log_target,
+            "warp-sync-cancelled",
+            in_flight_aborted = n,
         );
     }
 }
