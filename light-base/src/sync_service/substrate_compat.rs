@@ -715,6 +715,14 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             gap,
                         );
                         cancel_warp_sync_and_abort(&mut task);
+                        // In AllForksOnly mode there is no `WarpSyncFinished` to trigger
+                        // the first GrandPa state announce. Without that announce, peers
+                        // don't know our set_id / round / finalized height and won't gossip
+                        // commit messages to us, which then prevents the first finality
+                        // verify from ever happening (chicken-and-egg). Trigger the announce
+                        // now so peers include us in the gossip mesh.
+                        task.network_up_to_date_finalized = false;
+                        task.network_up_to_date_best = false;
                         drain_pending_subscriptions(&mut task);
                     }
                 }
@@ -1476,6 +1484,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         "mode-decision; committed=AllForksOnly (timeout, no peers)",
                     );
                     cancel_warp_sync_and_abort(&mut task);
+                    // No peers connected, but the announce updates our local-state
+                    // so future gossip-opens advertise it.
+                    task.network_up_to_date_finalized = false;
+                    task.network_up_to_date_best = false;
                     drain_pending_subscriptions(&mut task);
                 }
             }
