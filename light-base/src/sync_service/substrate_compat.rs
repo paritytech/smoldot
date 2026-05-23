@@ -50,7 +50,10 @@ use smoldot::{
 const MODE_DECISION_WARP_GAP_THRESHOLD: u64 = 32;
 
 /// Maximum wait for a peer to report its best block before committing to AllForksOnly.
-const MODE_DECISION_TIMEOUT: Duration = Duration::from_secs(5);
+/// Sized for cold-start peer discovery on light clients: DNS resolution, libp2p handshake,
+/// and gossip-open negotiation typically complete within ~10s but can stretch to ~20s under
+/// adverse network conditions.
+const MODE_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Starts a sync service background task to synchronize a chain (relay chain or not) that is
 /// built with Substrate.
