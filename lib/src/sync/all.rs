@@ -407,6 +407,45 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         all_forks.non_finalized_blocks_ancestry_order()
     }
 
+    /// Drops the warp-sync state machine. After this call:
+    ///
+    /// - No new warp-sync requests are produced by [`AllSync::desired_requests`].
+    /// - In-flight warp-sync requests are removed; their user data is returned to the
+    ///   caller (typically abort handles for the outer futures).
+    /// - [`SourceMapping::warp_sync`] is cleared on all sources.
+    ///
+    /// No-op if called twice; returns an empty vector.
+    pub fn cancel_warp_sync(&mut self) -> Vec<TRq> {
+        if self.warp_sync.is_none() {
+            return Vec::new();
+        }
+
+        let warp_request_ids: Vec<usize> = self
+            .shared
+            .requests
+            .iter()
+            .filter(|(_, rq)| rq.warp_sync.is_some())
+            .map(|(id, _)| id)
+            .collect();
+
+        let mut aborted_handles = Vec::with_capacity(warp_request_ids.len());
+        for id in warp_request_ids {
+            let request = self.shared.requests.remove(id);
+            debug_assert!(request.all_forks.is_none());
+            self.shared.sources[request.source_id.0].num_requests -= 1;
+            aborted_handles.push(request.user_data);
+        }
+
+        for (_, source_mapping) in self.shared.sources.iter_mut() {
+            source_mapping.warp_sync = None;
+        }
+
+        self.warp_sync = None;
+        self.ready_to_transition = None;
+
+        aborted_handles
+    }
+
     /// Returns true if it is believed that we are near the head of the chain.
     ///
     /// The way this method is implemented is opaque and cannot be relied on. The return value
@@ -496,8 +535,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         };
 
         let _ = all_forks.remove_source(source_info.all_forks);
-        if let Some(warp_sync) = &mut self.warp_sync {
-            let _ = warp_sync.remove_source(source_info.warp_sync.unwrap());
+        if let (Some(warp_sync), Some(inner_id)) = (&mut self.warp_sync, source_info.warp_sync) {
+            let _ = warp_sync.remove_source(inner_id);
         }
 
         // TODO: optimize
