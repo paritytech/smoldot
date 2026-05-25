@@ -24,6 +24,12 @@ case "${network}" in
     relay_rpc="https://paseo-rpc.n.dwellir.com"
     para_rpc="https://asset-hub-paseo-rpc.n.dwellir.com"
     ;;
+  paseo-next)
+    relay_spec="${SPECS_DIR}/paseo.json"
+    para_spec="${SPECS_DIR}/paseo_asset_hub_next.json"
+    relay_rpc="https://paseo-rpc.n.dwellir.com"
+    para_rpc="" # TODO
+    ;;
   polkadot)
     relay_spec="${SPECS_DIR}/polkadot.json"
     para_spec="${SPECS_DIR}/polkadot_asset_hub.json"
