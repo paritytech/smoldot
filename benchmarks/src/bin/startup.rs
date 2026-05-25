@@ -40,8 +40,8 @@ use smoldot_benchmarks::{
     pick_bench_nodes, read_chain_spec_info, wait_for_finalized_block, ChainSpecInfo, Stats,
 };
 use smoldot_e2e_tests::{
-    ensure_smoldot_built, resolve_base_dir,
-    statement::{create_para_chain_spec_with_allowances, spawn_network, spawned_chain_spec_paths},
+    ensure_smoldot_built, resolve_base_dir, spawned_chain_spec_paths,
+    statement::{create_para_chain_spec_with_allowances, spawn_network},
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 
