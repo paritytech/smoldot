@@ -206,7 +206,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains_capacity,
             connections_capacity: 32,
-            handshake_timeout: Duration::from_secs(8),
+            handshake_timeout: Duration::from_secs(4),
             randomness_seed: {
                 let mut seed = [0; 32];
                 config.platform.fill_random_bytes(&mut seed);
@@ -2333,7 +2333,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // another existing connection or connection attempt with that same peer. However,
                 // it is not possible to be sure that we will reach 0 connections or connection
                 // attempts, and thus we ban the peer every time.
-                let ban_duration = Duration::from_secs(5);
+                // Pre-handshake failures get a shorter ban: many parallel dials time out
+                // before any handshake completes, and a long slot-hold there dominates
+                // peer-discovery latency on restarts.
+                let ban_duration = if handshake_finished {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_secs(2)
+                };
                 task.network.gossip_remove_desired_all(
                     &peer_id,
                     service::GossipKind::ConsensusTransactions,
