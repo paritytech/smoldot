@@ -1117,10 +1117,8 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
         .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
         .await;
 
-    // First iteration uses the snapshot's finalized block directly. Sync_service gates
-    // the subscribe_all response on mode commit (see SYNC_MODE_DECISION.md), so the
-    // snapshot is authoritative once delivered. Waiting on the channel here would
-    // block 10-30s for the next gossip finality proof.
+    // sync_service withholds the response until the bootstrap mode is committed, so the
+    // initial finalized header is authoritative and safe to use directly.
     let mut next_finalized_hash = Some(header::hash_from_scale_encoded_header(
         &subscription.finalized_block_scale_encoded_header,
     ));

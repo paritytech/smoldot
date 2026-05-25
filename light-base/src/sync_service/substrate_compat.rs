@@ -43,16 +43,14 @@ use smoldot::{
     sync::all,
 };
 
-/// Gap above which the sync service commits to WarpAhead mode and holds off emitting a
-/// chain-spec finalized block to subscribers until warp-sync completes. Matches
-/// `warp_sync_minimum_gap` in `lib/src/sync/all.rs` so the mode decision aligns with
-/// warp-sync's own willingness to engage a source.
+/// Peer-finalized minus local-finalized gap at/above which we commit to WarpAhead.
+/// Matches `warp_sync_minimum_gap` so the decision aligns with warp-sync's own
+/// willingness to engage a source.
 const MODE_DECISION_WARP_GAP_THRESHOLD: u64 = 32;
 
-/// Maximum wait for a peer to report its best block before committing to AllForksOnly.
-/// Sized for cold-start peer discovery on light clients: DNS resolution, libp2p handshake,
-/// and gossip-open negotiation typically complete within ~10s but can stretch to ~20s under
-/// adverse network conditions.
+/// Maximum wait for the first GrandpaNeighborPacket before falling back to AllForksOnly.
+/// Sized for cold-start peer discovery (DNS + libp2p handshake + gossip-open), which can
+/// stretch to ~20s on light clients.
 const MODE_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Starts a sync service background task to synchronize a chain (relay chain or not) that is
@@ -822,11 +820,9 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .unwrap_or_else(|| unreachable!())
                     .update_source_finality_state(sync_source_id, finalized_block_height);
 
-                // Mode decision: gate on peer_finalized (what warp_sync actually needs to
-                // fire), not peer_best. The Connected event only carries peer_best, which
-                // can be 3-5 blocks ahead of finalized — committing WarpAhead based on best
-                // when finalized is below threshold leaves warp_sync stalled waiting for
-                // finality to catch up (~6s/block on Polkadot-family chains).
+                // Gate on peer_finalized, not peer_best: warp_sync only fires when
+                // peer_finalized - local >= 32, so deciding on best leaves warp_sync
+                // stalled waiting for finality to catch up (~6s/block on Polkadot).
                 if matches!(task.mode, ModeState::Deciding) {
                     let local_finalized = task
                         .sync
@@ -987,12 +983,9 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 buffer_size,
                 runtime_interest,
             }) => {
-                // Frontend would like to subscribe to events. While the mode-decision is
-                // pending, the initial finalized block exposed by the sync service may not
-                // yet be authoritative (could still be the chain-spec checkpoint while
-                // warp-sync is going to deliver a much newer block). Queue the request and
-                // respond once the mode is committed and the first finalized block is
-                // emitted.
+                // While the mode-decision is pending, the sync's finalized block is the
+                // chain-spec checkpoint and may not be authoritative (warp-sync may
+                // overwrite it). Queue subscribers until the mode is committed.
                 if matches!(task.mode, ModeState::Ready) {
                     respond_subscribe_all(&mut task, send_back, buffer_size, runtime_interest);
                 } else {
@@ -1483,17 +1476,15 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
     }
 }
 
-/// Bootstrap mode decision. See `docs/SYNC_MODE_DECISION.md`.
+/// Bootstrap mode decision.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum ModeState {
-    /// No peer has reported a best block yet and the deadline has not fired.
+    /// No GrandpaNeighborPacket received yet and the deadline has not fired.
     /// `SubscribeAll` requests are queued.
     Deciding,
-    /// Mode committed to WarpAhead. Waiting for `WarpSyncFinished` before responding to
-    /// queued subscribers.
+    /// Committed to WarpAhead; awaiting `WarpSyncFinished` before responding to subscribers.
     AwaitingWarp,
-    /// First finalized block is authoritative for the chosen mode. Queued subscribers
-    /// have been (or will immediately be) responded to.
+    /// First finalized block is authoritative; queued subscribers are drained.
     Ready,
 }
 
@@ -1519,16 +1510,13 @@ struct Task<TPlat: PlatformRef> {
     /// Always `Some`, except for temporary extraction.
     sync: Option<all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>>,
 
-    /// Bootstrap mode-decision state. See `docs/SYNC_MODE_DECISION.md`.
     mode: ModeState,
 
-    /// Fires when [`MODE_DECISION_TIMEOUT`] elapses while still in [`ModeState::Deciding`].
-    /// Replaced with a pending future on commit so it never fires again.
+    /// Replaced with `pending` on mode commit so it never fires again.
     mode_decision_deadline:
         future::Fuse<future::Either<Pin<Box<TPlat::Delay>>, future::Pending<()>>>,
 
-    /// `SubscribeAll` requests that arrived before the mode-commit emitted a first
-    /// authoritative finalized block. Drained on transition to [`ModeState::Ready`].
+    /// `SubscribeAll` requests queued during [`ModeState::Deciding`] / [`ModeState::AwaitingWarp`].
     pending_subscriptions: VecDeque<PendingSubscribeAll>,
 
     /// If `Some`, contains the runtime of the current finalized block.
@@ -1630,6 +1618,8 @@ fn respond_subscribe_all<TPlat: PlatformRef>(
     });
 }
 
+/// Responds to every queued `SubscribeAll` request. Each response allocates a fresh
+/// notification channel and pushes its sender into `task.all_notifications`.
 fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
     while let Some(pending) = task.pending_subscriptions.pop_front() {
         respond_subscribe_all(
@@ -1641,11 +1631,9 @@ fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
     }
 }
 
-/// Commits to AllForksOnly bootstrap mode. Drops the warp-sync state machine, aborts the
-/// outer futures of any in-flight warp-sync requests, flips the network-state flags so the
-/// first GrandPa state announce fires (peers won't gossip commit messages to us otherwise),
-/// and drains queued `SubscribeAll` requests. The caller is expected to log the mode-commit
-/// reason; this helper only logs the warp-cancel count.
+/// Commits to AllForksOnly mode: cancels warp-sync, flips network-state flags to trigger
+/// the first GrandPa announce (without it peers won't gossip commits to us), drains queued
+/// subscribers.
 fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
     task.mode = ModeState::Ready;
     task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();

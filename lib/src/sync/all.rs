@@ -407,17 +407,14 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         all_forks.non_finalized_blocks_ancestry_order()
     }
 
-    /// Drops the warp-sync state machine. Used after the sync service commits to the
-    /// AllForksOnly bootstrap mode (see `docs/SYNC_MODE_DECISION.md`). After this call:
+    /// Drops the warp-sync state machine. After this call:
     ///
     /// - No new warp-sync requests are produced by [`AllSync::desired_requests`].
-    /// - Any in-flight warp-sync requests are removed from this state machine, and
-    ///   their user data (typically abort handles) is returned to the caller, who is
-    ///   responsible for aborting any associated outer futures.
+    /// - In-flight warp-sync requests are removed; their user data is returned to the
+    ///   caller (typically abort handles for the outer futures).
     /// - [`SourceMapping::warp_sync`] is cleared on all sources.
     ///
-    /// Calling this method twice is allowed; the second call is a no-op and returns
-    /// an empty vector.
+    /// No-op if called twice; returns an empty vector.
     pub fn cancel_warp_sync(&mut self) -> Vec<TRq> {
         if self.warp_sync.is_none() {
             return Vec::new();
