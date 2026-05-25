@@ -681,51 +681,6 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 best_block_number,
                 best_block_hash,
             }) => {
-                if matches!(task.mode, ModeState::Deciding) {
-                    let local_finalized = task
-                        .sync
-                        .as_ref()
-                        .unwrap_or_else(|| unreachable!())
-                        .finalized_block_number();
-                    let gap = best_block_number.saturating_sub(local_finalized);
-                    if gap >= MODE_DECISION_WARP_GAP_THRESHOLD {
-                        task.mode = ModeState::AwaitingWarp;
-                        task.mode_decision_deadline =
-                            future::Either::Right(future::pending()).fuse();
-                        log!(
-                            &task.platform,
-                            Debug,
-                            &task.log_target,
-                            "mode-decision; committed=WarpAhead",
-                            local_finalized,
-                            peer_best = best_block_number,
-                            gap,
-                        );
-                    } else {
-                        task.mode = ModeState::Ready;
-                        task.mode_decision_deadline =
-                            future::Either::Right(future::pending()).fuse();
-                        log!(
-                            &task.platform,
-                            Debug,
-                            &task.log_target,
-                            "mode-decision; committed=AllForksOnly",
-                            local_finalized,
-                            peer_best = best_block_number,
-                            gap,
-                        );
-                        cancel_warp_sync_and_abort(&mut task);
-                        // In AllForksOnly mode there is no `WarpSyncFinished` to trigger
-                        // the first GrandPa state announce. Without that announce, peers
-                        // don't know our set_id / round / finalized height and won't gossip
-                        // commit messages to us, which then prevents the first finality
-                        // verify from ever happening (chicken-and-egg). Trigger the announce
-                        // now so peers include us in the gossip mesh.
-                        task.network_up_to_date_finalized = false;
-                        task.network_up_to_date_best = false;
-                        drain_pending_subscriptions(&mut task);
-                    }
-                }
                 task.peers_source_id_map.insert(
                     peer_id.clone(),
                     task.sync
@@ -866,6 +821,57 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .as_mut()
                     .unwrap_or_else(|| unreachable!())
                     .update_source_finality_state(sync_source_id, finalized_block_height);
+
+                // Mode decision: gate on peer_finalized (what warp_sync actually needs to
+                // fire), not peer_best. The Connected event only carries peer_best, which
+                // can be 3-5 blocks ahead of finalized — committing WarpAhead based on best
+                // when finalized is below threshold leaves warp_sync stalled waiting for
+                // finality to catch up (~6s/block on Polkadot-family chains).
+                if matches!(task.mode, ModeState::Deciding) {
+                    let local_finalized = task
+                        .sync
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!())
+                        .finalized_block_number();
+                    let gap = finalized_block_height.saturating_sub(local_finalized);
+                    if gap >= MODE_DECISION_WARP_GAP_THRESHOLD {
+                        task.mode = ModeState::AwaitingWarp;
+                        task.mode_decision_deadline =
+                            future::Either::Right(future::pending()).fuse();
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "mode-decision; committed=WarpAhead",
+                            local_finalized,
+                            peer_finalized = finalized_block_height,
+                            gap,
+                        );
+                    } else {
+                        task.mode = ModeState::Ready;
+                        task.mode_decision_deadline =
+                            future::Either::Right(future::pending()).fuse();
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "mode-decision; committed=AllForksOnly",
+                            local_finalized,
+                            peer_finalized = finalized_block_height,
+                            gap,
+                        );
+                        cancel_warp_sync_and_abort(&mut task);
+                        // In AllForksOnly mode there is no `WarpSyncFinished` to trigger
+                        // the first GrandPa state announce. Without that announce, peers
+                        // don't know our set_id / round / finalized height and won't gossip
+                        // commit messages to us, which then prevents the first finality
+                        // verify from ever happening (chicken-and-egg). Trigger the announce
+                        // now so peers include us in the gossip mesh.
+                        task.network_up_to_date_finalized = false;
+                        task.network_up_to_date_best = false;
+                        drain_pending_subscriptions(&mut task);
+                    }
+                }
             }
 
             WakeUpReason::NetworkEvent(network_service::Event::GrandpaCommitMessage {
