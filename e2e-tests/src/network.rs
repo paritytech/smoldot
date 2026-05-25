@@ -427,6 +427,141 @@ pub async fn run_chainhead_v1_follow_js(
         .map_err(|e| anyhow!("JS test failed: {e}"))
 }
 
+/// Single iteration of the chainHead_v1_follow bench. Spawns the JS validator
+/// with a configurable smoldot DB-dump dir and optional preloaded DBs, captures
+/// stdout, and extracts the bootstrap latency (parachain
+/// `chainHead_v1_follow` request → first `initialized` event yielded).
+///
+/// `dump_dir`: where smoldot dumps databases on success.
+/// `preload`: if `Some((relay_db, para_db))`, smoldot loads those paths instead
+/// of starting cold.
+pub async fn run_chainhead_v1_follow_bench_js(
+    live: &LiveNetwork,
+    dump_dir: &std::path::Path,
+    preload: Option<(&std::path::Path, &std::path::Path)>,
+) -> Result<i64, anyhow::Error> {
+    let relay_spec_str = live.relay_spec.to_str().expect("UTF-8 path");
+    let para_spec_str = live.para_spec.to_str().expect("UTF-8 path");
+    let dump_str = dump_dir.to_str().expect("UTF-8 path").to_owned();
+
+    let relay_node = live.network.get_node("validator-0")?;
+    let relay_best = relay_node.reports(BEST_METRIC).await? as u64;
+    let relay_finalized = relay_node.reports(FINALIZED_METRIC).await? as u64;
+    let para_node = live.network.get_node("alice")?;
+    let para_best = para_node.reports(BEST_METRIC).await? as u64;
+    let para_finalized = para_node.reports(FINALIZED_METRIC).await? as u64;
+    let relay_best_str = relay_best.to_string();
+    let relay_finalized_str = relay_finalized.to_string();
+    let para_best_str = para_best.to_string();
+    let para_finalized_str = para_finalized.to_string();
+
+    let preload_strs = preload.map(|(relay_db, para_db)| {
+        (
+            relay_db.to_str().expect("UTF-8 path").to_owned(),
+            para_db.to_str().expect("UTF-8 path").to_owned(),
+        )
+    });
+
+    let mut env_vars: Vec<(&str, &str)> = vec![
+        ("RELAY_CHAIN_SPEC", relay_spec_str),
+        ("PARA_CHAIN_SPEC", para_spec_str),
+        ("RELAY_BEST_AT_LAUNCH", relay_best_str.as_str()),
+        ("RELAY_FINALIZED_AT_LAUNCH", relay_finalized_str.as_str()),
+        ("PARA_BEST_AT_LAUNCH", para_best_str.as_str()),
+        ("PARA_FINALIZED_AT_LAUNCH", para_finalized_str.as_str()),
+        ("SMOLDOT_DB_DUMP_DIR", dump_str.as_str()),
+    ];
+    if let Some((relay_db, para_db)) = preload_strs.as_ref() {
+        env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
+        env_vars.push(("SMOLDOT_DB_PARA", para_db.as_str()));
+    }
+
+    let stdout = crate::run_js_test_with_stdout("js/chainhead_v1_follow_test.js", &env_vars)
+        .await
+        .map_err(|e| anyhow!("JS test failed: {e}"))?;
+
+    parse_bootstrap_ms(&stdout).ok_or_else(|| {
+        anyhow!("could not parse bootstrap latency from JS test stdout (missing markers)")
+    })
+}
+
+/// Extract (t1 - t0) in ms from JS test stdout, where:
+/// t0 = first `chainHead_v1_follow` JSON-RPC request emitted by the parachain
+///      smoldot instance (the relay isn't subscribed to in this test).
+/// t1 = first `initialized` event emitted by that subscription.
+fn parse_bootstrap_ms(stdout: &str) -> Option<i64> {
+    let mut t0: Option<i64> = None;
+    let mut t0_target: Option<String> = None;
+    let mut t1: Option<i64> = None;
+    for line in stdout.lines() {
+        if !line.contains("json-rpc") {
+            continue;
+        }
+        let ts = parse_iso_ts_ms(line)?;
+        if t0.is_none()
+            && line.contains("json-rpc-request-queued")
+            && line.contains(r#"method":"chainHead_v1_follow""#)
+        {
+            t0 = Some(ts);
+            t0_target = log_target(line).map(str::to_owned);
+            continue;
+        }
+        if t1.is_none() && t0_target.is_some() && line.contains(r#"event":"initialized""#) {
+            // Only count `initialized` on the same json-rpc log target as the
+            // request; the relay smoldot instance also emits one but on a
+            // different target.
+            if log_target(line) == t0_target.as_deref() {
+                t1 = Some(ts);
+                break;
+            }
+        }
+    }
+    let (t0, t1) = (t0?, t1?);
+    Some((t1 - t0).max(0))
+}
+
+/// Extract the smoldot log target from a line shaped like
+/// `[2026-05-25T...Z] [INFO] [json-rpc-people-westend-local] message`.
+/// Returns the third `[...]` segment (after timestamp + level).
+fn log_target(line: &str) -> Option<&str> {
+    let mut remaining = line;
+    for _ in 0..2 {
+        let close = remaining.find(']')?;
+        remaining = &remaining[close + 1..];
+    }
+    let open = remaining.find('[')?;
+    let after = &remaining[open + 1..];
+    let close = after.find(']')?;
+    Some(&after[..close])
+}
+
+/// Parse the timestamp from a log line like `[2026-05-24T18:04:42.200Z] ...`
+/// into ms-since-epoch-of-day (i.e. UTC time-of-day in ms). Sufficient as long
+/// as t0 and t1 are within the same UTC day. For our bench cycles (minutes,
+/// not hours) this holds.
+fn parse_iso_ts_ms(line: &str) -> Option<i64> {
+    let start = line.find('[')? + 1;
+    let end = line[start..].find(']')? + start;
+    let raw = &line[start..end]; // e.g. 2026-05-24T18:04:42.200Z
+    let t_pos = raw.find('T')?;
+    let time = &raw[t_pos + 1..raw.len().saturating_sub(1)]; // strip trailing Z
+    let mut parts = time.split(':');
+    let h: i64 = parts.next()?.parse().ok()?;
+    let m: i64 = parts.next()?.parse().ok()?;
+    let s_and_frac = parts.next()?;
+    let mut sf = s_and_frac.split('.');
+    let s: i64 = sf.next()?.parse().ok()?;
+    let frac = sf.next().unwrap_or("0");
+    // frac is up to 3 digits (ms). Pad/truncate.
+    let mut ms_str = String::from(frac);
+    while ms_str.len() < 3 {
+        ms_str.push('0');
+    }
+    ms_str.truncate(3);
+    let ms: i64 = ms_str.parse().ok()?;
+    Some(((h * 60 + m) * 60 + s) * 1000 + ms)
+}
+
 /// Runs `js/smoke.js` against a live network. Env-injects spec paths, the
 /// expected-initial-finalized floor, and (warm only) smoldot DB content
 /// paths.

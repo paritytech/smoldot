@@ -23,8 +23,9 @@ pub mod snapshot;
 pub mod statement;
 
 pub use network::{
-    run_chainhead_v1_follow_js, run_smoke_js, spawn_scenario, spawned_chain_spec_paths,
-    LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC, FINALIZED_METRIC, PARA_ID,
+    run_chainhead_v1_follow_bench_js, run_chainhead_v1_follow_js, run_smoke_js, spawn_scenario,
+    spawned_chain_spec_paths, LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC,
+    FINALIZED_METRIC, PARA_ID,
 };
 
 /// A file-backed Rust → JS message channel. Rust appends newline-terminated
@@ -162,6 +163,17 @@ pub async fn run_browser_test(script: &str, env_vars: &[(&str, &str)]) -> Result
 ///
 /// Uses `tokio::process::Command` for async compatibility.
 pub async fn run_js_test(script: &str, env_vars: &[(&str, &str)]) -> Result<(), String> {
+    run_js_test_with_stdout(script, env_vars).await.map(|_| ())
+}
+
+/// Like [`run_js_test`] but returns the captured stdout + stderr on success
+/// as a single string (stderr appended). Used by the bench test to extract
+/// timestamps from emitted smoldot logs, which `helpers.js` routes to stderr
+/// via `console.error`.
+pub async fn run_js_test_with_stdout(
+    script: &str,
+    env_vars: &[(&str, &str)],
+) -> Result<String, String> {
     let e2e_dir = project_root().join("e2e-tests");
     let script_path = e2e_dir.join(script);
 
@@ -174,14 +186,16 @@ pub async fn run_js_test(script: &str, env_vars: &[(&str, &str)]) -> Result<(), 
 
     let output = cmd.output().await.expect("failed to run node");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
     eprintln!("--- JS stderr ---\n{stderr}");
-    eprintln!("--- JS stdout ---\n{stdout}");
 
     if output.status.success() {
-        Ok(())
+        let mut combined = stdout;
+        combined.push('\n');
+        combined.push_str(&stderr);
+        Ok(combined)
     } else {
         Err(format!(
             "JS test exited with {}\nstdout:\n{}\nstderr:\n{}",
