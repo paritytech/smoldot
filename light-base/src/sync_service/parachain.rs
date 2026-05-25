@@ -1117,28 +1117,31 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
         .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
         .await;
 
-    log!(
-        platform,
-        Info,
-        log_target,
-        "Waiting for relay chain to finalize a block..."
-    );
+    // sync_service withholds the response until the bootstrap mode is committed, so the
+    // initial finalized header is authoritative and safe to use directly.
+    let mut next_finalized_hash = Some(header::hash_from_scale_encoded_header(
+        &subscription.finalized_block_scale_encoded_header,
+    ));
 
     loop {
-        let finalized_hash = loop {
-            match subscription.new_blocks.next().await {
-                Some(runtime_service::Notification::Finalized { hash, .. }) => {
-                    break hash;
-                }
-                Some(_) => continue,
-                None => {
-                    // Subscription died. Re-subscribe.
-                    subscription = relay_chain_sync
-                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
-                        .await;
-                    break header::hash_from_scale_encoded_header(
-                        &subscription.finalized_block_scale_encoded_header,
-                    );
+        let finalized_hash = if let Some(h) = next_finalized_hash.take() {
+            h
+        } else {
+            loop {
+                match subscription.new_blocks.next().await {
+                    Some(runtime_service::Notification::Finalized { hash, .. }) => {
+                        break hash;
+                    }
+                    Some(_) => continue,
+                    None => {
+                        // Subscription died. Re-subscribe.
+                        subscription = relay_chain_sync
+                            .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
+                            .await;
+                        break header::hash_from_scale_encoded_header(
+                            &subscription.finalized_block_scale_encoded_header,
+                        );
+                    }
                 }
             }
         };
