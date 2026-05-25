@@ -412,7 +412,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// - No new warp-sync requests are produced by [`AllSync::desired_requests`].
     /// - In-flight warp-sync requests are removed; their user data is returned to the
     ///   caller (typically abort handles for the outer futures).
-    /// - [`SourceMapping::warp_sync`] is cleared on all sources.
     ///
     /// No-op if called twice; returns an empty vector.
     pub fn cancel_warp_sync(&mut self) -> Vec<TRq> {
