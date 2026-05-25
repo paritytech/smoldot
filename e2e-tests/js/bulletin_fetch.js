@@ -170,9 +170,9 @@ try {
   } catch (_) {}
 }
 
-if (exitCode || process.exitCode) {
-  process.exit(exitCode || 1);
-}
+// Force exit so Node doesn't sit waiting for the smoldot client's underlying
+// WebSocket / TCP handles to drain on their own (takes a few minutes).
+process.exit(exitCode || process.exitCode || 0);
 
 // Retries the transient BlockRequestFailed/Timeout and NoPeers/QueueFull
 // errors smoldot returns while its peer set is warming up. `method` lets us
