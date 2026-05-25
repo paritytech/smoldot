@@ -30,6 +30,11 @@ const MAX_BLOOM_BITS: usize = 1024 * 1024 * 8;
 /// practical configurations while preventing CPU abuse from peers.
 pub(crate) const MAX_NUM_HASHES: u32 = 64;
 
+/// Minimum number of expected items used to size a filter built from a local topic list.
+///
+/// Yields ~160 bytes at FPR=0.01.
+const MIN_EXPECTED_ITEMS: usize = 128;
+
 /// Wraps `fastbloom::DefaultHasher` to force `write_usize`/`write_isize` to always emit
 /// 8-byte LE values, ensuring identical bloom filter bits on wasm32 and 64-bit native targets.
 #[derive(Clone, Debug)]
@@ -154,7 +159,7 @@ impl AffinityFilter {
         false_positive_rate: f64,
     ) -> Self {
         let topics: Vec<&[u8; 32]> = topics.collect();
-        let count = topics.len().max(1);
+        let count = topics.len().max(MIN_EXPECTED_ITEMS);
         let mut filter = Self::new(seed, false_positive_rate, count);
         for topic in topics {
             filter.insert(topic);
@@ -427,6 +432,43 @@ mod tests {
         bytes.extend_from_slice(crate::util::encode_scale_compact_usize(2).as_ref());
         bytes.extend_from_slice(&0u64.to_le_bytes());
         assert!(AffinityFilter::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn from_topics_applies_minimum_floor() {
+        let reference = AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, MIN_EXPECTED_ITEMS)
+            .encode_to_vec();
+
+        for topic_count in [0usize, 1, MIN_EXPECTED_ITEMS / 2, MIN_EXPECTED_ITEMS] {
+            let topics: Vec<[u8; 32]> = (0..topic_count)
+                .map(|i| {
+                    let mut key = [0u8; 32];
+                    key[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                    key
+                })
+                .collect();
+            let filter =
+                AffinityFilter::from_topics(topics.iter(), TEST_SEED, BLOOM_FALSE_POS_RATE);
+            assert_eq!(
+                filter.encode_to_vec().len(),
+                reference.len(),
+                "encoded size for {topic_count} topics must match the floor-sized filter",
+            );
+        }
+
+        let above_floor = MIN_EXPECTED_ITEMS * 4;
+        let topics: Vec<[u8; 32]> = (0..above_floor)
+            .map(|i| {
+                let mut key = [0u8; 32];
+                key[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                key
+            })
+            .collect();
+        let filter = AffinityFilter::from_topics(topics.iter(), TEST_SEED, BLOOM_FALSE_POS_RATE);
+        assert!(
+            filter.encode_to_vec().len() > reference.len(),
+            "filter sized above the floor must produce a larger encoding",
+        );
     }
 
     #[test]
