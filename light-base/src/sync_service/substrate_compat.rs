@@ -848,9 +848,6 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             gap,
                         );
                     } else {
-                        task.mode = ModeState::Ready;
-                        task.mode_decision_deadline =
-                            future::Either::Right(future::pending()).fuse();
                         log!(
                             &task.platform,
                             Debug,
@@ -860,16 +857,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             peer_finalized = finalized_block_height,
                             gap,
                         );
-                        cancel_warp_sync_and_abort(&mut task);
-                        // In AllForksOnly mode there is no `WarpSyncFinished` to trigger
-                        // the first GrandPa state announce. Without that announce, peers
-                        // don't know our set_id / round / finalized height and won't gossip
-                        // commit messages to us, which then prevents the first finality
-                        // verify from ever happening (chicken-and-egg). Trigger the announce
-                        // now so peers include us in the gossip mesh.
-                        task.network_up_to_date_finalized = false;
-                        task.network_up_to_date_best = false;
-                        drain_pending_subscriptions(&mut task);
+                        commit_all_forks_only(&mut task);
                     }
                 }
             }
@@ -1482,19 +1470,13 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             WakeUpReason::ModeDecisionDeadline => {
                 task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();
                 if matches!(task.mode, ModeState::Deciding) {
-                    task.mode = ModeState::Ready;
                     log!(
                         &task.platform,
                         Debug,
                         &task.log_target,
                         "mode-decision; committed=AllForksOnly (timeout, no peers)",
                     );
-                    cancel_warp_sync_and_abort(&mut task);
-                    // No peers connected, but the announce updates our local-state
-                    // so future gossip-opens advertise it.
-                    task.network_up_to_date_finalized = false;
-                    task.network_up_to_date_best = false;
-                    drain_pending_subscriptions(&mut task);
+                    commit_all_forks_only(&mut task);
                 }
             }
         }
@@ -1659,9 +1641,15 @@ fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
     }
 }
 
-/// Drops the warp-sync state machine in [`Task::sync`] and aborts the outer futures of
-/// any in-flight warp-sync requests. Called on the AllForksOnly mode commit.
-fn cancel_warp_sync_and_abort<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
+/// Commits to AllForksOnly bootstrap mode. Drops the warp-sync state machine, aborts the
+/// outer futures of any in-flight warp-sync requests, flips the network-state flags so the
+/// first GrandPa state announce fires (peers won't gossip commit messages to us otherwise),
+/// and drains queued `SubscribeAll` requests. The caller is expected to log the mode-commit
+/// reason; this helper only logs the warp-cancel count.
+fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
+    task.mode = ModeState::Ready;
+    task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();
+
     let aborted = task
         .sync
         .as_mut()
@@ -1680,4 +1668,9 @@ fn cancel_warp_sync_and_abort<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
             in_flight_aborted = n,
         );
     }
+
+    task.network_up_to_date_finalized = false;
+    task.network_up_to_date_best = false;
+
+    drain_pending_subscriptions(task);
 }
