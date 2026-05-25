@@ -2504,7 +2504,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     ?error,
                 );
-                let ban_duration = Duration::from_secs(15);
+                let ban_duration = Duration::from_secs(3);
 
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
