@@ -29,11 +29,11 @@ use crate::bulletin;
 
 /// GCS URLs for the snapshots produced by `bulletin_generate_snapshot`.
 pub const DB_SNAPSHOT_RELAY: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/relay-2026-05-04.tgz";
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/relay-2026-05-25.tgz";
 pub const DB_SNAPSHOT_BULLETIN_FULL: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-full-2026-05-04.tgz";
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-full-2026-05-25.tgz";
 pub const DB_SNAPSHOT_BULLETIN_PARTIAL: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-partial-2026-05-04.tgz";
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-partial-2026-05-25.tgz";
 
 /// Bundle of snapshot URLs passed to [`spawn_with_snapshots`]. Borrowed —
 /// the caller owns the strings.
