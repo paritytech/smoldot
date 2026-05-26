@@ -378,7 +378,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 // must be cleared.
                 task.all_notifications.clear();
 
-                if matches!(task.mode, ModeState::AwaitingWarp | ModeState::Deciding) {
+                if matches!(
+                    task.mode,
+                    ModeState::AwaitingWarp { .. } | ModeState::Deciding
+                ) {
                     task.mode = ModeState::Ready;
                     task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();
                     log!(
@@ -441,14 +444,20 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                                 }
                             )
                         );
+                        // `BlockNumberNotIncrementing` means a finality proof overtook the
+                        // fragment mid-flight; the peer isn't at fault.
+                        let peer_at_fault =
+                            !matches!(err, all::VerifyFragmentError::BlockNumberNotIncrementing);
                         if let Some(sender_if_still_connected) = sender_if_still_connected {
-                            task.network_service
-                                .ban_and_disconnect(
-                                    sender_if_still_connected,
-                                    network_service::BanSeverity::High,
-                                    "bad-warp-sync-fragment",
-                                )
-                                .await;
+                            if peer_at_fault {
+                                task.network_service
+                                    .ban_and_disconnect(
+                                        sender_if_still_connected,
+                                        network_service::BanSeverity::High,
+                                        "bad-warp-sync-fragment",
+                                    )
+                                    .await;
+                            }
                         }
                     }
                 }
@@ -587,7 +596,24 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             pruned_blocks,
                         });
 
+                        let new_finalized = sync.finalized_block_number();
                         task.sync = Some(sync);
+
+                        // Finality reached the warp target; otherwise the next fragment fails
+                        // `BlockNumberNotIncrementing` and the node stalls in `AwaitingWarp`.
+                        if let ModeState::AwaitingWarp { target_finalized } = task.mode {
+                            if new_finalized >= target_finalized {
+                                log!(
+                                    &task.platform,
+                                    Debug,
+                                    &task.log_target,
+                                    "mode-decision; transition=Ready (CaughtUpViaFinality)",
+                                    local_finalized = new_finalized,
+                                    warp_target = target_finalized,
+                                );
+                                commit_all_forks_only(&mut task);
+                            }
+                        }
                     }
 
                     (
@@ -831,7 +857,9 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         .finalized_block_number();
                     let gap = finalized_block_height.saturating_sub(local_finalized);
                     if gap >= MODE_DECISION_WARP_GAP_THRESHOLD {
-                        task.mode = ModeState::AwaitingWarp;
+                        task.mode = ModeState::AwaitingWarp {
+                            target_finalized: finalized_block_height,
+                        };
                         task.mode_decision_deadline =
                             future::Either::Right(future::pending()).fuse();
                         log!(
@@ -1482,8 +1510,9 @@ enum ModeState {
     /// No GrandpaNeighborPacket received yet and the deadline has not fired.
     /// `SubscribeAll` requests are queued.
     Deciding,
-    /// Committed to WarpAhead; awaiting `WarpSyncFinished` before responding to subscribers.
-    AwaitingWarp,
+    /// Committed to WarpAhead; awaiting `WarpSyncFinished` or finality catching up to
+    /// `target_finalized` (the peer-claimed height that triggered the decision).
+    AwaitingWarp { target_finalized: u64 },
     /// First finalized block is authoritative; queued subscribers are drained.
     Ready,
 }
@@ -1516,7 +1545,7 @@ struct Task<TPlat: PlatformRef> {
     mode_decision_deadline:
         future::Fuse<future::Either<Pin<Box<TPlat::Delay>>, future::Pending<()>>>,
 
-    /// `SubscribeAll` requests queued during [`ModeState::Deciding`] / [`ModeState::AwaitingWarp`].
+    /// `SubscribeAll` requests queued during [`ModeState::Deciding`] / `AwaitingWarp`.
     pending_subscriptions: VecDeque<PendingSubscribeAll>,
 
     /// If `Some`, contains the runtime of the current finalized block.
