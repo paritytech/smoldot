@@ -2511,7 +2511,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     ?error,
                 );
-                let ban_duration = Duration::from_secs(3);
+                // Must exceed polkadot-sdk's 5s notification-reject ban; otherwise we retry
+                // into a still-active remote ban. 0.5s margin covers network delay and
+                // clock skew between the two sides' ban timers.
+                let ban_duration = Duration::from_millis(5500);
 
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
