@@ -465,11 +465,11 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                     when_substreams_rw_ready.push({
                         let platform = platform.clone();
                         let write_ready = coordinator_write_ready.clone();
+                        let write_listener = write_ready.listen();
                         Box::pin(async move {
                             // Wait for either platform data or a coordinator write
                             // notification (e.g. after AcceptInNotifications queues a
                             // handshake response that needs to be flushed).
-                            let write_listener = write_ready.listen();
                             platform
                                 .wait_read_write_again(socket.as_mut())
                                 .or(write_listener)
