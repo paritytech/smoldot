@@ -4,7 +4,7 @@
 
 ### Added
 
-- Implement the `ext_trie_blake2_256_verify_proof_version_1` and `ext_trie_blake2_256_verify_proof_version_2` host functions. The verifier handles Substrate's compact proof format (as produced by `sp_trie::generate_trie_proof`): path children are replaced by an empty inline placeholder and the target leaf's value is reconstructed from the caller-supplied expected value (hashed for state version V1 values of 32 bytes or more).
+- Implement the `ext_trie_blake2_256_verify_proof_version_1` and `ext_trie_blake2_256_verify_proof_version_2` host functions. The verifier handles Substrate's compact proof format (as produced by `sp_trie::generate_trie_proof`): path children are replaced by an empty inline placeholder and the target leaf's value is reconstructed from the caller-supplied expected value (hashed for state version V1 values of 33 bytes or more, matching `sp_trie`'s threshold).
 
 ## 3.1.4 - 2026-05-29
 

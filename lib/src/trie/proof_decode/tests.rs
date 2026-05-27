@@ -3074,3 +3074,68 @@ fn verify_compact_proof_rejects_truncated_proof() {
         trie::TrieEntryVersion::V1,
     ));
 }
+
+#[test]
+fn verify_compact_proof_rejects_extra_trailing_entry() {
+    // Append a third (empty) proof entry that the verifier never consumes. Without the
+    // post-verification "iterator empty" check, an attacker could pad a valid proof with
+    // unrelated nodes and still pass.
+    let mut padded = COMPACT_PROOF.to_vec();
+    // The Vec length is SCALE-compact-encoded in the first byte: 0x08 == 2 entries; bump to
+    // 0x0c == 3 entries and append one zero-length entry (0x00).
+    assert_eq!(padded[0], 0x08, "expected 2-entry proof prefix");
+    padded[0] = 0x0c;
+    padded.push(0x00);
+    assert!(!super::verify_compact_trie_proof(
+        &padded,
+        &COMPACT_PROOF_ROOT,
+        COMPACT_PROOF_KEY,
+        COMPACT_PROOF_VALUE,
+        trie::TrieEntryVersion::V1,
+    ));
+}
+
+// Threshold tests for `inject_compact_value`: `sp_trie` hashes V1 values of length >= 33,
+// inlines anything shorter. The 32-byte case is the regression boundary — an earlier version
+// hashed at >= 32 and would have produced the wrong reconstructed leaf for sub-33-byte values.
+
+#[test]
+fn inject_compact_value_v0_never_hashes() {
+    // V0 stores all values inline regardless of length.
+    let value = vec![0xabu8; 64];
+    match super::inject_compact_value(&value, trie::TrieEntryVersion::V0) {
+        super::CompactStorageValueOwned::Unhashed(v) => assert_eq!(v, value),
+        _ => panic!("expected Unhashed for V0"),
+    }
+}
+
+#[test]
+fn inject_compact_value_v1_inlines_31_bytes() {
+    let value = vec![0xaau8; 31];
+    match super::inject_compact_value(&value, trie::TrieEntryVersion::V1) {
+        super::CompactStorageValueOwned::Unhashed(v) => assert_eq!(v, value),
+        _ => panic!("expected Unhashed for V1 / 31 bytes"),
+    }
+}
+
+#[test]
+fn inject_compact_value_v1_inlines_32_bytes() {
+    // Threshold boundary: 32 bytes is still inline under sp_trie's `>= 33` rule.
+    let value = vec![0xbbu8; 32];
+    match super::inject_compact_value(&value, trie::TrieEntryVersion::V1) {
+        super::CompactStorageValueOwned::Unhashed(v) => assert_eq!(v, value),
+        _ => panic!("expected Unhashed for V1 / 32 bytes"),
+    }
+}
+
+#[test]
+fn inject_compact_value_v1_hashes_33_bytes() {
+    // Threshold crossing: 33 bytes is the first hashed-storage-value size under V1.
+    let value = vec![0xccu8; 33];
+    let expected = blake2_rfc::blake2b::blake2b(32, &[], &value);
+    let expected_arr = <[u8; 32]>::try_from(expected.as_bytes()).unwrap();
+    match super::inject_compact_value(&value, trie::TrieEntryVersion::V1) {
+        super::CompactStorageValueOwned::Hashed(h) => assert_eq!(h, expected_arr),
+        _ => panic!("expected Hashed for V1 / 33 bytes"),
+    }
+}
