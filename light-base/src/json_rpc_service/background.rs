@@ -96,6 +96,9 @@ pub(super) struct Config<TPlat: PlatformRef> {
     /// Maximum number of seen statement hashes tracked per subscription for dedup.
     /// `None` if the statement protocol is disabled.
     pub max_seen_statements: Option<NonZero<usize>>,
+
+    /// See [`crate::json_rpc_service::Config::optimistic_state`].
+    pub optimistic_state: Option<crate::json_rpc_service::OptimisticState>,
 }
 
 /// Fields used to process JSON-RPC requests in the background.
@@ -127,6 +130,9 @@ struct Background<TPlat: PlatformRef> {
     randomness: ChaCha20Rng,
 
     statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+
+    /// See [`Config::optimistic_state`].
+    optimistic_state: Option<crate::json_rpc_service::OptimisticState>,
 
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
@@ -251,6 +257,18 @@ struct Background<TPlat: PlatformRef> {
 }
 
 impl<TPlat: PlatformRef> Background<TPlat> {
+    /// Returns the optimistic-bootstrap state while its gate is still closed.
+    ///
+    /// Returns `None` once the gate has opened on the first real relay finalization, or when the
+    /// chain was not added with [`crate::OptimisticParachainBootstrap::Enabled`]. While `Some`,
+    /// `chainHead_v1_call` and transaction submission are rejected, and `chainHead_v1_storage` is
+    /// restricted to [`crate::json_rpc_service::OptimisticState::allowed_storage_prefixes`].
+    fn optimistic_gate(&self) -> Option<&crate::json_rpc_service::OptimisticState> {
+        self.optimistic_state
+            .as_ref()
+            .filter(|s| !s.gate_open.load(core::sync::atomic::Ordering::Acquire))
+    }
+
     /// Marks the statement affinity as stale and schedules the next update.
     /// If no update was ever sent, or the last update was more than the configured
     /// affinity update interval ago, the update fires immediately.
@@ -562,6 +580,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             seed
         }),
         statement_protocol_config: config.statement_protocol_config,
+        optimistic_state: config.optimistic_state,
         next_garbage_collection: Box::pin(config.platform.sleep(Duration::new(0, 0))),
         network_service: config.network_service.clone(),
         sync_service: config.sync_service.clone(),
@@ -2039,6 +2058,25 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         function,
                         call_parameters: methods::HexString(call_parameters),
                     } => {
+                        // Reject during the optimistic-bootstrap window. Runtime calls execute
+                        // arbitrary WASM that can read anything, which the storage allowlist
+                        // cannot constrain.
+                        if me.optimistic_gate().is_some() {
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::ApplicationDefined(
+                                        -32802,
+                                        "chainHead_v1_call rejected during \
+                                         optimistic-parachain-bootstrap window",
+                                    ),
+                                    None,
+                                ))
+                                .await;
+                            continue;
+                        }
+
                         let Some(subscription) = me
                             .chain_head_follow_subscriptions
                             .get_mut(&*follow_subscription)
@@ -2227,6 +2265,46 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         items,
                         child_trie,
                     } => {
+                        // Allowlist gate for the optimistic-bootstrap window. While the gate
+                        // is closed, the call must stay within the configured prefixes or it is
+                        // rejected. For a main-trie query every item key is checked. For a
+                        // child-trie query the child trie's prefixed name
+                        // `:child_storage:default:<child_trie>` is checked, which lets a caller
+                        // allow whole classes of child tries without enumerating individual slot
+                        // keys.
+                        if let Some(s) = me.optimistic_gate() {
+                            let any_disallowed = if let Some(child_trie) = child_trie.as_ref() {
+                                const PREFIX: &[u8] = b":child_storage:default:";
+                                let mut prefixed =
+                                    Vec::with_capacity(PREFIX.len() + child_trie.0.len());
+                                prefixed.extend_from_slice(PREFIX);
+                                prefixed.extend_from_slice(&child_trie.0);
+                                !s.allowed_storage_prefixes
+                                    .iter()
+                                    .any(|prefix| prefixed.starts_with(prefix))
+                            } else {
+                                items.iter().any(|item| {
+                                    !s.allowed_storage_prefixes
+                                        .iter()
+                                        .any(|prefix| item.key.0.starts_with(prefix))
+                                })
+                            };
+                            if any_disallowed {
+                                let _ = me
+                                    .responses_tx
+                                    .send(parse::build_error_response(
+                                        request_id_json,
+                                        parse::ErrorResponse::ApplicationDefined(
+                                            -32802,
+                                            "storage key outside optimistic-bootstrap allowlist",
+                                        ),
+                                        None,
+                                    ))
+                                    .await;
+                                continue;
+                            }
+                        }
+
                         let Some(subscription) = me
                             .chain_head_follow_subscriptions
                             .get_mut(&*follow_subscription)
@@ -2270,26 +2348,29 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             }
                         };
 
-                        if child_trie.is_some() {
-                            // TODO: implement this
+                        // Child-trie queries only support value and hash reads. The descendants
+                        // and merkle-value variants resolve against a trie root that, for a child
+                        // trie, isn't known until its proof arrives.
+                        if child_trie.is_some()
+                            && items.iter().any(|item| {
+                                !matches!(
+                                    item.ty,
+                                    methods::ChainHeadStorageType::Value
+                                        | methods::ChainHeadStorageType::Hash
+                                )
+                            })
+                        {
                             let _ = me
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
                                     parse::ErrorResponse::ServerError(
                                         -32000,
-                                        "Child key storage queries not supported yet",
+                                        "child-trie storage queries only support value and hash reads",
                                     ),
                                     None,
                                 ))
                                 .await;
-                            log!(
-                                &me.platform,
-                                Warn,
-                                &me.log_target,
-                                "chainHead_v1_storage has been called with a non-null childTrie. \
-                                This isn't supported by smoldot yet."
-                            );
                             continue;
                         }
 
@@ -2341,15 +2422,28 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         }
 
                         // Initialize the storage query operation.
-                        let fetch_operation = me.sync_service.clone().storage_query(
-                            block_number,
-                            hash.0,
-                            block_state_trie_root,
-                            storage_operations.into_iter(),
-                            3,
-                            Duration::from_secs(20),
-                            NonZero::<u32>::new(2).unwrap(),
-                        );
+                        let fetch_operation = if let Some(child_trie) = child_trie {
+                            me.sync_service.clone().child_storage_query(
+                                block_number,
+                                hash.0,
+                                block_state_trie_root,
+                                child_trie.0,
+                                storage_operations.into_iter(),
+                                3,
+                                Duration::from_secs(20),
+                                NonZero::<u32>::new(2).unwrap(),
+                            )
+                        } else {
+                            me.sync_service.clone().storage_query(
+                                block_number,
+                                hash.0,
+                                block_state_trie_root,
+                                storage_operations.into_iter(),
+                                3,
+                                Duration::from_secs(20),
+                                NonZero::<u32>::new(2).unwrap(),
+                            )
+                        };
 
                         let operation_id = {
                             let mut operation_id = [0u8; 32];
@@ -2817,6 +2911,26 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 )
                                 .to_json_response(request_id_json),
                             )
+                            .await;
+                    }
+
+                    methods::MethodCall::transaction_v1_broadcast { .. }
+                    | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. }
+                        if me.optimistic_gate().is_some() =>
+                    {
+                        // Reject during the optimistic-bootstrap window. A wallet must not
+                        // sign against state that may be on a relay fork that loses.
+                        let _ = me
+                            .responses_tx
+                            .send(parse::build_error_response(
+                                request_id_json,
+                                parse::ErrorResponse::ApplicationDefined(
+                                    -32802,
+                                    "transaction submission rejected during \
+                                     optimistic-parachain-bootstrap window",
+                                ),
+                                None,
+                            ))
                             .await;
                     }
 

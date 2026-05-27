@@ -60,6 +60,8 @@ fn add_chain(
     statement_store_max_seen_statements: u32,
     statement_store_false_positive_rate: f64,
     statement_store_affinity_update_interval_ms: u32,
+    optimistic_parachain_bootstrap: bool,
+    optimistic_allowed_storage_prefixes_encoded: Box<[u8]>,
 ) -> u32 {
     let mut client_lock = CLIENT.try_lock().unwrap();
 
@@ -138,6 +140,15 @@ fn add_chain(
                         smoldot_light::AddChainConfigJsonRpc::Disabled
                     },
                     potential_relay_chains: potential_relay_chains.into_iter(),
+                    optimistic_parachain_bootstrap: if optimistic_parachain_bootstrap {
+                        smoldot_light::OptimisticParachainBootstrap::Enabled {
+                            allowed_storage_prefixes: decode_prefix_list(
+                                &optimistic_allowed_storage_prefixes_encoded,
+                            ),
+                        }
+                    } else {
+                        smoldot_light::OptimisticParachainBootstrap::Disabled
+                    },
                     statement_protocol_config: NonZero::<usize>::new(
                         usize::try_from(statement_store_max_seen_statements).unwrap_or(0),
                     )
@@ -192,6 +203,40 @@ fn add_chain(
     );
 
     outer_chain_id_u32
+}
+
+/// Decodes the SCALE-like encoding used by the JS bindings to carry an arbitrary list of
+/// byte-prefixes across the wasm boundary: `[u32 LE count]` followed by `count` repetitions of
+/// `[u32 LE length][length bytes]`. Returns an empty `Vec` for an empty input buffer.
+fn decode_prefix_list(encoded: &[u8]) -> Vec<Vec<u8>> {
+    if encoded.is_empty() {
+        return Vec::new();
+    }
+    let mut cursor = 0;
+    let count_bytes: [u8; 4] = match encoded.get(cursor..cursor + 4).and_then(|s| s.try_into().ok())
+    {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+    let count = u32::from_le_bytes(count_bytes) as usize;
+    cursor += 4;
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let Some(len_bytes) = encoded
+            .get(cursor..cursor + 4)
+            .and_then(|s| <[u8; 4]>::try_from(s).ok())
+        else {
+            return out;
+        };
+        let len = u32::from_le_bytes(len_bytes) as usize;
+        cursor += 4;
+        let Some(bytes) = encoded.get(cursor..cursor + len) else {
+            return out;
+        };
+        out.push(bytes.to_vec());
+        cursor += len;
+    }
+    out
 }
 
 fn remove_chain(chain_id: u32) {

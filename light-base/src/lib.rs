@@ -146,6 +146,37 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
 
     /// If `Some`, enables the statement store networking protocol.
     pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+
+    /// Configures optimistic parachain bootstrap. Ignored for relay chains. Defaults to
+    /// [`OptimisticParachainBootstrap::Disabled`].
+    ///
+    /// See <https://github.com/paritytech/smoldot/issues/3237>.
+    pub optimistic_parachain_bootstrap: OptimisticParachainBootstrap,
+}
+
+/// See [`AddChainConfig::optimistic_parachain_bootstrap`].
+#[derive(Debug, Clone)]
+pub enum OptimisticParachainBootstrap {
+    /// Default. The parachain awaits the next `Notification::Finalized` on its relay chain
+    /// before deriving the initial parachain head.
+    Disabled,
+
+    /// The parachain's initial finalized head is derived from the relay chain's current best
+    /// block instead of waiting for the next finalized relay block. This removes the wait for
+    /// the next relay finalization from cold start, at the cost of the derived parahead being
+    /// unverified until a real relay finalization confirms it.
+    ///
+    /// Until the first real `Notification::Finalized` arrives, the JSON-RPC interface is gated
+    /// to bound the blast radius. `chainHead_v1_storage` is restricted to `allowed_storage_prefixes`
+    /// while `chainHead_v1_call` and transaction submission are rejected outright, all with error
+    /// `-32802`. The gates lift on the first real relay finalization.
+    Enabled {
+        /// Allowlist of storage-key prefixes (raw bytes, not hex) readable via
+        /// `chainHead_v1_storage` during the optimistic window. An empty list disallows all
+        /// storage reads. A child-trie query matches against the prefixed child trie name
+        /// `:child_storage:default:<child_trie>` rather than the keys within it.
+        allowed_storage_prefixes: Vec<Vec<u8>>,
+    },
 }
 
 /// See [`AddChainConfig::json_rpc`].
@@ -291,6 +322,18 @@ struct ChainServices<TPlat: platform::PlatformRef> {
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
     bitswap_service: Arc<bitswap_service::BitswapService>,
+    /// `Some` if the chain was added with
+    /// [`OptimisticParachainBootstrap::Enabled`]. The flag inside the `Arc` is
+    /// flipped to `true` by the parachain sync service when the first real
+    /// `Notification::Finalized` arrives, at which point the JSON-RPC gates
+    /// lift.
+    optimistic_state: Option<OptimisticState>,
+}
+
+#[derive(Clone)]
+struct OptimisticState {
+    gate_open: Arc<core::sync::atomic::AtomicBool>,
+    allowed_storage_prefixes: Arc<Vec<Vec<u8>>>,
 }
 
 impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
@@ -301,6 +344,7 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
             runtime_service: self.runtime_service.clone(),
             transactions_service: self.transactions_service.clone(),
             bitswap_service: self.bitswap_service.clone(),
+            optimistic_state: self.optimistic_state.clone(),
         }
     }
 }
@@ -705,10 +749,20 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         self.platform.client_version()
                     );
 
+                    // `None` disables optimistic bootstrap. `Some` enables it, the contained list
+                    // being the storage allowlist applied while the gate is closed.
+                    let optimistic_allowed_storage_prefixes =
+                        match &config.optimistic_parachain_bootstrap {
+                            OptimisticParachainBootstrap::Disabled => None,
+                            OptimisticParachainBootstrap::Enabled {
+                                allowed_storage_prefixes,
+                            } => Some(allowed_storage_prefixes.clone()),
+                        };
                     let config = match (&relay_chain, &chain_information) {
                         (Some((relay_chain, para_id, _)), _) => StartServicesChainTy::Parachain {
                             relay_chain,
                             para_id: *para_id,
+                            optimistic_allowed_storage_prefixes,
                         },
                         (None, Some(chain_information)) => {
                             StartServicesChainTy::SubstrateCompatible { chain_information }
@@ -946,6 +1000,13 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 genesis_block_hash,
                 statement_protocol_config,
                 max_seen_statements,
+                optimistic_state: services
+                    .optimistic_state
+                    .as_ref()
+                    .map(|s| json_rpc_service::OptimisticState {
+                        gate_open: s.gate_open.clone(),
+                        allowed_storage_prefixes: s.allowed_storage_prefixes.clone(),
+                    }),
             });
 
             Some(frontend)
@@ -1117,6 +1178,7 @@ enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
     Parachain {
         relay_chain: &'a ChainServices<TPlat>,
         para_id: u32,
+        optimistic_allowed_storage_prefixes: Option<Vec<Vec<u8>>>,
     },
 }
 
@@ -1181,12 +1243,23 @@ fn start_services<TPlat: platform::PlatformRef>(
         statement_protocol_config,
     });
 
+    let mut optimistic_state: Option<OptimisticState> = None;
+
     let (sync_service, runtime_service) = match config {
         StartServicesChainTy::Parachain {
             relay_chain,
             para_id,
+            optimistic_allowed_storage_prefixes,
         } => {
             // Chain is a parachain.
+
+            // Optimistic state is created here when the embedder opted in. The Arc is shared
+            // between sync_service (which flips the gate on first real finalization) and
+            // json_rpc_service (which reads it to decide whether to gate handlers).
+            optimistic_state = optimistic_allowed_storage_prefixes.map(|prefixes| OptimisticState {
+                gate_open: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+                allowed_storage_prefixes: Arc::new(prefixes),
+            });
 
             // The sync service is leveraging the network service, downloads block headers,
             // and verifies them, to determine what are the best and finalized blocks of the
@@ -1202,6 +1275,9 @@ fn start_services<TPlat: platform::PlatformRef>(
                             para_id,
                             relay_chain_sync: relay_chain.runtime_service.clone(),
                         },
+                        optimistic_gate_open: optimistic_state
+                            .as_ref()
+                            .map(|s| s.gate_open.clone()),
                     },
                 ),
             }));
@@ -1294,5 +1370,6 @@ fn start_services<TPlat: platform::PlatformRef>(
         sync_service,
         transactions_service,
         bitswap_service,
+        optimistic_state,
     }
 }

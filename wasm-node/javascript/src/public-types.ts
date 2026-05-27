@@ -474,4 +474,26 @@ export interface AddChainOptions {
         falsePositiveRate?: number,
         affinityUpdateIntervalMs?: number,
     }
+
+    /**
+     * If set, enables optimistic parachain bootstrap. The parachain's initial finalized head
+     * is derived from the relay chain's current best block instead of waiting for the next
+     * finalized relay block. This removes the wait for the next relay finalization from cold
+     * start, at the cost of the derived parahead being unverified until a real relay
+     * finalization confirms it.
+     *
+     * Until the first real relay finalization arrives, the JSON-RPC interface is gated to bound
+     * the blast radius. `chainHead_v1_storage` is restricted to `allowedStoragePrefixes` while
+     * `chainHead_v1_call` and transaction submission are rejected outright, all with error
+     * `-32802`. The gates lift on the first real relay finalization. Ignored for relay chains.
+     */
+    optimisticParachainBootstrap?: {
+        /**
+         * Allowlist of storage-key prefixes (raw bytes, not hex) readable via
+         * `chainHead_v1_storage` during the optimistic window. An empty array disallows all
+         * storage reads. A child-trie query matches against the prefixed child trie name
+         * `:child_storage:default:<childTrie>` rather than the keys within it.
+         */
+        allowedStoragePrefixes: Uint8Array[],
+    }
 }

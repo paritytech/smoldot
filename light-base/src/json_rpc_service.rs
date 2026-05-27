@@ -51,6 +51,7 @@ use alloc::{
     format,
     string::{String, ToString as _},
     sync::Arc,
+    vec::Vec,
 };
 use core::{num::NonZero, pin::Pin};
 use futures_lite::StreamExt as _;
@@ -126,6 +127,21 @@ pub struct Config<TPlat: PlatformRef> {
     /// Maximum number of seen statement hashes tracked per subscription for dedup.
     /// `None` if the statement protocol is disabled.
     pub max_seen_statements: Option<NonZero<usize>>,
+
+    /// `Some` iff the chain was added with
+    /// [`crate::OptimisticParachainBootstrap::Enabled`]. While the contained `gate_open` is
+    /// still `false`, `chainHead_v1_storage` is gated by `allowed_storage_prefixes` and
+    /// `chainHead_v1_call` / `transaction_v1_broadcast` / `transactionWatch_v1_submitAndWatch`
+    /// are rejected with `-32802`. The gate flips to `true` when the parachain sync service
+    /// applies its first real `Notification::Finalized` from the relay chain.
+    pub optimistic_state: Option<OptimisticState>,
+}
+
+/// See [`Config::optimistic_state`].
+#[derive(Clone)]
+pub struct OptimisticState {
+    pub gate_open: Arc<core::sync::atomic::AtomicBool>,
+    pub allowed_storage_prefixes: Arc<Vec<Vec<u8>>>,
 }
 
 /// Creates a new JSON-RPC service with the given configuration.
@@ -167,6 +183,7 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
                 genesis_block_hash: config.genesis_block_hash,
                 statement_protocol_config: config.statement_protocol_config,
                 max_seen_statements: config.max_seen_statements,
+                optimistic_state: config.optimistic_state,
             },
             requests_rx,
             responses_tx,

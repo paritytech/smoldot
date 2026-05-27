@@ -45,9 +45,14 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     block_number_bytes: usize,
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
     parachain_id: u32,
+    optimistic_gate_open: Option<Arc<core::sync::atomic::AtomicBool>>,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 ) {
+    // A closed gate (or no gate at all once optimistic bootstrap is off) is what distinguishes
+    // an optimistic bootstrap from the default behaviour.
+    let optimistic_bootstrap = optimistic_gate_open.is_some();
+
     // Phase 1: Fetch the current finalized parachain head from the relay chain.
     let effective_chain_info = fetch_parachain_head_from_relay(
         &log_target,
@@ -55,6 +60,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         &relay_chain_sync,
         parachain_id,
         block_number_bytes,
+        optimistic_bootstrap,
     )
     .await;
 
@@ -171,6 +177,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         known_finalized_runtime: Some(finalized_runtime),
         pending_requests: stream::FuturesUnordered::new(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
+        optimistic_gate_open,
         log_target,
         from_network_service: None,
         network_service,
@@ -963,6 +970,20 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     hash = HashDisplay(&hash),
                 );
 
+                // First real `Notification::Finalized` from paraheads. Lift the optimistic
+                // window gate so downstream JSON-RPC handlers stop rejecting gated methods.
+                if let Some(gate) = task.optimistic_gate_open.as_ref()
+                    && !gate.load(core::sync::atomic::Ordering::Acquire)
+                {
+                    gate.store(true, core::sync::atomic::Ordering::Release);
+                    log!(
+                        &task.platform,
+                        Info,
+                        &task.log_target,
+                        "optimistic-window-closed, gating lifted on first real finalization"
+                    );
+                }
+
                 let sync = task.sync.as_mut().unwrap();
                 match sync.set_finalized_block(&hash) {
                     Ok(result) => {
@@ -1081,6 +1102,13 @@ struct Task<TPlat: PlatformRef> {
     pending_requests: stream::FuturesUnordered<
         future::BoxFuture<'static, (all::RequestId, Result<RequestOutcome, future::Aborted>)>,
     >,
+
+    /// `Some` when the chain was added with optimistic-parachain-bootstrap enabled. The flag
+    /// inside the `Arc` is `false` while the parachain is still bootstrapped against the relay's
+    /// best block, and flipped to `true` when the first real `Notification::Finalized` from
+    /// paraheads is applied. Downstream consumers (JSON-RPC handlers) read this to decide
+    /// whether to gate methods.
+    optimistic_gate_open: Option<Arc<core::sync::atomic::AtomicBool>>,
 }
 
 enum RequestOutcome {
@@ -1105,40 +1133,82 @@ impl<TPlat: PlatformRef> Task<TPlat> {
     }
 }
 
-// Fetch the included parachain head from a finalized relay chain block.
+// Fetch the included parachain head from a relay chain block.
+//
+// When `optimistic_bootstrap` is `false` (the default), awaits the next
+// `Notification::Finalized` on the relay chain and derives the parahead from that finalized
+// block. When `true`, the first iteration instead uses the relay's current best block from the
+// initial subscription state, which is typically the warp-sync target on cold start. If the
+// runtime call against the optimistic block fails (block evicted, runtime error), the loop
+// falls back to the standard wait-for-finalized path. See
+// [`crate::AddChainConfig::optimistic_parachain_bootstrap`].
 async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
     relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
     para_id: u32,
     block_number_bytes: usize,
+    optimistic_bootstrap: bool,
 ) -> chain::chain_information::ValidChainInformation {
     let mut subscription = relay_chain_sync
         .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
         .await;
 
-    log!(
-        platform,
-        Info,
-        log_target,
-        "Waiting for relay chain to finalize a block..."
-    );
+    // If optimistic, pick the relay's current best block from the initial subscription state
+    // to use on the first iteration of the outer loop, bypassing the wait for the next
+    // `Notification::Finalized`. Falls back to the subscription's finalized block when no
+    // non-finalized blocks are tracked yet (typical on cold start: best == finalized ==
+    // warp-sync target).
+    let mut optimistic_hash: Option<[u8; 32]> = if optimistic_bootstrap {
+        let best = subscription
+            .non_finalized_blocks_ancestry_order
+            .iter()
+            .find(|b| b.is_new_best)
+            .map(|b| header::hash_from_scale_encoded_header(&b.scale_encoded_header));
+        Some(best.unwrap_or_else(|| {
+            header::hash_from_scale_encoded_header(
+                &subscription.finalized_block_scale_encoded_header,
+            )
+        }))
+    } else {
+        None
+    };
+
+    if optimistic_hash.is_some() {
+        log!(
+            platform,
+            Info,
+            log_target,
+            "Bootstrapping parachain from relay's current best block (optimistic)..."
+        );
+    } else {
+        log!(
+            platform,
+            Info,
+            log_target,
+            "Waiting for relay chain to finalize a block..."
+        );
+    }
 
     loop {
-        let finalized_hash = loop {
-            match subscription.new_blocks.next().await {
-                Some(runtime_service::Notification::Finalized { hash, .. }) => {
-                    break hash;
-                }
-                Some(_) => continue,
-                None => {
-                    // Subscription died. Re-subscribe.
-                    subscription = relay_chain_sync
-                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
-                        .await;
-                    break header::hash_from_scale_encoded_header(
-                        &subscription.finalized_block_scale_encoded_header,
-                    );
+        let source_hash = if let Some(h) = optimistic_hash.take() {
+            h
+        } else {
+            loop {
+                match subscription.new_blocks.next().await {
+                    Some(runtime_service::Notification::Finalized { hash, .. }) => {
+                        break hash;
+                    }
+                    Some(_) => continue,
+                    None => {
+                        // Subscription died. Re-subscribe.
+                        subscription = relay_chain_sync
+                            .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
+                            .await;
+                        break header::hash_from_scale_encoded_header(
+                            &subscription.finalized_block_scale_encoded_header,
+                        );
+                    }
                 }
             }
         };
@@ -1149,12 +1219,12 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
             log_target,
             format!(
                 "Trying to fetch parachain head from relay block {}",
-                HashDisplay(&finalized_hash)
+                HashDisplay(&source_hash)
             )
         );
 
         let pinned = relay_chain_sync
-            .pin_pinned_block_runtime(subscription.new_blocks.id(), finalized_hash)
+            .pin_pinned_block_runtime(subscription.new_blocks.id(), source_hash)
             .await;
         let (pinned_runtime, block_state_trie_root, block_number) = match pinned {
             Ok(v) => v,
@@ -1164,7 +1234,7 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
         let call_result = relay_chain_sync
             .runtime_call(
                 pinned_runtime,
-                finalized_hash,
+                source_hash,
                 block_number,
                 block_state_trie_root,
                 String::from(para::PERSISTED_VALIDATION_FUNCTION_NAME),

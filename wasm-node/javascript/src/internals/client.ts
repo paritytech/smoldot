@@ -540,6 +540,23 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             if (options.databaseContent !== undefined && typeof options.databaseContent !== 'string')
                 throw new AddChainError("`databaseContent` is not a string");
 
+            // Validate the optimistic-parachain-bootstrap shape. Its presence means enabled.
+            const optimisticParachainBootstrap = options.optimisticParachainBootstrap;
+            if (optimisticParachainBootstrap !== undefined) {
+                if (!Array.isArray(optimisticParachainBootstrap.allowedStoragePrefixes)) {
+                    throw new AddChainError(
+                        "`optimisticParachainBootstrap.allowedStoragePrefixes` must be an array"
+                    );
+                }
+                for (const prefix of optimisticParachainBootstrap.allowedStoragePrefixes) {
+                    if (!(prefix instanceof Uint8Array)) {
+                        throw new AddChainError(
+                            "`optimisticParachainBootstrap.allowedStoragePrefixes` entries must be Uint8Array"
+                        );
+                    }
+                }
+            }
+
             const promise = new Promise<{ success: true, chainId: number } | { success: false, error: string }>((resolve) => state.addChainIdAllocations.push(resolve));
 
             state.instance.instance.addChain(
@@ -551,7 +568,8 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 jsonRpcMaxSubscriptions,
                 statementStoreMaxSeenStatements,
                 statementStoreFalsePositiveRate,
-                statementStoreAffinityUpdateIntervalMs
+                statementStoreAffinityUpdateIntervalMs,
+                optimisticParachainBootstrap
             );
 
             const outcome = await promise;

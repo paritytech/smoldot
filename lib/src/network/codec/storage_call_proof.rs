@@ -168,16 +168,26 @@ pub fn build_child_storage_proof_request<'a>(
         impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + 'a,
     >,
 ) -> impl Iterator<Item = impl AsRef<[u8]>> {
+    // The remote expects the child storage key in field 3 to be the full prefixed key
+    // (`:child_storage:default:<child_trie>`). It strips the prefix via
+    // `ChildType::from_prefixed_key` and rejects a bare child trie name with
+    // `InvalidChildStorageKey`. `ChildStorageProofRequestConfig::child_trie` is the bare name,
+    // so the prefix is prepended here.
+    const PREFIX: &[u8] = b":child_storage:default:";
+    let mut prefixed_child_trie = Vec::with_capacity(PREFIX.len() + config.child_trie.as_ref().len());
+    prefixed_child_trie.extend_from_slice(PREFIX);
+    prefixed_child_trie.extend_from_slice(config.child_trie.as_ref());
+
     // Message format for RemoteReadChildRequest (tag 4 in Request oneof):
     // - Field 2: block hash
-    // - Field 3: child storage key (child trie name)
+    // - Field 3: child storage key (prefixed child trie key)
     // - Field 6: keys to fetch
     protobuf::message_tag_encode(
         4,
         protobuf::bytes_tag_encode(2, config.block_hash)
             .map(either::Left)
             .chain(
-                protobuf::bytes_tag_encode(3, config.child_trie)
+                protobuf::bytes_tag_encode(3, prefixed_child_trie)
                     .map(either::Left)
                     .map(either::Right),
             )
