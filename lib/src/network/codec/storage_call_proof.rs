@@ -174,7 +174,8 @@ pub fn build_child_storage_proof_request<'a>(
     // `InvalidChildStorageKey`. `ChildStorageProofRequestConfig::child_trie` is the bare name,
     // so the prefix is prepended here.
     const PREFIX: &[u8] = b":child_storage:default:";
-    let mut prefixed_child_trie = Vec::with_capacity(PREFIX.len() + config.child_trie.as_ref().len());
+    let mut prefixed_child_trie =
+        Vec::with_capacity(PREFIX.len() + config.child_trie.as_ref().len());
     prefixed_child_trie.extend_from_slice(PREFIX);
     prefixed_child_trie.extend_from_slice(config.child_trie.as_ref());
 

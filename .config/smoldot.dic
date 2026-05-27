@@ -1,4 +1,4 @@
-153
+155
 ABI
 ACK
 API
@@ -68,6 +68,7 @@ Westend
 Yamux
 aborter
 allocator
+allowlist/S
 amongst
 authorable
 backend/S
@@ -120,6 +121,7 @@ noncomprehending
 opcode
 orthogonally
 parachain/S
+parahead/S
 parathread/S
 parsers
 pluggable

@@ -213,7 +213,9 @@ fn decode_prefix_list(encoded: &[u8]) -> Vec<Vec<u8>> {
         return Vec::new();
     }
     let mut cursor = 0;
-    let count_bytes: [u8; 4] = match encoded.get(cursor..cursor + 4).and_then(|s| s.try_into().ok())
+    let count_bytes: [u8; 4] = match encoded
+        .get(cursor..cursor + 4)
+        .and_then(|s| s.try_into().ok())
     {
         Some(b) => b,
         None => return Vec::new(),

@@ -112,7 +112,7 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
     /// `Some` enables optimistic parachain bootstrap. See
     /// [`crate::AddChainConfig::optimistic_parachain_bootstrap`]. The contained `AtomicBool`
     /// is flipped from `false` to `true` by the parachain sync service when it processes its
-    /// first real `Notification::Finalized` from the relay chain, signalling that downstream
+    /// first real `Notification::Finalized` from the relay chain, signaling that downstream
     /// consumers can lift any optimistic-window restrictions.
     pub optimistic_gate_open: Option<Arc<core::sync::atomic::AtomicBool>>,
 }

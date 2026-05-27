@@ -1000,13 +1000,12 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 genesis_block_hash,
                 statement_protocol_config,
                 max_seen_statements,
-                optimistic_state: services
-                    .optimistic_state
-                    .as_ref()
-                    .map(|s| json_rpc_service::OptimisticState {
+                optimistic_state: services.optimistic_state.as_ref().map(|s| {
+                    json_rpc_service::OptimisticState {
                         gate_open: s.gate_open.clone(),
                         allowed_storage_prefixes: s.allowed_storage_prefixes.clone(),
-                    }),
+                    }
+                }),
             });
 
             Some(frontend)
@@ -1256,10 +1255,11 @@ fn start_services<TPlat: platform::PlatformRef>(
             // Optimistic state is created here when the embedder opted in. The Arc is shared
             // between sync_service (which flips the gate on first real finalization) and
             // json_rpc_service (which reads it to decide whether to gate handlers).
-            optimistic_state = optimistic_allowed_storage_prefixes.map(|prefixes| OptimisticState {
-                gate_open: Arc::new(core::sync::atomic::AtomicBool::new(false)),
-                allowed_storage_prefixes: Arc::new(prefixes),
-            });
+            optimistic_state =
+                optimistic_allowed_storage_prefixes.map(|prefixes| OptimisticState {
+                    gate_open: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+                    allowed_storage_prefixes: Arc::new(prefixes),
+                });
 
             // The sync service is leveraging the network service, downloads block headers,
             // and verifies them, to determine what are the best and finalized blocks of the
