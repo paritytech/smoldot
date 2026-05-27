@@ -161,19 +161,18 @@ pub enum OptimisticParachainBootstrap {
     /// before deriving the initial parachain head.
     Disabled,
 
-    /// The parachain's initial finalized head is derived from the relay chain's current best
-    /// block instead of waiting for the next finalized relay block. This removes the wait for
-    /// the next relay finalization from cold start, at the cost of the derived parahead being
-    /// unverified until a real relay finalization confirms it.
+    /// The parachain's initial head is taken from the relay chain's current finalized block
+    /// rather than by waiting for a new one. This removes the wait from cold start, and because
+    /// that block is already final the derived parahead never reorgs.
     ///
-    /// Until the first real `Notification::Finalized` arrives, the JSON-RPC interface is gated
-    /// to bound the blast radius. `chainHead_v1_storage` is restricted to `allowed_storage_prefixes`
-    /// while `chainHead_v1_call` and transaction submission are rejected outright, all with error
-    /// `-32802`. The gates lift on the first real relay finalization.
+    /// Until the parachain observes its first new relay finalization, the JSON-RPC interface is
+    /// restricted while the chain catches up from the bootstrap block: `chainHead_v1_storage` is
+    /// limited to `allowed_storage_prefixes`, and `chainHead_v1_call` and transaction submission
+    /// are rejected with error `-32802`. The restrictions lift at that point.
     Enabled {
         /// Allowlist of storage-key prefixes (raw bytes, not hex) readable via
-        /// `chainHead_v1_storage` during the optimistic window. An empty list disallows all
-        /// storage reads. A child-trie query matches against the prefixed child trie name
+        /// `chainHead_v1_storage` during the bootstrap window. An empty list disallows all
+        /// reads. A child-trie query matches against the prefixed child trie name
         /// `:child_storage:default:<child_trie>` rather than the keys within it.
         allowed_storage_prefixes: Vec<Vec<u8>>,
     },

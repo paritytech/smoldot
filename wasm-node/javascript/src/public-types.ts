@@ -476,16 +476,16 @@ export interface AddChainOptions {
     }
 
     /**
-     * If set, enables optimistic parachain bootstrap. The parachain's initial finalized head
-     * is derived from the relay chain's current best block instead of waiting for the next
-     * finalized relay block. This removes the wait for the next relay finalization from cold
-     * start, at the cost of the derived parahead being unverified until a real relay
-     * finalization confirms it.
+     * If set, enables optimistic parachain bootstrap. The parachain's initial head is taken from
+     * the relay chain's current finalized block rather than by waiting for a new one. This
+     * removes the wait from cold start, and because that block is already final the derived
+     * parahead never reorgs.
      *
-     * Until the first real relay finalization arrives, the JSON-RPC interface is gated to bound
-     * the blast radius. `chainHead_v1_storage` is restricted to `allowedStoragePrefixes` while
-     * `chainHead_v1_call` and transaction submission are rejected outright, all with error
-     * `-32802`. The gates lift on the first real relay finalization. Ignored for relay chains.
+     * Until the parachain observes its first new relay finalization, the JSON-RPC interface is
+     * restricted while the chain catches up from the bootstrap block: `chainHead_v1_storage` is
+     * limited to `allowedStoragePrefixes`, and `chainHead_v1_call` and transaction submission
+     * are rejected with error `-32802`. The restrictions lift at that point. Ignored for relay
+     * chains.
      */
     optimisticParachainBootstrap?: {
         /**

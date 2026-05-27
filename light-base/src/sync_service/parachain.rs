@@ -1104,10 +1104,9 @@ struct Task<TPlat: PlatformRef> {
     >,
 
     /// `Some` when the chain was added with optimistic-parachain-bootstrap enabled. The flag
-    /// inside the `Arc` is `false` while the parachain is still bootstrapped against the relay's
-    /// best block, and flipped to `true` when the first real `Notification::Finalized` from
-    /// paraheads is applied. Downstream consumers (JSON-RPC handlers) read this to decide
-    /// whether to gate methods.
+    /// inside the `Arc` is `false` during the bootstrap window, and flipped to `true` when the
+    /// first real `Notification::Finalized` from paraheads is applied. Downstream consumers
+    /// (JSON-RPC handlers) read this to decide whether to gate methods.
     optimistic_gate_open: Option<Arc<core::sync::atomic::AtomicBool>>,
 }
 
@@ -1135,13 +1134,12 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
 // Fetch the included parachain head from a relay chain block.
 //
-// When `optimistic_bootstrap` is `false` (the default), awaits the next
-// `Notification::Finalized` on the relay chain and derives the parahead from that finalized
-// block. When `true`, the first iteration instead uses the relay's current best block from the
-// initial subscription state, which is typically the warp-sync target on cold start. If the
-// runtime call against the optimistic block fails (block evicted, runtime error), the loop
-// falls back to the standard wait-for-finalized path. See
-// [`crate::AddChainConfig::optimistic_parachain_bootstrap`].
+// With `optimistic_bootstrap` `false` (the default), awaits the next `Notification::Finalized`
+// and derives the parahead from it. With `true`, the first iteration instead uses the relay's
+// current finalized block from the initial subscription state (typically the warp-sync target
+// on cold start), skipping that wait. The block is already final, so the parahead does not
+// reorg. If the runtime call against it fails (block evicted, runtime error), the loop falls
+// back to the default path. See [`crate::AddChainConfig::optimistic_parachain_bootstrap`].
 async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
@@ -1154,22 +1152,14 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
         .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
         .await;
 
-    // If optimistic, pick the relay's current best block from the initial subscription state
-    // to use on the first iteration of the outer loop, bypassing the wait for the next
-    // `Notification::Finalized`. Falls back to the subscription's finalized block when no
-    // non-finalized blocks are tracked yet (typical on cold start: best == finalized ==
-    // warp-sync target).
+    // If optimistic, bootstrap from the relay's current finalized block (already in the initial
+    // subscription state), skipping the wait for the next `Notification::Finalized`. The block
+    // is already final, so the derived parahead does not reorg and is safe to report as the
+    // parachain's finalized head.
     let mut optimistic_hash: Option<[u8; 32]> = if optimistic_bootstrap {
-        let best = subscription
-            .non_finalized_blocks_ancestry_order
-            .iter()
-            .find(|b| b.is_new_best)
-            .map(|b| header::hash_from_scale_encoded_header(&b.scale_encoded_header));
-        Some(best.unwrap_or_else(|| {
-            header::hash_from_scale_encoded_header(
-                &subscription.finalized_block_scale_encoded_header,
-            )
-        }))
+        Some(header::hash_from_scale_encoded_header(
+            &subscription.finalized_block_scale_encoded_header,
+        ))
     } else {
         None
     };
@@ -1179,7 +1169,7 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
             platform,
             Info,
             log_target,
-            "Bootstrapping parachain from relay's current best block (optimistic)..."
+            "Bootstrapping parachain from relay's current finalized block (optimistic)..."
         );
     } else {
         log!(
