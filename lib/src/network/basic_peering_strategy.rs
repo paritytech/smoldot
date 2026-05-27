@@ -472,7 +472,7 @@ where
         &mut self,
         chain: &TChainId,
         now: &TInstant,
-        mut filter: impl FnMut(&PeerId) -> bool,
+        mut filter_fn: impl FnMut(&PeerId) -> bool,
     ) -> AssignablePeer<'_, TInstant> {
         let Some(&chain_index) = self.chains_indices.get(chain) else {
             return AssignablePeer::NoPeer;
@@ -490,7 +490,7 @@ where
                         usize::MAX,
                     ),
             )
-            .filter(|(_, _, peer_id_index)| filter(&self.peer_ids[*peer_id_index]))
+            .filter(|(_, _, peer_id_index)| filter_fn(&self.peer_ids[*peer_id_index]))
             .choose(&mut self.randomness)
         {
             return AssignablePeer::Assignable(&self.peer_ids[*peer_id_index]);
@@ -508,7 +508,7 @@ where
                 )),
                 ops::Bound::Excluded((chain_index, PeerChainState::Slot, usize::MIN)),
             ))
-            .filter(|(_, _, peer_id_index)| filter(&self.peer_ids[*peer_id_index]))
+            .filter(|(_, _, peer_id_index)| filter_fn(&self.peer_ids[*peer_id_index]))
             .next()
         {
             let PeerChainState::Banned { expires } = state else {
