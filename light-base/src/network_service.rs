@@ -254,6 +254,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             next_recent_connection_restore: None,
             platform: config.platform.clone(),
             open_gossip_links: BTreeMap::new(),
+            chains_ever_gossip_connected: HashSet::with_capacity_and_hasher(4, Default::default()),
             v2_statement_peers: HashMap::with_capacity_and_hasher(4, Default::default()),
             current_affinity_filter: HashMap::with_capacity_and_hasher(4, Default::default()),
             event_pending_send: None,
@@ -1060,15 +1061,18 @@ struct BackgroundTask<TPlat: PlatformRef> {
     // TODO: using this data structure unfortunately means that PeerIds are cloned a lot, maybe some user data in ChainNetwork is better? not sure
     open_gossip_links: BTreeMap<(ChainId, PeerId), OpenGossipLinkState>,
 
+    /// Chains for which a gossip link has been opened at least once. Used to prefer bootnodes for
+    /// out slots only until the chain first connects.
+    chains_ever_gossip_connected: HashSet<ChainId, fnv::FnvBuildHasher>,
+
     /// Connected peers using statement protocol V2, per chain.
     v2_statement_peers: HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
 
     /// Current topic affinity filter per chain, sent to V2 peers on connect.
     current_affinity_filter: HashMap<ChainId, AffinityFilter, fnv::FnvBuildHasher>,
 
-    /// Nodes that are considered important, per chain. These nodes get additional logging, and
-    /// until a chain has an open gossip link its out slots are preferentially assigned to them. In
-    /// practice this is the set of bootnodes (see [`NetworkServiceChain::discover`]).
+    /// Important nodes per chain (in practice the bootnodes; see [`NetworkServiceChain::discover`]).
+    /// They get extra logging, and slot preference until the chain first connects.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
 
@@ -1294,14 +1298,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                             let now = task.platform.now();
 
-                            // Until the chain has an open gossip link, prefer assigning slots to
-                            // important nodes (in practice the chain's bootnodes); afterwards fill
-                            // slots from the general pool of discovered peers.
-                            let has_open_gossip_link = task
-                                .open_gossip_links
-                                .keys()
-                                .any(|(link_chain_id, _)| *link_chain_id == chain_id);
-                            if !has_open_gossip_link {
+                            // Until the chain first connects, prefer slots for important nodes
+                            // (the bootnodes); otherwise use the general pool.
+                            if !task.chains_ever_gossip_connected.contains(&chain_id) {
                                 if let basic_peering_strategy::AssignablePeer::Assignable(peer_id) =
                                     task.peering_strategy.pick_assignable_peer_filtered(
                                         &chain_id,
@@ -1613,6 +1612,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.v2_statement_peers.remove(&chain_id);
                 task.current_affinity_filter.remove(&chain_id);
                 task.important_nodes.remove(&chain_id);
+                task.chains_ever_gossip_connected.remove(&chain_id);
                 task.network.remove_chain(chain_id).unwrap();
                 task.peering_strategy.remove_chain_peers(&chain_id);
             }
@@ -2516,6 +2516,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     },
                 );
                 debug_assert!(_prev_value.is_none());
+
+                task.chains_ever_gossip_connected.insert(chain_id);
 
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some((
