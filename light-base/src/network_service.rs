@@ -206,6 +206,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains_capacity,
             connections_capacity: 32,
+            // Shortened from 8s: parallel dials hold slots until this fires.
             handshake_timeout: Duration::from_secs(4),
             randomness_seed: {
                 let mut seed = [0; 32];
