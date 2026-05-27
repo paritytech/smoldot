@@ -1799,6 +1799,12 @@ impl<'a, T> fmt::Binary for Children<'a, T> {
 /// empty inline placeholder and omit the target leaf's value. Both are reconstructed during
 /// verification from `expected_value`, which for state version V1 is hashed when its length is
 /// 33 bytes or more (matching `sp_trie`'s threshold).
+///
+/// Single-key only: assumes the proof witnesses exactly one `(key, Some(value))` item, which
+/// is the contract `ext_trie_blake2_256_verify_proof_*` always passes. Multi-key proofs whose
+/// intermediate branch nodes also carry omitted values would silently mis-verify here, since
+/// only the terminal value is injected from `expected_value`. Do not reuse this function for
+/// the general case.
 pub fn verify_compact_trie_proof(
     proof: &[u8],
     root: &[u8; 32],
