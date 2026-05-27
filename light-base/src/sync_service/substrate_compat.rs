@@ -860,8 +860,11 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         task.mode = ModeState::AwaitingWarp {
                             target_finalized: finalized_block_height,
                         };
-                        task.mode_decision_deadline =
-                            future::Either::Right(future::pending()).fuse();
+                        // Keep the deadline armed as a warp-stall fallback.
+                        task.mode_decision_deadline = future::Either::Left(Box::pin(
+                            task.platform.sleep(MODE_DECISION_TIMEOUT),
+                        ))
+                        .fuse();
                         log!(
                             &task.platform,
                             Debug,
@@ -1488,9 +1491,9 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 };
             }
 
-            WakeUpReason::ModeDecisionDeadline => {
-                task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();
-                if matches!(task.mode, ModeState::Deciding) {
+            WakeUpReason::ModeDecisionDeadline => match task.mode {
+                ModeState::Deciding => {
+                    task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();
                     log!(
                         &task.platform,
                         Debug,
@@ -1499,7 +1502,49 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     );
                     commit_all_forks_only(&mut task);
                 }
-            }
+                ModeState::AwaitingWarp { .. } => {
+                    // Re-arm while warp can still progress (downloading/building, or a
+                    // qualifying source exists); fall back to all-forks only when starved.
+                    let warp_can_proceed = {
+                        let Some(sync) = task.sync.as_ref() else {
+                            unreachable!()
+                        };
+                        match sync.status() {
+                            all::Status::WarpSyncFragments { source: Some(_), .. }
+                            | all::Status::WarpSyncChainInformation { .. } => true,
+                            _ => sync.desired_requests().any(|(_, _, rq)| {
+                                matches!(rq, all::DesiredRequest::WarpSync { .. })
+                            }),
+                        }
+                    };
+
+                    if warp_can_proceed {
+                        task.mode_decision_deadline = future::Either::Left(Box::pin(
+                            task.platform.sleep(MODE_DECISION_TIMEOUT),
+                        ))
+                        .fuse();
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "mode-decision; awaiting-warp deadline re-armed",
+                        );
+                    } else {
+                        task.mode_decision_deadline =
+                            future::Either::Right(future::pending()).fuse();
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "mode-decision; committed=AllForksOnly (warp starved)",
+                        );
+                        commit_all_forks_only(&mut task);
+                    }
+                }
+                ModeState::Ready => {
+                    task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();
+                }
+            },
         }
     }
 }
