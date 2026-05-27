@@ -3095,13 +3095,12 @@ fn verify_compact_proof_rejects_extra_trailing_entry() {
     ));
 }
 
-// Threshold tests for `inject_compact_value`: `sp_trie` hashes V1 values of length >= 33,
-// inlines anything shorter. The 32-byte case is the regression boundary — an earlier version
-// hashed at >= 32 and would have produced the wrong reconstructed leaf for sub-33-byte values.
+// Regression: an earlier version hashed V1 values at >= 32. `sp_trie`'s threshold is >= 33,
+// so a 32-byte V1 value must stay inline; otherwise the reconstructed leaf and root diverge
+// from what was stored.
 
 #[test]
 fn inject_compact_value_v0_never_hashes() {
-    // V0 stores all values inline regardless of length.
     let value = vec![0xabu8; 64];
     match super::inject_compact_value(&value, trie::TrieEntryVersion::V0) {
         super::CompactStorageValueOwned::Unhashed(v) => assert_eq!(v, value),
