@@ -1290,10 +1290,30 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 continue;
                             }
 
-                            match task
-                                .peering_strategy
-                                .pick_assignable_peer(&chain_id, &task.platform.now())
-                            {
+                            let now = task.platform.now();
+
+                            // Until the chain has an open gossip link, prefer a bootnode (curated
+                            // and reachable); afterwards fill slots from the general pool.
+                            let has_open_gossip_link = task
+                                .open_gossip_links
+                                .keys()
+                                .any(|(link_chain_id, _)| *link_chain_id == chain_id);
+                            if !has_open_gossip_link {
+                                if let basic_peering_strategy::AssignablePeer::Assignable(peer_id) =
+                                    task.peering_strategy.pick_assignable_peer_filtered(
+                                        &chain_id,
+                                        &now,
+                                        |peer_id| task.important_nodes.contains(peer_id),
+                                    )
+                                {
+                                    break 'search WakeUpReason::CanAssignSlot(
+                                        peer_id.clone(),
+                                        chain_id,
+                                    );
+                                }
+                            }
+
+                            match task.peering_strategy.pick_assignable_peer(&chain_id, &now) {
                                 basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
                                     break 'search WakeUpReason::CanAssignSlot(
                                         peer_id.clone(),

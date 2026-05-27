@@ -462,6 +462,18 @@ where
         chain: &TChainId,
         now: &TInstant,
     ) -> AssignablePeer<'_, TInstant> {
+        self.pick_assignable_peer_filtered(chain, now, |_| true)
+    }
+
+    /// Same as [`BasicPeeringStrategy::pick_assignable_peer`], except that only peers for which
+    /// `filter` returns `true` are taken into account. The [`AssignablePeer::AllPeersBanned`] and
+    /// [`AssignablePeer::NoPeer`] return values thus concern only the filtered subset of peers.
+    pub fn pick_assignable_peer_filtered(
+        &mut self,
+        chain: &TChainId,
+        now: &TInstant,
+        mut filter: impl FnMut(&PeerId) -> bool,
+    ) -> AssignablePeer<'_, TInstant> {
         let Some(&chain_index) = self.chains_indices.get(chain) else {
             return AssignablePeer::NoPeer;
         };
@@ -478,6 +490,7 @@ where
                         usize::MAX,
                     ),
             )
+            .filter(|(_, _, peer_id_index)| filter(&self.peer_ids[*peer_id_index]))
             .choose(&mut self.randomness)
         {
             return AssignablePeer::Assignable(&self.peer_ids[*peer_id_index]);
@@ -495,6 +508,7 @@ where
                 )),
                 ops::Bound::Excluded((chain_index, PeerChainState::Slot, usize::MIN)),
             ))
+            .filter(|(_, _, peer_id_index)| filter(&self.peer_ids[*peer_id_index]))
             .next()
         {
             let PeerChainState::Banned { expires } = state else {
@@ -1012,8 +1026,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        BasicPeeringStrategy, Config, InsertAddressConnectionsResult, InsertAddressResult,
-        InsertChainPeerResult,
+        AssignablePeer, BasicPeeringStrategy, Config, InsertAddressConnectionsResult,
+        InsertAddressResult, InsertChainPeerResult,
     };
     use crate::network::service::{PeerId, peer_id::PublicKey};
     use core::time::Duration;
@@ -1025,6 +1039,43 @@ mod tests {
         assert!(PeerChainState::Assignable < PeerChainState::Banned { expires: 0 });
         assert!(PeerChainState::Banned { expires: 5 } < PeerChainState::Banned { expires: 7 });
         assert!(PeerChainState::Banned { expires: u32::MAX } < PeerChainState::Slot);
+    }
+
+    #[test]
+    fn pick_assignable_peer_filtered_restricts_to_subset() {
+        let mut bps = BasicPeeringStrategy::<u32, Duration>::new(Config {
+            randomness_seed: [0; 32],
+            peers_capacity: 0,
+            chains_capacity: 0,
+        });
+
+        let bootnode = PeerId::from_public_key(&PublicKey::Ed25519([1; 32]));
+        let discovered = PeerId::from_public_key(&PublicKey::Ed25519([2; 32]));
+        for p in [&bootnode, &discovered] {
+            assert!(matches!(
+                bps.insert_chain_peer(0, p.clone(), usize::MAX),
+                InsertChainPeerResult::Inserted { peer_removed: None }
+            ));
+        }
+
+        // Filtering to the bootnode only ever yields the bootnode, regardless of randomness.
+        for _ in 0..20 {
+            assert!(matches!(
+                bps.pick_assignable_peer_filtered(&0, &Duration::ZERO, |p| *p == bootnode),
+                AssignablePeer::Assignable(p) if *p == bootnode
+            ));
+        }
+
+        // A filter excluding every peer reports no assignable peer even though peers exist...
+        assert!(matches!(
+            bps.pick_assignable_peer_filtered(&0, &Duration::ZERO, |_| false),
+            AssignablePeer::NoPeer
+        ));
+        // ...whereas the unfiltered pick still finds one.
+        assert!(matches!(
+            bps.pick_assignable_peer(&0, &Duration::ZERO),
+            AssignablePeer::Assignable(_)
+        ));
     }
 
     #[test]
