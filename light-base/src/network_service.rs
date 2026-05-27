@@ -262,7 +262,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             bitswap_event_pending_send: None,
             bitswap_event_senders: either::Left(Vec::new()),
             pending_new_bitswap_subscriptions: Vec::new(),
-            important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
+            important_nodes: HashMap::with_capacity_and_hasher(16, Default::default()),
             main_messages_rx: Box::pin(main_messages_rx),
             messages_rx: stream::SelectAll::new(),
             blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
@@ -1066,9 +1066,11 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Current topic affinity filter per chain, sent to V2 peers on connect.
     current_affinity_filter: HashMap<ChainId, AffinityFilter, fnv::FnvBuildHasher>,
 
-    /// List of nodes that are considered as important for logging purposes.
+    /// Nodes that are considered important, per chain. These nodes get additional logging, and
+    /// until a chain has an open gossip link its out slots are preferentially assigned to them. In
+    /// practice this is the set of bootnodes (see [`NetworkServiceChain::discover`]).
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
-    important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
+    important_nodes: HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
 
     /// Event about to be sent on the senders of [`BackgroundTask::event_senders`].
     event_pending_send: Option<(ChainId, Event)>,
@@ -1292,8 +1294,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                             let now = task.platform.now();
 
-                            // Until the chain has an open gossip link, prefer a bootnode (curated
-                            // and reachable); afterwards fill slots from the general pool.
+                            // Until the chain has an open gossip link, prefer assigning slots to
+                            // important nodes (in practice the chain's bootnodes); afterwards fill
+                            // slots from the general pool of discovered peers.
                             let has_open_gossip_link = task
                                 .open_gossip_links
                                 .keys()
@@ -1303,7 +1306,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     task.peering_strategy.pick_assignable_peer_filtered(
                                         &chain_id,
                                         &now,
-                                        |peer_id| task.important_nodes.contains(peer_id),
+                                        |peer_id| {
+                                            task.important_nodes
+                                                .get(&chain_id)
+                                                .map_or(false, |nodes| nodes.contains(peer_id))
+                                        },
                                     )
                                 {
                                     break 'search WakeUpReason::CanAssignSlot(
@@ -1605,6 +1612,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 task.v2_statement_peers.remove(&chain_id);
                 task.current_affinity_filter.remove(&chain_id);
+                task.important_nodes.remove(&chain_id);
                 task.network.remove_chain(chain_id).unwrap();
                 task.peering_strategy.remove_chain_peers(&chain_id);
             }
@@ -2166,7 +2174,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             ) => {
                 for (peer_id, addrs) in list {
                     if important_nodes {
-                        task.important_nodes.insert(peer_id.clone());
+                        task.important_nodes
+                            .entry(chain_id)
+                            .or_default()
+                            .insert(peer_id.clone());
                     }
 
                     // Note that we must call this function before `insert_address`, as documented
