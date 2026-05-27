@@ -1,0 +1,21 @@
+{
+  "name": "Paseo Asset Hub Next",
+  "id": "next-asset-hub-paseo",
+  "chainType": "Live",
+  "bootNodes": [
+    "/dns/paseo-asset-hub-next-collator-node-0.parity-testnet.parity.io/tcp/443/wss/p2p/12D3KooWKT5DcVLoBbVDAM6N5ujDVknPfQWHk8SGJqJPyAM8Z4Y4",
+    "/dns/paseo-asset-hub-next-collator-node-1.parity-testnet.parity.io/tcp/443/wss/p2p/12D3KooWFjpVdBnfJFntogWhinn15WW2n8Fd2DiAcqU6i9rg47Yg"
+  ],
+  "telemetryEndpoints": null,
+  "protocolId": null,
+  "properties": {
+    "tokenDecimals": 10,
+    "tokenSymbol": "PAS"
+  },
+  "relay_chain": "paseo",
+  "para_id": 1500,
+  "codeSubstitutes": {},
+  "genesis": {
+    "stateRootHash": "0xf60bedeca8d9c1cd928473b6fb4bc4e42896636dd783acf55d3800938dcdb24a"
+  }
+}
