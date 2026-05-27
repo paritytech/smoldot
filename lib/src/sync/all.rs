@@ -245,39 +245,33 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
     /// Returns the current status of the syncing.
     pub fn status(&'_ self) -> Status<'_, TSrc> {
-        // TODO:
-        Status::Sync
-        /*match &self.inner {
-            AllSyncInner::AllForks(_) => Status::Sync,
-            AllSyncInner::WarpSync { inner, .. } => match inner.status() {
-                warp_sync::Status::Fragments {
-                    source: None,
-                    finalized_block_hash,
-                    finalized_block_number,
-                } => Status::WarpSyncFragments {
-                    source: None,
-                    finalized_block_hash,
-                    finalized_block_number,
-                },
-                warp_sync::Status::Fragments {
-                    source: Some((_, user_data)),
-                    finalized_block_hash,
-                    finalized_block_number,
-                } => Status::WarpSyncFragments {
-                    source: Some((user_data.outer_source_id, &user_data.user_data)),
-                    finalized_block_hash,
-                    finalized_block_number,
-                },
-                warp_sync::Status::ChainInformation {
-                    finalized_block_hash,
-                    finalized_block_number,
-                } => Status::WarpSyncChainInformation {
-                    finalized_block_hash,
-                    finalized_block_number,
-                },
+        let Some(warp_sync) = &self.warp_sync else {
+            return Status::Sync;
+        };
+        match warp_sync.status() {
+            warp_sync::Status::Fragments {
+                source,
+                finalized_block_hash,
+                finalized_block_number,
+            } => Status::WarpSyncFragments {
+                source: source.map(|(_, src)| {
+                    let outer_source_id = src.outer_source_id;
+                    (
+                        outer_source_id,
+                        &self.shared.sources[outer_source_id.0].user_data,
+                    )
+                }),
+                finalized_block_hash,
+                finalized_block_number,
             },
-            AllSyncInner::Poisoned => unreachable!(),
-        }*/
+            warp_sync::Status::ChainInformation {
+                finalized_block_hash,
+                finalized_block_number,
+            } => Status::WarpSyncChainInformation {
+                finalized_block_hash,
+                finalized_block_number,
+            },
+        }
     }
 
     /// Returns the header of the finalized block.
