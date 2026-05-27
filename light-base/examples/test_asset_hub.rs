@@ -44,6 +44,7 @@ fn main() {
             database_content: "",
             user_data: (),
             statement_protocol_config: None,
+            optimistic_parachain_bootstrap: smoldot_light::OptimisticParachainBootstrap::Disabled,
         })
         .unwrap();
 
@@ -62,6 +63,7 @@ fn main() {
             database_content: "",
             user_data: (),
             statement_protocol_config: None,
+            optimistic_parachain_bootstrap: smoldot_light::OptimisticParachainBootstrap::Disabled,
         })
         .unwrap();
 

@@ -83,6 +83,9 @@ fn main() {
 
             // Statement protocol is not used in this example.
             statement_protocol_config: None,
+
+            // Optimistic parachain bootstrap is not used in this example.
+            optimistic_parachain_bootstrap: smoldot_light::OptimisticParachainBootstrap::Disabled,
         })
         .unwrap();
     // The Polkadot chain is now properly initialized.
@@ -118,6 +121,7 @@ fn main() {
             // previously been created is completely appropriate.
             potential_relay_chains: [polkadot_chain_id].into_iter(),
             statement_protocol_config: None,
+            optimistic_parachain_bootstrap: smoldot_light::OptimisticParachainBootstrap::Disabled,
         })
         .unwrap();
     // The Assethub chain is now properly initialized.

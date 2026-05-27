@@ -56,6 +56,8 @@ fn main() {
         } = client
             .add_chain(smoldot_light::AddChainConfig {
                 specification: &relay_chain_spec,
+                optimistic_parachain_bootstrap:
+                    smoldot_light::OptimisticParachainBootstrap::Disabled,
                 json_rpc: smoldot_light::AddChainConfigJsonRpc::Enabled {
                     max_pending_requests: NonZero::<u32>::new(128).unwrap(),
                     max_subscriptions: 1024,
@@ -84,6 +86,8 @@ fn main() {
             } = client
                 .add_chain(smoldot_light::AddChainConfig {
                     specification: &para_spec,
+                    optimistic_parachain_bootstrap:
+                        smoldot_light::OptimisticParachainBootstrap::Disabled,
                     json_rpc: smoldot_light::AddChainConfigJsonRpc::Enabled {
                         max_pending_requests: NonZero::<u32>::new(128).unwrap(),
                         max_subscriptions: 1024,
