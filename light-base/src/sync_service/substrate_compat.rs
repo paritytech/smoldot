@@ -43,11 +43,6 @@ use smoldot::{
     sync::all,
 };
 
-/// Peer-finalized minus local-finalized gap at/above which we commit to WarpAhead.
-/// Matches `warp_sync_minimum_gap` so the decision aligns with warp-sync's own
-/// willingness to engage a source.
-const MODE_DECISION_WARP_GAP_THRESHOLD: u64 = 32;
-
 /// Maximum wait for the first GrandpaNeighborPacket before falling back to AllForksOnly.
 /// Sized for cold-start peer discovery (DNS + libp2p handshake + gossip-open), which can
 /// stretch to ~20s on light clients.
@@ -846,9 +841,6 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .unwrap_or_else(|| unreachable!())
                     .update_source_finality_state(sync_source_id, finalized_block_height);
 
-                // Gate on peer_finalized, not peer_best: warp_sync only fires when
-                // peer_finalized - local >= 32, so deciding on best leaves warp_sync
-                // stalled waiting for finality to catch up (~6s/block on Polkadot).
                 if matches!(task.mode, ModeState::Deciding) {
                     let local_finalized = task
                         .sync
@@ -856,7 +848,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         .unwrap_or_else(|| unreachable!())
                         .finalized_block_number();
                     let gap = finalized_block_height.saturating_sub(local_finalized);
-                    if gap >= MODE_DECISION_WARP_GAP_THRESHOLD {
+                    if warp_sync_can_proceed(task.sync.as_ref().unwrap_or_else(|| unreachable!())) {
                         task.mode = ModeState::AwaitingWarp {
                             target_finalized: finalized_block_height,
                         };
@@ -1503,22 +1495,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     commit_all_forks_only(&mut task);
                 }
                 ModeState::AwaitingWarp { .. } => {
-                    // Re-arm while warp can still progress (downloading/building, or a
-                    // qualifying source exists); fall back to all-forks only when starved.
-                    let warp_can_proceed = {
-                        let Some(sync) = task.sync.as_ref() else {
-                            unreachable!()
-                        };
-                        match sync.status() {
-                            all::Status::WarpSyncFragments { source: Some(_), .. }
-                            | all::Status::WarpSyncChainInformation { .. } => true,
-                            _ => sync.desired_requests().any(|(_, _, rq)| {
-                                matches!(rq, all::DesiredRequest::WarpSync { .. })
-                            }),
-                        }
-                    };
-
-                    if warp_can_proceed {
+                    if warp_sync_can_proceed(task.sync.as_ref().unwrap_or_else(|| unreachable!())) {
                         task.mode_decision_deadline = future::Either::Left(Box::pin(
                             task.platform.sleep(MODE_DECISION_TIMEOUT),
                         ))
@@ -1690,6 +1667,24 @@ fn respond_subscribe_all<TPlat: PlatformRef>(
         non_finalized_blocks_ancestry_order,
         new_blocks,
     });
+}
+
+/// Warp is downloading/building, or a qualifying source is available for the next request.
+fn warp_sync_can_proceed(
+    sync: &all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>,
+) -> bool {
+    match sync.status() {
+        all::Status::WarpSyncFragments {
+            source: Some(_), ..
+        }
+        | all::Status::WarpSyncChainInformation { .. } => true,
+        // At the mode-decision point no warp request is dispatched yet, so this arm decides.
+        // The caller already fed the source's finalized height (update_source_finality_state),
+        // so desired_requests() is expected to already include a warp request when the gap > 32.
+        _ => sync
+            .desired_requests()
+            .any(|(_, _, rq)| matches!(rq, all::DesiredRequest::WarpSync { .. })),
+    }
 }
 
 /// Responds to every queued `SubscribeAll` request. Each response allocates a fresh
