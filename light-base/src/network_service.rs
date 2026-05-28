@@ -206,7 +206,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains_capacity,
             connections_capacity: 32,
-            handshake_timeout: Duration::from_secs(8),
+            // Shortened from 8s: parallel dials hold slots until this fires.
+            handshake_timeout: Duration::from_secs(4),
             randomness_seed: {
                 let mut seed = [0; 32];
                 config.platform.fill_random_bytes(&mut seed);
@@ -2333,7 +2334,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // another existing connection or connection attempt with that same peer. However,
                 // it is not possible to be sure that we will reach 0 connections or connection
                 // attempts, and thus we ban the peer every time.
-                let ban_duration = Duration::from_secs(5);
+                // Pre-handshake failures get a shorter ban: many parallel dials time out
+                // before any handshake completes, and a long slot-hold there dominates
+                // peer-discovery latency on restarts.
+                let ban_duration = if handshake_finished {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_secs(2)
+                };
                 task.network.gossip_remove_desired_all(
                     &peer_id,
                     service::GossipKind::ConsensusTransactions,
@@ -2504,7 +2512,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     ?error,
                 );
-                let ban_duration = Duration::from_secs(15);
+                // Must exceed polkadot-sdk's 5s notification-reject ban; otherwise we retry
+                // into a still-active remote ban. 0.5s margin covers network delay and
+                // clock skew between the two sides' ban timers.
+                let ban_duration = Duration::from_millis(5500);
 
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
