@@ -1540,15 +1540,20 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             "mode-decision; awaiting-warp deadline re-armed",
                         );
                     } else {
-                        task.mode_decision_deadline =
-                            future::Either::Right(future::pending()).fuse();
+                        // Warp starved: drop back to Deciding so a future warp-eligible peer
+                        // can re-trigger CommitWarpAhead instead of locking in AllForksOnly.
+                        task.mode = ModeState::Deciding;
+                        task.deciding_packets_seen = 0;
+                        task.mode_decision_deadline = future::Either::Left(Box::pin(
+                            task.platform.sleep(MODE_DECISION_TIMEOUT),
+                        ))
+                        .fuse();
                         log!(
                             &task.platform,
                             Debug,
                             &task.log_target,
-                            "mode-decision; committed=AllForksOnly (warp starved)",
+                            "mode-decision; warp starved, back to Deciding",
                         );
-                        commit_all_forks_only(&mut task);
                     }
                 }
                 ModeState::Ready => {
