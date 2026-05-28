@@ -2606,8 +2606,6 @@ mod tests {
         })
     }
 
-    // Regression: AllSync::status() used to be a stub returning Status::Sync, hiding the active
-    // warp phase from callers (notably sync_service's warp_sync_can_proceed).
     #[test]
     fn status_reports_warp_for_fresh_grandpa_chain() {
         let sync = fresh_sync();
@@ -2622,5 +2620,48 @@ mod tests {
         let mut sync = fresh_sync();
         let _ = sync.cancel_warp_sync();
         assert!(matches!(sync.status(), Status::Sync));
+    }
+
+    #[test]
+    fn status_reports_warp_fragments_during_inflight_download() {
+        let mut sync = fresh_sync();
+
+        let source_id = match sync.prepare_add_source(100, [1; 32]) {
+            AddSource::UnknownBestBlock(s) => s.add_source_and_insert_block((), ()),
+            _ => unreachable!(),
+        };
+        sync.update_source_finality_state(source_id, 100);
+
+        let sync_start_block_hash = sync
+            .desired_requests()
+            .find_map(|(_, _, rq)| match rq {
+                DesiredRequest::WarpSync {
+                    sync_start_block_hash,
+                } => Some(sync_start_block_hash),
+                _ => None,
+            })
+            .expect("warp request should be desired");
+
+        let _ = sync.add_request(
+            source_id,
+            RequestDetail::WarpSync {
+                sync_start_block_hash,
+            },
+            (),
+        );
+
+        // No further WarpSync desired while one is in flight
+        assert!(
+            !sync
+                .desired_requests()
+                .any(|(_, _, rq)| matches!(rq, DesiredRequest::WarpSync { .. }))
+        );
+        assert!(matches!(
+            sync.status(),
+            Status::WarpSyncFragments {
+                source: Some(_),
+                ..
+            }
+        ));
     }
 }
