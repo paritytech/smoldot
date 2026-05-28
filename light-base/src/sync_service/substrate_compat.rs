@@ -50,6 +50,12 @@ use smoldot::{
 // https://github.com/paritytech/smoldot/pull/3268#discussion_r3311751768
 const MODE_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Minimum number of below-gap GrandpaNeighborPackets observed while `Deciding` before
+/// committing to AllForksOnly. Guards against a single lagging first peer wrongly locking
+/// us into the slow path when our local finalized is an old chain-spec checkpoint.
+/// See https://github.com/paritytech/smoldot/pull/3268#discussion_r3311637661
+const MODE_DECISION_MIN_PACKETS: usize = 2;
+
 /// Starts a sync service background task to synchronize a chain (relay chain or not) that is
 /// built with Substrate.
 pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
@@ -113,6 +119,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         ))
         .fuse(),
         mode: ModeState::Deciding,
+        deciding_packets_seen: 0,
         mode_decision_deadline: future::Either::Left(Box::pin(
             platform.sleep(MODE_DECISION_TIMEOUT),
         ))
@@ -869,16 +876,31 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             gap,
                         );
                     } else {
-                        log!(
-                            &task.platform,
-                            Debug,
-                            &task.log_target,
-                            "mode-decision; committed=AllForksOnly",
-                            local_finalized,
-                            peer_finalized = finalized_block_height,
-                            gap,
-                        );
-                        commit_all_forks_only(&mut task);
+                        task.deciding_packets_seen += 1;
+                        if task.deciding_packets_seen >= MODE_DECISION_MIN_PACKETS {
+                            log!(
+                                &task.platform,
+                                Debug,
+                                &task.log_target,
+                                "mode-decision; committed=AllForksOnly",
+                                local_finalized,
+                                peer_finalized = finalized_block_height,
+                                gap,
+                                packets_seen = task.deciding_packets_seen,
+                            );
+                            commit_all_forks_only(&mut task);
+                        } else {
+                            log!(
+                                &task.platform,
+                                Debug,
+                                &task.log_target,
+                                "mode-decision; deciding (no warp-eligible peer yet)",
+                                local_finalized,
+                                peer_finalized = finalized_block_height,
+                                gap,
+                                packets_seen = task.deciding_packets_seen,
+                            );
+                        }
                     }
                 }
             }
@@ -1492,7 +1514,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         &task.platform,
                         Debug,
                         &task.log_target,
-                        "mode-decision; committed=AllForksOnly (timeout, no peers)",
+                        "mode-decision; committed=AllForksOnly (timeout)",
+                        packets_seen = task.deciding_packets_seen,
                     );
                     commit_all_forks_only(&mut task);
                 }
@@ -1564,6 +1587,10 @@ struct Task<TPlat: PlatformRef> {
     sync: Option<all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>>,
 
     mode: ModeState,
+
+    /// Number of below-gap GrandpaNeighborPackets observed while in [`ModeState::Deciding`].
+    /// Only meaningful in that state; gates the early commit to AllForksOnly.
+    deciding_packets_seen: usize,
 
     /// Replaced with `pending` on mode commit so it never fires again.
     mode_decision_deadline:
