@@ -1731,3 +1731,140 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
 
     drain_pending_subscriptions(task);
 }
+
+#[cfg(test)]
+mod tests {
+    // TODO follow-up:
+    // - move fixtures to a shared `smoldot-test-support` crate
+    //   cross-crate `cfg(test)` doesn't propagate,
+    // - add a `Status::WarpSyncChainInformation` case
+    //   (see https://github.com/paritytech/smoldot/pull/3268#discussion_r3311390876)
+    //   needs a test-only AllSync setter or crypto-correct warp fragments
+    use super::*;
+    use smoldot::{
+        chain::chain_information,
+        libp2p::peer_id::{PeerId, PublicKey},
+        sync::all::{
+            AddSource, AllSync, Config, DesiredRequest, RequestDetail, SourceId, Status,
+        },
+    };
+
+    type TestSync = AllSync<future::AbortHandle, (PeerId, codec::Role), ()>;
+
+    fn aura_grandpa_genesis() -> chain_information::ValidChainInformation {
+        chain_information::ValidChainInformation::try_from(chain_information::ChainInformation {
+            finalized_block_header: Box::new(header::Header {
+                parent_hash: [0; 32],
+                number: 0,
+                state_root: [0; 32],
+                extrinsics_root: [0; 32],
+                digest: header::Digest::from(header::DigestRef::empty()),
+            }),
+            consensus: chain_information::ChainInformationConsensus::Aura {
+                finalized_authorities_list: Vec::new(),
+                slot_duration: NonZero::new(6000).unwrap(),
+            },
+            finality: chain_information::ChainInformationFinality::Grandpa {
+                after_finalized_block_authorities_set_id: 0,
+                finalized_triggered_authorities: Vec::new(),
+                finalized_scheduled_change: None,
+            },
+        })
+        .unwrap()
+    }
+
+    fn fresh_sync() -> TestSync {
+        AllSync::new(Config {
+            chain_information: aura_grandpa_genesis(),
+            block_number_bytes: 4,
+            allow_unknown_consensus_engines: false,
+            sources_capacity: 4,
+            blocks_capacity: 4,
+            max_disjoint_headers: 4,
+            max_requests_per_block: NonZero::new(1).unwrap(),
+            download_ahead_blocks: NonZero::new(1).unwrap(),
+            download_bodies: false,
+            download_all_chain_information_storage_proofs: false,
+            code_trie_node_hint: None,
+        })
+    }
+
+    fn test_peer() -> PeerId {
+        PeerId::from_public_key(&PublicKey::Ed25519([42u8; 32]))
+    }
+
+    fn add_peer(sync: &mut TestSync, finalized: u64) -> SourceId {
+        let source_id = match sync.prepare_add_source(finalized, [1; 32]) {
+            AddSource::UnknownBestBlock(s) => {
+                s.add_source_and_insert_block((test_peer(), codec::Role::Full), ())
+            }
+            _ => unreachable!(),
+        };
+        sync.update_source_finality_state(source_id, finalized);
+        source_id
+    }
+
+    fn dispatch_warp(sync: &mut TestSync, source_id: SourceId) {
+        let sync_start_block_hash = sync
+            .desired_requests()
+            .find_map(|(_, _, rq)| match rq {
+                DesiredRequest::WarpSync {
+                    sync_start_block_hash,
+                } => Some(sync_start_block_hash),
+                _ => None,
+            })
+            .expect("warp request should be desired");
+        let (handle, _reg) = future::AbortHandle::new_pair();
+        let _ = sync.add_request(
+            source_id,
+            RequestDetail::WarpSync {
+                sync_start_block_hash,
+            },
+            handle,
+        );
+    }
+
+    // Status::WarpSyncFragments { source: Some(_), .. } arm.
+    #[test]
+    fn proceeds_with_inflight_fragment_download() {
+        let mut sync = fresh_sync();
+        let src = add_peer(&mut sync, 100);
+        dispatch_warp(&mut sync, src);
+        assert!(
+            !sync
+                .desired_requests()
+                .any(|(_, _, rq)| matches!(rq, DesiredRequest::WarpSync { .. }))
+        );
+        assert!(matches!(
+            sync.status(),
+            Status::WarpSyncFragments { source: Some(_), .. }
+        ));
+        assert!(warp_sync_can_proceed(&sync));
+    }
+
+    // Fall-through arm with a desired WarpSync request.
+    #[test]
+    fn proceeds_with_eligible_source_before_dispatch() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 100);
+        assert!(warp_sync_can_proceed(&sync));
+    }
+
+    // Fall-through arm, no eligible source: genuine stall.
+    #[test]
+    fn cannot_proceed_with_source_below_gap() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 10);
+        assert!(!warp_sync_can_proceed(&sync));
+    }
+
+    // Status::Sync arm after cancel_warp_sync.
+    #[test]
+    fn cannot_proceed_after_cancel() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 100);
+        let _ = sync.cancel_warp_sync();
+        assert!(matches!(sync.status(), Status::Sync));
+        assert!(!warp_sync_can_proceed(&sync));
+    }
+}
