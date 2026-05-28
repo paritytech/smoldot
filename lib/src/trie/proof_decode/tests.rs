@@ -3062,6 +3062,50 @@ fn verify_compact_proof_rejects_tampered_proof_byte() {
 }
 
 #[test]
+fn verify_compact_proof_rejects_present_leaf_value() {
+    let mut proof = COMPACT_PROOF.to_vec();
+
+    // COMPACT_PROOF is a SCALE-encoded Vec<Vec<u8>> with two trie-node entries.
+    // At byte 74, the second entry starts with its SCALE compact length prefix:
+    //
+    //   0x08 0x40 0x00
+    //
+    //   0x08       = SCALE compact length 2 (2 << 2)
+    //   0x40 0x00 = leaf node with an empty value placeholder
+    //
+    // In a compact proof, that empty value means "the real value was omitted and
+    // must be supplied separately by the host-function argument".
+    let leaf_entry_len_index = 74;
+    assert_eq!(proof[leaf_entry_len_index], 0x08);
+    assert_eq!(&proof[leaf_entry_len_index + 1..], &[0x40, 0x00]);
+
+    // Change the second entry to:
+    //
+    //   0x0c 0x40 0x04 0xab
+    //
+    //   0x0c             = SCALE compact length 3 (3 << 2)
+    //   0x40             = same leaf node header
+    //   0x04             = SCALE compact value length 1 (1 << 2)
+    //   0xab             = the one-byte value now present in the proof
+    //
+    // This turns the proof from "leaf exists, value omitted" into
+    // "leaf exists, value is 0xab".
+    // Substrate rejects this as ExtraneousValue, even though the verifier is
+    // given the expected value separately.
+    proof[leaf_entry_len_index] = 0x0c;
+    proof[leaf_entry_len_index + 2] = 0x04;
+    proof.push(0xab);
+
+    assert!(!super::verify_compact_trie_proof(
+        &proof,
+        &COMPACT_PROOF_ROOT,
+        COMPACT_PROOF_KEY,
+        COMPACT_PROOF_VALUE,
+        trie::TrieEntryVersion::V1,
+    ));
+}
+
+#[test]
 fn verify_compact_proof_rejects_truncated_proof() {
     // Drop the leaf entry — verifier should fail when it tries to descend into
     // the path placeholder and finds the iterator empty.
