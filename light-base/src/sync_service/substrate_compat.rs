@@ -50,9 +50,8 @@ use smoldot::{
 // https://github.com/paritytech/smoldot/pull/3268#discussion_r3311751768
 const MODE_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Below-gap packets to observe before committing AllForksOnly. Avoids one lagging
+/// Below warp sync minimum gap packets to observe before committing AllForksOnly. Avoids one lagging
 /// first peer locking us into the slow path when our local finalized is a stale checkpoint.
-/// https://github.com/paritytech/smoldot/pull/3268#discussion_r3311637661
 const MODE_DECISION_MIN_PACKETS: usize = 2;
 
 /// Starts a sync service background task to synchronize a chain (relay chain or not) that is
@@ -1948,7 +1947,9 @@ mod tests {
         );
         assert_eq!(
             neighbor_packet_outcome(
-                &ModeState::AwaitingWarp { target_finalized: 100 },
+                &ModeState::AwaitingWarp {
+                    target_finalized: 100
+                },
                 &sync,
                 0,
             ),
@@ -1986,11 +1987,7 @@ mod tests {
         let mut sync = fresh_sync();
         let _ = add_peer(&mut sync, 10);
         assert_eq!(
-            neighbor_packet_outcome(
-                &ModeState::Deciding,
-                &sync,
-                MODE_DECISION_MIN_PACKETS - 1,
-            ),
+            neighbor_packet_outcome(&ModeState::Deciding, &sync, MODE_DECISION_MIN_PACKETS - 1,),
             NeighborPacketOutcome::CommitAllForksOnly,
         );
     }
