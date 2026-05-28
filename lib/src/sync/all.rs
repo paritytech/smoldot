@@ -413,21 +413,18 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             return Vec::new();
         }
 
-        let warp_request_ids: Vec<usize> = self
+        let warp_request_ids: Vec<RequestId> = self
             .shared
             .requests
             .iter()
             .filter(|(_, rq)| rq.warp_sync.is_some())
-            .map(|(id, _)| id)
+            .map(|(id, _)| RequestId(id))
             .collect();
 
-        let mut aborted_handles = Vec::with_capacity(warp_request_ids.len());
-        for id in warp_request_ids {
-            let request = self.shared.requests.remove(id);
-            debug_assert!(request.all_forks.is_none());
-            self.shared.sources[request.source_id.0].num_requests -= 1;
-            aborted_handles.push(request.user_data);
-        }
+        let aborted_handles: Vec<TRq> = warp_request_ids
+            .into_iter()
+            .map(|id| self.remove_request(id))
+            .collect();
 
         for (_, source_mapping) in self.shared.sources.iter_mut() {
             source_mapping.warp_sync = None;
