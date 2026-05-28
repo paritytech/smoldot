@@ -1323,8 +1323,10 @@ async fn run_background<TPlat: PlatformRef>(
 
                 // The buffer size should be large enough so that, if the CPU is busy, it
                 // doesn't become full before the execution of the runtime service resumes.
-                // Note that this `await` freezes the entire runtime service background task,
-                // but the sync service guarantees that `subscribe_all` returns very quickly.
+                // Note that this `await` freezes the entire runtime service background task.
+                // The sync service returns promptly except for the first call after startup,
+                // which may block until the bootstrap mode commits (see
+                // `SyncService::subscribe_all`).
                 let subscription = background.sync_service.subscribe_all(32, true).await;
 
                 log!(
