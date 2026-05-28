@@ -50,10 +50,9 @@ use smoldot::{
 // https://github.com/paritytech/smoldot/pull/3268#discussion_r3311751768
 const MODE_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Minimum number of below-gap GrandpaNeighborPackets observed while `Deciding` before
-/// committing to AllForksOnly. Guards against a single lagging first peer wrongly locking
-/// us into the slow path when our local finalized is an old chain-spec checkpoint.
-/// See https://github.com/paritytech/smoldot/pull/3268#discussion_r3311637661
+/// Below-gap packets to observe before committing AllForksOnly. Avoids one lagging
+/// first peer locking us into the slow path when our local finalized is a stale checkpoint.
+/// https://github.com/paritytech/smoldot/pull/3268#discussion_r3311637661
 const MODE_DECISION_MIN_PACKETS: usize = 2;
 
 /// Starts a sync service background task to synchronize a chain (relay chain or not) that is
@@ -850,34 +849,41 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .unwrap_or_else(|| unreachable!())
                     .update_source_finality_state(sync_source_id, finalized_block_height);
 
-                if matches!(task.mode, ModeState::Deciding) {
+                let outcome = neighbor_packet_outcome(
+                    &task.mode,
+                    task.sync.as_ref().unwrap_or_else(|| unreachable!()),
+                    task.deciding_packets_seen,
+                );
+                if !matches!(outcome, NeighborPacketOutcome::Ignore) {
                     let local_finalized = task
                         .sync
                         .as_ref()
                         .unwrap_or_else(|| unreachable!())
                         .finalized_block_number();
                     let gap = finalized_block_height.saturating_sub(local_finalized);
-                    if warp_sync_can_proceed(task.sync.as_ref().unwrap_or_else(|| unreachable!())) {
-                        task.mode = ModeState::AwaitingWarp {
-                            target_finalized: finalized_block_height,
-                        };
-                        // Keep the deadline armed as a warp-stall fallback.
-                        task.mode_decision_deadline = future::Either::Left(Box::pin(
-                            task.platform.sleep(MODE_DECISION_TIMEOUT),
-                        ))
-                        .fuse();
-                        log!(
-                            &task.platform,
-                            Debug,
-                            &task.log_target,
-                            "mode-decision; committed=WarpAhead",
-                            local_finalized,
-                            peer_finalized = finalized_block_height,
-                            gap,
-                        );
-                    } else {
-                        task.deciding_packets_seen += 1;
-                        if task.deciding_packets_seen >= MODE_DECISION_MIN_PACKETS {
+                    match outcome {
+                        NeighborPacketOutcome::Ignore => unreachable!(),
+                        NeighborPacketOutcome::CommitWarpAhead => {
+                            task.mode = ModeState::AwaitingWarp {
+                                target_finalized: finalized_block_height,
+                            };
+                            // Keep the deadline armed as a warp-stall fallback.
+                            task.mode_decision_deadline = future::Either::Left(Box::pin(
+                                task.platform.sleep(MODE_DECISION_TIMEOUT),
+                            ))
+                            .fuse();
+                            log!(
+                                &task.platform,
+                                Debug,
+                                &task.log_target,
+                                "mode-decision; committed=WarpAhead",
+                                local_finalized,
+                                peer_finalized = finalized_block_height,
+                                gap,
+                            );
+                        }
+                        NeighborPacketOutcome::CommitAllForksOnly => {
+                            task.deciding_packets_seen += 1;
                             log!(
                                 &task.platform,
                                 Debug,
@@ -889,7 +895,9 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                                 packets_seen = task.deciding_packets_seen,
                             );
                             commit_all_forks_only(&mut task);
-                        } else {
+                        }
+                        NeighborPacketOutcome::StayDeciding => {
+                            task.deciding_packets_seen += 1;
                             log!(
                                 &task.platform,
                                 Debug,
@@ -1588,8 +1596,7 @@ struct Task<TPlat: PlatformRef> {
 
     mode: ModeState,
 
-    /// Number of below-gap GrandpaNeighborPackets observed while in [`ModeState::Deciding`].
-    /// Only meaningful in that state; gates the early commit to AllForksOnly.
+    /// Below-gap packets observed while [`ModeState::Deciding`]; gates AllForksOnly commit.
     deciding_packets_seen: usize,
 
     /// Replaced with `pending` on mode commit so it never fires again.
@@ -1696,6 +1703,34 @@ fn respond_subscribe_all<TPlat: PlatformRef>(
         non_finalized_blocks_ancestry_order,
         new_blocks,
     });
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NeighborPacketOutcome {
+    Ignore,
+    CommitWarpAhead,
+    CommitAllForksOnly,
+    StayDeciding,
+}
+
+/// `packets_seen` excludes the current packet. Caller must have already fed the new
+/// packet's finalized height into `sync`.
+fn neighbor_packet_outcome(
+    mode: &ModeState,
+    sync: &all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>,
+    packets_seen: usize,
+) -> NeighborPacketOutcome {
+    if !matches!(mode, ModeState::Deciding) {
+        return NeighborPacketOutcome::Ignore;
+    }
+    if warp_sync_can_proceed(sync) {
+        return NeighborPacketOutcome::CommitWarpAhead;
+    }
+    if packets_seen + 1 >= MODE_DECISION_MIN_PACKETS {
+        NeighborPacketOutcome::CommitAllForksOnly
+    } else {
+        NeighborPacketOutcome::StayDeciding
+    }
 }
 
 /// Warp is downloading/building, or a qualifying source is available for the next request.
@@ -1896,5 +1931,62 @@ mod tests {
         let _ = sync.cancel_warp_sync();
         assert!(matches!(sync.status(), Status::Sync));
         assert!(!warp_sync_can_proceed(&sync));
+    }
+
+    #[test]
+    fn neighbor_packet_ignored_outside_deciding() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 100);
+        assert_eq!(
+            neighbor_packet_outcome(&ModeState::Ready, &sync, 0),
+            NeighborPacketOutcome::Ignore,
+        );
+        assert_eq!(
+            neighbor_packet_outcome(
+                &ModeState::AwaitingWarp { target_finalized: 100 },
+                &sync,
+                0,
+            ),
+            NeighborPacketOutcome::Ignore,
+        );
+    }
+
+    #[test]
+    fn neighbor_packet_commits_warp_with_eligible_peer() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 100);
+        assert_eq!(
+            neighbor_packet_outcome(&ModeState::Deciding, &sync, 0),
+            NeighborPacketOutcome::CommitWarpAhead,
+        );
+        // Eligible peer wins even with packets already buffered.
+        assert_eq!(
+            neighbor_packet_outcome(&ModeState::Deciding, &sync, 5),
+            NeighborPacketOutcome::CommitWarpAhead,
+        );
+    }
+
+    #[test]
+    fn neighbor_packet_stays_deciding_below_min() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 10);
+        assert_eq!(
+            neighbor_packet_outcome(&ModeState::Deciding, &sync, 0),
+            NeighborPacketOutcome::StayDeciding,
+        );
+    }
+
+    #[test]
+    fn neighbor_packet_commits_all_forks_at_min_packets() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 10);
+        assert_eq!(
+            neighbor_packet_outcome(
+                &ModeState::Deciding,
+                &sync,
+                MODE_DECISION_MIN_PACKETS - 1,
+            ),
+            NeighborPacketOutcome::CommitAllForksOnly,
+        );
     }
 }
