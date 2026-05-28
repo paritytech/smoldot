@@ -46,6 +46,8 @@ use smoldot::{
 /// Maximum wait for the first GrandpaNeighborPacket before falling back to AllForksOnly.
 /// Sized for cold-start peer discovery (DNS + libp2p handshake + gossip-open), which can
 /// stretch to ~20s on light clients.
+// TODO follow-up: integration test that fires this timeout.
+// https://github.com/paritytech/smoldot/pull/3268#discussion_r3311751768
 const MODE_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Starts a sync service background task to synchronize a chain (relay chain or not) that is
@@ -1744,9 +1746,7 @@ mod tests {
     use smoldot::{
         chain::chain_information,
         libp2p::peer_id::{PeerId, PublicKey},
-        sync::all::{
-            AddSource, AllSync, Config, DesiredRequest, RequestDetail, SourceId, Status,
-        },
+        sync::all::{AddSource, AllSync, Config, DesiredRequest, RequestDetail, SourceId, Status},
     };
 
     type TestSync = AllSync<future::AbortHandle, (PeerId, codec::Role), ()>;
@@ -1837,7 +1837,10 @@ mod tests {
         );
         assert!(matches!(
             sync.status(),
-            Status::WarpSyncFragments { source: Some(_), .. }
+            Status::WarpSyncFragments {
+                source: Some(_),
+                ..
+            }
         ));
         assert!(warp_sync_can_proceed(&sync));
     }
