@@ -2174,9 +2174,11 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
 
         let runtime_calls = mem::take(&mut self.inner.runtime_calls);
 
-        debug_assert!(runtime_calls
-            .values()
-            .all(|c| matches!(c, CallProof::Downloaded { .. })));
+        debug_assert!(
+            runtime_calls
+                .values()
+                .all(|c| matches!(c, CallProof::Downloaded { .. }))
+        );
 
         // Decode all the Merkle proofs that have been received.
         let calls = {
