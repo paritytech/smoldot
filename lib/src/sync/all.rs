@@ -2562,3 +2562,65 @@ fn all_forks_request_convert(
         request_justification: true,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chain::chain_information;
+
+    fn aura_grandpa_genesis() -> chain_information::ValidChainInformation {
+        chain_information::ValidChainInformation::try_from(chain_information::ChainInformation {
+            finalized_block_header: Box::new(header::Header {
+                parent_hash: [0; 32],
+                number: 0,
+                state_root: [0; 32],
+                extrinsics_root: [0; 32],
+                digest: header::Digest::from(header::DigestRef::empty()),
+            }),
+            consensus: chain_information::ChainInformationConsensus::Aura {
+                finalized_authorities_list: Vec::new(),
+                slot_duration: NonZero::new(6000).unwrap(),
+            },
+            finality: chain_information::ChainInformationFinality::Grandpa {
+                after_finalized_block_authorities_set_id: 0,
+                finalized_triggered_authorities: Vec::new(),
+                finalized_scheduled_change: None,
+            },
+        })
+        .unwrap()
+    }
+
+    fn fresh_sync() -> AllSync<(), (), ()> {
+        AllSync::new(Config {
+            chain_information: aura_grandpa_genesis(),
+            block_number_bytes: 4,
+            allow_unknown_consensus_engines: false,
+            sources_capacity: 4,
+            blocks_capacity: 4,
+            max_disjoint_headers: 4,
+            max_requests_per_block: NonZero::new(1).unwrap(),
+            download_ahead_blocks: NonZero::new(1).unwrap(),
+            download_bodies: false,
+            download_all_chain_information_storage_proofs: false,
+            code_trie_node_hint: None,
+        })
+    }
+
+    // Regression: AllSync::status() used to be a stub returning Status::Sync, hiding the active
+    // warp phase from callers (notably sync_service's warp_sync_can_proceed).
+    #[test]
+    fn status_reports_warp_for_fresh_grandpa_chain() {
+        let sync = fresh_sync();
+        assert!(matches!(
+            sync.status(),
+            Status::WarpSyncFragments { source: None, .. }
+        ));
+    }
+
+    #[test]
+    fn status_reports_sync_after_cancel_warp() {
+        let mut sync = fresh_sync();
+        let _ = sync.cancel_warp_sync();
+        assert!(matches!(sync.status(), Status::Sync));
+    }
+}
