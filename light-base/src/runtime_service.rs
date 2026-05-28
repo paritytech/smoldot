@@ -1442,7 +1442,10 @@ async fn run_background<TPlat: PlatformRef>(
                                         Some(
                                             tree.input_output_iter_unordered()
                                                 .find(|b| b.user_data.hash == block.parent_hash)
-                                                .unwrap()
+                                                .expect(
+                                                    "blocks come in ancestry order, parent \
+                                                     was already inserted; qed",
+                                                )
                                                 .id,
                                         )
                                     };
@@ -1460,7 +1463,10 @@ async fn run_background<TPlat: PlatformRef>(
                                                 &block.scale_encoded_header,
                                                 background.sync_service.block_number_bytes(),
                                             )
-                                            .unwrap()
+                                            .expect(
+                                                "header provided by sync_service was already \
+                                                 validated; qed",
+                                            )
                                             .number, // TODO: consider feeding the information from the sync service?
                                             scale_encoded_header: block.scale_encoded_header,
                                         },
