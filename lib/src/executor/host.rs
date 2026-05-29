@@ -2318,16 +2318,21 @@ impl ReadyToRun {
                 }
             }
             HostFunction::ext_transaction_index_index_version_1 => {
-                // TODO: this is currently a no-op; because not all the parameters are verified, this might lead to consensus issues
-                let _tx_ptr = expect_pointer_size_raw!(0);
+                // Substrate uses these to maintain an offchain index of stored chunks served
+                // over Bitswap; smoldot doesn't store chunks at all, so the call is a no-op.
+                // Params still need to be consumed so the wasm VM doesn't fault on the
+                // `expect_*` arity-or-type mismatch the previous code triggered.
+                let _extrinsic_index = expect_u32!(0);
+                let _content_size = expect_u32!(1);
+                let _content_hash = expect_pointer_constant_size!(2, 32);
                 HostVm::ReadyToRun(ReadyToRun {
                     inner: self.inner,
                     resume_value: None,
                 })
             }
             HostFunction::ext_transaction_index_renew_version_1 => {
-                // TODO: this is currently a no-op; because not all the parameters are verified, this might lead to consensus issues
-                let _tx_ptr = expect_pointer_size_raw!(0);
+                let _extrinsic_index = expect_u32!(0);
+                let _content_hash = expect_pointer_constant_size!(1, 32);
                 HostVm::ReadyToRun(ReadyToRun {
                     inner: self.inner,
                     resume_value: None,
