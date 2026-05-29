@@ -22,25 +22,30 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
-use zombienet_sdk::{LocalFileSystem, Network, NetworkConfigBuilder};
+use anyhow::{anyhow, bail, Context, Result};
+use zombienet_sdk::{LocalFileSystem, Network, NetworkConfig, NetworkConfigBuilder};
 
 use crate::bulletin;
 
-/// GCS URLs for the snapshots produced by `bulletin_generate_snapshot`.
-pub const DB_SNAPSHOT_RELAY: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/relay-2026-05-25.tgz";
-pub const DB_SNAPSHOT_BULLETIN_FULL: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-full-2026-05-25.tgz";
-pub const DB_SNAPSHOT_BULLETIN_PARTIAL: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bulletin-partial-2026-05-25.tgz";
+/// GCS URL of the snapshot bundle produced by `bulletin_generate_snapshot`
+/// (a single `bundle.tar.gz` packed by the zombienet-sdk `BundleBuilder`).
+pub const DB_SNAPSHOT_BUNDLE: &str =
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bundle-2026-05-25.tar.gz";
 
-/// Bundle of snapshot URLs passed to [`spawn_with_snapshots`]. Borrowed —
-/// the caller owns the strings.
-pub struct SnapshotUrls<'a> {
-    pub relay: &'a str,
-    pub bulletin_full: &'a str,
-    pub bulletin_partial: &'a str,
+/// SHA256 of the published bundle. Empty means not yet pinned — in that case
+/// the resolver requires [`BUNDLE_OVERRIDE_ENV`] to point at a local bundle.
+pub const DB_SNAPSHOT_BUNDLE_SHA256: &str = "";
+
+/// Point this at a locally-generated `bundle.tar.gz` (e.g. `./tmp/snapshots/
+/// bundle.tar.gz` produced by `./g`) to skip the download and run against it.
+pub const BUNDLE_OVERRIDE_ENV: &str = "DB_SNAPSHOT_BUNDLE_OVERRIDE";
+
+/// Per-node DB archives unpacked from the bundle, ready to hand to
+/// `with_db_snapshot`. Owned local paths under the network base dir.
+pub struct BulletinSnapshots {
+    pub relay: PathBuf,
+    pub bulletin_full: PathBuf,
+    pub bulletin_partial: PathBuf,
 }
 
 /// Path to the bulletin chain spec shipped with the `smoldot-e2e-tests` crate.
@@ -48,10 +53,65 @@ pub fn bulletin_chain_spec() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("chain-specs/bulletin-westend-local-spec.json")
 }
 
-/// Returns the value of `env_var` if set, or `default` otherwise. Useful for
-/// pointing snapshot URLs at a locally-staged `.tgz` while iterating.
-pub fn get_snapshot_url(default: &str, env_var: &str) -> String {
-    std::env::var(env_var).unwrap_or_else(|_| default.to_string())
+/// Resolves the snapshot bundle (local override or download + SHA256-verify),
+/// unpacks it under `{base_dir}/bulletin-snapshots/`, and returns the inner
+/// per-node archive paths.
+///
+/// Set [`BUNDLE_OVERRIDE_ENV`] to a local `bundle.tar.gz` to iterate without a
+/// download. Otherwise the bundle is fetched from [`DB_SNAPSHOT_BUNDLE`] into
+/// `~/.cache/smoldot-e2e/bulletin/` and verified against
+/// [`DB_SNAPSHOT_BUNDLE_SHA256`].
+pub fn resolve_bundle(base_dir: &Path) -> Result<BulletinSnapshots> {
+    let bundle_path = if let Ok(p) = std::env::var(BUNDLE_OVERRIDE_ENV) {
+        let p = PathBuf::from(p);
+        if !p.is_file() {
+            bail!("{BUNDLE_OVERRIDE_ENV}: {} is not a file", p.display());
+        }
+        log::info!("bulletin snapshot: using local override {}", p.display());
+        p
+    } else {
+        if DB_SNAPSHOT_BUNDLE_SHA256.is_empty() {
+            return Err(anyhow!(
+                "DB_SNAPSHOT_BUNDLE_SHA256 not pinned (placeholder); set \
+                 {BUNDLE_OVERRIDE_ENV} to a local bundle.tar.gz"
+            ));
+        }
+        let cached = bundle_cache_path(DB_SNAPSHOT_BUNDLE_SHA256)?;
+        if !cached.is_file() {
+            log::info!("bulletin snapshot: downloading {DB_SNAPSHOT_BUNDLE}");
+            crate::snapshot::download(DB_SNAPSHOT_BUNDLE, &cached)?;
+        }
+        crate::snapshot::verify_sha256(&cached, DB_SNAPSHOT_BUNDLE_SHA256)?;
+        cached
+    };
+
+    // Unpack fresh each run so stale inner archives can't leak across runs.
+    let extract_dir = base_dir.join("bulletin-snapshots");
+    let _ = std::fs::remove_dir_all(&extract_dir);
+    zombienet_sdk::snapshot::untar_bundle(&bundle_path, &extract_dir)
+        .with_context(|| format!("untar bundle {}", bundle_path.display()))?;
+
+    let snaps = BulletinSnapshots {
+        relay: extract_dir.join("relay.tgz"),
+        bulletin_full: extract_dir.join("bulletin-full.tgz"),
+        bulletin_partial: extract_dir.join("bulletin-partial.tgz"),
+    };
+    for p in [&snaps.relay, &snaps.bulletin_full, &snaps.bulletin_partial] {
+        if !p.is_file() {
+            bail!("bundle is missing expected archive {}", p.display());
+        }
+    }
+    Ok(snaps)
+}
+
+fn bundle_cache_path(sha256: &str) -> Result<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .ok_or_else(|| anyhow!("neither XDG_CACHE_HOME nor HOME is set"))?;
+    let dir = base.join("smoldot-e2e").join("bulletin");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join(format!("bundle-{sha256}.tar.gz")))
 }
 
 /// Emit a copy-pasteable shell command equivalent to what `run_js_test`
@@ -77,17 +137,22 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Spawns a zombienet network running a westend relay + the bulletin
-/// parachain, restoring the supplied DB snapshots on the relay and on each
-/// of the two collators. `extra_para_args` are appended verbatim to the
-/// parachain's default arg list — used by `bulletin_batch` to crank up log
-/// verbosity on the collator side.
-pub async fn spawn_with_snapshots(
+/// Builds the bulletin network config (westend relay + bulletin parachain,
+/// para id 2487).
+///
+/// - `snaps == None`: fresh from genesis, to *generate* the snapshots
+///   (`bulletin_generate_snapshot`).
+/// - `snaps == Some`: restore those snapshots to *run the tests* — relay on
+///   both validators, `bulletin-full` on collator-1, `bulletin-partial` on
+///   collator-2.
+///
+/// `extra_para_args` are appended to the parachain's default args.
+pub fn bulletin_network_config(
     base_dir: &Path,
     chain_spec: &Path,
-    snaps: SnapshotUrls<'_>,
+    snaps: Option<&BulletinSnapshots>,
     extra_para_args: &[&str],
-) -> Result<Network<LocalFileSystem>> {
+) -> Result<NetworkConfig> {
     let chain_spec_str = chain_spec
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 chain spec path"))?
@@ -96,36 +161,27 @@ pub async fn spawn_with_snapshots(
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 base dir"))?
         .to_string();
-    let relay = snaps.relay.to_string();
-    let bulletin_full = snaps.bulletin_full.to_string();
-    let bulletin_partial = snaps.bulletin_partial.to_string();
+    let relay = snaps.map(|s| s.relay.clone());
+    let bulletin_full = snaps.map(|s| s.bulletin_full.clone());
+    let bulletin_partial = snaps.map(|s| s.bulletin_partial.clone());
     let extra_para_args: Vec<String> = extra_para_args.iter().map(|s| s.to_string()).collect();
 
-    let cfg = NetworkConfigBuilder::new()
-        .with_relaychain(|rc| {
+    NetworkConfigBuilder::new()
+        .with_relaychain(move |rc| {
             rc.with_chain(bulletin::RELAY_CHAIN)
                 .with_default_command(bulletin::RELAY_BINARY)
                 .with_validator(|n| {
                     n.with_name("alice")
                         .bootnode(true)
-                        .with_db_snapshot(relay.as_str())
+                        .with_optional_db_snapshot(relay.clone())
                 })
                 .with_validator(|n| {
                     n.with_name("bob")
                         .bootnode(true)
-                        .with_db_snapshot(relay.as_str())
+                        .with_optional_db_snapshot(relay.clone())
                 })
         })
-        .with_parachain(|p| {
-            // Skip the embedded relay client and proxy relay-chain queries
-            // through alice/bob's RPC. Zombienet expands the
-            // `{{ZOMBIE:<node>:ws_uri}}` templates at spawn time. This
-            // sidesteps the relay-side libp2p discovery quirks we hit with
-            // the embedded relay (see polkadot-sdk's
-            // `full_node_warp_sync/common.rs` for the same pattern on
-            // collators "four" / "five", and
-            // `bulletin_generate_snapshot::spawn_network` for the original
-            // investigation).
+        .with_parachain(move |p| {
             let mut args = vec!["--ipfs-server".into()];
             for arg in &extra_para_args {
                 args.push(arg.as_str().into());
@@ -141,20 +197,31 @@ pub async fn spawn_with_snapshots(
                         .validator(true)
                         .bootnode(true)
                         .with_command(bulletin::PARA_BINARY)
-                        .with_db_snapshot(bulletin_full.as_str())
+                        .with_optional_db_snapshot(bulletin_full.clone())
                 })
                 .with_collator(|c| {
                     c.with_name("collator-2")
                         .validator(true)
                         .bootnode(true)
                         .with_command(bulletin::PARA_BINARY)
-                        .with_db_snapshot(bulletin_partial.as_str())
+                        .with_optional_db_snapshot(bulletin_partial.clone())
                 })
         })
-        .with_global_settings(|g| g.with_base_dir(base_dir_str.as_str()))
+        .with_global_settings(move |g| g.with_base_dir(base_dir_str.as_str()))
         .build()
-        .map_err(|e| anyhow!("network config errors: {e:?}"))?;
+        .map_err(|e| anyhow!("network config errors: {e:?}"))
+}
 
+/// Spawns the bulletin network restoring the supplied DB snapshots, detaches
+/// it, and waits until it is up. Thin wrapper over [`bulletin_network_config`]
+/// with `Some(snaps)`.
+pub async fn spawn_with_snapshots(
+    base_dir: &Path,
+    chain_spec: &Path,
+    snaps: &BulletinSnapshots,
+    extra_para_args: &[&str],
+) -> Result<Network<LocalFileSystem>> {
+    let cfg = bulletin_network_config(base_dir, chain_spec, Some(snaps), extra_para_args)?;
     let spawn_fn = zombienet_sdk::environment::get_spawn_fn();
     let network = spawn_fn(cfg).await?;
     network.detach().await;

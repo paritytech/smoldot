@@ -15,7 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use smoldot::libp2p::cid::{Cid, CidPrefix, MultihashType};
 
@@ -179,32 +178,4 @@ fn write_leb128(out: &mut Vec<u8>, mut value: u64) {
         }
         out.push(byte | 0x80);
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ManifestPayload {
-    pub label: String,
-    pub cid: String,
-    pub sha256: String,
-    pub size: u64,
-    pub on_partial: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArchiveChecksums {
-    pub relay_sha256: String,
-    pub bulletin_full_sha256: String,
-    pub bulletin_partial_sha256: String,
-}
-
-/// Manifest emitted alongside the snapshots by the generator. Bumping
-/// `schema_version` is a breaking change.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BulletinManifest {
-    pub schema_version: u32,
-    pub snapshot_height: u64,
-    pub bulletin_release_tag: String,
-    pub polkadot_release_tag: String,
-    pub payloads: Vec<ManifestPayload>,
-    pub archives: ArchiveChecksums,
 }

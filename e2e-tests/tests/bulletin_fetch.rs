@@ -20,9 +20,8 @@ use serde::Serialize;
 use smoldot_e2e_tests::{
     bulletin, ensure_js_deps_installed, ensure_smoldot_built,
     harness::{
-        bulletin_chain_spec, chain_spec_paths, get_snapshot_url, print_dev_mode_invocation,
-        spawn_with_snapshots, SnapshotUrls, DB_SNAPSHOT_BULLETIN_FULL,
-        DB_SNAPSHOT_BULLETIN_PARTIAL, DB_SNAPSHOT_RELAY,
+        bulletin_chain_spec, chain_spec_paths, print_dev_mode_invocation, resolve_bundle,
+        spawn_with_snapshots,
     },
     resolve_base_dir, run_js_test,
 };
@@ -46,27 +45,9 @@ async fn bulletin_fetch() -> Result<()> {
     let chain_spec = bulletin_chain_spec();
     let base_dir = resolve_base_dir()?;
 
-    let relay = get_snapshot_url(DB_SNAPSHOT_RELAY, "DB_SNAPSHOT_RELAY_OVERRIDE");
-    let bulletin_full = get_snapshot_url(
-        DB_SNAPSHOT_BULLETIN_FULL,
-        "DB_SNAPSHOT_BULLETIN_FULL_OVERRIDE",
-    );
-    let bulletin_partial = get_snapshot_url(
-        DB_SNAPSHOT_BULLETIN_PARTIAL,
-        "DB_SNAPSHOT_BULLETIN_PARTIAL_OVERRIDE",
-    );
+    let snaps = resolve_bundle(&base_dir)?;
 
-    let network = spawn_with_snapshots(
-        &base_dir,
-        &chain_spec,
-        SnapshotUrls {
-            relay: &relay,
-            bulletin_full: &bulletin_full,
-            bulletin_partial: &bulletin_partial,
-        },
-        &[],
-    )
-    .await?;
+    let network = spawn_with_snapshots(&base_dir, &chain_spec, &snaps, &[]).await?;
 
     let (relay_spec, bulletin_spec) = chain_spec_paths(&network)?;
 

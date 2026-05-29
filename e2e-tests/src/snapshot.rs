@@ -148,7 +148,7 @@ fn cache_dir() -> Result<PathBuf, anyhow::Error> {
     Ok(dir)
 }
 
-fn download(url: &str, dst: &std::path::Path) -> Result<(), anyhow::Error> {
+pub(crate) fn download(url: &str, dst: &std::path::Path) -> Result<(), anyhow::Error> {
     let tmp = dst.with_extension("partial");
     let status = std::process::Command::new("curl")
         .arg("-fL")
@@ -182,7 +182,7 @@ fn extract_tarball(tarball: &std::path::Path, dst: &std::path::Path) -> Result<(
     Ok(())
 }
 
-fn verify_sha256(path: &std::path::Path, expected: &str) -> Result<(), anyhow::Error> {
+pub(crate) fn verify_sha256(path: &std::path::Path, expected: &str) -> Result<(), anyhow::Error> {
     let output = std::process::Command::new("sha256sum").arg(path).output()?;
     if !output.status.success() {
         return Err(anyhow!(
