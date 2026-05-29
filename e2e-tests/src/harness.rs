@@ -207,7 +207,13 @@ pub fn bulletin_network_config(
                         .with_optional_db_snapshot(bulletin_partial.clone())
                 })
         })
-        .with_global_settings(move |g| g.with_base_dir(base_dir_str.as_str()))
+        .with_global_settings(move |g| {
+            // `with_spawn_concurrency(1)` is an upstream workaround for a
+            // spawn-time race in zombienet-sdk; see
+            // <https://github.com/paritytech/smoldot/pull/3249#issuecomment-4438807458>.
+            g.with_base_dir(base_dir_str.as_str())
+                .with_spawn_concurrency(1)
+        })
         .build()
         .map_err(|e| anyhow!("network config errors: {e:?}"))
 }

@@ -206,7 +206,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains_capacity,
             connections_capacity: 32,
-            handshake_timeout: Duration::from_secs(8),
+            // Shortened from 8s: parallel dials hold slots until this fires.
+            handshake_timeout: Duration::from_secs(4),
             randomness_seed: {
                 let mut seed = [0; 32];
                 config.platform.fill_random_bytes(&mut seed);
@@ -253,6 +254,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             next_recent_connection_restore: None,
             platform: config.platform.clone(),
             open_gossip_links: BTreeMap::new(),
+            chains_ever_gossip_connected: HashSet::with_capacity_and_hasher(4, Default::default()),
             v2_statement_peers: HashMap::with_capacity_and_hasher(4, Default::default()),
             current_affinity_filter: HashMap::with_capacity_and_hasher(4, Default::default()),
             event_pending_send: None,
@@ -262,7 +264,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             bitswap_connected_peers: 0,
             bitswap_event_senders: either::Left(Vec::new()),
             pending_new_bitswap_subscriptions: Vec::new(),
-            important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
+            important_nodes: HashMap::with_capacity_and_hasher(16, Default::default()),
             main_messages_rx: Box::pin(main_messages_rx),
             messages_rx: stream::SelectAll::new(),
             blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
@@ -1060,15 +1062,20 @@ struct BackgroundTask<TPlat: PlatformRef> {
     // TODO: using this data structure unfortunately means that PeerIds are cloned a lot, maybe some user data in ChainNetwork is better? not sure
     open_gossip_links: BTreeMap<(ChainId, PeerId), OpenGossipLinkState>,
 
+    /// Chains for which a gossip link has been opened at least once. Used to prefer bootnodes for
+    /// out slots only until the chain first connects.
+    chains_ever_gossip_connected: HashSet<ChainId, fnv::FnvBuildHasher>,
+
     /// Connected peers using statement protocol V2, per chain.
     v2_statement_peers: HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
 
     /// Current topic affinity filter per chain, sent to V2 peers on connect.
     current_affinity_filter: HashMap<ChainId, AffinityFilter, fnv::FnvBuildHasher>,
 
-    /// List of nodes that are considered as important for logging purposes.
+    /// Important nodes per chain (in practice the bootnodes; see [`NetworkServiceChain::discover`]).
+    /// They get extra logging, and slot preference until the chain first connects.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
-    important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
+    important_nodes: HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
 
     /// Event about to be sent on the senders of [`BackgroundTask::event_senders`].
     event_pending_send: Option<(ChainId, Event)>,
@@ -1296,10 +1303,30 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 continue;
                             }
 
-                            match task
-                                .peering_strategy
-                                .pick_assignable_peer(&chain_id, &task.platform.now())
-                            {
+                            let now = task.platform.now();
+
+                            // Until the chain first connects, prefer slots for important nodes
+                            // (the bootnodes); otherwise use the general pool.
+                            if !task.chains_ever_gossip_connected.contains(&chain_id) {
+                                if let basic_peering_strategy::AssignablePeer::Assignable(peer_id) =
+                                    task.peering_strategy.pick_assignable_peer_filtered(
+                                        &chain_id,
+                                        &now,
+                                        |peer_id| {
+                                            task.important_nodes
+                                                .get(&chain_id)
+                                                .map_or(false, |nodes| nodes.contains(peer_id))
+                                        },
+                                    )
+                                {
+                                    break 'search WakeUpReason::CanAssignSlot(
+                                        peer_id.clone(),
+                                        chain_id,
+                                    );
+                                }
+                            }
+
+                            match task.peering_strategy.pick_assignable_peer(&chain_id, &now) {
                                 basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
                                     break 'search WakeUpReason::CanAssignSlot(
                                         peer_id.clone(),
@@ -1591,6 +1618,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 task.v2_statement_peers.remove(&chain_id);
                 task.current_affinity_filter.remove(&chain_id);
+                task.important_nodes.remove(&chain_id);
+                task.chains_ever_gossip_connected.remove(&chain_id);
                 task.network.remove_chain(chain_id).unwrap();
                 task.peering_strategy.remove_chain_peers(&chain_id);
             }
@@ -2152,7 +2181,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             ) => {
                 for (peer_id, addrs) in list {
                     if important_nodes {
-                        task.important_nodes.insert(peer_id.clone());
+                        task.important_nodes
+                            .entry(chain_id)
+                            .or_default()
+                            .insert(peer_id.clone());
                     }
 
                     // Note that we must call this function before `insert_address`, as documented
@@ -2340,7 +2372,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // another existing connection or connection attempt with that same peer. However,
                 // it is not possible to be sure that we will reach 0 connections or connection
                 // attempts, and thus we ban the peer every time.
-                let ban_duration = Duration::from_secs(5);
+                // Pre-handshake failures get a shorter ban: many parallel dials time out
+                // before any handshake completes, and a long slot-hold there dominates
+                // peer-discovery latency on restarts.
+                let ban_duration = if handshake_finished {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_secs(2)
+                };
                 task.network.gossip_remove_desired_all(
                     &peer_id,
                     service::GossipKind::ConsensusTransactions,
@@ -2485,6 +2524,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 debug_assert!(_prev_value.is_none());
 
+                task.chains_ever_gossip_connected.insert(chain_id);
+
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some((
                     chain_id,
@@ -2511,7 +2552,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     ?error,
                 );
-                let ban_duration = Duration::from_secs(15);
+                // Must exceed polkadot-sdk's 5s notification-reject ban; otherwise we retry
+                // into a still-active remote ban. 0.5s margin covers network delay and
+                // clock skew between the two sides' ban timers.
+                let ban_duration = Duration::from_millis(5500);
 
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.

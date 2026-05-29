@@ -34,18 +34,34 @@ if (process.argv.slice(2).indexOf("--release") !== -1) {
 if (buildProfile != 'debug' && buildProfile != 'min-size-release')
     throw new Error("Either --debug or --release must be passed");
 
-// The important step in this script is running `cargo build --target wasm32-unknown-unknown` on
-// the Rust code. This generates a `wasm` file in `target/wasm32-unknown-unknown`.
+// Pick the wasm target by probing the installed Rust toolchain.
+const sysroot = child_process.execSync('rustc --print sysroot', { encoding: 'utf-8' }).trim();
+const isTargetInstalled = (target) =>
+    fs.existsSync(path.join(sysroot, 'lib', 'rustlib', target, 'lib'));
+let wasmTarget;
+if (isTargetInstalled('wasm32v1-none')) {
+    wasmTarget = 'wasm32v1-none';
+} else if (isTargetInstalled('wasm32-unknown-unknown')) {
+    wasmTarget = 'wasm32-unknown-unknown';
+} else {
+    throw new Error(
+        "Neither `wasm32v1-none` nor `wasm32-unknown-unknown` is installed for the current Rust " +
+        "toolchain. Install one of them (e.g. `rustup target add wasm32v1-none`) and retry."
+    );
+}
+
+// The important step in this script is running `cargo build --target <wasmTarget>` on the Rust
+// code. This generates a `wasm` file in `target/<wasmTarget>`.
 // No optional Wasm features is enabled due to being an unstable part of the Rust compiler.
 // Additionally, SIMD should not be enabled, because WASM engines seem to allow only SIMD
 // instructions on specific hardware. See for example <https://bugzilla.mozilla.org/show_bug.cgi?id=1625130#c11>
 // and <https://bugzilla.mozilla.org/show_bug.cgi?id=1840710>.
 child_process.execSync(
-    "cargo build --package smoldot-light-wasm --target wasm32-unknown-unknown --no-default-features " +
+    "cargo build --package smoldot-light-wasm --target " + wasmTarget + " --no-default-features " +
     (buildProfile == 'debug' ? '' : ("--profile " + buildProfile)),
     { 'stdio': 'inherit' }
 );
-const rustOutput = "../../target/wasm32-unknown-unknown/" + buildProfile + "/smoldot_light_wasm.wasm";
+const rustOutput = "../../target/" + wasmTarget + "/" + buildProfile + "/smoldot_light_wasm.wasm";
 
 // The code below will write a variable number of files to the `src/internals/bytecode` directory.
 // Start by clearing all existing files from this directory in case there are some left from past

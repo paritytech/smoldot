@@ -7,7 +7,8 @@ End-to-end tests that spin up a Zombienet network and drive a Node.js-hosted smo
 
 ## Prerequisites
 
-- **Rust** with the wasm32-unknown-unknown target.
+- **Rust** with either the `wasm32v1-none` (preferred, requires Rust 1.84+) or
+  `wasm32-unknown-unknown` target installed.
 - **Node.js 22+**.
 - **Polkadot binaries on `$PATH`**: `polkadot`, `polkadot-parachain`,
   `polkadot-execute-worker`, `polkadot-prepare-worker`, `test-parachain`.
