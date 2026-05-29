@@ -1323,8 +1323,10 @@ async fn run_background<TPlat: PlatformRef>(
 
                 // The buffer size should be large enough so that, if the CPU is busy, it
                 // doesn't become full before the execution of the runtime service resumes.
-                // Note that this `await` freezes the entire runtime service background task,
-                // but the sync service guarantees that `subscribe_all` returns very quickly.
+                // Note that this `await` freezes the entire runtime service background task.
+                // The sync service returns promptly except for the first call after startup,
+                // which may block until the bootstrap mode commits (see
+                // `SyncService::subscribe_all`).
                 let subscription = background.sync_service.subscribe_all(32, true).await;
 
                 log!(
@@ -1440,7 +1442,10 @@ async fn run_background<TPlat: PlatformRef>(
                                         Some(
                                             tree.input_output_iter_unordered()
                                                 .find(|b| b.user_data.hash == block.parent_hash)
-                                                .unwrap()
+                                                .expect(
+                                                    "blocks come in ancestry order, parent \
+                                                     was already inserted; qed",
+                                                )
                                                 .id,
                                         )
                                     };
@@ -1458,7 +1463,10 @@ async fn run_background<TPlat: PlatformRef>(
                                                 &block.scale_encoded_header,
                                                 background.sync_service.block_number_bytes(),
                                             )
-                                            .unwrap()
+                                            .expect(
+                                                "header provided by sync_service was already \
+                                                 validated; qed",
+                                            )
                                             .number, // TODO: consider feeding the information from the sync service?
                                             scale_encoded_header: block.scale_encoded_header,
                                         },
