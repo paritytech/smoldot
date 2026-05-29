@@ -30,11 +30,12 @@ use crate::bulletin;
 /// GCS URL of the snapshot bundle produced by `bulletin_generate_snapshot`
 /// (a single `bundle.tar.gz` packed by the zombienet-sdk `BundleBuilder`).
 pub const DB_SNAPSHOT_BUNDLE: &str =
-    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bundle-2026-05-25.tar.gz";
+    "https://storage.googleapis.com/zombienet-db-snaps/smoldot/bulletin_fetch/bundle-2026-05-29.tar.gz";
 
 /// SHA256 of the published bundle. Empty means not yet pinned — in that case
 /// the resolver requires [`BUNDLE_OVERRIDE_ENV`] to point at a local bundle.
-pub const DB_SNAPSHOT_BUNDLE_SHA256: &str = "";
+pub const DB_SNAPSHOT_BUNDLE_SHA256: &str =
+    "658acad23c4e4e44e088dfb135d5691de5f079b0f48a6d5597b99007ce60ee25";
 
 /// Point this at a locally-generated `bundle.tar.gz` (e.g. `./tmp/snapshots/
 /// bundle.tar.gz` produced by `./g`) to skip the download and run against it.
