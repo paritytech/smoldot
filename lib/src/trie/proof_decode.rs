@@ -1900,12 +1900,17 @@ fn compact_proof_compute_merkle<'a, I: Iterator<Item = &'a [u8]>>(
             core::array::from_fn(|i| decoded.children[i].map(|c| c.to_vec()));
 
         if key_pos == key.len() {
-            // Substrate's compact encoder always replaces the queried value with an empty
-            // inline placeholder. A non-empty (or hashed) value here means the proof carries
-            // data it shouldn't, which substrate rejects as `ExtraneousValue`.
-            match decoded.storage_value {
-                trie_node::StorageValue::Unhashed(v) if v.is_empty() => {}
-                _ => return None,
+            // Substrate picks the placeholder shape by node kind: a leaf uses empty inline
+            // (`Unhashed(b"")`), a branch uses `None`. Any other shape would mean the proof
+            // carries data it shouldn't — substrate rejects that as `ExtraneousValue`.
+            let has_children = decoded.children.iter().any(|c| c.is_some());
+            let placeholder_ok = match decoded.storage_value {
+                trie_node::StorageValue::None => has_children,
+                trie_node::StorageValue::Unhashed(v) => !has_children && v.is_empty(),
+                trie_node::StorageValue::Hashed(_) => false,
+            };
+            if !placeholder_ok {
+                return None;
             }
             let new_storage_value = inject_compact_value(expected_value, state_version);
             break compact_encode_node(partial_key, new_children, new_storage_value, is_root)?;
