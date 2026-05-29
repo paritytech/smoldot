@@ -231,8 +231,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
     /// Gates the final `all_forks` rebuild in [`AllSync::process_one`]. Warp's verification,
     /// build, and [`AllSync::desired_requests`] keep running so callers can probe warp
-    /// readiness; a result completed while suppressed sits in [`Self::ready_to_transition`]
-    /// until lifted or dropped via [`AllSync::discard_pending_warp_completion`].
+    /// readiness; a result completed while suppressed is held until lifted or dropped via
+    /// [`AllSync::discard_pending_warp_completion`].
     pub fn set_warp_completion_suppressed(&mut self, v: bool) {
         self.shared.warp_completion_suppressed = v;
     }
