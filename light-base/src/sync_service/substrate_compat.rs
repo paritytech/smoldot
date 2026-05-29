@@ -117,6 +117,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         ))
         .fuse(),
         mode: ModeState::Deciding,
+        bootstrap_complete: false,
         deciding_packets_seen: 0,
         mode_decision_deadline: future::Either::Left(Box::pin(
             platform.sleep(MODE_DECISION_TIMEOUT),
@@ -137,6 +138,12 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         ),
         platform,
     };
+
+    // Suppress warp completion during Deciding; lifted once the chosen mode drains.
+    task.sync
+        .as_mut()
+        .unwrap_or_else(|| unreachable!())
+        .set_warp_completion_suppressed(true);
 
     // Main loop of the syncing logic.
     //
@@ -393,6 +400,13 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         "mode-decision; transition=Ready (WarpSyncFinished)",
                     );
                     drain_pending_subscriptions(&mut task);
+                    task.bootstrap_complete = true;
+                    // Post-bootstrap re-warp is allowed; the `Stop` flows through
+                    // `all_notifications.clear()` above.
+                    task.sync
+                        .as_mut()
+                        .unwrap_or_else(|| unreachable!())
+                        .set_warp_completion_suppressed(false);
                 }
             }
 
@@ -871,6 +885,11 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                                 task.platform.sleep(MODE_DECISION_TIMEOUT),
                             ))
                             .fuse();
+                            // Allow warp completion to rebuild all_forks.
+                            task.sync
+                                .as_mut()
+                                .unwrap_or_else(|| unreachable!())
+                                .set_warp_completion_suppressed(false);
                             log!(
                                 &task.platform,
                                 Debug,
@@ -1541,6 +1560,11 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     } else {
                         // Warp starved: drop back to Deciding so a future warp-eligible peer
                         // can re-trigger CommitWarpAhead instead of locking in AllForksOnly.
+                        // Re-suppress: no mode chosen yet, no subscribers drained.
+                        task.sync
+                            .as_mut()
+                            .unwrap_or_else(|| unreachable!())
+                            .set_warp_completion_suppressed(true);
                         task.mode = ModeState::Deciding;
                         task.deciding_packets_seen = 0;
                         task.mode_decision_deadline = future::Either::Left(Box::pin(
@@ -1599,6 +1623,12 @@ struct Task<TPlat: PlatformRef> {
     sync: Option<all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>>,
 
     mode: ModeState,
+
+    /// `false` until the chosen bootstrap mode has delivered its first `initialized` event to
+    /// subscribers. While `false`, warp completion is suppressed at the [`all::AllSync`] layer
+    /// so a stray `WarpSyncFinished` cannot rebuild `all_forks` and `Stop` queued subscribers.
+    /// Once `true`, warp may re-engage and any later completion is allowed to fire a `Stop`.
+    bootstrap_complete: bool,
 
     /// Below-gap packets observed while [`ModeState::Deciding`]; gates AllForksOnly commit.
     deciding_packets_seen: usize,
@@ -1768,18 +1798,19 @@ fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
     }
 }
 
-/// Commits to AllForksOnly mode: cancels warp-sync, flips network-state flags to trigger
-/// the first GrandPa announce (without it peers won't gossip commits to us), drains queued
-/// subscribers.
+/// Commits to AllForksOnly mode: aborts any in-flight warp request, flips network-state
+/// flags to trigger the first GrandPa announce (without it peers won't gossip commits to
+/// us), drains queued subscribers, and lifts warp-completion suppression so warp may
+/// re-engage if the node ever falls back behind by `warp_sync_minimum_gap`.
 fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
     task.mode = ModeState::Ready;
     task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();
 
-    let aborted = task
-        .sync
-        .as_mut()
-        .unwrap_or_else(|| unreachable!())
-        .cancel_warp_sync();
+    let sync = task.sync.as_mut().unwrap_or_else(|| unreachable!());
+    let aborted = sync.abort_in_flight_warp_requests();
+    // Drop any warp result completed while suppressed; else unsuppressing below would
+    // immediately rebuild all_forks from stale chain_info.
+    sync.discard_pending_warp_completion();
     let n = aborted.len();
     for handle in aborted {
         handle.abort();
@@ -1789,7 +1820,7 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
             &task.platform,
             Debug,
             &task.log_target,
-            "warp-sync-cancelled",
+            "warp-sync-aborted",
             in_flight_aborted = n,
         );
     }
@@ -1798,6 +1829,11 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
     task.network_up_to_date_best = false;
 
     drain_pending_subscriptions(task);
+    task.bootstrap_complete = true;
+    task.sync
+        .as_mut()
+        .unwrap_or_else(|| unreachable!())
+        .set_warp_completion_suppressed(false);
 }
 
 #[cfg(test)]
@@ -1927,14 +1963,13 @@ mod tests {
         assert!(!warp_sync_can_proceed(&sync));
     }
 
-    // Status::Sync arm after cancel_warp_sync.
+    // abort_in_flight_warp_requests keeps warp alive; progress is still possible.
     #[test]
-    fn cannot_proceed_after_cancel() {
+    fn proceeds_after_abort_in_flight() {
         let mut sync = fresh_sync();
         let _ = add_peer(&mut sync, 100);
-        let _ = sync.cancel_warp_sync();
-        assert!(matches!(sync.status(), Status::Sync));
-        assert!(!warp_sync_can_proceed(&sync));
+        let _ = sync.abort_in_flight_warp_requests();
+        assert!(warp_sync_can_proceed(&sync));
     }
 
     #[test]

@@ -224,8 +224,22 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 max_requests_per_block: config.max_requests_per_block,
                 block_number_bytes: config.block_number_bytes,
                 allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
+                warp_completion_suppressed: false,
             },
         }
+    }
+
+    /// Gates the final `all_forks` rebuild in [`AllSync::process_one`]. Warp's verification,
+    /// build, and [`AllSync::desired_requests`] keep running so callers can probe warp
+    /// readiness; a result completed while suppressed sits in [`Self::ready_to_transition`]
+    /// until lifted or dropped via [`AllSync::discard_pending_warp_completion`].
+    pub fn set_warp_completion_suppressed(&mut self, v: bool) {
+        self.shared.warp_completion_suppressed = v;
+    }
+
+    /// Drops any pending warp-sync completion before un-suppressing avoids a stale rebuild.
+    pub fn discard_pending_warp_completion(&mut self) {
+        self.ready_to_transition = None;
     }
 
     /// Returns the value that was initially passed in [`Config::block_number_bytes`].
@@ -401,14 +415,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         all_forks.non_finalized_blocks_ancestry_order()
     }
 
-    /// Drops the warp-sync state machine. After this call:
-    ///
-    /// - No new warp-sync requests are produced by [`AllSync::desired_requests`].
-    /// - In-flight warp-sync requests are removed; their user data is returned to the
-    ///   caller (typically abort handles for the outer futures).
-    ///
-    /// No-op if called twice; returns an empty vector.
-    pub fn cancel_warp_sync(&mut self) -> Vec<TRq> {
+    /// Aborts all in-flight warp-sync requests, returning their user data (typically
+    /// `AbortHandle`s for the outer futures). `warp_sync` remains alive and may re-engage
+    /// later. No-op if warp-sync is not in use.
+    pub fn abort_in_flight_warp_requests(&mut self) -> Vec<TRq> {
         if self.warp_sync.is_none() {
             return Vec::new();
         }
@@ -421,19 +431,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             .map(|(id, _)| RequestId(id))
             .collect();
 
-        let aborted_handles: Vec<TRq> = warp_request_ids
+        warp_request_ids
             .into_iter()
             .map(|id| self.remove_request(id))
-            .collect();
-
-        for (_, source_mapping) in self.shared.sources.iter_mut() {
-            source_mapping.warp_sync = None;
-        }
-
-        self.warp_sync = None;
-        self.ready_to_transition = None;
-
-        aborted_handles
+            .collect()
     }
 
     /// Returns true if it is believed that we are near the head of the chain.
@@ -1016,14 +1017,15 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
         }
 
-        if let Some(RuntimeInformation {
-            finalized_runtime: finalized_block_runtime,
-            finalized_body,
-            finalized_storage_code,
-            finalized_storage_heap_pages,
-            finalized_storage_code_merkle_value,
-            finalized_storage_code_closest_ancestor_excluding,
-        }) = self.ready_to_transition.take()
+        if !self.shared.warp_completion_suppressed
+            && let Some(RuntimeInformation {
+                finalized_runtime: finalized_block_runtime,
+                finalized_body,
+                finalized_storage_code,
+                finalized_storage_heap_pages,
+                finalized_storage_code_merkle_value,
+                finalized_storage_code_closest_ancestor_excluding,
+            }) = self.ready_to_transition.take()
         {
             let (Some(all_forks), Some(warp_sync)) =
                 (self.all_forks.as_mut(), self.warp_sync.as_mut())
@@ -2527,6 +2529,8 @@ struct Shared<TRq, TSrc> {
     block_number_bytes: usize,
     /// Value passed through [`Config::allow_unknown_consensus_engines`].
     allow_unknown_consensus_engines: bool,
+    /// See [`AllSync::set_warp_completion_suppressed`].
+    warp_completion_suppressed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2613,10 +2617,41 @@ mod tests {
     }
 
     #[test]
-    fn status_reports_sync_after_cancel_warp() {
+    fn abort_in_flight_warp_requests_keeps_warp_alive() {
         let mut sync = fresh_sync();
-        let _ = sync.cancel_warp_sync();
-        assert!(matches!(sync.status(), Status::Sync));
+        let aborted = sync.abort_in_flight_warp_requests();
+        assert!(aborted.is_empty());
+        // warp_sync remains alive; status still reflects it.
+        assert!(matches!(
+            sync.status(),
+            Status::WarpSyncFragments { source: None, .. }
+        ));
+    }
+
+    #[test]
+    fn desired_requests_emits_warp_regardless_of_suppression() {
+        let mut sync = fresh_sync();
+        let source_id = match sync.prepare_add_source(100, [1; 32]) {
+            AddSource::UnknownBestBlock(s) => s.add_source_and_insert_block((), ()),
+            _ => unreachable!(),
+        };
+        sync.update_source_finality_state(source_id, 100);
+
+        // Suppression only gates the final rebuild; warp's desired_requests must still
+        // emit so callers can probe whether warp would make progress.
+        sync.set_warp_completion_suppressed(true);
+        assert!(
+            sync.desired_requests()
+                .any(|(_, _, rq)| matches!(rq, DesiredRequest::WarpSync { .. }))
+        );
+    }
+
+    #[test]
+    fn discard_pending_warp_completion_is_noop_when_empty() {
+        let mut sync = fresh_sync();
+        assert!(sync.ready_to_transition.is_none());
+        sync.discard_pending_warp_completion();
+        assert!(sync.ready_to_transition.is_none());
     }
 
     #[test]
