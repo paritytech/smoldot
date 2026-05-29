@@ -2108,10 +2108,36 @@ impl ReadyToRun {
                     },
                 }
             }
-            HostFunction::ext_trie_blake2_256_verify_proof_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_trie_blake2_256_verify_proof_version_2 => host_fn_not_implemented!(),
-            HostFunction::ext_trie_keccak_256_verify_proof_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_trie_keccak_256_verify_proof_version_2 => host_fn_not_implemented!(),
+            HostFunction::ext_trie_blake2_256_verify_proof_version_1
+            | HostFunction::ext_trie_blake2_256_verify_proof_version_2
+            | HostFunction::ext_trie_keccak_256_verify_proof_version_1
+            | HostFunction::ext_trie_keccak_256_verify_proof_version_2 => {
+                let root = expect_pointer_constant_size!(0, 32);
+                let proof_owned: Vec<u8> = expect_pointer_size!(1).as_ref().to_vec();
+                let key_owned: Vec<u8> = expect_pointer_size!(2).as_ref().to_vec();
+                let value_owned: Vec<u8> = expect_pointer_size!(3).as_ref().to_vec();
+
+                let valid = (|| -> Option<()> {
+                    let decoded =
+                        trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+                            proof: proof_owned,
+                        })
+                        .ok()?;
+
+                    match decoded.storage_value(&root, &key_owned) {
+                        Ok(Some((stored_value, _version))) => {
+                            (stored_value == value_owned.as_slice()).then_some(())
+                        }
+                        _ => None,
+                    }
+                })()
+                .is_some();
+
+                HostVm::ReadyToRun(ReadyToRun {
+                    inner: self.inner,
+                    resume_value: Some(vm::WasmValue::I32(if valid { 1 } else { 0 })),
+                })
+            }
             HostFunction::ext_misc_print_num_version_1 => {
                 let num = match params[0] {
                     vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
@@ -2291,16 +2317,14 @@ impl ReadyToRun {
                 }
             }
             HostFunction::ext_transaction_index_index_version_1 => {
-                // TODO: this is currently a no-op; because not all the parameters are verified, this might lead to consensus issues
-                let _tx_ptr = expect_pointer_size_raw!(0);
+                // No-op: params are (content_hash: i32, len: i32, context: i32)
                 HostVm::ReadyToRun(ReadyToRun {
                     inner: self.inner,
                     resume_value: None,
                 })
             }
             HostFunction::ext_transaction_index_renew_version_1 => {
-                // TODO: this is currently a no-op; because not all the parameters are verified, this might lead to consensus issues
-                let _tx_ptr = expect_pointer_size_raw!(0);
+                // No-op: params are (content_hash: i32, context: i32)
                 HostVm::ReadyToRun(ReadyToRun {
                     inner: self.inner,
                     resume_value: None,
