@@ -462,6 +462,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         );
                         // `BlockNumberNotIncrementing` means a finality proof overtook the
                         // fragment mid-flight; the peer isn't at fault.
+                        // TODO: malicious peers could abuse this to avoid bans.
+                        // https://github.com/paritytech/smoldot/pull/3268#discussion_r3319607065
                         let peer_at_fault =
                             !matches!(err, all::VerifyFragmentError::BlockNumberNotIncrementing);
                         if let Some(sender_if_still_connected) = sender_if_still_connected {
@@ -1546,6 +1548,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     commit_all_forks_only(&mut task);
                 }
                 ModeState::AwaitingWarp { .. } => {
+                    // TODO: warp never reaching `is_finished=true` keeps subscribe_all queued.
+                    // https://github.com/paritytech/smoldot/pull/3268#discussion_r3319656011
                     if warp_sync_can_proceed(task.sync.as_ref().unwrap_or_else(|| unreachable!())) {
                         task.mode_decision_deadline = future::Either::Left(Box::pin(
                             task.platform.sleep(MODE_DECISION_TIMEOUT),
