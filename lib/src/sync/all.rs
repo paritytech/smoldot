@@ -2655,6 +2655,48 @@ mod tests {
     }
 
     #[test]
+    fn warp_sync_alive_after_all_forks_only_commit() {
+        let mut sync = fresh_sync();
+
+        let source_id = match sync.prepare_add_source(100, [1; 32]) {
+            AddSource::UnknownBestBlock(s) => s.add_source_and_insert_block((), ()),
+            _ => unreachable!(),
+        };
+        sync.update_source_finality_state(source_id, 100);
+
+        let sync_start_block_hash = sync
+            .desired_requests()
+            .find_map(|(_, _, rq)| match rq {
+                DesiredRequest::WarpSync {
+                    sync_start_block_hash,
+                } => Some(sync_start_block_hash),
+                _ => None,
+            })
+            .expect("warp request should be desired");
+        let _ = sync.add_request(
+            source_id,
+            RequestDetail::WarpSync {
+                sync_start_block_hash,
+            },
+            (),
+        );
+
+        // Simulate commit_all_forks_only: abort in-flight, drop any pending completion,
+        // then lift suppression.
+        sync.set_warp_completion_suppressed(true);
+        let aborted = sync.abort_in_flight_warp_requests();
+        assert_eq!(aborted.len(), 1);
+        sync.discard_pending_warp_completion();
+        sync.set_warp_completion_suppressed(false);
+
+        // Source still far enough ahead -> warp must be desired again.
+        assert!(
+            sync.desired_requests()
+                .any(|(_, _, rq)| matches!(rq, DesiredRequest::WarpSync { .. }))
+        );
+    }
+
+    #[test]
     fn status_reports_warp_fragments_during_inflight_download() {
         let mut sync = fresh_sync();
 
