@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 3.1.4 - 2026-05-29
+
+### Changed
+
+- Revert the immediate parachain block delivery introduced in 3.1.3. ([#3267](https://github.com/paritytech/smoldot/pull/3267))
+- Decide the parachain bootstrap mode up front so `chainHead_v1_follow` subscribers receive an authoritative finalized block instead of a stale chain-spec checkpoint. ([#3268](https://github.com/paritytech/smoldot/pull/3268))
+- Prefer chain-spec bootnodes for relay-chain gossip slots until a chain has an open gossip link, speeding up the first relay-chain gossip after a warm restart. ([#3273](https://github.com/paritytech/smoldot/pull/3273))
+- Shorten handshake and peer-ban timeouts to speed up peer discovery after a restart. ([#3269](https://github.com/paritytech/smoldot/pull/3269))
+
+### Fixed
+
+- Fix `forbidNonLocalWs` auto-detection in browsers, which previously never forbade non-local WebSocket connections on secure origins. ([#3262](https://github.com/paritytech/smoldot/pull/3262))
+- Avoid banning peers that send justifications targeting not-yet-downloaded blocks during post-warp-sync catch-up, removing sync delays. ([#3257](https://github.com/paritytech/smoldot/pull/3257))
+- Floor the statement-distribution affinity bloom filter size so sparse topic subscriptions still produce a realistically-sized filter. ([#3265](https://github.com/paritytech/smoldot/pull/3265))
+
 ## 3.1.3 - 2026-05-13
 
 ### Changed
