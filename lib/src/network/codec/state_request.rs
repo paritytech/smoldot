@@ -87,14 +87,10 @@ pub fn build_state_request(config: StateRequest) -> impl Iterator<Item = impl As
             either::Left(protobuf::bytes_tag_encode(2, key).map(either::Left))
         }
         StateRequestStart::ChildTrieDefault { child_trie, key } => either::Right(
-            protobuf::bytes_tag_encode(2, {
-                let mut vec = b":child_storage:default:".to_vec();
-                vec.extend(child_trie);
-                vec
-            })
-            .map(either::Left)
-            .chain(protobuf::bytes_tag_encode(2, key).map(either::Right))
-            .map(either::Right),
+            protobuf::bytes_tag_encode(2, crate::trie::default_child_trie_root_key(&child_trie))
+                .map(either::Left)
+                .chain(protobuf::bytes_tag_encode(2, key).map(either::Right))
+                .map(either::Right),
         ),
     };
 

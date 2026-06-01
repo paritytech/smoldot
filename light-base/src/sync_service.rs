@@ -775,66 +775,52 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                 keys
             };
 
-            let result = if let Some(child_trie) = &self.child_trie {
-                self.sync_service
-                    .network_service
-                    .clone()
-                    .child_storage_proof_request(
-                        target.clone(),
-                        codec::ChildStorageProofRequestConfig {
-                            block_hash: self.block_hash,
-                            child_trie: &child_trie[..],
-                            keys: keys_to_request.into_iter(),
-                        },
-                        self.timeout_per_request,
-                    )
-                    .await
-                    // The two request errors are isomorphic. Normalize so the rest of the
-                    // function only deals with `StorageProofRequestError`.
-                    .map_err(|err| match err {
-                        network_service::ChildStorageProofRequestError::NoConnection => {
-                            network_service::StorageProofRequestError::NoConnection
-                        }
-                        network_service::ChildStorageProofRequestError::RequestTooLarge => {
-                            network_service::StorageProofRequestError::RequestTooLarge
-                        }
-                        network_service::ChildStorageProofRequestError::Request(err) => {
-                            network_service::StorageProofRequestError::Request(err)
-                        }
-                    })
-            } else {
-                self.sync_service
-                    .network_service
-                    .clone()
-                    .storage_proof_request(
-                        target.clone(),
-                        codec::StorageProofRequestConfig {
-                            block_hash: self.block_hash,
-                            keys: keys_to_request.into_iter(),
-                        },
-                        self.timeout_per_request,
-                    )
-                    .await
-            };
+            let result: Result<_, StorageQueryNetworkError> =
+                if let Some(child_trie) = &self.child_trie {
+                    self.sync_service
+                        .network_service
+                        .clone()
+                        .child_storage_proof_request(
+                            target.clone(),
+                            codec::ChildStorageProofRequestConfig {
+                                block_hash: self.block_hash,
+                                child_trie: &child_trie[..],
+                                keys: keys_to_request.into_iter(),
+                            },
+                            self.timeout_per_request,
+                        )
+                        .await
+                        .map_err(StorageQueryNetworkError::ChildStorageProof)
+                } else {
+                    self.sync_service
+                        .network_service
+                        .clone()
+                        .storage_proof_request(
+                            target.clone(),
+                            codec::StorageProofRequestConfig {
+                                block_hash: self.block_hash,
+                                keys: keys_to_request.into_iter(),
+                            },
+                            self.timeout_per_request,
+                        )
+                        .await
+                        .map_err(StorageQueryNetworkError::StorageProof)
+                };
 
             let proof = match result {
                 Ok(r) => r,
                 Err(err) => {
                     // In case of error that isn't a protocol error, we reduce the number of
                     // trie node items to request.
-                    let reduce_max = match &err {
-                        network_service::StorageProofRequestError::RequestTooLarge => true,
-                        network_service::StorageProofRequestError::Request(
-                            service::StorageProofRequestError::Request(err),
-                        ) => !err.is_protocol_error(),
-                        _ => false,
-                    };
+                    let reduce_max = err.is_request_too_large()
+                        || match err.protocol_request_error() {
+                            Some(service::StorageProofRequestError::Request(inner)) => {
+                                !inner.is_protocol_error()
+                            }
+                            _ => false,
+                        };
 
-                    if !matches!(
-                        err,
-                        network_service::StorageProofRequestError::RequestTooLarge
-                    ) || self.response_nodes_cap == 1
-                    {
+                    if !err.is_request_too_large() || self.response_nodes_cap == 1 {
                         self.sync_service
                             .network_service
                             .ban_and_disconnect(
@@ -880,10 +866,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
             // read from the main trie at `:child_storage:default:<child_trie>`. `None` means the
             // child trie doesn't exist, in which case every key has no value.
             let effective_root: Option<[u8; 32]> = if let Some(child_trie) = &self.child_trie {
-                const PREFIX: &[u8] = b":child_storage:default:";
-                let mut child_root_key = Vec::with_capacity(PREFIX.len() + child_trie.len());
-                child_root_key.extend_from_slice(PREFIX);
-                child_root_key.extend_from_slice(child_trie);
+                let child_root_key = trie::default_child_trie_root_key(child_trie);
                 match decoded_proof.storage_value(&self.main_trie_root_hash, &child_root_key) {
                     Ok(Some((value, _))) => match <&[u8; 32]>::try_from(value) {
                         Ok(hash) => Some(*hash),
@@ -1186,21 +1169,22 @@ impl StorageQueryError {
     /// issue.
     pub fn is_network_problem(&self) -> bool {
         self.errors.iter().all(|err| match err {
-            StorageQueryErrorDetail::Network(
-                network_service::StorageProofRequestError::Request(
-                    service::StorageProofRequestError::Request(_)
-                    | service::StorageProofRequestError::RemoteCouldntAnswer,
-                ),
-            )
-            | StorageQueryErrorDetail::Network(
-                network_service::StorageProofRequestError::NoConnection,
-            ) => true,
-            StorageQueryErrorDetail::Network(
-                network_service::StorageProofRequestError::Request(
-                    service::StorageProofRequestError::Decode(_),
-                )
-                | network_service::StorageProofRequestError::RequestTooLarge,
-            ) => false,
+            StorageQueryErrorDetail::Network(net) => {
+                if net.is_no_connection() {
+                    return true;
+                }
+                if net.is_request_too_large() {
+                    return false;
+                }
+                match net.protocol_request_error() {
+                    Some(
+                        service::StorageProofRequestError::Request(_)
+                        | service::StorageProofRequestError::RemoteCouldntAnswer,
+                    ) => true,
+                    Some(service::StorageProofRequestError::Decode(_)) => false,
+                    None => false,
+                }
+            }
             StorageQueryErrorDetail::ProofVerification(_)
             | StorageQueryErrorDetail::MissingProofEntry => false,
         })
@@ -1226,12 +1210,63 @@ impl fmt::Display for StorageQueryError {
 pub enum StorageQueryErrorDetail {
     /// Error during the network request.
     #[display("{_0}")]
-    Network(network_service::StorageProofRequestError),
+    Network(StorageQueryNetworkError),
     /// Error verifying the proof.
     #[display("{_0}")]
     ProofVerification(proof_decode::Error),
     /// Proof is missing one or more desired storage items.
     MissingProofEntry,
+}
+
+/// Network-level error returned by a storage query. Distinguishes a main-trie request from a
+/// child-trie request so callers can tell them apart for logging or retry policy.
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+pub enum StorageQueryNetworkError {
+    /// Error during a main-trie storage proof request.
+    #[display("storage proof request: {_0}")]
+    StorageProof(network_service::StorageProofRequestError),
+    /// Error during a child-trie storage proof request.
+    #[display("child storage proof request: {_0}")]
+    ChildStorageProof(network_service::ChildStorageProofRequestError),
+}
+
+impl StorageQueryNetworkError {
+    /// Returns `true` if this is a `NoConnection` error from either variant.
+    fn is_no_connection(&self) -> bool {
+        matches!(
+            self,
+            StorageQueryNetworkError::StorageProof(
+                network_service::StorageProofRequestError::NoConnection
+            ) | StorageQueryNetworkError::ChildStorageProof(
+                network_service::ChildStorageProofRequestError::NoConnection
+            )
+        )
+    }
+
+    /// Returns `true` if the request was rejected for being too large.
+    fn is_request_too_large(&self) -> bool {
+        matches!(
+            self,
+            StorageQueryNetworkError::StorageProof(
+                network_service::StorageProofRequestError::RequestTooLarge
+            ) | StorageQueryNetworkError::ChildStorageProof(
+                network_service::ChildStorageProofRequestError::RequestTooLarge
+            )
+        )
+    }
+
+    /// Returns the protocol-level request error if this wraps a `Request(_)`.
+    fn protocol_request_error(&self) -> Option<&service::StorageProofRequestError> {
+        match self {
+            StorageQueryNetworkError::StorageProof(
+                network_service::StorageProofRequestError::Request(e),
+            )
+            | StorageQueryNetworkError::ChildStorageProof(
+                network_service::ChildStorageProofRequestError::Request(e),
+            ) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 /// Return value of [`SyncService::subscribe_all`].

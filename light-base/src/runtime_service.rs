@@ -3411,10 +3411,7 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
         let proof_access_duration_before = platform.now();
         let trie_root = if let Some(child_trie) = child_trie {
             // TODO: allocation here, but probably not problematic
-            const PREFIX: &[u8] = b":child_storage:default:";
-            let mut key = Vec::with_capacity(PREFIX.len() + child_trie.len());
-            key.extend_from_slice(PREFIX);
-            key.extend_from_slice(child_trie.as_ref());
+            let key = smoldot::trie::default_child_trie_root_key(child_trie.as_ref());
             match call_proof.storage_value(block_state_trie_root_hash, &key) {
                 Err(_) => {
                     return (
@@ -3755,10 +3752,7 @@ fn get_trie_root_for_child_or_main<'a>(
     child_trie: Option<&[u8]>,
 ) -> Result<Option<&'a [u8; 32]>, ()> {
     if let Some(child_trie) = child_trie {
-        const PREFIX: &[u8] = b":child_storage:default:";
-        let mut key = Vec::with_capacity(PREFIX.len() + child_trie.len());
-        key.extend_from_slice(PREFIX);
-        key.extend_from_slice(child_trie);
+        let key = smoldot::trie::default_child_trie_root_key(child_trie);
         match proof.storage_value(block_state_trie_root_hash, &key) {
             Err(_) => Err(()),
             Ok(None) => Ok(None),

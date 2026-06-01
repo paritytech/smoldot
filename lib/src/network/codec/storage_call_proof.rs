@@ -173,11 +173,7 @@ pub fn build_child_storage_proof_request<'a>(
     // `ChildType::from_prefixed_key` and rejects a bare child trie name with
     // `InvalidChildStorageKey`. `ChildStorageProofRequestConfig::child_trie` is the bare name,
     // so the prefix is prepended here.
-    const PREFIX: &[u8] = b":child_storage:default:";
-    let mut prefixed_child_trie =
-        Vec::with_capacity(PREFIX.len() + config.child_trie.as_ref().len());
-    prefixed_child_trie.extend_from_slice(PREFIX);
-    prefixed_child_trie.extend_from_slice(config.child_trie.as_ref());
+    let prefixed_child_trie = crate::trie::default_child_trie_root_key(config.child_trie.as_ref());
 
     // Message format for RemoteReadChildRequest (tag 4 in Request oneof):
     // - Field 2: block hash

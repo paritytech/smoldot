@@ -1527,10 +1527,7 @@ fn run_single_runtime_call(
             executor::runtime_call::RuntimeCall::StorageGet(get) => {
                 let child_trie = get.child_trie().map(|c| c.as_ref().to_vec());
                 let trie_root = if let Some(child_trie) = &child_trie {
-                    const PREFIX: &[u8] = b":child_storage:default:";
-                    let mut key = Vec::with_capacity(PREFIX.len() + child_trie.len());
-                    key.extend_from_slice(PREFIX);
-                    key.extend_from_slice(child_trie);
+                    let key = smoldot::trie::default_child_trie_root_key(child_trie);
                     match proof.storage_value(state_root, &key) {
                         Ok(Some((value, _))) => match <&[u8; 32]>::try_from(value) {
                             Ok(hash) => Some(*hash),
