@@ -222,10 +222,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     /// always be `None`. Since the runtime can only be provided to one call to this function,
     /// only one subscriber should use `runtime_interest` equal to `true`.
     ///
-    /// While this function is asynchronous, it normally finishes quickly. The first call after
-    /// startup may block until the sync service commits its bootstrap mode (warp-sync vs
-    /// all-forks-only), so that the returned finalized block isn't a chain-spec checkpoint
-    /// that warp-sync would later overwrite.
+    /// While this function is asynchronous, it is guaranteed to finish relatively quickly. Only
+    /// CPU operations are performed.
     pub async fn subscribe_all(&self, buffer_size: usize, runtime_interest: bool) -> SubscribeAll {
         let (send_back, rx) = oneshot::channel();
 
@@ -425,6 +423,61 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         timeout_per_request: Duration,
         max_parallel: NonZero<u32>,
     ) -> StorageQuery<TPlat> {
+        self.storage_query_inner(
+            block_number,
+            block_hash,
+            main_trie_root_hash,
+            None,
+            requests,
+            total_attempts,
+            timeout_per_request,
+            max_parallel,
+        )
+    }
+
+    /// Like [`SyncService::storage_query`], but reads from the child trie named `child_trie`
+    /// (the bytes after the `:child_storage:default:` prefix) instead of the main trie.
+    ///
+    /// The proof is fetched with a child-storage-proof network request. Verification is two
+    /// levels deep: the child trie's root is first resolved from `main_trie_root_hash` at
+    /// `:child_storage:default:<child_trie>`, then each requested key is verified against that
+    /// child root. Only [`StorageRequestItemTy::Value`] and [`StorageRequestItemTy::Hash`] are
+    /// supported here. The descendants and merkle-value variants are not, as they resolve
+    /// against a fixed root that isn't known for a child trie until the proof arrives.
+    pub fn child_storage_query(
+        self: Arc<Self>,
+        block_number: u64,
+        block_hash: [u8; 32],
+        main_trie_root_hash: [u8; 32],
+        child_trie: Vec<u8>,
+        requests: impl Iterator<Item = StorageRequestItem>,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        max_parallel: NonZero<u32>,
+    ) -> StorageQuery<TPlat> {
+        self.storage_query_inner(
+            block_number,
+            block_hash,
+            main_trie_root_hash,
+            Some(child_trie),
+            requests,
+            total_attempts,
+            timeout_per_request,
+            max_parallel,
+        )
+    }
+
+    fn storage_query_inner(
+        self: Arc<Self>,
+        block_number: u64,
+        block_hash: [u8; 32],
+        main_trie_root_hash: [u8; 32],
+        child_trie: Option<Vec<u8>>,
+        requests: impl Iterator<Item = StorageRequestItem>,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        max_parallel: NonZero<u32>,
+    ) -> StorageQuery<TPlat> {
         let total_attempts = usize::try_from(total_attempts).unwrap_or(usize::MAX);
 
         let requests = requests
@@ -461,6 +514,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             block_number,
             block_hash,
             main_trie_root_hash,
+            child_trie,
             total_attempts,
             timeout_per_request,
             _max_parallel: max_parallel,
@@ -578,6 +632,10 @@ pub struct StorageQuery<TPlat: PlatformRef> {
     block_number: u64,
     block_hash: [u8; 32],
     main_trie_root_hash: [u8; 32],
+    /// `Some` for a child-trie query (the bytes after `:child_storage:default:`). When set,
+    /// requests are fetched via child-storage-proof requests and each key is verified against
+    /// the child trie root resolved from `main_trie_root_hash`, not against the main root.
+    child_trie: Option<Vec<u8>>,
     /// Requests that haven't been fulfilled yet.
     /// The `usize` is the index of the request in the original list of requests that the API user
     /// provided.
@@ -717,19 +775,47 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                 keys
             };
 
-            let result = self
-                .sync_service
-                .network_service
-                .clone()
-                .storage_proof_request(
-                    target.clone(),
-                    codec::StorageProofRequestConfig {
-                        block_hash: self.block_hash,
-                        keys: keys_to_request.into_iter(),
-                    },
-                    self.timeout_per_request,
-                )
-                .await;
+            let result = if let Some(child_trie) = &self.child_trie {
+                self.sync_service
+                    .network_service
+                    .clone()
+                    .child_storage_proof_request(
+                        target.clone(),
+                        codec::ChildStorageProofRequestConfig {
+                            block_hash: self.block_hash,
+                            child_trie: &child_trie[..],
+                            keys: keys_to_request.into_iter(),
+                        },
+                        self.timeout_per_request,
+                    )
+                    .await
+                    // The two request errors are isomorphic. Normalize so the rest of the
+                    // function only deals with `StorageProofRequestError`.
+                    .map_err(|err| match err {
+                        network_service::ChildStorageProofRequestError::NoConnection => {
+                            network_service::StorageProofRequestError::NoConnection
+                        }
+                        network_service::ChildStorageProofRequestError::RequestTooLarge => {
+                            network_service::StorageProofRequestError::RequestTooLarge
+                        }
+                        network_service::ChildStorageProofRequestError::Request(err) => {
+                            network_service::StorageProofRequestError::Request(err)
+                        }
+                    })
+            } else {
+                self.sync_service
+                    .network_service
+                    .clone()
+                    .storage_proof_request(
+                        target.clone(),
+                        codec::StorageProofRequestConfig {
+                            block_hash: self.block_hash,
+                            keys: keys_to_request.into_iter(),
+                        },
+                        self.timeout_per_request,
+                    )
+                    .await
+            };
 
             let proof = match result {
                 Ok(r) => r,
@@ -787,6 +873,47 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         .push(StorageQueryErrorDetail::ProofVerification(err));
                     continue;
                 }
+            };
+
+            // Resolve the trie root that the requested keys are verified against. For a main-trie
+            // query this is `main_trie_root_hash`. For a child-trie query the child root is first
+            // read from the main trie at `:child_storage:default:<child_trie>`. `None` means the
+            // child trie doesn't exist, in which case every key has no value.
+            let effective_root: Option<[u8; 32]> = if let Some(child_trie) = &self.child_trie {
+                const PREFIX: &[u8] = b":child_storage:default:";
+                let mut child_root_key = Vec::with_capacity(PREFIX.len() + child_trie.len());
+                child_root_key.extend_from_slice(PREFIX);
+                child_root_key.extend_from_slice(child_trie);
+                match decoded_proof.storage_value(&self.main_trie_root_hash, &child_root_key) {
+                    Ok(Some((value, _))) => match <&[u8; 32]>::try_from(value) {
+                        Ok(hash) => Some(*hash),
+                        Err(_) => {
+                            // The stored child root isn't a 32-byte hash, which means a corrupt
+                            // proof. Ban the peer and count the failure.
+                            self.sync_service
+                                .network_service
+                                .ban_and_disconnect(
+                                    target,
+                                    network_service::BanSeverity::High,
+                                    "bad-child-trie-root",
+                                )
+                                .await;
+                            self.outcome_errors
+                                .push(StorageQueryErrorDetail::MissingProofEntry);
+                            continue;
+                        }
+                    },
+                    Ok(None) => None,
+                    Err(_) => {
+                        // The main-trie path to the child root is absent from the proof. Retry
+                        // against another peer.
+                        self.outcome_errors
+                            .push(StorageQueryErrorDetail::MissingProofEntry);
+                        continue;
+                    }
+                }
+            } else {
+                Some(self.main_trie_root_hash)
             };
 
             let mut proof_has_advanced_verification = false;
@@ -867,8 +994,21 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         }
                     }
                     RequestImpl::ValueOrHash { key, hash } => {
+                        let Some(lookup_root) = effective_root.as_ref() else {
+                            // Child trie doesn't exist, so the key has no value.
+                            proof_has_advanced_verification = true;
+                            self.available_results.push_back((
+                                request_index,
+                                if hash {
+                                    StorageResultItem::Hash { key, hash: None }
+                                } else {
+                                    StorageResultItem::Value { key, value: None }
+                                },
+                            ));
+                            continue;
+                        };
                         match decoded_proof.trie_node_info(
-                            &self.main_trie_root_hash,
+                            lookup_root,
                             trie::bytes_to_nibbles(key.iter().copied()),
                         ) {
                             Ok(node_info) => match node_info.storage_value {
