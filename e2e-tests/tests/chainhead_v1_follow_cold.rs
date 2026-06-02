@@ -58,6 +58,11 @@ async fn chainhead_v1_follow_cold() -> Result<(), anyhow::Error> {
         })?;
     log::info!("alice reached #{target} (>= baseline+{REQUIRED_BLOCKS})");
 
-    run_chainhead_v1_follow_js(&live, &cfg).await?;
+    // Step 1: follow with runtime
+    run_chainhead_v1_follow_js(&live, &cfg, true).await?;
+
+    // Step 2: follow without runtime
+    run_chainhead_v1_follow_js(&live, &cfg, false).await?;
+
     Ok(())
 }

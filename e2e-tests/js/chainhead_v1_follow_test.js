@@ -274,6 +274,9 @@ class ChainHeadValidator {
     if (this.withRuntime && !event.finalizedBlockRuntime) {
       this.violation("initialized.finalizedBlockRuntime missing with withRuntime=true");
     }
+    if (!this.withRuntime && event.finalizedBlockRuntime != null) {
+      this.violation("initialized.finalizedBlockRuntime present with withRuntime=false");
+    }
     for (const h of hashes) this.knownHashes.add(h);
     this.initialFinalizedHash = hashes[hashes.length - 1];
     this.lastFinalizedHash = this.initialFinalizedHash;
@@ -295,6 +298,9 @@ class ChainHeadValidator {
         `newBlock parent unknown: parent=${event.parentBlockHash} block=${event.blockHash}`,
       );
       return;
+    }
+    if (!this.withRuntime && event.newRuntime != null) {
+      this.violation(`newBlock.newRuntime present with withRuntime=false: ${event.blockHash}`);
     }
     this.knownHashes.add(event.blockHash);
     this.parents.set(event.blockHash, event.parentBlockHash);

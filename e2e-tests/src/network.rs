@@ -384,6 +384,7 @@ fn decode_header_number(hex_str: &str) -> Result<u64, anyhow::Error> {
 pub async fn run_chainhead_v1_follow_js(
     live: &LiveNetwork,
     cfg: &Scenario,
+    with_runtime: bool,
 ) -> Result<(), anyhow::Error> {
     let relay_spec_str = live.relay_spec.to_str().expect("UTF-8 path");
     let para_spec_str = live.para_spec.to_str().expect("UTF-8 path");
@@ -406,6 +407,7 @@ pub async fn run_chainhead_v1_follow_js(
     let para_best_str = para_best.to_string();
     let para_finalized_str = para_finalized.to_string();
 
+    let with_runtime_str = if with_runtime { "true" } else { "false" };
     let mut env_vars: Vec<(&str, &str)> = vec![
         ("RELAY_CHAIN_SPEC", relay_spec_str),
         ("PARA_CHAIN_SPEC", para_spec_str),
@@ -413,6 +415,7 @@ pub async fn run_chainhead_v1_follow_js(
         ("RELAY_FINALIZED_AT_LAUNCH", relay_finalized_str.as_str()),
         ("PARA_BEST_AT_LAUNCH", para_best_str.as_str()),
         ("PARA_FINALIZED_AT_LAUNCH", para_finalized_str.as_str()),
+        ("WITH_RUNTIME", with_runtime_str),
     ];
     if let Some((relay_db, para_db)) = smoldot_db_paths.as_ref() {
         env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
@@ -420,7 +423,7 @@ pub async fn run_chainhead_v1_follow_js(
     }
 
     log::info!(
-        "running chainHead_v1_follow JS driver (relay_spec={relay_spec_str}, para_spec={para_spec_str}, relay best/finalized=#{relay_best}/#{relay_finalized}, para best/finalized=#{para_best}/#{para_finalized})"
+        "running chainHead_v1_follow JS driver (with_runtime={with_runtime}, relay_spec={relay_spec_str}, para_spec={para_spec_str}, relay best/finalized=#{relay_best}/#{relay_finalized}, para best/finalized=#{para_best}/#{para_finalized})"
     );
     crate::run_js_test("js/chainhead_v1_follow_test.js", &env_vars)
         .await

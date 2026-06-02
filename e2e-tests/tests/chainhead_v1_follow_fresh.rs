@@ -43,6 +43,11 @@ async fn chainhead_v1_follow_fresh() -> Result<(), anyhow::Error> {
         .map_err(|e| anyhow!("alice did not produce parachain blocks: {e}"))?;
     log::info!("alice has \u{2265}{REQUIRED_BLOCKS} parachain blocks");
 
-    run_chainhead_v1_follow_js(&live, &cfg).await?;
+    // Step 1: follow with runtime
+    run_chainhead_v1_follow_js(&live, &cfg, true).await?;
+
+    // Step 2: follow without runtime
+    run_chainhead_v1_follow_js(&live, &cfg, false).await?;
+
     Ok(())
 }
