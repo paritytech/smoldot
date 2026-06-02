@@ -163,6 +163,21 @@ if [[ -n "${SMOLDOT_DB_DUMP_DIR:-}" ]]; then
   fi
 fi
 
+# Mirror the Rust harness: build the smoldot JS bundle and install JS deps.
+# Set SKIP_BUILD=true to skip the (idempotent) rebuild on repeat runs.
+if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
+  if [[ ! -d "${REPO_ROOT}/wasm-node/javascript/node_modules" ]]; then
+    echo "Installing smoldot JS deps..." >&2
+    (cd "${REPO_ROOT}/wasm-node/javascript" && npm ci)
+  fi
+  echo "Building smoldot JS bundle..." >&2
+  (cd "${REPO_ROOT}/wasm-node/javascript" && npm run build)
+fi
+if [[ ! -d "${SCRIPT_DIR}/js/node_modules" ]]; then
+  echo "Installing JS deps..." >&2
+  (cd "${SCRIPT_DIR}/js" && npm install)
+fi
+
 cd "${SCRIPT_DIR}"
 exec env \
   WITH_RUNTIME="${WITH_RUNTIME:-false}" \

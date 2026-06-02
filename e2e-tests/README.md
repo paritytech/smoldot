@@ -47,7 +47,9 @@ What happens inside:
 live public network, attaching a smoldot light client to bundled chain specs
 from [`demo-chain-specs/`](../demo-chain-specs) and following `chainHead_v1`
 until it sees enough new and finalized blocks. Unlike the Zombienet tests
-above, it needs no local Polkadot binaries.
+above, it needs no local Polkadot binaries — only Node.js 22+ and npm. The
+script builds the smoldot JS bundle and installs `js/` dependencies on first
+run (set `SKIP_BUILD=true` to skip the rebuild on repeat runs).
 
 ```sh
 # Relay-only:
