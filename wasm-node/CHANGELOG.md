@@ -2,13 +2,16 @@
 
 ## Unreleased
 
+## 3.2.0 - 2026-06-02
+
 ### Added
 
-- Implement the `ext_trie_blake2_256_verify_proof_version_1` and `ext_trie_blake2_256_verify_proof_version_2` host functions. The verifier handles Substrate's compact proof format (as produced by `sp_trie::generate_trie_proof`): path children are replaced by an empty inline placeholder and the target leaf's value is reconstructed from the caller-supplied expected value (hashed for state version V1 values of 33 bytes or more, matching `sp_trie`'s threshold).
+- `chainHead_v1_storage` can now read child-trie storage (the default child trie), letting callers read e.g. contract storage directly without going through a runtime call. ([#3278](https://github.com/paritytech/smoldot/pull/3278))
+- Implement the `ext_trie_blake2_256_verify_proof_version_1` and `ext_trie_blake2_256_verify_proof_version_2` host functions. The verifier handles Substrate's compact proof format (as produced by `sp_trie::generate_trie_proof`): path children are replaced by an empty inline placeholder and the target leaf's value is reconstructed from the caller-supplied expected value (hashed for state version V1 values of 33 bytes or more, matching `sp_trie`'s threshold). ([#3263](https://github.com/paritytech/smoldot/pull/3263))
 
 ### Fixed
 
-- `ext_transaction_index_index_version_1` and `ext_transaction_index_renew_version_1` now consume their parameters with the correct wasm value types (3xI32 and 2xI32 respectively). The previous code read the first parameter as a packed pointer-size (I64), which crashed the wasm executor as soon as a substrate runtime actually called either function (e.g. `pallet-transaction-storage::store` / `renew`). Behavior remains a no-op since smoldot is a light client and has no offchain transaction index to update.
+- `ext_transaction_index_index_version_1` and `ext_transaction_index_renew_version_1` now consume their parameters with the correct wasm value types (3xI32 and 2xI32 respectively). The previous code read the first parameter as a packed pointer-size (I64), which crashed the wasm executor as soon as a substrate runtime actually called either function (e.g. `pallet-transaction-storage::store` / `renew`). Behavior remains a no-op since smoldot is a light client and has no offchain transaction index to update. ([#3263](https://github.com/paritytech/smoldot/pull/3263))
 
 ## 3.1.4 - 2026-05-29
 
