@@ -425,33 +425,100 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         timeout_per_request: Duration,
         max_parallel: NonZero<u32>,
     ) -> StorageQuery<TPlat> {
+        self.storage_query_inner(
+            block_number,
+            block_hash,
+            main_trie_root_hash,
+            None,
+            requests,
+            total_attempts,
+            timeout_per_request,
+            max_parallel,
+        )
+    }
+
+    /// Like [`SyncService::storage_query`], but reads from the child trie named `child_trie`
+    /// (the bytes after the `:child_storage:default:` prefix) instead of the main trie.
+    ///
+    /// The proof is fetched with a child-storage-proof network request. Verification is two
+    /// levels deep: the child trie's root is first resolved from `main_trie_root_hash` at
+    /// `:child_storage:default:<child_trie>`, then each requested key is verified against that
+    /// child root. Only [`StorageRequestItemTy::Value`] and [`StorageRequestItemTy::Hash`] are
+    /// supported here. The descendants and merkle-value variants are not, as they resolve
+    /// against a fixed root that isn't known for a child trie until the proof arrives.
+    pub fn child_storage_query(
+        self: Arc<Self>,
+        block_number: u64,
+        block_hash: [u8; 32],
+        main_trie_root_hash: [u8; 32],
+        child_trie: Vec<u8>,
+        requests: impl Iterator<Item = StorageRequestItem>,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        max_parallel: NonZero<u32>,
+    ) -> StorageQuery<TPlat> {
+        self.storage_query_inner(
+            block_number,
+            block_hash,
+            main_trie_root_hash,
+            Some(child_trie),
+            requests,
+            total_attempts,
+            timeout_per_request,
+            max_parallel,
+        )
+    }
+
+    fn storage_query_inner(
+        self: Arc<Self>,
+        block_number: u64,
+        block_hash: [u8; 32],
+        main_trie_root_hash: [u8; 32],
+        child_trie: Option<Vec<u8>>,
+        requests: impl Iterator<Item = StorageRequestItem>,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        max_parallel: NonZero<u32>,
+    ) -> StorageQuery<TPlat> {
         let total_attempts = usize::try_from(total_attempts).unwrap_or(usize::MAX);
 
         let requests = requests
-            .map(|request| match request.ty {
-                StorageRequestItemTy::DescendantsHashes
-                | StorageRequestItemTy::DescendantsValues => RequestImpl::PrefixScan {
-                    scan: prefix_proof::prefix_scan(prefix_proof::Config {
-                        prefix: &request.key,
-                        trie_root_hash: main_trie_root_hash,
-                        full_storage_values_required: matches!(
+            .map(|request| {
+                debug_assert!(
+                    child_trie.is_none()
+                        || matches!(
                             request.ty,
-                            StorageRequestItemTy::DescendantsValues
+                            StorageRequestItemTy::Value | StorageRequestItemTy::Hash
                         ),
-                    }),
-                    requested_key: request.key,
-                },
-                StorageRequestItemTy::Value => RequestImpl::ValueOrHash {
-                    key: request.key,
-                    hash: false,
-                },
-                StorageRequestItemTy::Hash => RequestImpl::ValueOrHash {
-                    key: request.key,
-                    hash: true,
-                },
-                StorageRequestItemTy::MerkleProof => RequestImpl::MerkleProof { key: request.key },
-                StorageRequestItemTy::ClosestDescendantMerkleValue => {
-                    RequestImpl::ClosestDescendantMerkleValue { key: request.key }
+                    "child-trie queries only support `Value` and `Hash` request types"
+                );
+                match request.ty {
+                    StorageRequestItemTy::DescendantsHashes
+                    | StorageRequestItemTy::DescendantsValues => RequestImpl::PrefixScan {
+                        scan: prefix_proof::prefix_scan(prefix_proof::Config {
+                            prefix: &request.key,
+                            trie_root_hash: main_trie_root_hash,
+                            full_storage_values_required: matches!(
+                                request.ty,
+                                StorageRequestItemTy::DescendantsValues
+                            ),
+                        }),
+                        requested_key: request.key,
+                    },
+                    StorageRequestItemTy::Value => RequestImpl::ValueOrHash {
+                        key: request.key,
+                        hash: false,
+                    },
+                    StorageRequestItemTy::Hash => RequestImpl::ValueOrHash {
+                        key: request.key,
+                        hash: true,
+                    },
+                    StorageRequestItemTy::MerkleProof => {
+                        RequestImpl::MerkleProof { key: request.key }
+                    }
+                    StorageRequestItemTy::ClosestDescendantMerkleValue => {
+                        RequestImpl::ClosestDescendantMerkleValue { key: request.key }
+                    }
                 }
             })
             .enumerate()
@@ -461,6 +528,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             block_number,
             block_hash,
             main_trie_root_hash,
+            child_trie,
             total_attempts,
             timeout_per_request,
             _max_parallel: max_parallel,
@@ -578,6 +646,10 @@ pub struct StorageQuery<TPlat: PlatformRef> {
     block_number: u64,
     block_hash: [u8; 32],
     main_trie_root_hash: [u8; 32],
+    /// `Some` for a child-trie query (the bytes after `:child_storage:default:`). When set,
+    /// requests are fetched via child-storage-proof requests and each key is verified against
+    /// the child trie root resolved from `main_trie_root_hash`, not against the main root.
+    child_trie: Option<Vec<u8>>,
     /// Requests that haven't been fulfilled yet.
     /// The `usize` is the index of the request in the original list of requests that the API user
     /// provided.
@@ -717,38 +789,52 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                 keys
             };
 
-            let result = self
-                .sync_service
-                .network_service
-                .clone()
-                .storage_proof_request(
-                    target.clone(),
-                    codec::StorageProofRequestConfig {
-                        block_hash: self.block_hash,
-                        keys: keys_to_request.into_iter(),
-                    },
-                    self.timeout_per_request,
-                )
-                .await;
+            let result: Result<_, StorageQueryNetworkError> =
+                if let Some(child_trie) = &self.child_trie {
+                    self.sync_service
+                        .network_service
+                        .clone()
+                        .child_storage_proof_request(
+                            target.clone(),
+                            codec::ChildStorageProofRequestConfig {
+                                block_hash: self.block_hash,
+                                child_trie: &child_trie[..],
+                                keys: keys_to_request.into_iter(),
+                            },
+                            self.timeout_per_request,
+                        )
+                        .await
+                        .map_err(StorageQueryNetworkError::ChildStorageProof)
+                } else {
+                    self.sync_service
+                        .network_service
+                        .clone()
+                        .storage_proof_request(
+                            target.clone(),
+                            codec::StorageProofRequestConfig {
+                                block_hash: self.block_hash,
+                                keys: keys_to_request.into_iter(),
+                            },
+                            self.timeout_per_request,
+                        )
+                        .await
+                        .map_err(StorageQueryNetworkError::StorageProof)
+                };
 
             let proof = match result {
                 Ok(r) => r,
                 Err(err) => {
                     // In case of error that isn't a protocol error, we reduce the number of
                     // trie node items to request.
-                    let reduce_max = match &err {
-                        network_service::StorageProofRequestError::RequestTooLarge => true,
-                        network_service::StorageProofRequestError::Request(
-                            service::StorageProofRequestError::Request(err),
-                        ) => !err.is_protocol_error(),
-                        _ => false,
-                    };
+                    let reduce_max = err.is_request_too_large()
+                        || match err.protocol_request_error() {
+                            Some(service::StorageProofRequestError::Request(inner)) => {
+                                !inner.is_protocol_error()
+                            }
+                            _ => false,
+                        };
 
-                    if !matches!(
-                        err,
-                        network_service::StorageProofRequestError::RequestTooLarge
-                    ) || self.response_nodes_cap == 1
-                    {
+                    if !err.is_request_too_large() || self.response_nodes_cap == 1 {
                         self.sync_service
                             .network_service
                             .ban_and_disconnect(
@@ -787,6 +873,44 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         .push(StorageQueryErrorDetail::ProofVerification(err));
                     continue;
                 }
+            };
+
+            // Resolve the trie root that the requested keys are verified against. For a main-trie
+            // query this is `main_trie_root_hash`. For a child-trie query the child root is first
+            // read from the main trie at `:child_storage:default:<child_trie>`. `None` means the
+            // child trie doesn't exist, in which case every key has no value.
+            let effective_root: Option<[u8; 32]> = if let Some(child_trie) = &self.child_trie {
+                let child_root_key = trie::default_child_trie_root_key(child_trie);
+                match decoded_proof.storage_value(&self.main_trie_root_hash, &child_root_key) {
+                    Ok(Some((value, _))) => match <&[u8; 32]>::try_from(value) {
+                        Ok(hash) => Some(*hash),
+                        Err(_) => {
+                            // The stored child root isn't a 32-byte hash, which means a corrupt
+                            // proof. Ban the peer and count the failure.
+                            self.sync_service
+                                .network_service
+                                .ban_and_disconnect(
+                                    target,
+                                    network_service::BanSeverity::High,
+                                    "bad-child-trie-root",
+                                )
+                                .await;
+                            self.outcome_errors
+                                .push(StorageQueryErrorDetail::MissingProofEntry);
+                            continue;
+                        }
+                    },
+                    Ok(None) => None,
+                    Err(_) => {
+                        // The main-trie path to the child root is absent from the proof. Retry
+                        // against another peer.
+                        self.outcome_errors
+                            .push(StorageQueryErrorDetail::MissingProofEntry);
+                        continue;
+                    }
+                }
+            } else {
+                Some(self.main_trie_root_hash)
             };
 
             let mut proof_has_advanced_verification = false;
@@ -867,8 +991,21 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         }
                     }
                     RequestImpl::ValueOrHash { key, hash } => {
+                        let Some(lookup_root) = effective_root.as_ref() else {
+                            // Child trie doesn't exist, so the key has no value.
+                            proof_has_advanced_verification = true;
+                            self.available_results.push_back((
+                                request_index,
+                                if hash {
+                                    StorageResultItem::Hash { key, hash: None }
+                                } else {
+                                    StorageResultItem::Value { key, value: None }
+                                },
+                            ));
+                            continue;
+                        };
                         match decoded_proof.trie_node_info(
-                            &self.main_trie_root_hash,
+                            lookup_root,
                             trie::bytes_to_nibbles(key.iter().copied()),
                         ) {
                             Ok(node_info) => match node_info.storage_value {
@@ -1046,21 +1183,22 @@ impl StorageQueryError {
     /// issue.
     pub fn is_network_problem(&self) -> bool {
         self.errors.iter().all(|err| match err {
-            StorageQueryErrorDetail::Network(
-                network_service::StorageProofRequestError::Request(
-                    service::StorageProofRequestError::Request(_)
-                    | service::StorageProofRequestError::RemoteCouldntAnswer,
-                ),
-            )
-            | StorageQueryErrorDetail::Network(
-                network_service::StorageProofRequestError::NoConnection,
-            ) => true,
-            StorageQueryErrorDetail::Network(
-                network_service::StorageProofRequestError::Request(
-                    service::StorageProofRequestError::Decode(_),
-                )
-                | network_service::StorageProofRequestError::RequestTooLarge,
-            ) => false,
+            StorageQueryErrorDetail::Network(net) => {
+                if net.is_no_connection() {
+                    return true;
+                }
+                if net.is_request_too_large() {
+                    return false;
+                }
+                match net.protocol_request_error() {
+                    Some(
+                        service::StorageProofRequestError::Request(_)
+                        | service::StorageProofRequestError::RemoteCouldntAnswer,
+                    ) => true,
+                    Some(service::StorageProofRequestError::Decode(_)) => false,
+                    None => false,
+                }
+            }
             StorageQueryErrorDetail::ProofVerification(_)
             | StorageQueryErrorDetail::MissingProofEntry => false,
         })
@@ -1086,12 +1224,63 @@ impl fmt::Display for StorageQueryError {
 pub enum StorageQueryErrorDetail {
     /// Error during the network request.
     #[display("{_0}")]
-    Network(network_service::StorageProofRequestError),
+    Network(StorageQueryNetworkError),
     /// Error verifying the proof.
     #[display("{_0}")]
     ProofVerification(proof_decode::Error),
     /// Proof is missing one or more desired storage items.
     MissingProofEntry,
+}
+
+/// Network-level error returned by a storage query. Distinguishes a main-trie request from a
+/// child-trie request so callers can tell them apart for logging or retry policy.
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+pub enum StorageQueryNetworkError {
+    /// Error during a main-trie storage proof request.
+    #[display("storage proof request: {_0}")]
+    StorageProof(network_service::StorageProofRequestError),
+    /// Error during a child-trie storage proof request.
+    #[display("child storage proof request: {_0}")]
+    ChildStorageProof(network_service::ChildStorageProofRequestError),
+}
+
+impl StorageQueryNetworkError {
+    /// Returns `true` if this is a `NoConnection` error from either variant.
+    fn is_no_connection(&self) -> bool {
+        matches!(
+            self,
+            StorageQueryNetworkError::StorageProof(
+                network_service::StorageProofRequestError::NoConnection
+            ) | StorageQueryNetworkError::ChildStorageProof(
+                network_service::ChildStorageProofRequestError::NoConnection
+            )
+        )
+    }
+
+    /// Returns `true` if the request was rejected for being too large.
+    fn is_request_too_large(&self) -> bool {
+        matches!(
+            self,
+            StorageQueryNetworkError::StorageProof(
+                network_service::StorageProofRequestError::RequestTooLarge
+            ) | StorageQueryNetworkError::ChildStorageProof(
+                network_service::ChildStorageProofRequestError::RequestTooLarge
+            )
+        )
+    }
+
+    /// Returns the protocol-level request error if this wraps a `Request(_)`.
+    fn protocol_request_error(&self) -> Option<&service::StorageProofRequestError> {
+        match self {
+            StorageQueryNetworkError::StorageProof(
+                network_service::StorageProofRequestError::Request(e),
+            )
+            | StorageQueryNetworkError::ChildStorageProof(
+                network_service::ChildStorageProofRequestError::Request(e),
+            ) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 /// Return value of [`SyncService::subscribe_all`].
