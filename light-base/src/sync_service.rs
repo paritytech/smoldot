@@ -481,30 +481,42 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let total_attempts = usize::try_from(total_attempts).unwrap_or(usize::MAX);
 
         let requests = requests
-            .map(|request| match request.ty {
-                StorageRequestItemTy::DescendantsHashes
-                | StorageRequestItemTy::DescendantsValues => RequestImpl::PrefixScan {
-                    scan: prefix_proof::prefix_scan(prefix_proof::Config {
-                        prefix: &request.key,
-                        trie_root_hash: main_trie_root_hash,
-                        full_storage_values_required: matches!(
+            .map(|request| {
+                debug_assert!(
+                    child_trie.is_none()
+                        || matches!(
                             request.ty,
-                            StorageRequestItemTy::DescendantsValues
+                            StorageRequestItemTy::Value | StorageRequestItemTy::Hash
                         ),
-                    }),
-                    requested_key: request.key,
-                },
-                StorageRequestItemTy::Value => RequestImpl::ValueOrHash {
-                    key: request.key,
-                    hash: false,
-                },
-                StorageRequestItemTy::Hash => RequestImpl::ValueOrHash {
-                    key: request.key,
-                    hash: true,
-                },
-                StorageRequestItemTy::MerkleProof => RequestImpl::MerkleProof { key: request.key },
-                StorageRequestItemTy::ClosestDescendantMerkleValue => {
-                    RequestImpl::ClosestDescendantMerkleValue { key: request.key }
+                    "child-trie queries only support `Value` and `Hash` request types"
+                );
+                match request.ty {
+                    StorageRequestItemTy::DescendantsHashes
+                    | StorageRequestItemTy::DescendantsValues => RequestImpl::PrefixScan {
+                        scan: prefix_proof::prefix_scan(prefix_proof::Config {
+                            prefix: &request.key,
+                            trie_root_hash: main_trie_root_hash,
+                            full_storage_values_required: matches!(
+                                request.ty,
+                                StorageRequestItemTy::DescendantsValues
+                            ),
+                        }),
+                        requested_key: request.key,
+                    },
+                    StorageRequestItemTy::Value => RequestImpl::ValueOrHash {
+                        key: request.key,
+                        hash: false,
+                    },
+                    StorageRequestItemTy::Hash => RequestImpl::ValueOrHash {
+                        key: request.key,
+                        hash: true,
+                    },
+                    StorageRequestItemTy::MerkleProof => {
+                        RequestImpl::MerkleProof { key: request.key }
+                    }
+                    StorageRequestItemTy::ClosestDescendantMerkleValue => {
+                        RequestImpl::ClosestDescendantMerkleValue { key: request.key }
+                    }
                 }
             })
             .enumerate()
