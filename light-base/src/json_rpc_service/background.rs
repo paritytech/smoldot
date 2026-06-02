@@ -4446,7 +4446,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                 match notification {
                     sync_service::Notification::Finalized {
-                        hash,
+                        finalized_blocks_hashes,
+                        hash: _,
                         best_block_hash_if_changed,
                         pruned_blocks,
                     } => {
@@ -4473,7 +4474,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 methods::ServerToClient::chainHead_v1_followEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::FollowEvent::Finalized {
-                                        finalized_blocks_hashes: vec![methods::HashHexString(hash)],
+                                        finalized_blocks_hashes: finalized_blocks_hashes
+                                            .into_iter()
+                                            .map(methods::HashHexString)
+                                            .collect(),
                                         pruned_blocks_hashes: pruned_blocks
                                             .into_iter()
                                             .map(methods::HashHexString)

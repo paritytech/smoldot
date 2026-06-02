@@ -415,6 +415,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                     let sender =
                                         runtime_subscription.all_subscriptions.swap_remove(index);
                                     let notif = super::Notification::Finalized {
+                                        finalized_blocks_hashes: Vec::from([hash]),
                                         hash,
                                         best_block_hash_if_changed: if best_output_block_updated {
                                             Some(best_block_hash)

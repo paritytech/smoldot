@@ -605,6 +605,11 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             task.known_finalized_runtime = None;
                         }
                         task.dispatch_all_subscribers(Notification::Finalized {
+                            finalized_blocks_hashes: finalized_blocks_newest_to_oldest
+                                .iter()
+                                .rev()
+                                .map(|b| b.block_hash)
+                                .collect(),
                             hash: *sync.finalized_block_hash(),
                             best_block_hash_if_changed: if updates_best_block {
                                 Some(*sync.best_block_hash())

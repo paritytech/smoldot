@@ -350,6 +350,12 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                                     task.known_finalized_runtime = None;
                                 }
                                 task.dispatch_all_subscribers(Notification::Finalized {
+                                    finalized_blocks_hashes: result
+                                        .finalized_blocks
+                                        .iter()
+                                        .rev()
+                                        .map(|b| b.block_hash)
+                                        .collect(),
                                     hash: pending_hash,
                                     best_block_hash_if_changed: if result.updates_best_block {
                                         Some(*task.sync.as_ref().unwrap().best_block_hash())
@@ -913,6 +919,12 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             task.known_finalized_runtime = None;
                         }
                         task.dispatch_all_subscribers(Notification::Finalized {
+                            finalized_blocks_hashes: result
+                                .finalized_blocks
+                                .iter()
+                                .rev()
+                                .map(|b| b.block_hash)
+                                .collect(),
                             hash: finalized_hash,
                             best_block_hash_if_changed: if result.updates_best_block {
                                 Some(*task.sync.as_ref().unwrap().best_block_hash())
@@ -937,6 +949,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             }
 
             WakeUpReason::ParaheadNotification(Notification::Finalized {
+                finalized_blocks_hashes: _,
                 hash,
                 best_block_hash_if_changed: _,
                 pruned_blocks: _,
@@ -964,6 +977,12 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             task.known_finalized_runtime = None;
                         }
                         task.dispatch_all_subscribers(Notification::Finalized {
+                            finalized_blocks_hashes: result
+                                .finalized_blocks
+                                .iter()
+                                .rev()
+                                .map(|b| b.block_hash)
+                                .collect(),
                             hash,
                             best_block_hash_if_changed: if result.updates_best_block {
                                 Some(*task.sync.as_ref().unwrap().best_block_hash())
