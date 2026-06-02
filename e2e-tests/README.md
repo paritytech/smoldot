@@ -40,6 +40,36 @@ What happens inside:
    `waitForMessage`.
 
 
+## chainHead against live networks
+
+[`run_chainhead_test.sh`](run_chainhead_test.sh) drives
+[`js/chainhead_v1_follow_test.js`](js/chainhead_v1_follow_test.js) against a
+live public network, attaching a smoldot light client to bundled chain specs
+from [`demo-chain-specs/`](../demo-chain-specs) and following `chainHead_v1`
+until it sees enough new and finalized blocks. Unlike the Zombienet tests
+above, it needs no local Polkadot binaries.
+
+```sh
+# Relay-only:
+./run_chainhead_test.sh paseo
+
+# Relay + asset-hub parachain:
+./run_chainhead_test.sh paseo-ah
+```
+
+The network argument selects the mode: a bare relay name (`paseo`, `polkadot`,
+`kusama`, `westend`) runs relay-only, while an `-ah`/`-ah-next` variant also
+adds the matching asset-hub parachain. When an RPC URL is configured for the
+network, the script first queries its finalized height so the validator's
+lag-regression check is meaningful.
+
+Useful overrides (see the script header for the full list):
+- `WITH_RUNTIME=true` — subscribe with runtime (default `false`).
+- `RELAY_CHAIN_SPEC` / `PARA_CHAIN_SPEC` — override the bundled specs.
+- `SMOLDOT_DB_DUMP_DIR` — dump smoldot DBs on success and warm-load them on
+  later runs from the same directory.
+
+
 ## Bulletin / bitswap snapshots
 
 The `bulletin_fetch` test drives smoldot's `bitswap_v1_get` JSON-RPC
