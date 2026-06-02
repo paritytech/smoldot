@@ -352,7 +352,9 @@ class ChainHeadValidator {
         this.violation(
           `finalized chain break: ${h} parent=${parent} expected=${prev}`,
         );
-        return;
+        // Record once; state still advances to the tip below so we don't
+        // re-flag the same gap on every later event.
+        break;
       }
       prev = h;
     }
