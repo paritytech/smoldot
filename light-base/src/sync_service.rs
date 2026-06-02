@@ -222,8 +222,10 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     /// always be `None`. Since the runtime can only be provided to one call to this function,
     /// only one subscriber should use `runtime_interest` equal to `true`.
     ///
-    /// While this function is asynchronous, it is guaranteed to finish relatively quickly. Only
-    /// CPU operations are performed.
+    /// While this function is asynchronous, it normally finishes quickly. The first call after
+    /// startup may block until the sync service commits its bootstrap mode (warp-sync vs
+    /// all-forks-only), so that the returned finalized block isn't a chain-spec checkpoint
+    /// that warp-sync would later overwrite.
     pub async fn subscribe_all(&self, buffer_size: usize, runtime_interest: bool) -> SubscribeAll {
         let (send_back, rx) = oneshot::channel();
 
