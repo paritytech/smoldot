@@ -22,12 +22,14 @@ A version-bumping release commit drives four outputs:
 | Deno git-tag `light-js-deno-v<npm>` | `deno-publish` (creates tag if missing) |
 | crates.io `smoldot` | `crates-io-publish` (runs `cargo publish --no-verify`; `continue-on-error: true`) |
 | crates.io `smoldot-light` | `crates-io-publish` (same) |
+| git tags `npm-smoldot-v<npm>`, `smoldot-v<lib>`, `smoldot-light-v<light-base>` | `tags-publish` (creates each tag if missing) |
 | Docs (gh-pages) | `docs-publish` (force-pushes fresh tree every run, regardless of version) |
 
-Three git tags are created **manually** on the release commit after merge:
-`npm-smoldot-v<X.Y.Z>`, `smoldot-v<A.B.C>`, `smoldot-light-v<A.B.C>`. Create
-only the ones whose version actually changed. The `light-js-deno-v<X.Y.Z>` tag
-is created by CI, not manually.
+All release tags are pushed by CI. `tags-publish` reads the version files
+and pushes `npm-smoldot-v<X.Y.Z>`, `smoldot-v<A.B.C>`, and
+`smoldot-light-v<A.B.C>` to the merge commit, but only the ones whose
+version names don't already exist on the remote — so a non-bumping push
+to `main` is a no-op for each tag.
 
 ---
 
@@ -161,13 +163,14 @@ cargo check -p smoldot -p smoldot-light
 Optional dry-runs:
 
 ```sh
-cargo publish --dry-run --locked -p smoldot
+cargo publish --dry-run --locked --allow-dirty -p smoldot
 ```
 
 Run this every release; it only validates packaging and local build.
+`--allow-dirty` because the version bumps aren't committed yet (step 7).
 
 ```sh
-cargo publish --dry-run --locked -p smoldot-light
+cargo publish --dry-run --locked --allow-dirty -p smoldot-light
 ```
 
 Run this **only if `smoldot` is not being bumped**. Otherwise it fails on
@@ -226,10 +229,6 @@ npm view smoldot@<X.Y.Z>
 # crates.io — requires a User-Agent with contact info
 curl -sS -A "some-agent" https://crates.io/api/v1/crates/smoldot       | jq .crate.max_version
 curl -sS -A "some-agent" https://crates.io/api/v1/crates/smoldot-light | jq .crate.max_version
-
-# Deno tag pushed by CI
-git fetch --tags
-git tag -l 'light-js-deno-v<X.Y.Z>'
 ```
 
 Expected quirk: the `crates-io-publish` job's `smoldot` step fails with
@@ -238,30 +237,22 @@ Expected quirk: the `crates-io-publish` job's `smoldot` step fails with
 
 ---
 
-## 11. Create and push the manual tags
+## 11. Verify CI-pushed tags
 
-On the release commit SHA (the merged squash on `main`):
-
-```sh
-git fetch origin main
-git checkout <release-commit-sha>
-
-git tag npm-smoldot-v<X.Y.Z>                # always
-git tag smoldot-light-v<A.B.C>              # if smoldot-light bumped
-git tag smoldot-v<A.B.C>                    # if smoldot bumped
-
-git push origin \
-    npm-smoldot-v<X.Y.Z> \
-    [smoldot-light-v<A.B.C>] \
-    [smoldot-v<A.B.C>]
-```
-
-Tags are lightweight (no `-a`/`-m`). Verify they landed on origin:
+`tags-publish` and `deno-publish` push the release-marker tags
+automatically on the release commit. Confirm they landed:
 
 ```sh
 git fetch --tags
-git tag -l '*<X.Y.Z>*'   # should list the CI-pushed light-js-deno-v tag plus the manual ones
+git tag -l \
+    'npm-smoldot-v<X.Y.Z>' \
+    'smoldot-v<A.B.C>' \
+    'smoldot-light-v<A.B.C>' \
+    'light-js-deno-v<X.Y.Z>'
 ```
+
+Only the tags whose versions actually changed are pushed — `tags-publish`
+short-circuits per tag if the name already exists on the remote.
 
 On any post-publish failure, do not delete published versions — yank
 (`npm deprecate smoldot@<X.Y.Z> '...'`, `cargo yank --version <A.B.C>`) and

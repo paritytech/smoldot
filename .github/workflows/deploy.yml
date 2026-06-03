@@ -348,10 +348,113 @@ jobs:
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         continue-on-error: true
 
+  tags-publish:
+    # Pushes `npm-smoldot-v…`, `smoldot-v…`, `smoldot-light-v…` — each only
+    # after the version is found on its registry. Guards against publish
+    # steps' `continue-on-error: true` letting a tag through on failure.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [npm-publish, deno-publish, crates-io-publish]
+    # Serialize runs to avoid `git push` races on the same new tag.
+    concurrency:
+      group: tags-publish
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # to push tags
+    steps:
+      - uses: actions/checkout@v6
+      - id: tags
+        name: Compute and validate tag names
+        run: |
+          set -euo pipefail
+          NPM_VER=$(jq -r .version ./wasm-node/javascript/package.json)
+          SMOLDOT_VER=$(cargo read-manifest --manifest-path=./lib/Cargo.toml        | jq -r .version)
+          LIGHT_VER=$(cargo  read-manifest --manifest-path=./light-base/Cargo.toml  | jq -r .version)
+          for v in "$NPM_VER" "$SMOLDOT_VER" "$LIGHT_VER"; do
+            [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] \
+              || { echo "::error::version files did not yield a semver: '$v'"; exit 1; }
+          done
+          {
+            echo "npm_ver=$NPM_VER"
+            echo "smoldot_ver=$SMOLDOT_VER"
+            echo "light_ver=$LIGHT_VER"
+            echo "npm=npm-smoldot-v$NPM_VER"
+            echo "smoldot=smoldot-v$SMOLDOT_VER"
+            echo "light=smoldot-light-v$LIGHT_VER"
+          } >> "$GITHUB_OUTPUT"
+          printf 'Computed tags:\n  npm-smoldot-v%s\n  smoldot-v%s\n  smoldot-light-v%s\n' \
+            "$NPM_VER" "$SMOLDOT_VER" "$LIGHT_VER"
+      - name: Push verified release tags
+        env:
+          NPM_VER:     ${{ steps.tags.outputs.npm_ver }}
+          SMOLDOT_VER: ${{ steps.tags.outputs.smoldot_ver }}
+          LIGHT_VER:   ${{ steps.tags.outputs.light_ver }}
+          NPM_TAG:     ${{ steps.tags.outputs.npm }}
+          SMOLDOT_TAG: ${{ steps.tags.outputs.smoldot }}
+          LIGHT_TAG:   ${{ steps.tags.outputs.light }}
+        run: |
+          set -euo pipefail
+          # crates.io requires a contact-bearing User-Agent.
+          UA="smoldot-release-ci (https://github.com/${{ github.repository }})"
+
+          # Registries are eventually-consistent; retry up to 3 min per check.
+          retry() {
+            local i; for i in 1 2 3 4 5 6; do
+              "$@" && return 0
+              sleep 30
+            done
+            return 1
+          }
+
+          npm_has() {
+            local code
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              "https://registry.npmjs.org/smoldot/$1")
+            [[ "$code" == "200" ]]
+          }
+          crate_has() {
+            curl -fsS -A "$UA" "https://crates.io/api/v1/crates/$1/$2" \
+              | jq -e --arg v "$2" '.version.num == $v' >/dev/null
+          }
+          remote_tag_exists() {
+            [[ -n "$(git ls-remote --tags origin "refs/tags/$1")" ]]
+          }
+          push_tag() {
+            local tag="$1"
+            if remote_tag_exists "$tag"; then
+              echo "Tag $tag already exists on remote; skipping."
+              return
+            fi
+            git tag "$tag"
+            git push origin "$tag"
+            echo "Pushed: $tag -> $(git rev-parse HEAD)"
+          }
+
+          FAILED=0
+          if retry npm_has "$NPM_VER"; then
+            push_tag "$NPM_TAG"
+          else
+            echo "::error::smoldot@$NPM_VER not found on npm after retries; not tagging $NPM_TAG"
+            FAILED=1
+          fi
+          if retry crate_has smoldot "$SMOLDOT_VER"; then
+            push_tag "$SMOLDOT_TAG"
+          else
+            echo "::error::smoldot v$SMOLDOT_VER not found on crates.io after retries; not tagging $SMOLDOT_TAG"
+            FAILED=1
+          fi
+          if retry crate_has smoldot-light "$LIGHT_VER"; then
+            push_tag "$LIGHT_TAG"
+          else
+            echo "::error::smoldot-light v$LIGHT_VER not found on crates.io after retries; not tagging $LIGHT_TAG"
+            FAILED=1
+          fi
+          exit "$FAILED"
+
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [docs-publish, npm-publish, deno-publish, crates-io-publish]
+    needs: [docs-publish, npm-publish, deno-publish, crates-io-publish, tags-publish]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success

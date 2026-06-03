@@ -177,6 +177,22 @@ pub const EMPTY_KECCAK256_TRIE_MERKLE_VALUE: [u8; 32] = [
     214, 101, 145, 255, 150, 169, 224, 100, 188, 201, 138,
 ];
 
+/// Prefix that identifies a default child trie within the main trie's storage.
+///
+/// The root of a default child trie identified by `trie_id` is stored in the main trie under
+/// the key `concat(`[`DEFAULT_CHILD_STORAGE_PREFIX`]`, trie_id)`. Use
+/// [`default_child_trie_root_key`] to build that key.
+pub const DEFAULT_CHILD_STORAGE_PREFIX: &[u8] = b":child_storage:default:";
+
+/// Returns the main-trie storage key under which the root of the default child trie identified
+/// by `trie_id` is stored: `concat(`[`DEFAULT_CHILD_STORAGE_PREFIX`]`, trie_id)`.
+pub fn default_child_trie_root_key(trie_id: &[u8]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(DEFAULT_CHILD_STORAGE_PREFIX.len() + trie_id.len());
+    k.extend_from_slice(DEFAULT_CHILD_STORAGE_PREFIX);
+    k.extend_from_slice(trie_id);
+    k
+}
+
 /// Returns the Merkle value of a trie containing the entries passed as parameter. The entries
 /// passed as parameter are `(key, value)`.
 ///

@@ -2945,3 +2945,240 @@ fn issue_2175() {
 
     assert!(next_key.is_none());
 }
+
+// Captured live from `pallet-transaction-storage::apply_block_inherents` at
+// paseo-bulletin block #1503870: a V1 chunk-trie with one 256-byte chunk at
+// index 0. Exercises both compact-format reconstructions (path placeholder
+// child, omitted V1 hashed value).
+const COMPACT_PROOF: &[u8] = &[
+    0x08, 0x1d, 0x01, 0x81, 0x00, 0x11, 0x01, 0x00, 0x80, 0xad, 0xf8, 0xf2, 0xcc, 0x06, 0x40, 0x50,
+    0x70, 0xdc, 0xef, 0xc1, 0xfe, 0x08, 0x4b, 0x32, 0xdb, 0x91, 0x43, 0x09, 0x87, 0xad, 0x90, 0x37,
+    0x2b, 0xc0, 0x92, 0x75, 0x2c, 0x8a, 0xb7, 0xab, 0x82, 0x80, 0x78, 0x00, 0xc6, 0xf9, 0xfb, 0x17,
+    0x81, 0xd0, 0xc4, 0x2c, 0x35, 0xe7, 0xef, 0x85, 0x0f, 0x16, 0x43, 0x13, 0x39, 0x08, 0x09, 0x41,
+    0xfa, 0x3e, 0xb2, 0x05, 0xaa, 0xa0, 0xdc, 0x17, 0xb4, 0x5a, 0x08, 0x40, 0x00,
+];
+
+const COMPACT_PROOF_ROOT: [u8; 32] = [
+    0x2c, 0x6d, 0xa7, 0x41, 0xe1, 0xae, 0x13, 0x30, 0x13, 0xdc, 0x92, 0x55, 0x45, 0xcc, 0xfa, 0xd5,
+    0x62, 0xc4, 0x1a, 0x43, 0x2c, 0x0d, 0xf6, 0x18, 0xe8, 0x9e, 0x2c, 0x41, 0x1f, 0xf5, 0x75, 0xa7,
+];
+
+const COMPACT_PROOF_KEY: &[u8] = &[0x00];
+
+const COMPACT_PROOF_VALUE: &[u8] = &[
+    0x94, 0x01, 0x01, 0x70, 0x12, 0x20, 0xf8, 0x8f, 0x70, 0xc5, 0xae, 0x6c, 0x02, 0x4d, 0xd1, 0x73,
+    0x51, 0x53, 0xc1, 0x70, 0x57, 0x8f, 0xbb, 0xf3, 0x7b, 0x64, 0x45, 0xbc, 0xdb, 0xba, 0xb2, 0x98,
+    0xcc, 0x3e, 0x3a, 0xb6, 0x91, 0x9c, 0x12, 0x35, 0x0a, 0x24, 0x01, 0x55, 0x12, 0x20, 0x59, 0xca,
+    0x74, 0xb2, 0xce, 0xd5, 0xcb, 0xa2, 0x4b, 0x6b, 0xc6, 0xb8, 0xe5, 0x67, 0x47, 0xb7, 0x5b, 0x48,
+    0x34, 0xac, 0xc0, 0x60, 0xbb, 0x6d, 0xa3, 0x90, 0x13, 0xfb, 0xf7, 0x66, 0x95, 0x45, 0x12, 0x0a,
+    0x69, 0x6e, 0x64, 0x65, 0x78, 0x2e, 0x68, 0x74, 0x6d, 0x6c, 0x18, 0x90, 0x03, 0x12, 0x33, 0x0a,
+    0x24, 0x01, 0x55, 0x12, 0x20, 0xaa, 0x66, 0x49, 0xa4, 0x92, 0x3f, 0xac, 0x62, 0xaa, 0xd8, 0xd4,
+    0x49, 0xaa, 0xa1, 0xa4, 0x2b, 0xb7, 0x22, 0x9b, 0x86, 0xf6, 0x64, 0x9a, 0x22, 0x0b, 0xcc, 0xb3,
+    0x3e, 0xff, 0xa3, 0xf5, 0xdc, 0x12, 0x09, 0x73, 0x74, 0x79, 0x6c, 0x65, 0x2e, 0x63, 0x73, 0x73,
+    0x18, 0x7a, 0x0a, 0x02, 0x08, 0x01, 0xb4, 0x03, 0x01, 0x55, 0x12, 0x20, 0x59, 0xca, 0x74, 0xb2,
+    0xce, 0xd5, 0xcb, 0xa2, 0x4b, 0x6b, 0xc6, 0xb8, 0xe5, 0x67, 0x47, 0xb7, 0x5b, 0x48, 0x34, 0xac,
+    0xc0, 0x60, 0xbb, 0x6d, 0xa3, 0x90, 0x13, 0xfb, 0xf7, 0x66, 0x95, 0x45, 0x3c, 0x21, 0x64, 0x6f,
+    0x63, 0x74, 0x79, 0x70, 0x65, 0x20, 0x68, 0x74, 0x6d, 0x6c, 0x3e, 0x0a, 0x3c, 0x68, 0x74, 0x6d,
+    0x6c, 0x20, 0x6c, 0x61, 0x6e, 0x67, 0x3d, 0x22, 0x65, 0x6e, 0x22, 0x3e, 0x0a, 0x3c, 0x68, 0x65,
+    0x61, 0x64, 0x3e, 0x0a, 0x20, 0x20, 0x3c, 0x6d, 0x65, 0x74, 0x61, 0x20, 0x63, 0x68, 0x61, 0x72,
+    0x73, 0x65, 0x74, 0x3d, 0x22, 0x75, 0x74, 0x66, 0x2d, 0x38, 0x22, 0x20, 0x2f, 0x3e, 0x0a, 0x20,
+];
+
+#[test]
+fn verify_compact_proof_accepts_valid_substrate_proof() {
+    assert!(super::verify_compact_trie_proof(
+        COMPACT_PROOF,
+        &COMPACT_PROOF_ROOT,
+        COMPACT_PROOF_KEY,
+        COMPACT_PROOF_VALUE,
+        trie::TrieEntryVersion::V1,
+    ));
+}
+
+#[test]
+fn verify_compact_proof_rejects_wrong_root() {
+    let mut bad_root = COMPACT_PROOF_ROOT;
+    bad_root[0] ^= 0x01;
+    assert!(!super::verify_compact_trie_proof(
+        COMPACT_PROOF,
+        &bad_root,
+        COMPACT_PROOF_KEY,
+        COMPACT_PROOF_VALUE,
+        trie::TrieEntryVersion::V1,
+    ));
+}
+
+#[test]
+fn verify_compact_proof_rejects_wrong_value() {
+    let mut bad_value = COMPACT_PROOF_VALUE.to_vec();
+    bad_value[0] ^= 0x01;
+    assert!(!super::verify_compact_trie_proof(
+        COMPACT_PROOF,
+        &COMPACT_PROOF_ROOT,
+        COMPACT_PROOF_KEY,
+        &bad_value,
+        trie::TrieEntryVersion::V1,
+    ));
+}
+
+#[test]
+fn verify_compact_proof_rejects_wrong_key() {
+    let bad_key = &[0x01u8][..];
+    assert!(!super::verify_compact_trie_proof(
+        COMPACT_PROOF,
+        &COMPACT_PROOF_ROOT,
+        bad_key,
+        COMPACT_PROOF_VALUE,
+        trie::TrieEntryVersion::V1,
+    ));
+}
+
+#[test]
+fn verify_compact_proof_rejects_wrong_state_version() {
+    // Same inputs but V0: the leaf's value is >= 32 bytes so V1 hashes it but V0 would
+    // store it inline; reconstructing as Unhashed under V0 won't produce the original root.
+    assert!(!super::verify_compact_trie_proof(
+        COMPACT_PROOF,
+        &COMPACT_PROOF_ROOT,
+        COMPACT_PROOF_KEY,
+        COMPACT_PROOF_VALUE,
+        trie::TrieEntryVersion::V0,
+    ));
+}
+
+#[test]
+fn verify_compact_proof_rejects_tampered_proof_byte() {
+    let mut bad_proof = COMPACT_PROOF.to_vec();
+    // Flip a byte inside the first proof entry (the root branch). Any change should
+    // either make decoding fail or change the reconstructed root hash.
+    bad_proof[10] ^= 0x01;
+    assert!(!super::verify_compact_trie_proof(
+        &bad_proof,
+        &COMPACT_PROOF_ROOT,
+        COMPACT_PROOF_KEY,
+        COMPACT_PROOF_VALUE,
+        trie::TrieEntryVersion::V1,
+    ));
+}
+
+#[test]
+fn verify_compact_proof_rejects_present_leaf_value() {
+    let mut proof = COMPACT_PROOF.to_vec();
+
+    // COMPACT_PROOF is a SCALE-encoded Vec<Vec<u8>> with two trie-node entries.
+    // At byte 74, the second entry starts with its SCALE compact length prefix:
+    //
+    //   0x08 0x40 0x00
+    //
+    //   0x08       = SCALE compact length 2 (2 << 2)
+    //   0x40 0x00 = leaf node with an empty value placeholder
+    //
+    // In a compact proof, that empty value means "the real value was omitted and
+    // must be supplied separately by the host-function argument".
+    let leaf_entry_len_index = 74;
+    assert_eq!(proof[leaf_entry_len_index], 0x08);
+    assert_eq!(&proof[leaf_entry_len_index + 1..], &[0x40, 0x00]);
+
+    // Change the second entry to:
+    //
+    //   0x0c 0x40 0x04 0xab
+    //
+    //   0x0c             = SCALE compact length 3 (3 << 2)
+    //   0x40             = same leaf node header
+    //   0x04             = SCALE compact value length 1 (1 << 2)
+    //   0xab             = the one-byte value now present in the proof
+    //
+    // This turns the proof from "leaf exists, value omitted" into
+    // "leaf exists, value is 0xab".
+    // Substrate rejects this as ExtraneousValue, even though the verifier is
+    // given the expected value separately.
+    proof[leaf_entry_len_index] = 0x0c;
+    proof[leaf_entry_len_index + 2] = 0x04;
+    proof.push(0xab);
+
+    assert!(!super::verify_compact_trie_proof(
+        &proof,
+        &COMPACT_PROOF_ROOT,
+        COMPACT_PROOF_KEY,
+        COMPACT_PROOF_VALUE,
+        trie::TrieEntryVersion::V1,
+    ));
+}
+
+#[test]
+fn verify_compact_proof_rejects_truncated_proof() {
+    // Drop the leaf entry — verifier should fail when it tries to descend into
+    // the path placeholder and finds the iterator empty.
+    let truncated = &COMPACT_PROOF[..COMPACT_PROOF.len() - 3];
+    assert!(!super::verify_compact_trie_proof(
+        truncated,
+        &COMPACT_PROOF_ROOT,
+        COMPACT_PROOF_KEY,
+        COMPACT_PROOF_VALUE,
+        trie::TrieEntryVersion::V1,
+    ));
+}
+
+#[test]
+fn verify_compact_proof_rejects_extra_trailing_entry() {
+    // Append a third (empty) proof entry that the verifier never consumes. Without the
+    // post-verification "iterator empty" check, an attacker could pad a valid proof with
+    // unrelated nodes and still pass.
+    let mut padded = COMPACT_PROOF.to_vec();
+    // The Vec length is SCALE-compact-encoded in the first byte: 0x08 == 2 entries; bump to
+    // 0x0c == 3 entries and append one zero-length entry (0x00).
+    assert_eq!(padded[0], 0x08, "expected 2-entry proof prefix");
+    padded[0] = 0x0c;
+    padded.push(0x00);
+    assert!(!super::verify_compact_trie_proof(
+        &padded,
+        &COMPACT_PROOF_ROOT,
+        COMPACT_PROOF_KEY,
+        COMPACT_PROOF_VALUE,
+        trie::TrieEntryVersion::V1,
+    ));
+}
+
+// Regression: an earlier version hashed V1 values at >= 32. `sp_trie`'s threshold is >= 33,
+// so a 32-byte V1 value must stay inline; otherwise the reconstructed leaf and root diverge
+// from what was stored.
+
+#[test]
+fn inject_compact_value_v0_never_hashes() {
+    let value = vec![0xabu8; 64];
+    match super::inject_compact_value(&value, trie::TrieEntryVersion::V0) {
+        super::CompactStorageValueOwned::Unhashed(v) => assert_eq!(v, value),
+        _ => panic!("expected Unhashed for V0"),
+    }
+}
+
+#[test]
+fn inject_compact_value_v1_inlines_31_bytes() {
+    let value = vec![0xaau8; 31];
+    match super::inject_compact_value(&value, trie::TrieEntryVersion::V1) {
+        super::CompactStorageValueOwned::Unhashed(v) => assert_eq!(v, value),
+        _ => panic!("expected Unhashed for V1 / 31 bytes"),
+    }
+}
+
+#[test]
+fn inject_compact_value_v1_inlines_32_bytes() {
+    // Threshold boundary: 32 bytes is still inline under sp_trie's `>= 33` rule.
+    let value = vec![0xbbu8; 32];
+    match super::inject_compact_value(&value, trie::TrieEntryVersion::V1) {
+        super::CompactStorageValueOwned::Unhashed(v) => assert_eq!(v, value),
+        _ => panic!("expected Unhashed for V1 / 32 bytes"),
+    }
+}
+
+#[test]
+fn inject_compact_value_v1_hashes_33_bytes() {
+    // Threshold crossing: 33 bytes is the first hashed-storage-value size under V1.
+    let value = vec![0xccu8; 33];
+    let expected = blake2_rfc::blake2b::blake2b(32, &[], &value);
+    let expected_arr = <[u8; 32]>::try_from(expected.as_bytes()).unwrap();
+    match super::inject_compact_value(&value, trie::TrieEntryVersion::V1) {
+        super::CompactStorageValueOwned::Hashed(h) => assert_eq!(h, expected_arr),
+        _ => panic!("expected Hashed for V1 / 33 bytes"),
+    }
+}

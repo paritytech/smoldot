@@ -224,8 +224,22 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 max_requests_per_block: config.max_requests_per_block,
                 block_number_bytes: config.block_number_bytes,
                 allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
+                warp_completion_suppressed: false,
             },
         }
+    }
+
+    /// Gates the final `all_forks` rebuild in [`AllSync::process_one`]. Warp's verification,
+    /// build, and [`AllSync::desired_requests`] keep running so callers can probe warp
+    /// readiness; a result completed while suppressed is held until lifted or dropped via
+    /// [`AllSync::discard_pending_warp_completion`].
+    pub fn set_warp_completion_suppressed(&mut self, v: bool) {
+        self.shared.warp_completion_suppressed = v;
+    }
+
+    /// Drops any pending warp-sync completion before un-suppressing avoids a stale rebuild.
+    pub fn discard_pending_warp_completion(&mut self) {
+        self.ready_to_transition = None;
     }
 
     /// Returns the value that was initially passed in [`Config::block_number_bytes`].
@@ -245,39 +259,33 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
     /// Returns the current status of the syncing.
     pub fn status(&'_ self) -> Status<'_, TSrc> {
-        // TODO:
-        Status::Sync
-        /*match &self.inner {
-            AllSyncInner::AllForks(_) => Status::Sync,
-            AllSyncInner::WarpSync { inner, .. } => match inner.status() {
-                warp_sync::Status::Fragments {
-                    source: None,
-                    finalized_block_hash,
-                    finalized_block_number,
-                } => Status::WarpSyncFragments {
-                    source: None,
-                    finalized_block_hash,
-                    finalized_block_number,
-                },
-                warp_sync::Status::Fragments {
-                    source: Some((_, user_data)),
-                    finalized_block_hash,
-                    finalized_block_number,
-                } => Status::WarpSyncFragments {
-                    source: Some((user_data.outer_source_id, &user_data.user_data)),
-                    finalized_block_hash,
-                    finalized_block_number,
-                },
-                warp_sync::Status::ChainInformation {
-                    finalized_block_hash,
-                    finalized_block_number,
-                } => Status::WarpSyncChainInformation {
-                    finalized_block_hash,
-                    finalized_block_number,
-                },
+        let Some(warp_sync) = &self.warp_sync else {
+            return Status::Sync;
+        };
+        match warp_sync.status() {
+            warp_sync::Status::Fragments {
+                source,
+                finalized_block_hash,
+                finalized_block_number,
+            } => Status::WarpSyncFragments {
+                source: source.map(|(_, src)| {
+                    let outer_source_id = src.outer_source_id;
+                    (
+                        outer_source_id,
+                        &self.shared.sources[outer_source_id.0].user_data,
+                    )
+                }),
+                finalized_block_hash,
+                finalized_block_number,
             },
-            AllSyncInner::Poisoned => unreachable!(),
-        }*/
+            warp_sync::Status::ChainInformation {
+                finalized_block_hash,
+                finalized_block_number,
+            } => Status::WarpSyncChainInformation {
+                finalized_block_hash,
+                finalized_block_number,
+            },
+        }
     }
 
     /// Returns the header of the finalized block.
@@ -407,6 +415,28 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         all_forks.non_finalized_blocks_ancestry_order()
     }
 
+    /// Aborts all in-flight warp-sync requests, returning their user data (typically
+    /// `AbortHandle`s for the outer futures). `warp_sync` remains alive and may re-engage
+    /// later. No-op if warp-sync is not in use.
+    pub fn abort_in_flight_warp_requests(&mut self) -> Vec<TRq> {
+        if self.warp_sync.is_none() {
+            return Vec::new();
+        }
+
+        let warp_request_ids: Vec<RequestId> = self
+            .shared
+            .requests
+            .iter()
+            .filter(|(_, rq)| rq.warp_sync.is_some())
+            .map(|(id, _)| RequestId(id))
+            .collect();
+
+        warp_request_ids
+            .into_iter()
+            .map(|id| self.remove_request(id))
+            .collect()
+    }
+
     /// Returns true if it is believed that we are near the head of the chain.
     ///
     /// The way this method is implemented is opaque and cannot be relied on. The return value
@@ -496,8 +526,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         };
 
         let _ = all_forks.remove_source(source_info.all_forks);
-        if let Some(warp_sync) = &mut self.warp_sync {
-            let _ = warp_sync.remove_source(source_info.warp_sync.unwrap());
+        if let (Some(warp_sync), Some(inner_id)) = (&mut self.warp_sync, source_info.warp_sync) {
+            let _ = warp_sync.remove_source(inner_id);
         }
 
         // TODO: optimize
@@ -987,14 +1017,15 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
         }
 
-        if let Some(RuntimeInformation {
-            finalized_runtime: finalized_block_runtime,
-            finalized_body,
-            finalized_storage_code,
-            finalized_storage_heap_pages,
-            finalized_storage_code_merkle_value,
-            finalized_storage_code_closest_ancestor_excluding,
-        }) = self.ready_to_transition.take()
+        if !self.shared.warp_completion_suppressed
+            && let Some(RuntimeInformation {
+                finalized_runtime: finalized_block_runtime,
+                finalized_body,
+                finalized_storage_code,
+                finalized_storage_heap_pages,
+                finalized_storage_code_merkle_value,
+                finalized_storage_code_closest_ancestor_excluding,
+            }) = self.ready_to_transition.take()
         {
             let (Some(all_forks), Some(warp_sync)) =
                 (self.all_forks.as_mut(), self.warp_sync.as_mut())
@@ -2498,6 +2529,8 @@ struct Shared<TRq, TSrc> {
     block_number_bytes: usize,
     /// Value passed through [`Config::allow_unknown_consensus_engines`].
     allow_unknown_consensus_engines: bool,
+    /// See [`AllSync::set_warp_completion_suppressed`].
+    warp_completion_suppressed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2528,5 +2561,181 @@ fn all_forks_request_convert(
         request_bodies: download_body,
         request_headers: true,
         request_justification: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chain::chain_information;
+
+    fn aura_grandpa_genesis() -> chain_information::ValidChainInformation {
+        chain_information::ValidChainInformation::try_from(chain_information::ChainInformation {
+            finalized_block_header: Box::new(header::Header {
+                parent_hash: [0; 32],
+                number: 0,
+                state_root: [0; 32],
+                extrinsics_root: [0; 32],
+                digest: header::Digest::from(header::DigestRef::empty()),
+            }),
+            consensus: chain_information::ChainInformationConsensus::Aura {
+                finalized_authorities_list: Vec::new(),
+                slot_duration: NonZero::new(6000).unwrap(),
+            },
+            finality: chain_information::ChainInformationFinality::Grandpa {
+                after_finalized_block_authorities_set_id: 0,
+                finalized_triggered_authorities: Vec::new(),
+                finalized_scheduled_change: None,
+            },
+        })
+        .unwrap()
+    }
+
+    fn fresh_sync() -> AllSync<(), (), ()> {
+        AllSync::new(Config {
+            chain_information: aura_grandpa_genesis(),
+            block_number_bytes: 4,
+            allow_unknown_consensus_engines: false,
+            sources_capacity: 4,
+            blocks_capacity: 4,
+            max_disjoint_headers: 4,
+            max_requests_per_block: NonZero::new(1).unwrap(),
+            download_ahead_blocks: NonZero::new(1).unwrap(),
+            download_bodies: false,
+            download_all_chain_information_storage_proofs: false,
+            code_trie_node_hint: None,
+        })
+    }
+
+    #[test]
+    fn status_reports_warp_for_fresh_grandpa_chain() {
+        let sync = fresh_sync();
+        assert!(matches!(
+            sync.status(),
+            Status::WarpSyncFragments { source: None, .. }
+        ));
+    }
+
+    #[test]
+    fn abort_in_flight_warp_requests_keeps_warp_alive() {
+        let mut sync = fresh_sync();
+        let aborted = sync.abort_in_flight_warp_requests();
+        assert!(aborted.is_empty());
+        // warp_sync remains alive; status still reflects it.
+        assert!(matches!(
+            sync.status(),
+            Status::WarpSyncFragments { source: None, .. }
+        ));
+    }
+
+    #[test]
+    fn desired_requests_emits_warp_regardless_of_suppression() {
+        let mut sync = fresh_sync();
+        let source_id = match sync.prepare_add_source(100, [1; 32]) {
+            AddSource::UnknownBestBlock(s) => s.add_source_and_insert_block((), ()),
+            _ => unreachable!(),
+        };
+        sync.update_source_finality_state(source_id, 100);
+
+        // Suppression only gates the final rebuild; warp's desired_requests must still
+        // emit so callers can probe whether warp would make progress.
+        sync.set_warp_completion_suppressed(true);
+        assert!(
+            sync.desired_requests()
+                .any(|(_, _, rq)| matches!(rq, DesiredRequest::WarpSync { .. }))
+        );
+    }
+
+    #[test]
+    fn discard_pending_warp_completion_is_noop_when_empty() {
+        let mut sync = fresh_sync();
+        assert!(sync.ready_to_transition.is_none());
+        sync.discard_pending_warp_completion();
+        assert!(sync.ready_to_transition.is_none());
+    }
+
+    #[test]
+    fn warp_sync_alive_after_all_forks_only_commit() {
+        let mut sync = fresh_sync();
+
+        let source_id = match sync.prepare_add_source(100, [1; 32]) {
+            AddSource::UnknownBestBlock(s) => s.add_source_and_insert_block((), ()),
+            _ => unreachable!(),
+        };
+        sync.update_source_finality_state(source_id, 100);
+
+        let sync_start_block_hash = sync
+            .desired_requests()
+            .find_map(|(_, _, rq)| match rq {
+                DesiredRequest::WarpSync {
+                    sync_start_block_hash,
+                } => Some(sync_start_block_hash),
+                _ => None,
+            })
+            .expect("warp request should be desired");
+        let _ = sync.add_request(
+            source_id,
+            RequestDetail::WarpSync {
+                sync_start_block_hash,
+            },
+            (),
+        );
+
+        // Simulate commit_all_forks_only: abort in-flight, drop any pending completion,
+        // then lift suppression.
+        sync.set_warp_completion_suppressed(true);
+        let aborted = sync.abort_in_flight_warp_requests();
+        assert_eq!(aborted.len(), 1);
+        sync.discard_pending_warp_completion();
+        sync.set_warp_completion_suppressed(false);
+
+        // Source still far enough ahead -> warp must be desired again.
+        assert!(
+            sync.desired_requests()
+                .any(|(_, _, rq)| matches!(rq, DesiredRequest::WarpSync { .. }))
+        );
+    }
+
+    #[test]
+    fn status_reports_warp_fragments_during_inflight_download() {
+        let mut sync = fresh_sync();
+
+        let source_id = match sync.prepare_add_source(100, [1; 32]) {
+            AddSource::UnknownBestBlock(s) => s.add_source_and_insert_block((), ()),
+            _ => unreachable!(),
+        };
+        sync.update_source_finality_state(source_id, 100);
+
+        let sync_start_block_hash = sync
+            .desired_requests()
+            .find_map(|(_, _, rq)| match rq {
+                DesiredRequest::WarpSync {
+                    sync_start_block_hash,
+                } => Some(sync_start_block_hash),
+                _ => None,
+            })
+            .expect("warp request should be desired");
+
+        let _ = sync.add_request(
+            source_id,
+            RequestDetail::WarpSync {
+                sync_start_block_hash,
+            },
+            (),
+        );
+
+        // No further WarpSync desired while one is in flight
+        assert!(
+            !sync
+                .desired_requests()
+                .any(|(_, _, rq)| matches!(rq, DesiredRequest::WarpSync { .. }))
+        );
+        assert!(matches!(
+            sync.status(),
+            Status::WarpSyncFragments {
+                source: Some(_),
+                ..
+            }
+        ));
     }
 }

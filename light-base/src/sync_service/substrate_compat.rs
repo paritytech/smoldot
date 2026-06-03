@@ -24,12 +24,14 @@ use crate::{log, network_service, platform::PlatformRef, util};
 use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
+    collections::VecDeque,
     format,
     string::String,
     sync::Arc,
     vec::Vec,
 };
 use core::{cmp, iter, num::NonZero, pin::Pin, time::Duration};
+use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{FutureExt as _, StreamExt as _, future, stream};
 use hashbrown::HashMap;
@@ -40,6 +42,17 @@ use smoldot::{
     network::{self, codec},
     sync::all,
 };
+
+/// Maximum wait for the first GrandpaNeighborPacket before falling back to AllForksOnly.
+/// Sized for cold-start peer discovery (DNS + libp2p handshake + gossip-open), which can
+/// stretch to ~20s on light clients.
+// TODO follow-up: integration test that fires this timeout.
+// https://github.com/paritytech/smoldot/pull/3268#discussion_r3311751768
+const MODE_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Below warp sync minimum gap packets to observe before committing AllForksOnly. Avoids one lagging
+/// first peer locking us into the slow path when our local finalized is a stale checkpoint.
+const MODE_DECISION_MIN_PACKETS: usize = 2;
 
 /// Starts a sync service background task to synchronize a chain (relay chain or not) that is
 /// built with Substrate.
@@ -103,6 +116,14 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             platform.sleep(Duration::from_secs(10)),
         ))
         .fuse(),
+        mode: ModeState::Deciding,
+        bootstrap_complete: false,
+        deciding_packets_seen: 0,
+        mode_decision_deadline: future::Either::Left(Box::pin(
+            platform.sleep(MODE_DECISION_TIMEOUT),
+        ))
+        .fuse(),
+        pending_subscriptions: VecDeque::new(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         log_target,
         from_network_service: None,
@@ -117,6 +138,12 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         ),
         platform,
     };
+
+    // Suppress warp completion during Deciding; lifted once the chosen mode drains.
+    task.sync
+        .as_mut()
+        .unwrap_or_else(|| unreachable!())
+        .set_warp_completion_suppressed(true);
 
     // Main loop of the syncing logic.
     //
@@ -143,6 +170,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             ObsoleteRequest(all::RequestId),
             RequestFinished(all::RequestId, Result<RequestOutcome, future::Aborted>),
             WarpSyncTakingLongTimeWarning,
+            ModeDecisionDeadline,
         }
 
         let wake_up_reason = {
@@ -192,6 +220,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     future::Either::Left(Box::pin(task.platform.sleep(Duration::from_secs(10))))
                         .fuse();
                 WakeUpReason::WarpSyncTakingLongTimeWarning
+            })
+            .or(async {
+                (&mut task.mode_decision_deadline).await;
+                WakeUpReason::ModeDecisionDeadline
             })
             .or({
                 let sync = &mut task.sync;
@@ -354,6 +386,28 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 // Since there is a gap in the blocks, all active notifications to all blocks
                 // must be cleared.
                 task.all_notifications.clear();
+
+                if matches!(
+                    task.mode,
+                    ModeState::AwaitingWarp { .. } | ModeState::Deciding
+                ) {
+                    task.mode = ModeState::Ready;
+                    task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();
+                    log!(
+                        &task.platform,
+                        Debug,
+                        &task.log_target,
+                        "mode-decision; transition=Ready (WarpSyncFinished)",
+                    );
+                    drain_pending_subscriptions(&mut task);
+                    task.bootstrap_complete = true;
+                    // Post-bootstrap re-warp is allowed; the `Stop` flows through
+                    // `all_notifications.clear()` above.
+                    task.sync
+                        .as_mut()
+                        .unwrap_or_else(|| unreachable!())
+                        .set_warp_completion_suppressed(false);
+                }
             }
 
             WakeUpReason::SyncProcess(all::ProcessOne::VerifyWarpSyncFragment(verify)) => {
@@ -406,14 +460,22 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                                 }
                             )
                         );
+                        // `BlockNumberNotIncrementing` means a finality proof overtook the
+                        // fragment mid-flight; the peer isn't at fault.
+                        // TODO: malicious peers could abuse this to avoid bans.
+                        // https://github.com/paritytech/smoldot/pull/3268#discussion_r3319607065
+                        let peer_at_fault =
+                            !matches!(err, all::VerifyFragmentError::BlockNumberNotIncrementing);
                         if let Some(sender_if_still_connected) = sender_if_still_connected {
-                            task.network_service
-                                .ban_and_disconnect(
-                                    sender_if_still_connected,
-                                    network_service::BanSeverity::High,
-                                    "bad-warp-sync-fragment",
-                                )
-                                .await;
+                            if peer_at_fault {
+                                task.network_service
+                                    .ban_and_disconnect(
+                                        sender_if_still_connected,
+                                        network_service::BanSeverity::High,
+                                        "bad-warp-sync-fragment",
+                                    )
+                                    .await;
+                            }
                         }
                     }
                 }
@@ -552,7 +614,24 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             pruned_blocks,
                         });
 
+                        let new_finalized = sync.finalized_block_number();
                         task.sync = Some(sync);
+
+                        // Finality reached the warp target; otherwise the next fragment fails
+                        // `BlockNumberNotIncrementing` and the node stalls in `AwaitingWarp`.
+                        if let ModeState::AwaitingWarp { target_finalized } = task.mode {
+                            if new_finalized >= target_finalized {
+                                log!(
+                                    &task.platform,
+                                    Debug,
+                                    &task.log_target,
+                                    "mode-decision; transition=Ready (CaughtUpViaFinality)",
+                                    local_finalized = new_finalized,
+                                    warp_target = target_finalized,
+                                );
+                                commit_all_forks_only(&mut task);
+                            }
+                        }
                     }
 
                     (
@@ -578,9 +657,18 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         // Errors of type `JustificationEngineMismatch` indicate that the chain
                         // uses a finality engine that smoldot doesn't recognize. This is a benign
                         // error that shouldn't lead to a ban.
+                        //
+                        // Errors of type `UnknownTargetBlock` are expected during the catch-up
+                        // window that follows a warp sync: the non-finalized tree only contains
+                        // the warp-sync target block, so peers may send justifications for
+                        // higher blocks that the local node hasn't downloaded yet.
+                        // Banning these peers would slow down the catch-up.
                         if !matches!(
                             error,
-                            all::JustificationVerifyError::JustificationEngineMismatch
+                            all::JustificationVerifyError::JustificationEngineMismatch |
+                            all::JustificationVerifyError::FinalityVerify(
+                                smoldot::chain::blocks_tree::FinalityVerifyError::UnknownTargetBlock { .. }
+                            )
                         ) {
                             log!(
                                 &task.platform,
@@ -775,6 +863,74 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .as_mut()
                     .unwrap_or_else(|| unreachable!())
                     .update_source_finality_state(sync_source_id, finalized_block_height);
+
+                let outcome = neighbor_packet_outcome(
+                    &task.mode,
+                    task.sync.as_ref().unwrap_or_else(|| unreachable!()),
+                    task.deciding_packets_seen,
+                );
+                if !matches!(outcome, NeighborPacketOutcome::Ignore) {
+                    let local_finalized = task
+                        .sync
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!())
+                        .finalized_block_number();
+                    let gap = finalized_block_height.saturating_sub(local_finalized);
+                    match outcome {
+                        NeighborPacketOutcome::Ignore => unreachable!(),
+                        NeighborPacketOutcome::CommitWarpAhead => {
+                            task.mode = ModeState::AwaitingWarp {
+                                target_finalized: finalized_block_height,
+                            };
+                            // Keep the deadline armed as a warp-stall fallback.
+                            task.mode_decision_deadline = future::Either::Left(Box::pin(
+                                task.platform.sleep(MODE_DECISION_TIMEOUT),
+                            ))
+                            .fuse();
+                            // Allow warp completion to rebuild all_forks.
+                            task.sync
+                                .as_mut()
+                                .unwrap_or_else(|| unreachable!())
+                                .set_warp_completion_suppressed(false);
+                            log!(
+                                &task.platform,
+                                Debug,
+                                &task.log_target,
+                                "mode-decision; committed=WarpAhead",
+                                local_finalized,
+                                peer_finalized = finalized_block_height,
+                                gap,
+                            );
+                        }
+                        NeighborPacketOutcome::CommitAllForksOnly => {
+                            task.deciding_packets_seen += 1;
+                            log!(
+                                &task.platform,
+                                Debug,
+                                &task.log_target,
+                                "mode-decision; committed=AllForksOnly",
+                                local_finalized,
+                                peer_finalized = finalized_block_height,
+                                gap,
+                                packets_seen = task.deciding_packets_seen,
+                            );
+                            commit_all_forks_only(&mut task);
+                        }
+                        NeighborPacketOutcome::StayDeciding => {
+                            task.deciding_packets_seen += 1;
+                            log!(
+                                &task.platform,
+                                Debug,
+                                &task.log_target,
+                                "mode-decision; deciding (no warp-eligible peer yet)",
+                                local_finalized,
+                                peer_finalized = finalized_block_height,
+                                gap,
+                                packets_seen = task.deciding_packets_seen,
+                            );
+                        }
+                    }
+                }
             }
 
             WakeUpReason::NetworkEvent(network_service::Event::GrandpaCommitMessage {
@@ -902,40 +1058,18 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 buffer_size,
                 runtime_interest,
             }) => {
-                // Frontend would like to subscribe to events.
-
-                let Some(sync) = &task.sync else {
-                    unreachable!()
-                };
-
-                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
-                task.all_notifications.push(tx);
-
-                let non_finalized_blocks_ancestry_order = {
-                    sync.non_finalized_blocks_ancestry_order()
-                        .map(|h| {
-                            let scale_encoding = h.scale_encoding_vec(sync.block_number_bytes());
-                            BlockNotification {
-                                is_new_best: header::hash_from_scale_encoded_header(
-                                    &scale_encoding,
-                                ) == *sync.best_block_hash(),
-                                scale_encoded_header: scale_encoding,
-                                parent_hash: *h.parent_hash,
-                            }
-                        })
-                        .collect()
-                };
-
-                let _ = send_back.send(SubscribeAll {
-                    finalized_block_scale_encoded_header: sync.finalized_block_header().to_owned(),
-                    finalized_block_runtime: if runtime_interest {
-                        task.known_finalized_runtime.take()
-                    } else {
-                        None
-                    },
-                    non_finalized_blocks_ancestry_order,
-                    new_blocks,
-                });
+                // While the mode-decision is pending, the sync's finalized block is the
+                // chain-spec checkpoint and may not be authoritative (warp-sync may
+                // overwrite it). Queue subscribers until the mode is committed.
+                if matches!(task.mode, ModeState::Ready) {
+                    respond_subscribe_all(&mut task, send_back, buffer_size, runtime_interest);
+                } else {
+                    task.pending_subscriptions.push_back(PendingSubscribeAll {
+                        send_back,
+                        buffer_size,
+                        runtime_interest,
+                    });
+                }
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::PeersAssumedKnowBlock {
@@ -1400,8 +1534,80 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     }
                 };
             }
+
+            WakeUpReason::ModeDecisionDeadline => match task.mode {
+                ModeState::Deciding => {
+                    task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();
+                    log!(
+                        &task.platform,
+                        Debug,
+                        &task.log_target,
+                        "mode-decision; committed=AllForksOnly (timeout)",
+                        packets_seen = task.deciding_packets_seen,
+                    );
+                    commit_all_forks_only(&mut task);
+                }
+                ModeState::AwaitingWarp { .. } => {
+                    // TODO: warp never reaching `is_finished=true` keeps subscribe_all queued.
+                    // https://github.com/paritytech/smoldot/pull/3268#discussion_r3319656011
+                    if warp_sync_can_proceed(task.sync.as_ref().unwrap_or_else(|| unreachable!())) {
+                        task.mode_decision_deadline = future::Either::Left(Box::pin(
+                            task.platform.sleep(MODE_DECISION_TIMEOUT),
+                        ))
+                        .fuse();
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "mode-decision; awaiting-warp deadline re-armed",
+                        );
+                    } else {
+                        // Warp starved: drop back to Deciding so a future warp-eligible peer
+                        // can re-trigger CommitWarpAhead instead of locking in AllForksOnly.
+                        // Re-suppress: no mode chosen yet, no subscribers drained.
+                        task.sync
+                            .as_mut()
+                            .unwrap_or_else(|| unreachable!())
+                            .set_warp_completion_suppressed(true);
+                        task.mode = ModeState::Deciding;
+                        task.deciding_packets_seen = 0;
+                        task.mode_decision_deadline = future::Either::Left(Box::pin(
+                            task.platform.sleep(MODE_DECISION_TIMEOUT),
+                        ))
+                        .fuse();
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "mode-decision; warp starved, back to Deciding",
+                        );
+                    }
+                }
+                ModeState::Ready => {
+                    task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();
+                }
+            },
         }
     }
+}
+
+/// Bootstrap mode decision.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum ModeState {
+    /// No GrandpaNeighborPacket received yet and the deadline has not fired.
+    /// `SubscribeAll` requests are queued.
+    Deciding,
+    /// Committed to WarpAhead; awaiting `WarpSyncFinished` or finality catching up to
+    /// `target_finalized` (the peer-claimed height that triggered the decision).
+    AwaitingWarp { target_finalized: u64 },
+    /// First finalized block is authoritative; queued subscribers are drained.
+    Ready,
+}
+
+struct PendingSubscribeAll {
+    send_back: oneshot::Sender<SubscribeAll>,
+    buffer_size: usize,
+    runtime_interest: bool,
 }
 
 struct Task<TPlat: PlatformRef> {
@@ -1419,6 +1625,24 @@ struct Task<TPlat: PlatformRef> {
     ///
     /// Always `Some`, except for temporary extraction.
     sync: Option<all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>>,
+
+    mode: ModeState,
+
+    /// `false` until the chosen bootstrap mode has delivered its first `initialized` event to
+    /// subscribers. While `false`, warp completion is suppressed at the [`all::AllSync`] layer
+    /// so a stray `WarpSyncFinished` cannot rebuild `all_forks` and `Stop` queued subscribers.
+    /// Once `true`, warp may re-engage and any later completion is allowed to fire a `Stop`.
+    bootstrap_complete: bool,
+
+    /// Below-gap packets observed while [`ModeState::Deciding`]; gates AllForksOnly commit.
+    deciding_packets_seen: usize,
+
+    /// Replaced with `pending` on mode commit so it never fires again.
+    mode_decision_deadline:
+        future::Fuse<future::Either<Pin<Box<TPlat::Delay>>, future::Pending<()>>>,
+
+    /// `SubscribeAll` requests queued during [`ModeState::Deciding`] / `AwaitingWarp`.
+    pending_subscriptions: VecDeque<PendingSubscribeAll>,
 
     /// If `Some`, contains the runtime of the current finalized block.
     known_finalized_runtime: Option<FinalizedBlockRuntime>,
@@ -1478,5 +1702,332 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
             self.all_notifications.push(subscription);
         }
+    }
+}
+
+fn respond_subscribe_all<TPlat: PlatformRef>(
+    task: &mut Task<TPlat>,
+    send_back: oneshot::Sender<SubscribeAll>,
+    buffer_size: usize,
+    runtime_interest: bool,
+) {
+    let Some(sync) = &task.sync else {
+        unreachable!()
+    };
+
+    let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
+    task.all_notifications.push(tx);
+
+    let non_finalized_blocks_ancestry_order = sync
+        .non_finalized_blocks_ancestry_order()
+        .map(|h| {
+            let scale_encoding = h.scale_encoding_vec(sync.block_number_bytes());
+            BlockNotification {
+                is_new_best: header::hash_from_scale_encoded_header(&scale_encoding)
+                    == *sync.best_block_hash(),
+                scale_encoded_header: scale_encoding,
+                parent_hash: *h.parent_hash,
+            }
+        })
+        .collect();
+
+    let _ = send_back.send(SubscribeAll {
+        finalized_block_scale_encoded_header: sync.finalized_block_header().to_owned(),
+        finalized_block_runtime: if runtime_interest {
+            task.known_finalized_runtime.take()
+        } else {
+            None
+        },
+        non_finalized_blocks_ancestry_order,
+        new_blocks,
+    });
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NeighborPacketOutcome {
+    Ignore,
+    CommitWarpAhead,
+    CommitAllForksOnly,
+    StayDeciding,
+}
+
+/// `packets_seen` excludes the current packet. Caller must have already fed the new
+/// packet's finalized height into `sync`.
+fn neighbor_packet_outcome(
+    mode: &ModeState,
+    sync: &all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>,
+    packets_seen: usize,
+) -> NeighborPacketOutcome {
+    if !matches!(mode, ModeState::Deciding) {
+        return NeighborPacketOutcome::Ignore;
+    }
+    if warp_sync_can_proceed(sync) {
+        return NeighborPacketOutcome::CommitWarpAhead;
+    }
+    if packets_seen + 1 >= MODE_DECISION_MIN_PACKETS {
+        NeighborPacketOutcome::CommitAllForksOnly
+    } else {
+        NeighborPacketOutcome::StayDeciding
+    }
+}
+
+/// Warp is downloading/building, or a qualifying source is available for the next request.
+fn warp_sync_can_proceed(
+    sync: &all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>,
+) -> bool {
+    match sync.status() {
+        all::Status::WarpSyncFragments {
+            source: Some(_), ..
+        }
+        | all::Status::WarpSyncChainInformation { .. } => true,
+        // At the mode-decision point no warp request is dispatched yet, so this arm decides.
+        // The caller already fed the source's finalized height (update_source_finality_state),
+        // so desired_requests() is expected to already include a warp request when the gap > 32.
+        _ => sync
+            .desired_requests()
+            .any(|(_, _, rq)| matches!(rq, all::DesiredRequest::WarpSync { .. })),
+    }
+}
+
+/// Responds to every queued `SubscribeAll` request. Each response allocates a fresh
+/// notification channel and pushes its sender into `task.all_notifications`.
+fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
+    while let Some(pending) = task.pending_subscriptions.pop_front() {
+        respond_subscribe_all(
+            task,
+            pending.send_back,
+            pending.buffer_size,
+            pending.runtime_interest,
+        );
+    }
+}
+
+/// Commits to AllForksOnly mode: aborts any in-flight warp request, flips network-state
+/// flags to trigger the first GrandPa announce (without it peers won't gossip commits to
+/// us), drains queued subscribers, and lifts warp-completion suppression so warp may
+/// re-engage if the node ever falls back behind by `warp_sync_minimum_gap`.
+fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
+    task.mode = ModeState::Ready;
+    task.mode_decision_deadline = future::Either::Right(future::pending()).fuse();
+
+    let sync = task.sync.as_mut().unwrap_or_else(|| unreachable!());
+    let aborted = sync.abort_in_flight_warp_requests();
+    // Drop any warp result completed while suppressed; else unsuppressing below would
+    // immediately rebuild all_forks from stale chain_info.
+    sync.discard_pending_warp_completion();
+    let n = aborted.len();
+    for handle in aborted {
+        handle.abort();
+    }
+    if n > 0 {
+        log!(
+            &task.platform,
+            Debug,
+            &task.log_target,
+            "warp-sync-aborted",
+            in_flight_aborted = n,
+        );
+    }
+
+    task.network_up_to_date_finalized = false;
+    task.network_up_to_date_best = false;
+
+    drain_pending_subscriptions(task);
+    task.bootstrap_complete = true;
+    task.sync
+        .as_mut()
+        .unwrap_or_else(|| unreachable!())
+        .set_warp_completion_suppressed(false);
+}
+
+#[cfg(test)]
+mod tests {
+    // TODO follow-up:
+    // - move fixtures to a shared `smoldot-test-support` crate
+    //   cross-crate `cfg(test)` doesn't propagate,
+    // - add a `Status::WarpSyncChainInformation` case
+    //   (see https://github.com/paritytech/smoldot/pull/3268#discussion_r3311390876)
+    //   needs a test-only AllSync setter or crypto-correct warp fragments
+    use super::*;
+    use smoldot::{
+        chain::chain_information,
+        libp2p::peer_id::{PeerId, PublicKey},
+        sync::all::{AddSource, AllSync, Config, DesiredRequest, RequestDetail, SourceId, Status},
+    };
+
+    type TestSync = AllSync<future::AbortHandle, (PeerId, codec::Role), ()>;
+
+    fn aura_grandpa_genesis() -> chain_information::ValidChainInformation {
+        chain_information::ValidChainInformation::try_from(chain_information::ChainInformation {
+            finalized_block_header: Box::new(header::Header {
+                parent_hash: [0; 32],
+                number: 0,
+                state_root: [0; 32],
+                extrinsics_root: [0; 32],
+                digest: header::Digest::from(header::DigestRef::empty()),
+            }),
+            consensus: chain_information::ChainInformationConsensus::Aura {
+                finalized_authorities_list: Vec::new(),
+                slot_duration: NonZero::new(6000).unwrap(),
+            },
+            finality: chain_information::ChainInformationFinality::Grandpa {
+                after_finalized_block_authorities_set_id: 0,
+                finalized_triggered_authorities: Vec::new(),
+                finalized_scheduled_change: None,
+            },
+        })
+        .unwrap()
+    }
+
+    fn fresh_sync() -> TestSync {
+        AllSync::new(Config {
+            chain_information: aura_grandpa_genesis(),
+            block_number_bytes: 4,
+            allow_unknown_consensus_engines: false,
+            sources_capacity: 4,
+            blocks_capacity: 4,
+            max_disjoint_headers: 4,
+            max_requests_per_block: NonZero::new(1).unwrap(),
+            download_ahead_blocks: NonZero::new(1).unwrap(),
+            download_bodies: false,
+            download_all_chain_information_storage_proofs: false,
+            code_trie_node_hint: None,
+        })
+    }
+
+    fn test_peer() -> PeerId {
+        PeerId::from_public_key(&PublicKey::Ed25519([42u8; 32]))
+    }
+
+    fn add_peer(sync: &mut TestSync, finalized: u64) -> SourceId {
+        let source_id = match sync.prepare_add_source(finalized, [1; 32]) {
+            AddSource::UnknownBestBlock(s) => {
+                s.add_source_and_insert_block((test_peer(), codec::Role::Full), ())
+            }
+            _ => unreachable!(),
+        };
+        sync.update_source_finality_state(source_id, finalized);
+        source_id
+    }
+
+    fn dispatch_warp(sync: &mut TestSync, source_id: SourceId) {
+        let sync_start_block_hash = sync
+            .desired_requests()
+            .find_map(|(_, _, rq)| match rq {
+                DesiredRequest::WarpSync {
+                    sync_start_block_hash,
+                } => Some(sync_start_block_hash),
+                _ => None,
+            })
+            .expect("warp request should be desired");
+        let (handle, _reg) = future::AbortHandle::new_pair();
+        let _ = sync.add_request(
+            source_id,
+            RequestDetail::WarpSync {
+                sync_start_block_hash,
+            },
+            handle,
+        );
+    }
+
+    // Status::WarpSyncFragments { source: Some(_), .. } arm.
+    #[test]
+    fn proceeds_with_inflight_fragment_download() {
+        let mut sync = fresh_sync();
+        let src = add_peer(&mut sync, 100);
+        dispatch_warp(&mut sync, src);
+        assert!(
+            !sync
+                .desired_requests()
+                .any(|(_, _, rq)| matches!(rq, DesiredRequest::WarpSync { .. }))
+        );
+        assert!(matches!(
+            sync.status(),
+            Status::WarpSyncFragments {
+                source: Some(_),
+                ..
+            }
+        ));
+        assert!(warp_sync_can_proceed(&sync));
+    }
+
+    // Fall-through arm with a desired WarpSync request.
+    #[test]
+    fn proceeds_with_eligible_source_before_dispatch() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 100);
+        assert!(warp_sync_can_proceed(&sync));
+    }
+
+    // Fall-through arm, no eligible source: genuine stall.
+    #[test]
+    fn cannot_proceed_with_source_below_gap() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 10);
+        assert!(!warp_sync_can_proceed(&sync));
+    }
+
+    // abort_in_flight_warp_requests keeps warp alive; progress is still possible.
+    #[test]
+    fn proceeds_after_abort_in_flight() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 100);
+        let _ = sync.abort_in_flight_warp_requests();
+        assert!(warp_sync_can_proceed(&sync));
+    }
+
+    #[test]
+    fn neighbor_packet_ignored_outside_deciding() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 100);
+        assert_eq!(
+            neighbor_packet_outcome(&ModeState::Ready, &sync, 0),
+            NeighborPacketOutcome::Ignore,
+        );
+        assert_eq!(
+            neighbor_packet_outcome(
+                &ModeState::AwaitingWarp {
+                    target_finalized: 100
+                },
+                &sync,
+                0,
+            ),
+            NeighborPacketOutcome::Ignore,
+        );
+    }
+
+    #[test]
+    fn neighbor_packet_commits_warp_with_eligible_peer() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 100);
+        assert_eq!(
+            neighbor_packet_outcome(&ModeState::Deciding, &sync, 0),
+            NeighborPacketOutcome::CommitWarpAhead,
+        );
+        // Eligible peer wins even with packets already buffered.
+        assert_eq!(
+            neighbor_packet_outcome(&ModeState::Deciding, &sync, 5),
+            NeighborPacketOutcome::CommitWarpAhead,
+        );
+    }
+
+    #[test]
+    fn neighbor_packet_stays_deciding_below_min() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 10);
+        assert_eq!(
+            neighbor_packet_outcome(&ModeState::Deciding, &sync, 0),
+            NeighborPacketOutcome::StayDeciding,
+        );
+    }
+
+    #[test]
+    fn neighbor_packet_commits_all_forks_at_min_packets() {
+        let mut sync = fresh_sync();
+        let _ = add_peer(&mut sync, 10);
+        assert_eq!(
+            neighbor_packet_outcome(&ModeState::Deciding, &sync, MODE_DECISION_MIN_PACKETS - 1,),
+            NeighborPacketOutcome::CommitAllForksOnly,
+        );
     }
 }
