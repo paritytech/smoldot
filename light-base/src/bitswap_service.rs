@@ -947,7 +947,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // total events ever pushed for this batch is bounded by entries.len(); the
                 // receiver is also held by BitswapStreamHandle so the channel cannot be Closed.
                 for (cid_str, err) in invalid_slots {
-                    batch.pending_count -= 1;
+                    batch.pending_count = batch.pending_count.saturating_sub(1);
                     batch
                         .events_tx
                         .try_send((cid_str, BlockResult::Err(err)))
