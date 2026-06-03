@@ -18,7 +18,9 @@
 use crate::network_service::{self, BroadcastStatementResult};
 use alloc::{string::String, vec::Vec};
 use core::num::NonZero;
-use smoldot::json_rpc::methods::{InternalError, InvalidReason, StatementSubmitResult, TopicFilter};
+use smoldot::json_rpc::methods::{
+    InternalError, InvalidReason, StatementSubmitResult, TopicFilter,
+};
 use smoldot::network::codec;
 
 /// Validates a SCALE-encoded statement and broadcasts it to the network.
