@@ -15,17 +15,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Resolves the artifact set consumed by `smoke_cold` / `smoke_warm`, from
-//! three places:
-//!   - DB tarballs            → the GCS bundle (`relay_db`, `para_db`)
-//!   - full specs             → `chain-specs/smoke-*-spec.json` (`relay_spec`, …)
-//!   - lightSyncState + dumps → bundle manifest `user_data` (`*_light_sync_state`, …)
+//! Resolves the artifact set consumed by `smoke_cold` / `smoke_warm` from the
+//! single GCS bundle. `BundleBuilder` packs only the two DB tarballs as real
+//! files (`relay_db`, `para_db`); everything else (full specs, lightSyncState
+//! specs, smoldot-db dumps) is JSON carried in the manifest `user_data` and
+//! materialized to disk on first use.
 //!
 //! The bundle (`{GCS_BASE}/{ARTIFACTS_VERSION}/bundle.tar.gz`) is downloaded to
 //! `~/.cache/smoldot-e2e/{ARTIFACTS_VERSION}/`, SHA256-verified, and extracted on
 //! first use; an `.extracted-sha` marker triggers re-download on mismatch.
-//! `ARTIFACTS_DIR_OVERRIDE` points the bundle resolvers at a generator output dir
-//! (no download); full specs still come from `chain-specs/`.
+//! `ARTIFACTS_DIR_OVERRIDE` points the resolvers at a generator output dir
+//! (no download), where the loose files already exist.
 //!
 //! See `e2e-tests/docs/smoke-scenarios.md` for the layout and regeneration.
 
@@ -55,11 +55,11 @@ pub fn para_db() -> Result<PathBuf, anyhow::Error> {
 }
 
 pub fn relay_spec() -> Result<PathBuf, anyhow::Error> {
-    repo_spec("smoke-relay-spec.json")
+    materialize("relay-spec.json", "relay_full_spec")
 }
 
 pub fn para_spec() -> Result<PathBuf, anyhow::Error> {
-    repo_spec("smoke-para-spec.json")
+    materialize("para-spec.json", "para_full_spec")
 }
 
 pub fn relay_spec_light_sync_state() -> Result<PathBuf, anyhow::Error> {
@@ -90,20 +90,6 @@ fn resolve(rel: &str) -> Result<PathBuf, anyhow::Error> {
     if !p.is_file() {
         return Err(anyhow!(
             "expected {} in artifact bundle, missing",
-            p.display()
-        ));
-    }
-    Ok(p)
-}
-
-fn repo_spec(name: &str) -> Result<PathBuf, anyhow::Error> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("chain-specs")
-        .join(name);
-    if !p.is_file() {
-        return Err(anyhow!(
-            "committed full spec {} missing; regenerate via smoke_generate_snapshots and \
-             commit the emitted copy",
             p.display()
         ));
     }

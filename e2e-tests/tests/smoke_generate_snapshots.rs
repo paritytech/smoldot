@@ -170,7 +170,7 @@ async fn smoke_generate_snapshots() -> Result<(), anyhow::Error> {
         .user_data(build_user_data(&args.out)?)
         .build(args.out.join("bundle.tar.gz"))?;
 
-    print_manifest(&args.out, &bundle)?;
+    print_manifest(&bundle);
     log::info!("done");
     Ok(())
 }
@@ -208,8 +208,8 @@ async fn drain_parachain_pipeline(network: &Network<LocalFileSystem>) -> Result<
     Ok(())
 }
 
-/// Embeds the JSON artifacts not packed as bundle archives (lightSyncState
-/// specs + smoldot-db dumps) into the manifest `user_data`, keyed for
+/// Embeds every non-tarball artifact (full specs, lightSyncState specs,
+/// smoldot-db dumps — all JSON) into the manifest `user_data`, keyed for
 /// `snapshot::materialize`.
 fn build_user_data(out: &Path) -> Result<serde_json::Value, anyhow::Error> {
     let read_json = |rel: &str| -> Result<Value, anyhow::Error> {
@@ -219,6 +219,8 @@ fn build_user_data(out: &Path) -> Result<serde_json::Value, anyhow::Error> {
     };
     Ok(serde_json::json!({
         "artifacts_version": smoldot_e2e_tests::snapshot::ARTIFACTS_VERSION,
+        "relay_full_spec": read_json("relay-spec.json")?,
+        "para_full_spec": read_json("para-spec.json")?,
         "relay_spec_light_sync_state": read_json("relay-spec-lightSyncState.json")?,
         "para_spec_light_sync_state": read_json("para-spec-lightSyncState.json")?,
         "smoldot_db_relay": read_json("smoldot-db/relay.json")?,
@@ -391,10 +393,9 @@ async fn dump_smoldot_db(
     Ok(())
 }
 
-/// Prints the bundle sha256/size (from the `BundleBuilder` result), the
-/// `snapshot.rs` constant lines to pin, and the commands to commit the full
-/// specs into `chain-specs/`.
-fn print_manifest(out: &Path, bundle: &Bundle) -> Result<(), anyhow::Error> {
+/// Prints the bundle sha256/size and the `snapshot.rs` constant lines to pin.
+/// The bundle is fully self-contained — nothing else to commit.
+fn print_manifest(bundle: &Bundle) {
     println!("\n=== artifact manifest ===");
     println!(
         "  {}  {:>10} bytes  {}",
@@ -405,16 +406,6 @@ fn print_manifest(out: &Path, bundle: &Bundle) -> Result<(), anyhow::Error> {
     println!("\n=== snapshot.rs constants ===");
     println!("pub const ARTIFACTS_VERSION: &str = \"v1\";");
     println!("const BUNDLE_SHA256: &str = \"{}\";", bundle.sha256);
-    println!("\n=== commit the full specs ===");
-    println!(
-        "cp {} e2e-tests/chain-specs/smoke-relay-spec.json",
-        out.join("relay-spec.json").display()
-    );
-    println!(
-        "cp {} e2e-tests/chain-specs/smoke-para-spec.json",
-        out.join("para-spec.json").display()
-    );
-    Ok(())
 }
 
 async fn wait_for_finalized(node: &NetworkNode, height: u32) -> Result<(), anyhow::Error> {
