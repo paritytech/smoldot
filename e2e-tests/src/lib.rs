@@ -23,8 +23,10 @@ pub mod snapshot;
 pub mod statement;
 
 pub use network::{
-    run_chainhead_v1_follow_js, run_smoke_js, spawn_scenario, spawned_chain_spec_paths,
-    LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC, FINALIZED_METRIC, PARA_ID,
+    elastic_scaling_genesis_overrides, run_chainhead_v1_follow_js, run_smoke_js, spawn_scenario,
+    spawned_chain_spec_paths, LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC,
+    ELASTIC_MAX_VALIDATORS_PER_CORE, ELASTIC_SCALING_CORES, ELASTIC_VALIDATOR_COUNT,
+    FINALIZED_METRIC, PARA_ID,
 };
 
 /// A file-backed Rust → JS message channel. Rust appends newline-terminated

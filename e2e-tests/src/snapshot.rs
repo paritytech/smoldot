@@ -15,26 +15,24 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Resolves the artifact set consumed by `smoke_cold` / `smoke_warm`.
+//! Resolves the artifact set consumed by `smoke_cold` / `smoke_warm`, from
+//! three places:
+//!   - DB tarballs            → the GCS bundle (`relay_db`, `para_db`)
+//!   - full specs             → `chain-specs/smoke-*-spec.json` (`relay_spec`, …)
+//!   - lightSyncState + dumps → bundle manifest `user_data` (`*_light_sync_state`, …)
 //!
-//! Everything ships as a single bundle on GCS:
-//! `gs://zombienet-db-snaps/zombienet/smoldot_smoke_db/{ARTIFACTS_VERSION}/bundle.tar.gz`.
-//! On first use the bundle is downloaded into
-//! `~/.cache/smoldot-e2e/{ARTIFACTS_VERSION}/`, SHA256-verified, and
-//! extracted in place. A marker file (`.extracted-sha`) records which
-//! version is currently extracted; mismatch triggers re-download.
+//! The bundle (`{GCS_BASE}/{ARTIFACTS_VERSION}/bundle.tar.gz`) is downloaded to
+//! `~/.cache/smoldot-e2e/{ARTIFACTS_VERSION}/`, SHA256-verified, and extracted on
+//! first use; an `.extracted-sha` marker triggers re-download on mismatch.
+//! `ARTIFACTS_DIR_OVERRIDE` points the bundle resolvers at a generator output dir
+//! (no download); full specs still come from `chain-specs/`.
 //!
-//! For local iteration set `ARTIFACTS_DIR_OVERRIDE` to a directory laid out
-//! exactly like the generator output (`relaychain-db.tgz`, `relay-spec.json`,
-//! `smoldot-db/relay.json`, …). All resolvers point inside it; no download
-//! or verification.
-//!
-//! See `e2e-tests/docs/smoke-scenarios.md` for the full layout and the
-//! regeneration procedure.
+//! See `e2e-tests/docs/smoke-scenarios.md` for the layout and regeneration.
 
 use std::path::PathBuf;
 
 use anyhow::anyhow;
+use serde_json::Value;
 
 pub const ARTIFACTS_VERSION: &str = "v1";
 
@@ -57,27 +55,33 @@ pub fn para_db() -> Result<PathBuf, anyhow::Error> {
 }
 
 pub fn relay_spec() -> Result<PathBuf, anyhow::Error> {
-    resolve("relay-spec.json")
+    repo_spec("smoke-relay-spec.json")
 }
 
 pub fn para_spec() -> Result<PathBuf, anyhow::Error> {
-    resolve("para-spec.json")
+    repo_spec("smoke-para-spec.json")
 }
 
 pub fn relay_spec_light_sync_state() -> Result<PathBuf, anyhow::Error> {
-    resolve("relay-spec-lightSyncState.json")
+    materialize(
+        "relay-spec-lightSyncState.json",
+        "relay_spec_light_sync_state",
+    )
 }
 
 pub fn para_spec_light_sync_state() -> Result<PathBuf, anyhow::Error> {
-    resolve("para-spec-lightSyncState.json")
+    materialize(
+        "para-spec-lightSyncState.json",
+        "para_spec_light_sync_state",
+    )
 }
 
 pub fn smoldot_db_relay() -> Result<PathBuf, anyhow::Error> {
-    resolve("smoldot-db/relay.json")
+    materialize("smoldot-db/relay.json", "smoldot_db_relay")
 }
 
 pub fn smoldot_db_para() -> Result<PathBuf, anyhow::Error> {
-    resolve("smoldot-db/para.json")
+    materialize("smoldot-db/para.json", "smoldot_db_para")
 }
 
 fn resolve(rel: &str) -> Result<PathBuf, anyhow::Error> {
@@ -89,6 +93,42 @@ fn resolve(rel: &str) -> Result<PathBuf, anyhow::Error> {
             p.display()
         ));
     }
+    Ok(p)
+}
+
+fn repo_spec(name: &str) -> Result<PathBuf, anyhow::Error> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("chain-specs")
+        .join(name);
+    if !p.is_file() {
+        return Err(anyhow!(
+            "committed full spec {} missing; regenerate via smoke_generate_snapshots and \
+             commit the emitted copy",
+            p.display()
+        ));
+    }
+    Ok(p)
+}
+
+/// Returns the loose `rel` file if present (override dir or prior call),
+/// otherwise writes it from `manifest.json` `user_data[key]` first.
+fn materialize(rel: &str, key: &str) -> Result<PathBuf, anyhow::Error> {
+    let dir = ensure_bundle_extracted()?;
+    let p = dir.join(rel);
+    if p.is_file() {
+        return Ok(p);
+    }
+    let manifest_path = dir.join("manifest.json");
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(&manifest_path).map_err(|e| anyhow!("{}: {e}", manifest_path.display()))?,
+    )?;
+    let blob = manifest
+        .pointer(&format!("/user_data/{key}"))
+        .ok_or_else(|| anyhow!("{}: missing user_data.{key}", manifest_path.display()))?;
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&p, serde_json::to_string_pretty(blob)?)?;
     Ok(p)
 }
 

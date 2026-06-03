@@ -37,12 +37,12 @@ use std::path::{Path, PathBuf};
 use anyhow::anyhow;
 use serde_json::Value;
 use smoldot_e2e_tests::{
-    ensure_js_deps_installed, ensure_smoldot_built, resolve_base_dir, run_js_test,
-    FINALIZED_METRIC, PARA_ID,
+    elastic_scaling_genesis_overrides, ensure_js_deps_installed, ensure_smoldot_built,
+    resolve_base_dir, run_js_test, ELASTIC_VALIDATOR_COUNT, FINALIZED_METRIC, PARA_ID,
 };
 use zombienet_sdk::{
-    subxt::ext::subxt_rpcs::rpc_params, LocalFileSystem, Network, NetworkConfig,
-    NetworkConfigBuilder, NetworkNode,
+    snapshot::BundleBuilder, subxt::ext::subxt_rpcs::rpc_params, Bundle, LocalFileSystem, Network,
+    NetworkConfig, NetworkConfigBuilder, NetworkNode,
 };
 
 const DEFAULT_TARGET_FINALIZED: u32 = 2500;
@@ -142,61 +142,51 @@ async fn smoke_generate_snapshots() -> Result<(), anyhow::Error> {
 
     dump_smoldot_db(&args.out, &network).await?;
 
-    // Step 3: snapshot validator-0 + alice DBs *after* the dump. Tarring
-    // before would freeze the network DBs at an earlier point than smoldot's
-    // persisted finalized — when the test later spawns from the snapshot,
-    // smoldot's persisted block wouldn't yet exist in the validator's DB and
-    // smoldot would hang on `storage-proof-request-error`.
-    pause_and_tar(
-        &network,
-        "validator-0",
-        &network_base,
-        &args.out.join("relaychain-db.tgz"),
-    )
-    .await?;
-    pause_and_tar(
-        &network,
-        "alice",
-        &network_base,
-        &args.out.join("parachain-db.tgz"),
-    )
-    .await?;
+    // Step 3: snapshot the DBs *after* the dump, so they are not frozen behind
+    // smoldot's persisted finalized (else the consumer hangs on
+    // `storage-proof-request-error`). `snapshot_db` tars `data/` (minus
+    // `keystore/`/`network/`); `BundleBuilder` packs both tarballs + a manifest
+    // carrying the lightSyncState specs and smoldot-db dumps in `user_data`.
+    log::info!("pausing network for DB snapshots");
+    network.pause().await?;
+    let relay_snap = network
+        .get_node("validator-0")?
+        .snapshot_db(args.out.join("relaychain-db.tgz"))
+        .await?;
+    let para_snap = network
+        .get_node("alice")?
+        .snapshot_db(args.out.join("parachain-db.tgz"))
+        .await?;
+    network.resume().await?;
+    log::info!("network resumed");
 
-    create_bundle(&args.out)?;
-    print_manifest(&args.out)?;
+    let bundle = BundleBuilder::new()
+        .add(relay_snap)
+        .add(para_snap)
+        .user_data(build_user_data(&args.out)?)
+        .build(args.out.join("bundle.tar.gz"))?;
+
+    print_manifest(&args.out, &bundle)?;
     log::info!("done");
     Ok(())
 }
 
-/// Bundles every artifact in `out` (DB tarballs + full specs +
-/// light-sync-state specs + smoldot-db dumps) into a single
-/// `bundle.tar.gz`, consumed by `snapshot::ensure_bundle_extracted` at
-/// test time.
-fn create_bundle(out: &Path) -> Result<(), anyhow::Error> {
-    let bundle = out.join("bundle.tar.gz");
-    log::info!("bundling artifacts -> {}", bundle.display());
-    let status = std::process::Command::new("tar")
-        .arg("-czf")
-        .arg(&bundle)
-        .arg("-C")
-        .arg(out)
-        .arg("relaychain-db.tgz")
-        .arg("parachain-db.tgz")
-        .arg("relay-spec.json")
-        .arg("para-spec.json")
-        .arg("relay-spec-lightSyncState.json")
-        .arg("para-spec-lightSyncState.json")
-        .arg("smoldot-db")
-        .status()?;
-    if !status.success() {
-        return Err(anyhow!("tar bundle failed (exit {status})"));
-    }
-    log::info!(
-        "wrote {} ({} bytes)",
-        bundle.display(),
-        std::fs::metadata(&bundle)?.len()
-    );
-    Ok(())
+/// Embeds the JSON artifacts not packed as bundle archives (lightSyncState
+/// specs + smoldot-db dumps) into the manifest `user_data`, keyed for
+/// `snapshot::materialize`.
+fn build_user_data(out: &Path) -> Result<serde_json::Value, anyhow::Error> {
+    let read_json = |rel: &str| -> Result<Value, anyhow::Error> {
+        let p = out.join(rel);
+        serde_json::from_slice(&std::fs::read(&p).map_err(|e| anyhow!("{}: {e}", p.display()))?)
+            .map_err(|e| anyhow!("{}: {e}", p.display()))
+    };
+    Ok(serde_json::json!({
+        "artifacts_version": smoldot_e2e_tests::snapshot::ARTIFACTS_VERSION,
+        "relay_spec_light_sync_state": read_json("relay-spec-lightSyncState.json")?,
+        "para_spec_light_sync_state": read_json("para-spec-lightSyncState.json")?,
+        "smoldot_db_relay": read_json("smoldot-db/relay.json")?,
+        "smoldot_db_para": read_json("smoldot-db/para.json")?,
+    }))
 }
 
 /// Writes a light-sync-state copy of `full_spec_path` to `lss_spec_path`:
@@ -364,40 +354,30 @@ async fn dump_smoldot_db(
     Ok(())
 }
 
-/// Computes a manifest of the artifact files (sha256 + size) and prints
-/// suggested constant lines for `e2e-tests/src/snapshot.rs`. Uses
-/// `sha256sum` from coreutils.
-fn print_manifest(out: &Path) -> Result<(), anyhow::Error> {
-    let bundle = out.join("bundle.tar.gz");
-    if !bundle.is_file() {
-        return Err(anyhow!("manifest: bundle.tar.gz missing"));
-    }
-    let size = std::fs::metadata(&bundle)?.len();
-    let hash = sha256_of(&bundle)?;
-
+/// Prints the bundle sha256/size (from the `BundleBuilder` result), the
+/// `snapshot.rs` constant lines to pin, and the commands to commit the full
+/// specs into `chain-specs/`.
+fn print_manifest(out: &Path, bundle: &Bundle) -> Result<(), anyhow::Error> {
     println!("\n=== artifact manifest ===");
-    println!("  bundle.tar.gz  {size:>10} bytes  {hash}");
+    println!(
+        "  {}  {:>10} bytes  {}",
+        bundle.path.display(),
+        bundle.size,
+        bundle.sha256
+    );
     println!("\n=== snapshot.rs constants ===");
     println!("pub const ARTIFACTS_VERSION: &str = \"v1\";");
-    println!("const BUNDLE_SHA256: &str = \"{hash}\";");
+    println!("const BUNDLE_SHA256: &str = \"{}\";", bundle.sha256);
+    println!("\n=== commit the full specs ===");
+    println!(
+        "cp {} e2e-tests/chain-specs/smoke-relay-spec.json",
+        out.join("relay-spec.json").display()
+    );
+    println!(
+        "cp {} e2e-tests/chain-specs/smoke-para-spec.json",
+        out.join("para-spec.json").display()
+    );
     Ok(())
-}
-
-fn sha256_of(path: &Path) -> Result<String, anyhow::Error> {
-    let output = std::process::Command::new("sha256sum").arg(path).output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "sha256sum failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let stdout = String::from_utf8(output.stdout)?;
-    let hex = stdout
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| anyhow!("empty sha256sum output for {}", path.display()))?;
-    Ok(hex.to_string())
 }
 
 async fn wait_for_finalized(node: &NetworkNode, height: u32) -> Result<(), anyhow::Error> {
@@ -436,55 +416,6 @@ async fn gen_sync_spec(node: &NetworkNode, out_path: &Path) -> Result<(), anyhow
     std::fs::write(out_path, serde_json::to_string_pretty(&spec)?)?;
     let size = std::fs::metadata(out_path)?.len();
     log::info!("wrote {} ({} bytes)", out_path.display(), size);
-    Ok(())
-}
-
-/// Pauses `node_name`, tars its `data/` dir into `out_tgz`, and resumes it.
-/// `network_base` is the zombienet namespace base dir.
-async fn pause_and_tar(
-    network: &Network<LocalFileSystem>,
-    node_name: &str,
-    network_base: &Path,
-    out_tgz: &Path,
-) -> Result<(), anyhow::Error> {
-    let node = network.get_node(node_name)?;
-    log::info!("pausing {node_name} for snapshot");
-    node.pause().await?;
-
-    let node_base = network_base.join(node_name);
-    let data_dir = node_base.join("data");
-    if !data_dir.is_dir() {
-        return Err(anyhow!(
-            "{node_name} data dir missing at {}",
-            data_dir.display()
-        ));
-    }
-    log::info!(
-        "tarring {} -> {} (excluding keystore/)",
-        data_dir.display(),
-        out_tgz.display()
-    );
-    // Exclude `keystore/` so a sibling node consuming this snapshot doesn't end
-    // up with the source node's session keys on top of its own (zombienet
-    // inserts per-node keys via author_insertKey at startup). Otherwise BOTH
-    // nodes can author for the same slot and the chain stalls under
-    // equivocation.
-    let status = std::process::Command::new("tar")
-        .arg("-czf")
-        .arg(out_tgz)
-        .arg("--exclude=keystore")
-        .arg("-C")
-        .arg(&node_base)
-        .arg("data")
-        .status()?;
-    if !status.success() {
-        return Err(anyhow!("tar failed for {node_name} (exit {status})"));
-    }
-    let size = std::fs::metadata(out_tgz)?.len();
-    log::info!("wrote {} ({} bytes)", out_tgz.display(), size);
-
-    log::info!("resuming {node_name}");
-    node.resume().await?;
     Ok(())
 }
 
@@ -554,53 +485,37 @@ fn build_config(
     para_db: Option<&Path>,
 ) -> Result<NetworkConfig, anyhow::Error> {
     let images = zombienet_sdk::environment::get_images_from_env();
-    let relay_db = relay_db.map(|p| p.to_str().expect("UTF-8 path").to_owned());
-    let para_db = para_db.map(|p| p.to_str().expect("UTF-8 path").to_owned());
+    let relay_db = relay_db.map(Path::to_path_buf);
+    let para_db = para_db.map(Path::to_path_buf);
     NetworkConfigBuilder::new()
         .with_relaychain(|r| {
+            // Bake elastic-scaling cores + validator set into genesis so the
+            // snapshot can back multiple cores. Regenerate from genesis only:
+            // changing genesis config changes the hash, mismatching an old DB.
             let r = r
                 .with_chain("westend-local")
                 .with_default_command("polkadot")
-                .with_default_image(images.polkadot.as_str());
-            r.with_validator(|n| {
-                let n = n.with_name("validator-0").bootnode(true);
-                match relay_db.as_deref() {
-                    Some(p) => n.with_db_snapshot(p),
-                    None => n,
-                }
-            })
-            .with_validator(|n| {
-                let n = n.with_name("validator-1").bootnode(true);
-                match relay_db.as_deref() {
-                    Some(p) => n.with_db_snapshot(p),
-                    None => n,
-                }
+                .with_default_image(images.polkadot.as_str())
+                .with_genesis_overrides(elastic_scaling_genesis_overrides())
+                .with_optional_default_db_snapshot(relay_db.clone())
+                // validator-0 outside the fold sets the typestate the fold builds on.
+                .with_validator(|n| n.with_name("validator-0").bootnode(true));
+            (1..ELASTIC_VALIDATOR_COUNT).fold(r, |acc, i| {
+                acc.with_validator(|n| n.with_name(&format!("validator-{i}")).bootnode(true))
             })
         })
         .with_parachain(|p| {
-            let p = p
-                .with_id(PARA_ID)
+            p.with_id(PARA_ID)
                 .with_default_command("polkadot-parachain")
                 .with_default_image(images.cumulus.as_str())
                 .with_chain("people-westend-local")
                 .with_default_args(vec![
                     "--force-authoring".into(),
                     "--authoring=slot-based".into(),
-                ]);
-            p.with_collator(|n| {
-                let n = n.with_name("alice").bootnode(true);
-                match para_db.as_deref() {
-                    Some(p) => n.with_db_snapshot(p),
-                    None => n,
-                }
-            })
-            .with_collator(|n| {
-                let n = n.with_name("bob").bootnode(true);
-                match para_db.as_deref() {
-                    Some(p) => n.with_db_snapshot(p),
-                    None => n,
-                }
-            })
+                ])
+                .with_optional_default_db_snapshot(para_db.clone())
+                .with_collator(|n| n.with_name("alice").bootnode(true))
+                .with_collator(|n| n.with_name("bob").bootnode(true))
         })
         .with_global_settings(|g| {
             g.with_base_dir(base_dir_str).with_spawn_concurrency(1) // https://github.com/paritytech/smoldot/pull/3249#issuecomment-4438807458

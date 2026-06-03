@@ -45,9 +45,31 @@ pub const BEST_METRIC: &str = "block_height{status=\"best\"}";
 /// downstream smoldot timeout.
 const RELAY_FIRST_FINALIZED_TIMEOUT_SECS: u64 = 120;
 
-/// Core indices assigned to the parachain in the Fresh scenario so it can
-/// author multiple blocks per relay block (elastic scaling).
-const ELASTIC_SCALING_CORES: &[u32] = &[0, 1, 2];
+/// Core indices assigned to the parachain for elastic scaling.
+pub const ELASTIC_SCALING_CORES: &[u32] = &[0, 1, 2];
+
+/// Validators per backing group; `cores × this` = validator-set size to back
+/// every core in one relay block.
+pub const ELASTIC_MAX_VALIDATORS_PER_CORE: u32 = 2;
+
+/// Relay validators to spawn for elastic scaling, all genesis authorities.
+pub const ELASTIC_VALIDATOR_COUNT: u32 =
+    ELASTIC_SCALING_CORES.len() as u32 * ELASTIC_MAX_VALIDATORS_PER_CORE;
+
+/// Genesis `scheduler_params` override declaring the cores. Only effective on a
+/// generated genesis; a raw spec / DB snapshot has its core count fixed already.
+pub fn elastic_scaling_genesis_overrides() -> serde_json::Value {
+    serde_json::json!({
+        "configuration": {
+            "config": {
+                "scheduler_params": {
+                    "num_cores": ELASTIC_SCALING_CORES.len(),
+                    "max_validators_per_core": ELASTIC_MAX_VALIDATORS_PER_CORE
+                }
+            }
+        }
+    })
+}
 
 pub struct SnapshotPaths {
     /// Substrate-node DB tarballs.
@@ -174,8 +196,8 @@ fn build_network_config(
     let images = zombienet_sdk::environment::get_images_from_env();
 
     let snap = cfg.snapshot();
-    let relay_db = snap.map(|s| s.relay_db_tgz.to_str().expect("UTF-8 path").to_owned());
-    let para_db = snap.map(|s| s.para_db_tgz.to_str().expect("UTF-8 path").to_owned());
+    let relay_db = snap.map(|s| s.relay_db_tgz.clone());
+    let para_db = snap.map(|s| s.para_db_tgz.clone());
     // Substrate gets the *full* spec — it needs `genesis.raw` to bootstrap.
     let relay_spec_path = snap.map(|s| s.relay_full_spec.to_str().expect("UTF-8 path").to_owned());
     let para_spec_path = snap.map(|s| s.para_full_spec.to_str().expect("UTF-8 path").to_owned());
@@ -185,39 +207,17 @@ fn build_network_config(
             let r = r
                 .with_chain("westend-local")
                 .with_default_command("polkadot")
-                .with_default_image(images.polkadot.as_str());
+                .with_default_image(images.polkadot.as_str())
+                .with_optional_default_db_snapshot(relay_db.clone());
             let r = match relay_spec_path.as_deref() {
-                // Fresh: declare the total core count so the para can later be
-                // assigned multiple cores at runtime (elastic scaling). Only
-                // valid for a generated genesis; snapshot specs bring their own.
-                None => r.with_genesis_overrides(serde_json::json!({
-                    "configuration": {
-                        "config": {
-                            "scheduler_params": {
-                                "num_cores": ELASTIC_SCALING_CORES.len(),
-                                "max_validators_per_core": 2
-                            }
-                        }
-                    }
-                })),
+                // Only effective on Fresh's generated genesis; snapshots bring their own.
+                None => r.with_genesis_overrides(elastic_scaling_genesis_overrides()),
                 Some(p) => r.with_chain_spec_path(p),
             }
-            .with_validator(|n| {
-                let n = n.with_name("validator-0").bootnode(true);
-                match relay_db.as_deref() {
-                    Some(p) => n.with_db_snapshot(p),
-                    None => n,
-                }
-            });
-
-            (1..6).fold(r, |acc, i| {
-                acc.with_validator(|n| {
-                    let n = n.with_name(&format!("validator-{i}")).bootnode(true);
-                    match relay_db.as_deref() {
-                        Some(p) => n.with_db_snapshot(p),
-                        None => n,
-                    }
-                })
+            // validator-0 outside the fold sets the typestate the fold builds on.
+            .with_validator(|n| n.with_name("validator-0").bootnode(true));
+            (1..ELASTIC_VALIDATOR_COUNT).fold(r, |acc, i| {
+                acc.with_validator(|n| n.with_name(&format!("validator-{i}")).bootnode(true))
             })
         })
         .with_parachain(|p| {
@@ -229,25 +229,14 @@ fn build_network_config(
                 .with_default_args(vec![
                     "--force-authoring".into(),
                     "--authoring=slot-based".into(),
-                ]);
+                ])
+                .with_optional_default_db_snapshot(para_db.clone());
             let p = match para_spec_path.as_deref() {
                 None => p,
                 Some(path) => p.with_chain_spec_path(path),
             };
-            p.with_collator(|n| {
-                let n = n.with_name("alice").bootnode(true);
-                match para_db.as_deref() {
-                    Some(p) => n.with_db_snapshot(p),
-                    None => n,
-                }
-            })
-            .with_collator(|n| {
-                let n = n.with_name("bob").bootnode(true);
-                match para_db.as_deref() {
-                    Some(p) => n.with_db_snapshot(p),
-                    None => n,
-                }
-            })
+            p.with_collator(|n| n.with_name("alice").bootnode(true))
+                .with_collator(|n| n.with_name("bob").bootnode(true))
         })
         .with_global_settings(|g| {
             g.with_base_dir(base_dir_str).with_spawn_concurrency(1) // https://github.com/paritytech/smoldot/pull/3249#issuecomment-4438807458

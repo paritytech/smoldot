@@ -12,9 +12,13 @@ Cold/warm both rely on smoldot's real warp sync (gap from `lightSyncState` to cu
 
 Chain: `westend-local` relay + `people-westend-local` parachain. Same as fresh, so all three scenarios are directly comparable.
 
-## Artifact bundle
+## Artifact layout
 
-Single GCS object per version:
+The bundle is built with the zombienet-sdk `BundleBuilder`, which packs only
+per-node DB tarballs plus a `manifest.json`. So the artifacts live in two
+places:
+
+**GCS bundle** — single object per version:
 
 ```
 gs://zombienet-db-snaps/zombienet/smoldot_smoke_db/{ARTIFACTS_VERSION}/bundle.tar.gz
@@ -22,14 +26,21 @@ gs://zombienet-db-snaps/zombienet/smoldot_smoke_db/{ARTIFACTS_VERSION}/bundle.ta
 
 Contains:
 
-- `relaychain-db.tgz`, `parachain-db.tgz` — node DB snapshots; keystore stripped
-- `relay-spec.json`, `para-spec.json` — full chain specs (substrate side)
-- `relay-spec-lightSyncState.json`, `para-spec-lightSyncState.json` — slim chain specs (smoldot side, `genesis.stateRootHash` instead of `genesis.raw`)
-- `smoldot-db/relay.json`, `smoldot-db/para.json` — `chainHead_unstable_finalizedDatabase` dumps for warm
+- `relaychain-db.tgz`, `parachain-db.tgz` — node DB snapshots produced by `NetworkNode::snapshot_db` (excludes `keystore/` + `network/`). The parachain tarball also carries the collator's embedded relay node DB (`relay-data/`).
+- `manifest.json` — `SnapshotManifest` with per-archive checksums and a `user_data` blob holding (all JSON, inlined):
+  - `relay_spec_light_sync_state`, `para_spec_light_sync_state` — slim smoldot specs (`genesis.stateRootHash` instead of `genesis.raw`)
+  - `smoldot_db_relay`, `smoldot_db_para` — `chainHead_unstable_finalizedDatabase` dumps for warm
+
+  The consumer (`snapshot::materialize`) writes these back out to disk by key on first use.
+
+**Repo** — full chain specs (with `genesis.raw`, needed by substrate) are committed, not bundled, because they pin the exact genesis the DB snapshot was built against:
+
+- `e2e-tests/chain-specs/smoke-relay-spec.json`
+- `e2e-tests/chain-specs/smoke-para-spec.json`
 
 `ARTIFACTS_VERSION` and `BUNDLE_SHA256` live in `e2e-tests/src/snapshot.rs`. On first use the bundle is downloaded into `~/.cache/smoldot-e2e/{ARTIFACTS_VERSION}/`, SHA-verified, and extracted in place.
 
-For local iteration: `ARTIFACTS_DIR_OVERRIDE=/path/to/dir` skips download/verify and uses files directly from that directory.
+For local iteration: `ARTIFACTS_DIR_OVERRIDE=/path/to/dir` skips download/verify and reads the bundled files directly from the generator output directory (loose `*.tgz` + the JSON artifacts the generator also writes there). Full specs still come from `chain-specs/`.
 
 ## Regenerating the artifact bundle
 
@@ -67,9 +78,16 @@ Steps (from `e2e-tests/`):
 
    Required: `ZOMBIE_PROVIDER=native`, polkadot/polkadot-parachain on `PATH`. The module-level docstring in `tests/smoke_generate_snapshots.rs` lists every env var.
 
-   It produces `bundle.tar.gz` under `SMOKE_SNAPSHOT_OUT` and prints the SHA256 in the manifest at the end.
+   It produces `bundle.tar.gz` under `SMOKE_SNAPSHOT_OUT`, prints the bundle SHA256, and prints the `cp` commands to copy the full specs into `chain-specs/`.
 
-3. **Verify locally** before publishing:
+3. **Commit the full specs** (printed by the generator):
+
+   ```bash
+   cp /tmp/smoldot-snap-v2/relay-spec.json e2e-tests/chain-specs/smoke-relay-spec.json
+   cp /tmp/smoldot-snap-v2/para-spec.json  e2e-tests/chain-specs/smoke-para-spec.json
+   ```
+
+4. **Verify locally** before publishing:
 
    ```bash
    ARTIFACTS_DIR_OVERRIDE=/tmp/smoldot-snap-v2 cargo test --test smoke_cold -- --nocapture
@@ -78,24 +96,25 @@ Steps (from `e2e-tests/`):
 
    Both must pass. If they don't, it's almost certainly the chain spec / runtime version or the `--spec-at-finalized` choice — fix and retry before uploading.
 
-4. **Publish**:
+5. **Publish**:
    ```bash
    gsutil cp /tmp/smoldot-snap-v2/bundle.tar.gz \
      gs://zombienet-db-snaps/zombienet/smoldot_smoke_db/v2/bundle.tar.gz
    ```
 
-5. **Pin the new SHA** in `src/snapshot.rs` (copy the value from the generator manifest):
+6. **Pin the new SHA** in `src/snapshot.rs` (copy the value from the generator manifest):
    ```rust
    const BUNDLE_SHA256: &str = "<hash>";
    ```
 
-6. **CI cache key** invalidates automatically — the workflow's cache step keys on `hashFiles('e2e-tests/src/snapshot.rs')`, so bumping the constant is enough.
+7. **CI cache key** invalidates automatically — the workflow's cache step keys on `hashFiles('e2e-tests/src/snapshot.rs')`, so bumping the constant is enough.
 
-7. Commit, open PR, run cold/warm tests in CI to confirm GCS download + extract path works end-to-end.
+8. Commit (bundle SHA, version, and the regenerated `chain-specs/smoke-*-spec.json`), open PR, run cold/warm tests in CI to confirm the GCS download + extract path works end-to-end.
 
 ## Notes on common pitfalls
 
-- **Sibling nodes with identical session keys equivocate.** The generator excludes `keystore/` when tarring; zombienet inserts per-node keys via `author_insertKey` after startup. Don't add keystore back into the snapshot.
+- **Sibling nodes with identical session keys equivocate.** `NetworkNode::snapshot_db` excludes `keystore/` (and `network/`); zombienet inserts per-node keys via `author_insertKey` after startup. Don't reintroduce keystore into the snapshot.
+- **Full specs must match the DB genesis.** The committed `chain-specs/smoke-*-spec.json` pin the genesis (including the elastic-scaling `scheduler_params` override) the DB snapshot was generated against. Regenerate and recommit them whenever genesis config or the runtime changes — a stale full spec yields a genesis-hash mismatch against the DB.
 - **Same tarball path passed to multiple zombienet nodes** triggers a TOCTOU race in zombienet-provider's `with_db_snapshot` cache. The generator and `network::stage_per_node_snapshots` work around this by copying the tarball once per consuming node.
 - **Spec-at-finalized too close to target-finalized**: gap ≤ 32 means smoldot uses follow-forward instead of warp sync, which can't traverse GRANDPA rotations. Default `M = N/2` keeps it safe.
 - **Bootnode multiaddrs are per-spawn** (zombienet picks free ports). The committed specs ship with empty `bootNodes`; `network::prepare_runtime_specs` injects current multiaddrs into a runtime copy before handing the spec to smoldot.
