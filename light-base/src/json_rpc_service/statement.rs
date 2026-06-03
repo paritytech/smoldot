@@ -18,7 +18,7 @@
 use crate::network_service::{self, BroadcastStatementResult};
 use alloc::{string::String, vec::Vec};
 use core::num::NonZero;
-use smoldot::json_rpc::methods::{StatementSubmitResult, TopicFilter};
+use smoldot::json_rpc::methods::{InternalError, InvalidReason, StatementSubmitResult, TopicFilter};
 use smoldot::network::codec;
 
 /// Validates a SCALE-encoded statement and broadcasts it to the network.
@@ -35,14 +35,14 @@ where
 {
     if codec::decode_statement(encoded).is_err() {
         return StatementSubmitResult::Invalid {
-            reason: "Invalid statement encoding".into(),
+            reason: InvalidReason::Encoding,
         };
     }
 
     let broadcasted = broadcast(encoded.to_vec()).await;
     if broadcasted.total == 0 {
         StatementSubmitResult::InternalError {
-            error: "No connected peers".into(),
+            error: InternalError::NoConnectedPeers,
         }
     } else {
         StatementSubmitResult::New
@@ -160,7 +160,7 @@ mod tests {
         assert_eq!(
             result,
             StatementSubmitResult::Invalid {
-                reason: "Invalid statement encoding".into()
+                reason: InvalidReason::Encoding
             }
         );
     }
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(
             result,
             StatementSubmitResult::InternalError {
-                error: "No connected peers".into()
+                error: InternalError::NoConnectedPeers
             }
         );
     }
