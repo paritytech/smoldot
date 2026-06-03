@@ -423,6 +423,13 @@ fn decode_header_number(hex_str: &str) -> Result<u64, anyhow::Error> {
     Ok(header.number)
 }
 
+/// Chain the JS driver subscribes `chainHead_v1_follow` to. Selected by whether
+/// `PARA_CHAIN_SPEC` is passed: omitting it makes the JS run relay-only.
+pub enum FollowChain {
+    Relay,
+    Para,
+}
+
 /// Runs `js/chainhead_v1_follow_test.js` against a live network. Snapshots the
 /// relay and para best/finalized heights from the validator/collator metrics
 /// immediately before launching JS, so the validator can flag an initialized
@@ -431,6 +438,7 @@ pub async fn run_chainhead_v1_follow_js(
     live: &LiveNetwork,
     cfg: &Scenario,
     with_runtime: bool,
+    follow: FollowChain,
 ) -> Result<(), anyhow::Error> {
     let relay_spec_str = live.relay_spec.to_str().expect("UTF-8 path");
     let para_spec_str = live.para_spec.to_str().expect("UTF-8 path");
@@ -456,20 +464,28 @@ pub async fn run_chainhead_v1_follow_js(
     let with_runtime_str = if with_runtime { "true" } else { "false" };
     let mut env_vars: Vec<(&str, &str)> = vec![
         ("RELAY_CHAIN_SPEC", relay_spec_str),
-        ("PARA_CHAIN_SPEC", para_spec_str),
         ("RELAY_BEST_AT_LAUNCH", relay_best_str.as_str()),
         ("RELAY_FINALIZED_AT_LAUNCH", relay_finalized_str.as_str()),
         ("PARA_BEST_AT_LAUNCH", para_best_str.as_str()),
         ("PARA_FINALIZED_AT_LAUNCH", para_finalized_str.as_str()),
         ("WITH_RUNTIME", with_runtime_str),
     ];
+    // The JS subscribes to the para chain iff PARA_CHAIN_SPEC is set; omitting
+    // it runs relay-only.
+    if matches!(follow, FollowChain::Para) {
+        env_vars.push(("PARA_CHAIN_SPEC", para_spec_str));
+    }
     if let Some((relay_db, para_db)) = smoldot_db_paths.as_ref() {
         env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
         env_vars.push(("SMOLDOT_DB_PARA", para_db.as_str()));
     }
 
+    let followed = match follow {
+        FollowChain::Relay => "relay",
+        FollowChain::Para => "para",
+    };
     log::info!(
-        "running chainHead_v1_follow JS driver (with_runtime={with_runtime}, relay_spec={relay_spec_str}, para_spec={para_spec_str}, relay best/finalized=#{relay_best}/#{relay_finalized}, para best/finalized=#{para_best}/#{para_finalized})"
+        "running chainHead_v1_follow JS driver (follow={followed}, with_runtime={with_runtime}, relay best/finalized=#{relay_best}/#{relay_finalized}, para best/finalized=#{para_best}/#{para_finalized})"
     );
     crate::run_js_test("js/chainhead_v1_follow_test.js", &env_vars)
         .await

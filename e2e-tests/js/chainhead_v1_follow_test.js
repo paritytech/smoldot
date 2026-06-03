@@ -380,12 +380,14 @@ class ChainHeadValidator {
         `new initial finalized #${n} < previous last finalized #${this.previousSub.lastFinalizedNumber}`,
       );
     }
-    if (
-      paraFinalizedAtLaunch > 0 &&
-      n + initialLagTolerance < paraFinalizedAtLaunch
-    ) {
+    // Compare against the followed chain's own finalized-at-launch.
+    const chainLabel = relayOnly ? "relay" : "para";
+    const finalizedAtLaunch = relayOnly
+      ? relayFinalizedAtLaunch
+      : paraFinalizedAtLaunch;
+    if (finalizedAtLaunch > 0 && n + initialLagTolerance < finalizedAtLaunch) {
       this.regression(
-        `initial finalized #${n} lags more than ${initialLagTolerance} behind para finalized at launch #${paraFinalizedAtLaunch}`,
+        `initial finalized #${n} lags more than ${initialLagTolerance} behind ${chainLabel} finalized at launch #${finalizedAtLaunch}`,
       );
     }
   }
