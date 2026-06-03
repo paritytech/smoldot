@@ -45,6 +45,10 @@ pub const BEST_METRIC: &str = "block_height{status=\"best\"}";
 /// downstream smoldot timeout.
 const RELAY_FIRST_FINALIZED_TIMEOUT_SECS: u64 = 120;
 
+/// Core indices assigned to the parachain in the Fresh scenario so it can
+/// author multiple blocks per relay block (elastic scaling).
+const ELASTIC_SCALING_CORES: &[u32] = &[0, 1, 2];
+
 pub struct SnapshotPaths {
     /// Substrate-node DB tarballs.
     pub relay_db_tgz: PathBuf,
@@ -128,6 +132,7 @@ pub async fn spawn_scenario(
 
     if matches!(cfg, Scenario::Fresh) {
         wait_for_relay_first_finalized(&network).await?;
+        assign_elastic_cores(&network).await?;
     }
 
     let (relay_spec, para_spec) = match cfg.snapshot() {
@@ -182,22 +187,37 @@ fn build_network_config(
                 .with_default_command("polkadot")
                 .with_default_image(images.polkadot.as_str());
             let r = match relay_spec_path.as_deref() {
-                None => r,
+                // Fresh: declare the total core count so the para can later be
+                // assigned multiple cores at runtime (elastic scaling). Only
+                // valid for a generated genesis; snapshot specs bring their own.
+                None => r.with_genesis_overrides(serde_json::json!({
+                    "configuration": {
+                        "config": {
+                            "scheduler_params": {
+                                "num_cores": ELASTIC_SCALING_CORES.len(),
+                                "max_validators_per_core": 2
+                            }
+                        }
+                    }
+                })),
                 Some(p) => r.with_chain_spec_path(p),
-            };
-            r.with_validator(|n| {
+            }
+            .with_validator(|n| {
                 let n = n.with_name("validator-0").bootnode(true);
                 match relay_db.as_deref() {
                     Some(p) => n.with_db_snapshot(p),
                     None => n,
                 }
-            })
-            .with_validator(|n| {
-                let n = n.with_name("validator-1").bootnode(true);
-                match relay_db.as_deref() {
-                    Some(p) => n.with_db_snapshot(p),
-                    None => n,
-                }
+            });
+
+            (1..6).fold(r, |acc, i| {
+                acc.with_validator(|n| {
+                    let n = n.with_name(&format!("validator-{i}")).bootnode(true);
+                    match relay_db.as_deref() {
+                        Some(p) => n.with_db_snapshot(p),
+                        None => n,
+                    }
+                })
             })
         })
         .with_parachain(|p| {
@@ -258,6 +278,43 @@ async fn wait_for_relay_first_finalized(
         .await
         .map_err(|e| anyhow!("relay did not finalize any block: {e}"))?;
     log::info!("relay produced its first finalized block");
+    Ok(())
+}
+
+/// Assigns [`ELASTIC_SCALING_CORES`] to the parachain at runtime via
+/// `Sudo(Coretime::assign_core)`, mirroring polkadot-sdk's elastic-scaling
+/// zombienet tests. Runtime assignment (rather than the genesis
+/// `with_num_cores` path) is what people-westend's relay runtime actually
+/// honours, and it avoids mutating genesis.
+async fn assign_elastic_cores(network: &Network<LocalFileSystem>) -> Result<(), anyhow::Error> {
+    use zombienet_sdk::subxt::{ext::scale_value::value, OnlineClient, PolkadotConfig};
+
+    let relay = network.get_node("validator-0")?;
+    let client: OnlineClient<PolkadotConfig> = relay.wait_client().await?;
+
+    let assign_calls: Vec<_> = ELASTIC_SCALING_CORES
+        .iter()
+        .map(|core| {
+            value! {
+                Coretime(assign_core { core: *core, begin: 0, assignment: ((Task(PARA_ID), 57600)), end_hint: None() })
+            }
+        })
+        .collect();
+    let tx = zombienet_sdk::subxt::tx::dynamic(
+        "Sudo",
+        "sudo",
+        vec![value! { Utility(batch { calls: assign_calls }) }],
+    );
+
+    log::info!("assigning cores {ELASTIC_SCALING_CORES:?} to para {PARA_ID}");
+    let signer = zombienet_sdk::subxt_signer::sr25519::dev::alice();
+    client
+        .tx()
+        .sign_and_submit_then_watch_default(&tx, &signer)
+        .await?
+        .wait_for_finalized_success()
+        .await?;
+    log::info!("cores assigned to para {PARA_ID}");
     Ok(())
 }
 
