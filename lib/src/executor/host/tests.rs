@@ -22,6 +22,7 @@ use super::{Config, HeapPages, HostVm, HostVmPrototype, StorageProofSizeBehavior
 mod hash_algorithms;
 mod initialization;
 mod run;
+mod transaction_index;
 
 /*
 

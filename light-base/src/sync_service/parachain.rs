@@ -20,7 +20,9 @@ use super::{
 };
 use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 
-use alloc::{borrow::Cow, boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    borrow::Cow, boxed::Box, collections::VecDeque, format, string::String, sync::Arc, vec::Vec,
+};
 use core::{cmp, iter, num::NonZero, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
@@ -171,6 +173,8 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         known_finalized_runtime: Some(finalized_runtime),
         pending_requests: stream::FuturesUnordered::new(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
+        pending_subscriptions: VecDeque::new(),
+        bootstrap_complete: false,
         log_target,
         from_network_service: None,
         network_service,
@@ -558,38 +562,15 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 buffer_size,
                 runtime_interest,
             }) => {
-                let Some(sync) = &task.sync else {
-                    unreachable!()
-                };
-
-                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
-                task.all_notifications.push(tx);
-
-                let non_finalized_blocks_ancestry_order = {
-                    sync.non_finalized_blocks_ancestry_order()
-                        .map(|h| {
-                            let scale_encoding = h.scale_encoding_vec(sync.block_number_bytes());
-                            BlockNotification {
-                                is_new_best: header::hash_from_scale_encoded_header(
-                                    &scale_encoding,
-                                ) == *sync.best_block_hash(),
-                                scale_encoded_header: scale_encoding,
-                                parent_hash: *h.parent_hash,
-                            }
-                        })
-                        .collect()
-                };
-
-                let _ = send_back.send(SubscribeAll {
-                    finalized_block_scale_encoded_header: sync.finalized_block_header().to_vec(),
-                    finalized_block_runtime: if runtime_interest {
-                        task.known_finalized_runtime.take()
-                    } else {
-                        None
-                    },
-                    non_finalized_blocks_ancestry_order,
-                    new_blocks,
-                });
+                if task.bootstrap_complete {
+                    respond_subscribe_all(&mut task, send_back, buffer_size, runtime_interest);
+                } else {
+                    task.pending_subscriptions.push_back(PendingSubscribeAll {
+                        send_back,
+                        buffer_size,
+                        runtime_interest,
+                    });
+                }
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::PeersAssumedKnowBlock {
@@ -948,6 +929,11 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 }
 
                 task.paraheads_notifications = Some(subscribe_all.new_blocks);
+
+                if !task.bootstrap_complete {
+                    drain_pending_subscriptions(&mut task);
+                    task.bootstrap_complete = true;
+                }
             }
 
             WakeUpReason::ParaheadNotification(Notification::Finalized {
@@ -1075,6 +1061,16 @@ struct Task<TPlat: PlatformRef> {
 
     all_notifications: Vec<async_channel::Sender<Notification>>,
 
+    /// `SubscribeAll` requests received before the initial paraheads subscription resolved.
+    /// Drained in the `ParaheadSubscribed` arm so the very first response a client sees
+    /// carries the authoritative relay-derived finalized parahead, never a transient
+    /// pre-bootstrap one.
+    pending_subscriptions: VecDeque<PendingSubscribeAll>,
+
+    /// `false` until the first drain runs. Once `true`, subsequent `SubscribeAll` requests
+    /// get the current finalized synchronously.
+    bootstrap_complete: bool,
+
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::Event>>>>,
 
@@ -1087,6 +1083,61 @@ enum RequestOutcome {
     Block(Result<Vec<codec::BlockData>, network_service::BlocksRequestError>),
     Storage(Result<Vec<u8>, ()>),
     CallProof(Result<network::service::EncodedMerkleProof, ()>),
+}
+
+struct PendingSubscribeAll {
+    send_back: oneshot::Sender<SubscribeAll>,
+    buffer_size: usize,
+    runtime_interest: bool,
+}
+
+fn respond_subscribe_all<TPlat: PlatformRef>(
+    task: &mut Task<TPlat>,
+    send_back: oneshot::Sender<SubscribeAll>,
+    buffer_size: usize,
+    runtime_interest: bool,
+) {
+    let Some(sync) = &task.sync else {
+        unreachable!()
+    };
+
+    let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
+    task.all_notifications.push(tx);
+
+    let non_finalized_blocks_ancestry_order = sync
+        .non_finalized_blocks_ancestry_order()
+        .map(|h| {
+            let scale_encoding = h.scale_encoding_vec(sync.block_number_bytes());
+            BlockNotification {
+                is_new_best: header::hash_from_scale_encoded_header(&scale_encoding)
+                    == *sync.best_block_hash(),
+                scale_encoded_header: scale_encoding,
+                parent_hash: *h.parent_hash,
+            }
+        })
+        .collect();
+
+    let _ = send_back.send(SubscribeAll {
+        finalized_block_scale_encoded_header: sync.finalized_block_header().to_vec(),
+        finalized_block_runtime: if runtime_interest {
+            task.known_finalized_runtime.take()
+        } else {
+            None
+        },
+        non_finalized_blocks_ancestry_order,
+        new_blocks,
+    });
+}
+
+fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
+    while let Some(pending) = task.pending_subscriptions.pop_front() {
+        respond_subscribe_all(
+            task,
+            pending.send_back,
+            pending.buffer_size,
+            pending.runtime_interest,
+        );
+    }
 }
 
 impl<TPlat: PlatformRef> Task<TPlat> {
@@ -1117,28 +1168,31 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
         .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
         .await;
 
-    log!(
-        platform,
-        Info,
-        log_target,
-        "Waiting for relay chain to finalize a block..."
-    );
+    // sync_service withholds the response until the bootstrap mode is committed, so the
+    // initial finalized header is authoritative and safe to use directly.
+    let mut next_finalized_hash = Some(header::hash_from_scale_encoded_header(
+        &subscription.finalized_block_scale_encoded_header,
+    ));
 
     loop {
-        let finalized_hash = loop {
-            match subscription.new_blocks.next().await {
-                Some(runtime_service::Notification::Finalized { hash, .. }) => {
-                    break hash;
-                }
-                Some(_) => continue,
-                None => {
-                    // Subscription died. Re-subscribe.
-                    subscription = relay_chain_sync
-                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
-                        .await;
-                    break header::hash_from_scale_encoded_header(
-                        &subscription.finalized_block_scale_encoded_header,
-                    );
+        let finalized_hash = if let Some(h) = next_finalized_hash.take() {
+            h
+        } else {
+            loop {
+                match subscription.new_blocks.next().await {
+                    Some(runtime_service::Notification::Finalized { hash, .. }) => {
+                        break hash;
+                    }
+                    Some(_) => continue,
+                    None => {
+                        // Subscription died. Re-subscribe.
+                        subscription = relay_chain_sync
+                            .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
+                            .await;
+                        break header::hash_from_scale_encoded_header(
+                            &subscription.finalized_block_scale_encoded_header,
+                        );
+                    }
                 }
             }
         };
@@ -1473,10 +1527,7 @@ fn run_single_runtime_call(
             executor::runtime_call::RuntimeCall::StorageGet(get) => {
                 let child_trie = get.child_trie().map(|c| c.as_ref().to_vec());
                 let trie_root = if let Some(child_trie) = &child_trie {
-                    const PREFIX: &[u8] = b":child_storage:default:";
-                    let mut key = Vec::with_capacity(PREFIX.len() + child_trie.len());
-                    key.extend_from_slice(PREFIX);
-                    key.extend_from_slice(child_trie);
+                    let key = smoldot::trie::default_child_trie_root_key(child_trie);
                     match proof.storage_value(state_root, &key) {
                         Ok(Some((value, _))) => match <&[u8; 32]>::try_from(value) {
                             Ok(hash) => Some(*hash),
