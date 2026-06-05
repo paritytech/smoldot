@@ -38,25 +38,17 @@ impl<T> NonFinalizedTree<T> {
                 || !matches!(self.finality, Finality::Outsourced)
         );
 
-        self.blocks_trigger_gp_change
-            .range((
-                ops::Bound::Excluded((
-                    Some(self.finalized_block_number),
-                    fork_tree::NodeIndex::MAX,
-                )),
-                ops::Bound::Unbounded,
-            ))
-            .map(|(_prev_auth_change_trigger_number, block_index)| {
-                debug_assert!(
-                    _prev_auth_change_trigger_number
-                        .map_or(false, |n| n > self.finalized_block_number)
-                );
+        // All entries are yielded, including the first pending set-change blocks (key `None`
+        // or `<=` finalized), which must be finalized before any of their descendants.
+        self.blocks_trigger_gp_change.iter().map(
+            |(_prev_auth_change_trigger_number, block_index)| {
                 let block = self
                     .blocks
                     .get(*block_index)
                     .unwrap_or_else(|| unreachable!());
                 (block.number, &block.hash)
-            })
+            },
+        )
     }
 
     /// Verifies the given justification.
