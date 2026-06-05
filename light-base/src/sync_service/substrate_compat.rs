@@ -1776,10 +1776,15 @@ fn neighbor_packet_outcome(
     }
 }
 
-/// Warp is downloading/building, or a qualifying source is available for the next request.
+/// Warp is downloading/building, holds a completed-but-suppressed result, or a qualifying
+/// source is available for the next request.
 fn warp_sync_can_proceed(
     sync: &all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>,
 ) -> bool {
+    // A result completed while suppressed is fresh; it must be applied, not discarded.
+    if sync.has_pending_warp_completion() {
+        return true;
+    }
     match sync.status() {
         all::Status::WarpSyncFragments {
             source: Some(_), ..
@@ -1788,9 +1793,17 @@ fn warp_sync_can_proceed(
         // At the mode-decision point no warp request is dispatched yet, so this arm decides.
         // The caller already fed the source's finalized height (update_source_finality_state),
         // so desired_requests() is expected to already include a warp request when the gap > 32.
-        _ => sync
-            .desired_requests()
-            .any(|(_, _, rq)| matches!(rq, all::DesiredRequest::WarpSync { .. })),
+        // The storage/call-proof requests are emitted only by the warp machine; they cover the
+        // window between the last fragment verification and the runtime-download dispatch,
+        // where the status still reports `WarpSyncFragments { source: None }`.
+        _ => sync.desired_requests().any(|(_, _, rq)| {
+            matches!(
+                rq,
+                all::DesiredRequest::WarpSync { .. }
+                    | all::DesiredRequest::StorageGetMerkleProof { .. }
+                    | all::DesiredRequest::RuntimeCallMerkleProof { .. }
+            )
+        }),
     }
 }
 
@@ -1853,6 +1866,8 @@ mod tests {
     // - add a `Status::WarpSyncChainInformation` case
     //   (see https://github.com/paritytech/smoldot/pull/3268#discussion_r3311390876)
     //   needs a test-only AllSync setter or crypto-correct warp fragments
+    // - same limitation for the pending-completion and storage/call-proof arms of
+    //   `warp_sync_can_proceed` (docs/SYNC_MODE_DECISION_RACE.md)
     use super::*;
     use smoldot::{
         chain::chain_information,
