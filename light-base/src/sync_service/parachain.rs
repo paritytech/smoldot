@@ -1160,13 +1160,14 @@ fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
 }
 
 impl<TPlat: PlatformRef> Task<TPlat> {
+    /// Sends a notification to all the notification receivers.
+    ///
+    /// A subscriber whose buffer is full is dropped, per the `subscribe_all` contract;
+    /// skipping the notification instead would leave a gap in its stream.
     fn dispatch_all_subscribers(&mut self, notification: Notification) {
         for index in (0..self.all_notifications.len()).rev() {
             let subscription = self.all_notifications.swap_remove(index);
             if subscription.try_send(notification.clone()).is_err() {
-                if !subscription.is_closed() {
-                    self.all_notifications.push(subscription);
-                }
                 continue;
             }
 
