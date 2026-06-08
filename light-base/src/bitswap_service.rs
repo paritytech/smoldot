@@ -181,12 +181,15 @@ impl BitswapService {
     /// whose `events_rx` yields one `(cid_string, BlockResult)` event per input CID, in arrival
     /// order (the order in which each CID resolves), not input order.
     ///
-    /// Top-level errors: only the batch-input validation cases — `-32801 TooManyCids`,
-    /// `-32802 EmptyCids`, `-32803 DuplicateCids` — are surfaced at the top level. Wholesale
-    /// Have-broadcast failures (no peers connected / network send queue full) are NOT top-level
-    /// errors per the `bitswap_unstable_stream` spec: the subscription opens normally and the
-    /// failure fans out as one `streamItemError(-32812 FailRetryBackoff)` per remaining valid
-    /// CID, followed by `streamDone`.
+    /// Top-level errors:
+    /// - `-32801 TooManyCids`, `-32802 EmptyCids`, `-32803 DuplicateCids`: batch-input
+    ///   validation, surfaced before any subscription state is created.
+    /// - `-32812 FailRetryBackoff`: wholesale Have-broadcast failure at subscription-open time
+    ///   (no Bitswap peers connected, or network send queue full).
+    ///
+    /// Per-CID failures observed *after* the subscription has opened (e.g. all peers
+    /// disconnect mid-stream, individual `Block` request errors) still surface as
+    /// `streamItemError` events, as per the spec.
     ///
     /// Dropping the returned handle (explicit unsubscribe or client disconnect) cancels remaining
     /// work and emits a Bitswap Cancel wantlist to peers we previously contacted.
@@ -473,9 +476,7 @@ enum ToBackground {
         ready_tx: oneshot::Sender<Result<BatchId, BitswapGetError>>,
     },
     /// Cancel an in-flight batch. Idempotent: if the batch already finished, this is a no-op.
-    CancelBatch {
-        batch_id: BatchId,
-    },
+    CancelBatch { batch_id: BatchId },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -545,11 +546,7 @@ enum HaveContext {
         /// is queued and don't appear here.
         cids: Vec<(usize, Cid)>,
         /// Channel for signalling subscription readiness back to the caller of
-        /// [`BitswapService::bitswap_stream`]. Always sent as `Ok(batch_id)` exactly once when
-        /// the broadcast resolves: on success because the peer set is non-empty, or on wholesale
-        /// failure because the spec mandates the subscription open regardless (the failure is
-        /// reported via per-CID `streamItemError` events in `events_tx` instead). The `Result`
-        /// type is kept for structural symmetry with `bitswap_get`'s error path.
+        /// [`BitswapService::bitswap_stream`].
         ready_tx: oneshot::Sender<Result<BatchId, BitswapGetError>>,
     },
 }
@@ -776,9 +773,10 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
             let msg = message.clone();
             // Fire-and-forget. Cancel is best-effort and does not need to be awaited; if it
             // fails the peer will eventually expire its want-list state on its own.
-            self.platform.spawn_task(self.log_target.clone().into(), async move {
-                let _ = network_service.send_bitswap_message(peer, msg).await;
-            });
+            self.platform
+                .spawn_task(self.log_target.clone().into(), async move {
+                    let _ = network_service.send_bitswap_message(peer, msg).await;
+                });
         }
     }
 }
@@ -1002,14 +1000,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let network_service = task.network_service.clone();
                 task.pending_have_broadcast = Some(Box::pin(async move {
                     let result = network_service.broadcast_bitswap_message(message).await;
-                    (
-                        result,
-                        HaveContext::Batch {
-                            batch_id,
-                            cids: valid_cids,
-                            ready_tx,
-                        },
-                    )
+                    (result, HaveContext::Batch {
+                        batch_id,
+                        cids: valid_cids,
+                        ready_tx,
+                    })
                 }));
             }
             WakeUpReason::Message(ToBackground::CancelBatch { batch_id }) => {
@@ -1065,15 +1060,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         have_peers
                     };
 
-                    task.requests.insert(
-                        request_id,
-                        Request {
-                            result_tx: SlotOutput::Single(result_tx),
-                            timeout: timeout.clone(),
-                            stage: RequestStage::Have(have_peers),
-                            cid: cid.clone(),
-                        },
-                    );
+                    task.requests.insert(request_id, Request {
+                        result_tx: SlotOutput::Single(result_tx),
+                        timeout: timeout.clone(),
+                        stage: RequestStage::Have(have_peers),
+                        cid: cid.clone(),
+                    });
                     task.requests_by_timeout.insert((timeout, request_id));
                     task.requests_by_cid
                         .entry(cid)
@@ -1093,41 +1085,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 &task.platform,
                                 Trace,
                                 &task.log_target,
-                                "have broadcast failed (batch), fanning out per-CID errors",
+                                "have broadcast failed (batch), rejecting subscription",
                                 batch_id = batch_id.0,
                                 ?err
                             );
-                            // Per spec (bitswap_unstable_stream.md): a wholesale broadcast
-                            // failure is NOT a top-level subscription rejection. The
-                            // subscription opens normally, one streamItemError per remaining
-                            // valid CID is emitted, then streamDone.
-                            //
-                            // Invalid CIDs have already been pre-resolved at batch creation
-                            // and their per-CID events are already in events_tx. We only need
-                            // to fan out for the valid slots (those in `cids`). The per-CID
-                            // code mapping for NoPeers / QueueFull → -32812 is locked by
-                            // `to_block_result_err` and the
-                            // `block_result_err_codes_match_top_level_codes` unit test.
-                            if let Some(batch) = task.batches.remove(&batch_id) {
-                                for (slot_idx, _cid) in cids {
-                                    let cid_str = batch.cid_strs[slot_idx].clone();
-                                    match batch
-                                        .events_tx
-                                        .try_send((cid_str, BlockResult::Err(err.clone())))
-                                    {
-                                        Ok(())
-                                        | Err(async_channel::TrySendError::Closed(_)) => {}
-                                        Err(async_channel::TrySendError::Full(_)) => {
-                                            // Invariant: see deliver_batch_slot's Full arm.
-                                            unreachable!()
-                                        }
-                                    }
-                                }
-                                // Dropping events_tx closes the channel — the JSON-RPC pump
-                                // sees the close and emits the spec-required streamDone.
-                                drop(batch.events_tx);
-                            }
-                            let _ = ready_tx.send(Ok(batch_id));
+                            task.batches.remove(&batch_id);
+                            let _ = ready_tx.send(Err(err));
                             continue;
                         }
                     };
@@ -1177,16 +1140,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             have_peers
                         };
 
-                        task.requests.insert(
-                            request_id,
-                            Request {
-                                result_tx: SlotOutput::Batch { batch_id, slot_idx },
-                                timeout: timeout.clone(),
-                                stage: RequestStage::Have(have_peers),
-                                cid: cid.clone(),
-                            },
-                        );
-                        task.requests_by_timeout.insert((timeout.clone(), request_id));
+                        task.requests.insert(request_id, Request {
+                            result_tx: SlotOutput::Batch { batch_id, slot_idx },
+                            timeout: timeout.clone(),
+                            stage: RequestStage::Have(have_peers),
+                            cid: cid.clone(),
+                        });
+                        task.requests_by_timeout
+                            .insert((timeout.clone(), request_id));
                         task.requests_by_cid
                             .entry(cid)
                             .or_default()
@@ -1207,7 +1168,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 // Slots that have just resolved and need to be delivered after the per-block-
                 // presence borrow on `task.requests_by_cid` is released.
-                let mut deliveries: Vec<(SlotOutput, Result<Vec<u8>, BitswapGetError>)> = Vec::new();
+                let mut deliveries: Vec<(SlotOutput, Result<Vec<u8>, BitswapGetError>)> =
+                    Vec::new();
 
                 for BlockPresence { cid, presence_type } in message.block_presences {
                     let cid = match Cid::from_bytes(cid.to_owned()) {
@@ -1659,7 +1621,9 @@ mod tests {
 
     #[test]
     fn parse_and_dedup_accepts_max_size() {
-        let cids: Vec<String> = (0..MAX_CIDS_PER_REQUEST).map(|i| format!("invalid-{i}")).collect();
+        let cids: Vec<String> = (0..MAX_CIDS_PER_REQUEST)
+            .map(|i| format!("invalid-{i}"))
+            .collect();
         let out = parse_and_dedup(cids).unwrap();
         assert_eq!(out.len(), MAX_CIDS_PER_REQUEST);
     }
