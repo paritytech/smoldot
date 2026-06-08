@@ -478,10 +478,16 @@ mod tests {
         ]);
 
         let matches = subs.matching(&[batch_entry(0x01, vec![[7u8; 32]])]);
-        assert_eq!(matched_ids(&matches), vec!["all".to_string(), "any".to_string()]);
+        assert_eq!(
+            matched_ids(&matches),
+            vec!["all".to_string(), "any".to_string()]
+        );
 
         let matches = subs.matching(&[batch_entry(0x02, vec![])]);
-        assert_eq!(matched_ids(&matches), vec!["all".to_string(), "any".to_string()]);
+        assert_eq!(
+            matched_ids(&matches),
+            vec!["all".to_string(), "any".to_string()]
+        );
     }
 
     #[test]
