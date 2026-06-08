@@ -30,10 +30,7 @@ use smoldot_e2e_tests::{
 use zombienet_sdk::{
     snapshot::BundleBuilder,
     subxt::{
-        config::{
-            substrate::SubstrateConfig, transaction_extensions, Config,
-            DefaultExtrinsicParamsBuilder,
-        },
+        config::{substrate::SubstrateConfig, DefaultExtrinsicParamsBuilder},
         dynamic::{tx, Value},
         OnlineClient,
     },
@@ -49,33 +46,11 @@ const EXTRINSIC_TIMEOUT_SECS: u64 = 60;
 const AUTH_TX_LIMIT: u32 = 1000;
 const AUTH_BYTE_LIMIT: u64 = 100_000_000;
 
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-enum BulletinConfig {}
-
-type BulletinExtrinsicParams = transaction_extensions::AnyOf<
-    BulletinConfig,
-    (
-        transaction_extensions::VerifySignature<BulletinConfig>,
-        transaction_extensions::CheckSpecVersion,
-        transaction_extensions::CheckTxVersion,
-        transaction_extensions::CheckNonce,
-        transaction_extensions::CheckGenesis<BulletinConfig>,
-        transaction_extensions::CheckMortality<BulletinConfig>,
-        transaction_extensions::ChargeAssetTxPayment<BulletinConfig>,
-        transaction_extensions::ChargeTransactionPayment,
-        transaction_extensions::CheckMetadataHash,
-    ),
->;
-
-impl Config for BulletinConfig {
-    type AccountId = <SubstrateConfig as Config>::AccountId;
-    type Address = <SubstrateConfig as Config>::Address;
-    type Signature = <SubstrateConfig as Config>::Signature;
-    type Hasher = <SubstrateConfig as Config>::Hasher;
-    type Header = <SubstrateConfig as Config>::Header;
-    type ExtrinsicParams = BulletinExtrinsicParams;
-    type AssetId = <SubstrateConfig as Config>::AssetId;
-}
+// The bulletin chain is a vanilla substrate chain (standard AccountId32 /
+// MultiAddress / sr25519 / Blake2 header) whose signed extensions all fall
+// within subxt's `DefaultExtrinsicParams` set, so stock `SubstrateConfig`
+// works. The actual calls are built dynamically against the live chain's
+// metadata (see `tx(...)` below), so they target the real bulletin runtime.
 
 struct SnapshotOpts {
     chain_spec: PathBuf,
@@ -283,8 +258,8 @@ async fn spawn_network(chain_spec: &Path) -> Result<Network<LocalFileSystem>> {
     Ok(network)
 }
 
-async fn connect_subxt(ws_url: &str) -> Result<OnlineClient<BulletinConfig>> {
-    OnlineClient::<BulletinConfig>::from_url(ws_url)
+async fn connect_subxt(ws_url: &str) -> Result<OnlineClient<SubstrateConfig>> {
+    OnlineClient::<SubstrateConfig>::from_url(ws_url)
         .await
         .with_context(|| format!("subxt connect to {ws_url}"))
 }
@@ -294,7 +269,7 @@ async fn connect_subxt(ws_url: &str) -> Result<OnlineClient<BulletinConfig>> {
 /// origin to a fixed set of test accounts (Alice in `bulletin-westend`'s
 /// `local_testnet` preset), so no sudo wrapping is needed.
 async fn authorize_account(
-    api: &OnlineClient<BulletinConfig>,
+    api: &OnlineClient<SubstrateConfig>,
     authorizer: &Keypair,
     target: &Keypair,
 ) -> Result<()> {
@@ -309,7 +284,7 @@ async fn authorize_account(
         ],
     );
 
-    let params = DefaultExtrinsicParamsBuilder::<BulletinConfig>::new().build();
+    let params = DefaultExtrinsicParamsBuilder::<SubstrateConfig>::new().build();
     let progress = tokio::time::timeout(
         Duration::from_secs(EXTRINSIC_TIMEOUT_SECS),
         api.tx()
@@ -331,7 +306,7 @@ async fn authorize_account(
 /// Submits `transactionStorage::store(data)` and waits for the `Stored`
 /// event. Returns the predicted CID.
 async fn submit_store(
-    api: &OnlineClient<BulletinConfig>,
+    api: &OnlineClient<SubstrateConfig>,
     signer: &Keypair,
     payload: &Payload,
 ) -> Result<String> {
@@ -349,7 +324,7 @@ async fn submit_store(
         vec![Value::from_bytes(payload.content)],
     );
 
-    let params = DefaultExtrinsicParamsBuilder::<BulletinConfig>::new().build();
+    let params = DefaultExtrinsicParamsBuilder::<SubstrateConfig>::new().build();
     let progress = tokio::time::timeout(
         Duration::from_secs(EXTRINSIC_TIMEOUT_SECS),
         api.tx().sign_and_submit_then_watch(&call, signer, params),
