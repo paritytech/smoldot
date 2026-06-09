@@ -518,6 +518,12 @@ enum Event<TPlat: PlatformRef> {
         request_id_json: String,
         result: Result<Vec<u8>, bitswap_service::BitswapGetError>,
     },
+    /// Result of [`bitswap_service::BitswapService::bitswap_stream`] (the Have-broadcast handshake).
+    /// Resolving this off the main dispatch loop keeps `bitswap_unstable_stream` non-blocking.
+    BitswapStreamReady {
+        request_id_json: String,
+        result: Result<bitswap_service::BitswapStreamHandle, bitswap_service::BitswapGetError>,
+    },
     /// One iteration of the `bitswap_unstable_stream` events pump. `event` is `None` if the
     /// events channel closed (no more notifications). The receiver is shipped along so the main
     /// loop can re-arm the next pump iteration.
@@ -611,10 +617,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             2,
             Default::default(),
         ),
-        bitswap_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-            0,
-            Default::default(),
-        ),
+        bitswap_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
         chain_head_follow_subscriptions: hashbrown::HashMap::with_hasher(Default::default()),
         legacy_api_storage_subscriptions: BTreeSet::new(),
         legacy_api_storage_subscriptions_by_key: BTreeSet::new(),
@@ -1189,50 +1192,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             format!("Bitswap stream subscription: {} cids", cids.len())
                         );
 
-                        match me.bitswap_service.bitswap_stream(cids).await {
-                            Ok(handle) => {
-                                let subscription_id = {
-                                    let mut sub_id = [0u8; 32];
-                                    me.randomness.fill_bytes(&mut sub_id);
-                                    bs58::encode(sub_id).into_string()
-                                };
-
-                                let events_rx = handle.events_rx.clone();
-                                let _prev = me.bitswap_subscriptions.insert(
-                                    subscription_id.clone(),
-                                    BitswapSubscription { _handle: handle },
-                                );
-                                debug_assert!(_prev.is_none());
-
-                                let _ = me
-                                    .responses_tx
-                                    .send(
-                                        methods::Response::bitswap_unstable_stream(Cow::Borrowed(
-                                            &subscription_id,
-                                        ))
-                                        .to_json_response(request_id_json),
-                                    )
-                                    .await;
-
-                                // Push the events pump. The pump yields one event per loop and
-                                // re-arms itself; on channel close it ends the chain by
-                                // delivering `event = None`.
-                                me.background_tasks.push(Box::pin(async move {
-                                    let event = events_rx.recv().await.ok();
-                                    Event::BitswapStreamEvent {
-                                        subscription_id,
-                                        event,
-                                        events_rx,
-                                    }
-                                }));
-                            }
-                            Err(error) => {
-                                let _ = me
-                                    .responses_tx
-                                    .send(error.to_json_rpc_error(request_id_json))
-                                    .await;
-                            }
-                        }
+                        me.background_tasks.push({
+                            let bitswap_service = me.bitswap_service.clone();
+                            let request_id_json = request_id_json.to_owned();
+                            Box::pin(async move {
+                                let result = bitswap_service.bitswap_stream(cids).await;
+                                Event::BitswapStreamReady {
+                                    request_id_json,
+                                    result,
+                                }
+                            })
+                        });
                     }
 
                     methods::MethodCall::bitswap_unstable_unstream { subscription } => {
@@ -4343,13 +4313,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             )
                             .await;
                     }
-                    subscription_info.pinned_blocks_headers.insert(
-                        hash,
-                        match block {
+                    subscription_info
+                        .pinned_blocks_headers
+                        .insert(hash, match block {
                             either::Left(b) => b.scale_encoded_header,
                             either::Right(b) => b.scale_encoded_header,
-                        },
-                    );
+                        });
                 }
 
                 // Push a new background task that will yield an event when the newly-created
@@ -5046,33 +5015,27 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 let finalized_block_hash = header::hash_from_scale_encoded_header(
                     &subscribe_all.finalized_block_scale_encoded_header,
                 );
-                pinned_blocks.insert(
-                    finalized_block_hash,
-                    RecentBlock {
-                        scale_encoded_header: subscribe_all.finalized_block_scale_encoded_header,
-                        runtime_version: Arc::new(subscribe_all.finalized_block_runtime),
-                    },
-                );
+                pinned_blocks.insert(finalized_block_hash, RecentBlock {
+                    scale_encoded_header: subscribe_all.finalized_block_scale_encoded_header,
+                    runtime_version: Arc::new(subscribe_all.finalized_block_runtime),
+                });
                 finalized_and_pruned_lru.put(finalized_block_hash, ());
 
                 let mut current_best_block = finalized_block_hash;
 
                 for block in subscribe_all.non_finalized_blocks_ancestry_order {
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                    pinned_blocks.insert(
-                        hash,
-                        RecentBlock {
-                            scale_encoded_header: block.scale_encoded_header,
-                            runtime_version: match block.new_runtime {
-                                Some(r) => Arc::new(r),
-                                None => pinned_blocks
-                                    .get(&block.parent_hash)
-                                    .unwrap()
-                                    .runtime_version
-                                    .clone(),
-                            },
+                    pinned_blocks.insert(hash, RecentBlock {
+                        scale_encoded_header: block.scale_encoded_header,
+                        runtime_version: match block.new_runtime {
+                            Some(r) => Arc::new(r),
+                            None => pinned_blocks
+                                .get(&block.parent_hash)
+                                .unwrap()
+                                .runtime_version
+                                .clone(),
                         },
-                    );
+                    });
 
                     if block.is_new_best {
                         current_best_block = hash;
@@ -5198,20 +5161,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     )),
                 );
 
-                let _was_in = pinned_blocks.insert(
-                    hash,
-                    RecentBlock {
-                        scale_encoded_header: block.scale_encoded_header,
-                        runtime_version: match block.new_runtime {
-                            Some(r) => Arc::new(r),
-                            None => pinned_blocks
-                                .get(&block.parent_hash)
-                                .unwrap()
-                                .runtime_version
-                                .clone(),
-                        },
+                let _was_in = pinned_blocks.insert(hash, RecentBlock {
+                    scale_encoded_header: block.scale_encoded_header,
+                    runtime_version: match block.new_runtime {
+                        Some(r) => Arc::new(r),
+                        None => pinned_blocks
+                            .get(&block.parent_hash)
+                            .unwrap()
+                            .runtime_version
+                            .clone(),
                     },
-                );
+                });
                 debug_assert!(_was_in.is_none());
 
                 for subscription_id in &me.all_heads_subscriptions {
@@ -6059,6 +6019,56 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     Err(error) => error.to_json_rpc_error(&request_id_json),
                 };
                 let _ = me.responses_tx.send(response).await;
+            }
+
+            WakeUpReason::Event(Event::BitswapStreamReady {
+                request_id_json,
+                result,
+            }) => {
+                match result {
+                    Ok(handle) => {
+                        let subscription_id = {
+                            let mut sub_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut sub_id);
+                            bs58::encode(sub_id).into_string()
+                        };
+
+                        let events_rx = handle.events_rx.clone();
+                        let _prev = me
+                            .bitswap_subscriptions
+                            .insert(subscription_id.clone(), BitswapSubscription {
+                                _handle: handle,
+                            });
+                        debug_assert!(_prev.is_none());
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::bitswap_unstable_stream(Cow::Borrowed(
+                                    &subscription_id,
+                                ))
+                                .to_json_response(&request_id_json),
+                            )
+                            .await;
+
+                        // Push the events pump. The pump yields one event per loop and re-arms
+                        // itself; on channel close it ends the chain by delivering `event = None`.
+                        me.background_tasks.push(Box::pin(async move {
+                            let event = events_rx.recv().await.ok();
+                            Event::BitswapStreamEvent {
+                                subscription_id,
+                                event,
+                                events_rx,
+                            }
+                        }));
+                    }
+                    Err(error) => {
+                        let _ = me
+                            .responses_tx
+                            .send(error.to_json_rpc_error(&request_id_json))
+                            .await;
+                    }
+                }
             }
 
             WakeUpReason::Event(Event::BitswapStreamEvent {
