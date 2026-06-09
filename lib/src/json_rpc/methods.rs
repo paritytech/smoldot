@@ -1109,8 +1109,24 @@ pub enum SystemPeerRole {
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum StatementSubmitResult {
     New,
-    Invalid { reason: String },
-    InternalError { error: String },
+    Invalid { reason: InvalidReason },
+    InternalError { error: InternalError },
+}
+
+/// Reason why a submitted statement was rejected as invalid.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum InvalidReason {
+    /// The SCALE-encoded statement failed to decode.
+    #[serde(rename = "Invalid statement encoding")]
+    Encoding,
+}
+
+/// Reason why a submitted statement could not be processed internally.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum InternalError {
+    /// The statement is valid but there were no connected peers to broadcast it to.
+    #[serde(rename = "No connected peers")]
+    NoConnectedPeers,
 }
 
 /// Notification event for statement subscriptions.
@@ -1533,24 +1549,35 @@ mod tests {
 
     #[test]
     fn statement_submit_result_serialization() {
-        let new = super::StatementSubmitResult::New;
+        use super::{InternalError, InvalidReason, StatementSubmitResult};
+
+        let new = StatementSubmitResult::New;
         assert_eq!(serde_json::to_string(&new).unwrap(), r#"{"status":"new"}"#);
 
-        let invalid = super::StatementSubmitResult::Invalid {
-            reason: "bad encoding".into(),
+        let invalid = StatementSubmitResult::Invalid {
+            reason: InvalidReason::Encoding,
         };
         assert_eq!(
             serde_json::to_string(&invalid).unwrap(),
-            r#"{"status":"invalid","reason":"bad encoding"}"#
+            r#"{"status":"invalid","reason":"Invalid statement encoding"}"#
         );
 
-        let internal = super::StatementSubmitResult::InternalError {
-            error: "No connected peers".into(),
+        let internal = StatementSubmitResult::InternalError {
+            error: InternalError::NoConnectedPeers,
         };
         assert_eq!(
             serde_json::to_string(&internal).unwrap(),
             r#"{"status":"internalError","error":"No connected peers"}"#
         );
+
+        // Round-trips: the typed fields deserialize back from their wire strings.
+        for value in [new, invalid, internal] {
+            let json = serde_json::to_string(&value).unwrap();
+            assert_eq!(
+                serde_json::from_str::<StatementSubmitResult>(&json).unwrap(),
+                value
+            );
+        }
     }
 
     #[test]

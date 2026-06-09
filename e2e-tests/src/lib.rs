@@ -24,8 +24,8 @@ pub mod snapshot;
 pub mod statement;
 
 pub use network::{
-    run_smoke_js, spawn_scenario, spawned_chain_spec_paths, LiveNetwork, Scenario, SmoldotDbPaths,
-    SnapshotPaths, BEST_METRIC, FINALIZED_METRIC, PARA_ID,
+    run_chainhead_v1_follow_js, run_smoke_js, spawn_scenario, spawned_chain_spec_paths,
+    LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC, FINALIZED_METRIC, PARA_ID,
 };
 
 /// A file-backed Rust → JS message channel. Rust appends newline-terminated
@@ -146,8 +146,8 @@ pub async fn run_browser_test(script: &str, env_vars: &[(&str, &str)]) -> Result
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    eprintln!("--- browser stdout ---\n{stdout}");
     eprintln!("--- browser stderr ---\n{stderr}");
+    eprintln!("--- browser stdout ---\n{stdout}");
 
     if output.status.success() {
         Ok(())
@@ -178,8 +178,8 @@ pub async fn run_js_test(script: &str, env_vars: &[(&str, &str)]) -> Result<(), 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    eprintln!("--- JS stdout ---\n{stdout}");
     eprintln!("--- JS stderr ---\n{stderr}");
+    eprintln!("--- JS stdout ---\n{stdout}");
 
     if output.status.success() {
         Ok(())

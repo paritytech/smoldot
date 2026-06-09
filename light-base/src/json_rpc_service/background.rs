@@ -2341,26 +2341,29 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             }
                         };
 
-                        if child_trie.is_some() {
-                            // TODO: implement this
+                        // Child-trie queries only support value and hash reads. The descendants
+                        // and merkle-value variants resolve against a trie root that, for a child
+                        // trie, isn't known until its proof arrives.
+                        if child_trie.is_some()
+                            && items.iter().any(|item| {
+                                !matches!(
+                                    item.ty,
+                                    methods::ChainHeadStorageType::Value
+                                        | methods::ChainHeadStorageType::Hash
+                                )
+                            })
+                        {
                             let _ = me
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
                                     parse::ErrorResponse::ServerError(
                                         -32000,
-                                        "Child key storage queries not supported yet",
+                                        "child-trie storage queries only support value and hash reads",
                                     ),
                                     None,
                                 ))
                                 .await;
-                            log!(
-                                &me.platform,
-                                Warn,
-                                &me.log_target,
-                                "chainHead_v1_storage has been called with a non-null childTrie. \
-                                This isn't supported by smoldot yet."
-                            );
                             continue;
                         }
 
@@ -2412,15 +2415,28 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         }
 
                         // Initialize the storage query operation.
-                        let fetch_operation = me.sync_service.clone().storage_query(
-                            block_number,
-                            hash.0,
-                            block_state_trie_root,
-                            storage_operations.into_iter(),
-                            3,
-                            Duration::from_secs(20),
-                            NonZero::<u32>::new(2).unwrap(),
-                        );
+                        let fetch_operation = if let Some(child_trie) = child_trie {
+                            me.sync_service.clone().child_storage_query(
+                                block_number,
+                                hash.0,
+                                block_state_trie_root,
+                                child_trie.0,
+                                storage_operations.into_iter(),
+                                3,
+                                Duration::from_secs(20),
+                                NonZero::<u32>::new(2).unwrap(),
+                            )
+                        } else {
+                            me.sync_service.clone().storage_query(
+                                block_number,
+                                hash.0,
+                                block_state_trie_root,
+                                storage_operations.into_iter(),
+                                3,
+                                Duration::from_secs(20),
+                                NonZero::<u32>::new(2).unwrap(),
+                            )
+                        };
 
                         let operation_id = {
                             let mut operation_id = [0u8; 32];
