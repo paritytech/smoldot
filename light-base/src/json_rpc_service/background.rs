@@ -4447,7 +4447,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 match notification {
                     sync_service::Notification::Finalized {
                         finalized_blocks_hashes,
-                        hash: _,
                         best_block_hash_if_changed,
                         pruned_blocks,
                     } => {

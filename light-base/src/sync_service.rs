@@ -1336,12 +1336,9 @@ pub enum Notification {
     /// A non-finalized block has been finalized.
     Finalized {
         /// Newly-finalized blocks in ascending order (each the child of the previous). Never
-        /// empty; chains onto the previously-finalized block. All were previously reported as
-        /// blocks.
+        /// empty; chains onto the previously-finalized block. The last element is the highest
+        /// finalized block. All were previously reported as blocks.
         finalized_blocks_hashes: Vec<[u8; 32]>,
-
-        /// Highest finalized block. Equal to the last element of `finalized_blocks_hashes`.
-        hash: [u8; 32],
 
         /// If the current best block is pruned by the finalization, contains the updated hash
         /// of the best block after the finalization.

@@ -2564,11 +2564,12 @@ async fn run_background<TPlat: PlatformRef>(
             }
 
             WakeUpReason::Notification(sync_service::Notification::Finalized {
-                hash,
+                finalized_blocks_hashes,
                 best_block_hash_if_changed,
                 ..
             }) => {
                 // Sync service has reported a finalized block.
+                let hash = *finalized_blocks_hashes.last().unwrap();
 
                 log!(
                     &background.platform,

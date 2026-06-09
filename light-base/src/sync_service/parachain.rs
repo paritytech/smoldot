@@ -356,7 +356,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                                         .rev()
                                         .map(|b| b.block_hash)
                                         .collect(),
-                                    hash: pending_hash,
                                     best_block_hash_if_changed: if result.updates_best_block {
                                         Some(*task.sync.as_ref().unwrap().best_block_hash())
                                     } else {
@@ -925,7 +924,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                                 .rev()
                                 .map(|b| b.block_hash)
                                 .collect(),
-                            hash: finalized_hash,
                             best_block_hash_if_changed: if result.updates_best_block {
                                 Some(*task.sync.as_ref().unwrap().best_block_hash())
                             } else {
@@ -949,11 +947,11 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             }
 
             WakeUpReason::ParaheadNotification(Notification::Finalized {
-                finalized_blocks_hashes: _,
-                hash,
+                finalized_blocks_hashes,
                 best_block_hash_if_changed: _,
                 pruned_blocks: _,
             }) => {
+                let hash = *finalized_blocks_hashes.last().unwrap();
                 log!(
                     &task.platform,
                     Debug,
@@ -983,7 +981,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                                 .rev()
                                 .map(|b| b.block_hash)
                                 .collect(),
-                            hash,
                             best_block_hash_if_changed: if result.updates_best_block {
                                 Some(*task.sync.as_ref().unwrap().best_block_hash())
                             } else {
