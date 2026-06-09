@@ -764,8 +764,8 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
         );
 
         // One Cancel wantlist message containing all pending CIDs, sent to every peer this
-        // batch's Have broadcast reached. Cancel for an unknown CID is harmless on the receiver
-        // side — the peer no-ops.
+        // batch's Have broadcast reached. Substrate Bitswap servers don't track pending
+        // want-lists today, so Cancel is a no-op there; we send it for IPFS-spec conformance.
         let message = build_bitswap_cancel_message(pending_cids.iter());
 
         for peer in batch.peers_for_cancel {
