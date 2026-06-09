@@ -1355,8 +1355,6 @@ enum PendingStorageChangesTrieNode {
 
 /// Writing and reading keys the main trie under this prefix obeys special rules.
 const CHILD_STORAGE_SPECIAL_PREFIX: &[u8] = b":child_storage:";
-/// Writing and reading keys the main trie under this prefix obeys special rules.
-const DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX: &[u8] = b":child_storage:default:";
 
 impl Inner {
     /// Continues the execution.
@@ -1442,11 +1440,7 @@ impl Inner {
                     // If we've finished calculating a child trie, update its entry in the
                     // main trie.
                     if let Some(child_trie) = &trie {
-                        let mut main_trie_key = Vec::with_capacity(
-                            DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() + child_trie.len(),
-                        );
-                        main_trie_key.extend_from_slice(DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX);
-                        main_trie_key.extend_from_slice(child_trie);
+                        let main_trie_key = trie::default_child_trie_root_key(child_trie);
 
                         if trie_root_hash != trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE {
                             self.pending_storage_changes
