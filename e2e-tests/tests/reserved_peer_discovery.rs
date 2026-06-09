@@ -19,25 +19,22 @@
 //!
 //! Spawns a westend-local relay with two validators:
 //!
-//! - `validator-a`: chain-spec bootnode. Smoldot's address book starts
-//!   knowing only A.
-//! - `validator-b`: not a chain-spec bootnode. Zombienet still patches A's
-//!   address into the chain spec before B starts, so B uses A as its own
-//!   bootnode and the two validators gossip-peer with each other normally.
+//! - `validator-a`: chain-spec bootnode. Refuses inbound light-client gossip
+//!   slots (`--in-peers-light 0`) so smoldot cannot establish a gossip
+//!   substream with it — only Kademlia requests are accepted.
+//! - `validator-b`: regular validator; smoldot can gossip-connect to it.
 //!
-//! Smoldot is given the same chain spec, sees only A in `bootNodes`, and
-//! must learn about B through Kademlia FindNode against A (Identify
-//! advertises A's Kad protocol; FindNode then surfaces B from A's routing
-//! table). The test passes if `system_peers` on smoldot eventually lists
-//! B's peer-id — that can only happen after smoldot dials B directly,
-//! which can only happen after Kademlia surfaced B's address.
+//! Smoldot is given the chain spec, sees only A in `bootNodes`, and must
+//! learn about B through a Kademlia `FindNode` request against A. The test
+//! passes if `system_peers` on smoldot eventually lists B's peer-id — which
+//! can only happen after smoldot dials B directly, which can only happen
+//! after Kademlia surfaced B's address.
 
 use anyhow::anyhow;
 use smoldot_e2e_tests::*;
 use std::path::PathBuf;
 use zombienet_sdk::NetworkConfigBuilder;
 
-/// Extracts the trailing `/p2p/<peer_id>` segment from a multiaddr string.
 fn peer_id_from_multiaddr(multiaddr: &str) -> Result<String, anyhow::Error> {
     let suffix = multiaddr
         .rsplit('/')
@@ -61,23 +58,16 @@ async fn reserved_peer_discovery() -> Result<(), anyhow::Error> {
     let images = zombienet_sdk::environment::get_images_from_env();
     let base_dir_str = base_dir.to_str().expect("UTF-8 path").to_owned();
 
-    // Reserved-peer args use zombienet's `{{ZOMBIE:<name>:multiAddress}}`
-    // placeholder, which is resolved at spawn time once both peer-ids are
-    // known. The Rust SDK passes through these placeholders unchanged.
     let config = NetworkConfigBuilder::new()
         .with_relaychain(|r| {
             r.with_chain("westend-local")
                 .with_default_command("polkadot")
                 .with_default_image(images.polkadot.as_str())
-                // Only A is a chain-spec bootnode. Zombienet writes A's
-                // multiaddr into the relay chain spec it emits, so smoldot
-                // (which we point at that same chain spec) sees only A
-                // initially. Discovery must surface B.
-                .with_validator(|n| n.with_name("validator-a").bootnode(true))
-                // B is not a chain-spec bootnode, so it stays out of the
-                // emitted spec's `bootNodes` array. Zombienet still feeds
-                // A's address to B through its own internal --bootnodes
-                // CLI arg, so A and B gossip-peer with each other.
+                .with_validator(|n| {
+                    n.with_name("validator-a")
+                        .bootnode(true)
+                        .with_args(vec![("--in-peers-light", "0").into()])
+                })
                 .with_validator(|n| n.with_name("validator-b").bootnode(false))
         })
         .with_global_settings(|g| g.with_base_dir(base_dir_str.as_str()))
@@ -97,25 +87,10 @@ async fn reserved_peer_discovery() -> Result<(), anyhow::Error> {
     network.detach().await;
     network.wait_until_is_up(120).await?;
 
-    // Wait for the validators to peer with each other before we attach
-    // smoldot — that way we know B is reachable and Kademlia on A has
-    // something to return for FindNode queries on the chain's namespace.
-    let validator_a = network.get_node("validator-a")?;
     let validator_b = network.get_node("validator-b")?;
-    validator_a
-        .wait_metric_with_timeout(
-            "substrate_sub_libp2p_peers_count",
-            |n| n >= 1.0,
-            120u64,
-        )
-        .await
-        .map_err(|e| anyhow!("validator-a never peered with validator-b: {e}"))?;
-
     let validator_b_peer_id = peer_id_from_multiaddr(validator_b.multiaddr())?;
     log::info!("validator-b peer_id={validator_b_peer_id}");
 
-    // Locate the relay chain spec zombienet has emitted (with bootnodes
-    // patched in — only validator-a at this point).
     let zombienet_base = PathBuf::from(
         network
             .base_dir()
@@ -129,7 +104,7 @@ async fn reserved_peer_discovery() -> Result<(), anyhow::Error> {
         "js/reserved_peer_discovery.js",
         &[
             ("RELAY_CHAIN_SPEC", relay_spec.to_str().expect("UTF-8 path")),
-            ("VALIDATOR_B_PEER_ID", validator_b_peer_id.as_str()),
+            ("REQUIRED_PEER_ID", validator_b_peer_id.as_str()),
         ],
     )
     .await

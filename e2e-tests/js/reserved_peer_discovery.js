@@ -24,19 +24,20 @@ import {
 } from "./helpers.js";
 
 const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
-const validatorBPeerId = process.env.VALIDATOR_B_PEER_ID;
+const requiredPeerId = process.env.REQUIRED_PEER_ID;
 
-if (!relaySpecPath || !validatorBPeerId) {
+if (!relaySpecPath || !requiredPeerId) {
   console.error(
-    "Required env vars: RELAY_CHAIN_SPEC, VALIDATOR_B_PEER_ID",
+    "Required env vars: RELAY_CHAIN_SPEC, REQUIRED_PEER_ID",
   );
   process.exit(1);
 }
 
 // Polls `system_peers` until the target peer-id is present, with a deadline.
 // `system_peers` only lists *gossip-connected* peers, so seeing the target
-// here proves smoldot reached B at the substrate level — which can only
-// happen if Kademlia first surfaced B's multiaddr from A.
+// here proves smoldot reached the target at the substrate level — which
+// can only happen if Kademlia first surfaced its multiaddr from another
+// peer.
 async function waitForPeer(chain, targetPeerId, deadline) {
   while (Date.now() < deadline) {
     const reqId = sendRpc(chain, "system_peers", []).toString();
@@ -68,21 +69,18 @@ try {
   relay = await addChainFromSpec(client, relaySpecPath);
   report("addChain relay", true);
 
-  // Allow up to 3 minutes for: connect to A → Identify → Kademlia FindNode
-  // → discover B's multiaddr → connect to B → open block-announces gossip.
-  // The slowest step in practice is the discovery round timer.
   const peers = await waitForPeer(
     relay,
-    validatorBPeerId,
+    requiredPeerId,
     Date.now() + 180_000,
   );
   const ok = peers !== null;
   report(
-    "smoldot reached validator-b via Kademlia discovery",
+    "smoldot reached the required node via Kademlia discovery",
     ok,
     ok
       ? `peers=${peers.map((p) => p.peerId).join(",")}`
-      : `target=${validatorBPeerId} not in system_peers within deadline`,
+      : `target=${requiredPeerId} not in system_peers within deadline`,
   );
   if (!ok) passed = false;
 } catch (e) {
