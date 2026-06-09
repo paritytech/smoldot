@@ -38,8 +38,9 @@ impl<T> NonFinalizedTree<T> {
                 || !matches!(self.finality, Finality::Outsourced)
         );
 
-        // All entries are yielded, including the first pending set-change blocks (key `None`
-        // or `<=` finalized), which must be finalized before any of their descendants.
+        // Yield every pending set-change block. The first tuple field holds the previous set-change
+        // block that must finalize first; `None` means there is none, so this block is
+        // first in line.
         self.blocks_trigger_gp_change.iter().map(
             |(_prev_auth_change_trigger_number, block_index)| {
                 let block = self
