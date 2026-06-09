@@ -404,7 +404,10 @@ fn print_manifest(bundle: &Bundle) {
         bundle.sha256
     );
     println!("\n=== snapshot.rs constants ===");
-    println!("pub const ARTIFACTS_VERSION: &str = \"v1\";");
+    println!(
+        "pub const ARTIFACTS_VERSION: &str = \"{}\";",
+        smoldot_e2e_tests::snapshot::ARTIFACTS_VERSION
+    );
     println!("const BUNDLE_SHA256: &str = \"{}\";", bundle.sha256);
 }
 

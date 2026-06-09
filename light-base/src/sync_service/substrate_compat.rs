@@ -1869,7 +1869,7 @@ mod tests {
     //   (see https://github.com/paritytech/smoldot/pull/3268#discussion_r3311390876)
     //   needs a test-only AllSync setter or crypto-correct warp fragments
     // - same limitation for the pending-completion and storage/call-proof arms of
-    //   `warp_sync_can_proceed` (docs/SYNC_MODE_DECISION_RACE.md)
+    //   `warp_sync_can_proceed`
     use super::*;
     use smoldot::{
         chain::chain_information,
