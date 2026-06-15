@@ -946,20 +946,13 @@ where
                         continue;
                     }
 
+                    // `Some` whenever the async operation finished, regardless of whether the
+                    // block was reported. Consumers rely on this to know that the operation's
+                    // outcome was already acted upon (e.g. the relay block was already unpinned);
+                    // returning `None` for a finished-but-unreported block leads to that outcome
+                    // being applied twice.
                     let async_op = match pruned.user_data.async_op {
-                        AsyncOpState::Finished {
-                            user_data,
-                            reported,
-                            ..
-                        } => {
-                            // Here's a small corner case: the async operation was finished, but
-                            // this block wasn't reported yet.
-                            // This is actually problematic because the `TAsync` is thrown away
-                            // silently while the public API gives the impression that all
-                            // `TAsync`s are always returned.
-                            // TODO: solve that
-                            if reported { Some(user_data) } else { None }
-                        }
+                        AsyncOpState::Finished { user_data, .. } => Some(user_data),
                         _ => None,
                     };
 
@@ -1205,8 +1198,8 @@ pub enum OutputUpdate<TBl, TAsync> {
         /// Blocks that were a descendant of the former finalized block but not of the new
         /// finalized block. These blocks are no longer part of the data structure.
         ///
-        /// If the `Option<TAsync>` is `Some`, then that block was part of the output. Otherwise
-        /// it wasn't.
+        /// If the `Option<TAsync>` is `Some`, then that block's asynchronous operation had
+        /// finished. Otherwise it hadn't.
         pruned_blocks: Vec<(NodeIndex, TBl, Option<TAsync>)>,
     },
 
@@ -1295,13 +1288,12 @@ mod tests {
     use super::{AsyncTree, Config, NextNecessaryAsyncOp, OutputUpdate};
     use core::time::Duration;
 
-    // A relay block whose async op finished but which is pruned before being
-    // reported comes back in `pruned_blocks` with `None` async data, even though
-    // `async_op_finished` already returned it. `sync_service/paraheads.rs` unpins
-    // on both signals, so the same block is unpinned twice (Sentry DOTLI-7P:
-    // panic at runtime_service.rs:493).
+    // Regression test for the paraheads double-unpin (Sentry DOTLI-7P, panic at
+    // runtime_service.rs:493). A block whose async op finished but which is
+    // pruned before being reported must still report `Some` in `pruned_blocks`,
+    // so consumers don't act on its outcome a second time.
     #[test]
-    fn finished_but_unreported_pruned_block_is_delivered_through_both_unpin_paths() {
+    fn finished_but_unreported_pruned_block_reports_its_async_op() {
         let now = Duration::new(0, 0);
 
         let mut tree = AsyncTree::<Duration, &'static str, &'static str>::new(Config {
@@ -1323,28 +1315,30 @@ mod tests {
             other => panic!("expected relay-B to be reported, got {other:?}"),
         }
 
-        // Block A (fork, never reported): finish its op. This is path A's unpin.
+        // Block A (fork, never reported): finish its op without advancing it.
         let block_a = tree.input_insert_block("relay-A", None, false, false);
         let op_a = match tree.next_necessary_async_op(&now) {
             NextNecessaryAsyncOp::Ready(p) => p,
             NextNecessaryAsyncOp::NotReady { .. } => unreachable!(),
         };
         assert_eq!(op_a.block_index, block_a);
-        let unpinned_via_path_a = tree.async_op_finished(op_a.id, "parahead-A");
-        assert!(unpinned_via_path_a.contains(&block_a));
+        assert!(
+            tree.async_op_finished(op_a.id, "parahead-A")
+                .contains(&block_a)
+        );
 
-        // Finalize B without advancing A: A is pruned while `reported: false`.
+        // Finalize B: A is pruned while `reported: false`.
         tree.input_finalize(block_b);
         let pruned_blocks = match tree.try_advance_output() {
             Some(OutputUpdate::Finalized { pruned_blocks, .. }) => pruned_blocks,
             other => panic!("expected finalization of relay-B, got {other:?}"),
         };
 
-        // Path B sees `None` and unpins A again.
+        // A's finished op must come back as `Some`, so it isn't acted on twice.
         let a_entry = pruned_blocks
             .iter()
             .find(|(idx, _, _)| *idx == block_a)
             .expect("relay-A must appear in pruned_blocks");
-        assert_eq!(a_entry.2, None);
+        assert_eq!(a_entry.2, Some("parahead-A"));
     }
 }
