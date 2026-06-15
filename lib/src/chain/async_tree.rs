@@ -1289,3 +1289,62 @@ enum NextNecessaryAsyncOpInternal<TNow> {
 }
 
 // TODO: needs tests
+
+#[cfg(test)]
+mod tests {
+    use super::{AsyncTree, Config, NextNecessaryAsyncOp, OutputUpdate};
+    use core::time::Duration;
+
+    // A relay block whose async op finished but which is pruned before being
+    // reported comes back in `pruned_blocks` with `None` async data, even though
+    // `async_op_finished` already returned it. `sync_service/paraheads.rs` unpins
+    // on both signals, so the same block is unpinned twice (Sentry DOTLI-7P:
+    // panic at runtime_service.rs:493).
+    #[test]
+    fn finished_but_unreported_pruned_block_is_delivered_through_both_unpin_paths() {
+        let now = Duration::new(0, 0);
+
+        let mut tree = AsyncTree::<Duration, &'static str, &'static str>::new(Config {
+            finalized_async_user_data: "para-genesis",
+            retry_after_failed: Duration::from_secs(5),
+            blocks_capacity: 4,
+        });
+
+        // Block B (best chain): finish its op and report it.
+        let block_b = tree.input_insert_block("relay-B", None, false, true);
+        let op_b = match tree.next_necessary_async_op(&now) {
+            NextNecessaryAsyncOp::Ready(p) => p,
+            NextNecessaryAsyncOp::NotReady { .. } => unreachable!(),
+        };
+        assert_eq!(op_b.block_index, block_b);
+        tree.async_op_finished(op_b.id, "parahead-B");
+        match tree.try_advance_output() {
+            Some(OutputUpdate::Block(b)) => assert_eq!(b.index, block_b),
+            other => panic!("expected relay-B to be reported, got {other:?}"),
+        }
+
+        // Block A (fork, never reported): finish its op. This is path A's unpin.
+        let block_a = tree.input_insert_block("relay-A", None, false, false);
+        let op_a = match tree.next_necessary_async_op(&now) {
+            NextNecessaryAsyncOp::Ready(p) => p,
+            NextNecessaryAsyncOp::NotReady { .. } => unreachable!(),
+        };
+        assert_eq!(op_a.block_index, block_a);
+        let unpinned_via_path_a = tree.async_op_finished(op_a.id, "parahead-A");
+        assert!(unpinned_via_path_a.contains(&block_a));
+
+        // Finalize B without advancing A: A is pruned while `reported: false`.
+        tree.input_finalize(block_b);
+        let pruned_blocks = match tree.try_advance_output() {
+            Some(OutputUpdate::Finalized { pruned_blocks, .. }) => pruned_blocks,
+            other => panic!("expected finalization of relay-B, got {other:?}"),
+        };
+
+        // Path B sees `None` and unpins A again.
+        let a_entry = pruned_blocks
+            .iter()
+            .find(|(idx, _, _)| *idx == block_a)
+            .expect("relay-A must appear in pruned_blocks");
+        assert_eq!(a_entry.2, None);
+    }
+}
