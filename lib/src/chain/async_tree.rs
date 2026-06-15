@@ -1163,7 +1163,10 @@ pub struct InputIterItem<'a, TBl, TAsync> {
 
     /// User data of the asynchronous operation of this block.
     ///
-    /// `Some` if and only if the block has been reported in a [`OutputUpdate`] before.
+    /// `Some` if and only if the block has been reported in a [`OutputUpdate`] before, i.e. it is
+    /// part of the output tree. This is deliberately *not* the same condition as the `Option` in
+    /// [`OutputUpdate::Finalized::pruned_blocks`], which is `Some` as soon as the operation has
+    /// finished, whether or not the block was ever reported.
     pub async_op_user_data: Option<&'a TAsync>,
 
     /// Whether this block is considered as the best block of the output.
@@ -1200,6 +1203,10 @@ pub enum OutputUpdate<TBl, TAsync> {
         ///
         /// If the `Option<TAsync>` is `Some`, then that block's asynchronous operation had
         /// finished. Otherwise it hadn't.
+        ///
+        /// Note that this is `Some` even for a block that finished its operation but was never
+        /// reported in an [`OutputUpdate`], which differs from
+        /// [`InputIterItem::async_op_user_data`] (`Some` only once reported).
         pruned_blocks: Vec<(NodeIndex, TBl, Option<TAsync>)>,
     },
 
