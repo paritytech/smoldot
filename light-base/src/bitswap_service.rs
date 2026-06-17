@@ -1000,11 +1000,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let network_service = task.network_service.clone();
                 task.pending_have_broadcast = Some(Box::pin(async move {
                     let result = network_service.broadcast_bitswap_message(message).await;
-                    (result, HaveContext::Batch {
-                        batch_id,
-                        cids: valid_cids,
-                        ready_tx,
-                    })
+                    (
+                        result,
+                        HaveContext::Batch {
+                            batch_id,
+                            cids: valid_cids,
+                            ready_tx,
+                        },
+                    )
                 }));
             }
             WakeUpReason::Message(ToBackground::CancelBatch { batch_id }) => {
@@ -1060,12 +1063,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         have_peers
                     };
 
-                    task.requests.insert(request_id, Request {
-                        result_tx: SlotOutput::Single(result_tx),
-                        timeout: timeout.clone(),
-                        stage: RequestStage::Have(have_peers),
-                        cid: cid.clone(),
-                    });
+                    task.requests.insert(
+                        request_id,
+                        Request {
+                            result_tx: SlotOutput::Single(result_tx),
+                            timeout: timeout.clone(),
+                            stage: RequestStage::Have(have_peers),
+                            cid: cid.clone(),
+                        },
+                    );
                     task.requests_by_timeout.insert((timeout, request_id));
                     task.requests_by_cid
                         .entry(cid)
@@ -1140,12 +1146,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             have_peers
                         };
 
-                        task.requests.insert(request_id, Request {
-                            result_tx: SlotOutput::Batch { batch_id, slot_idx },
-                            timeout: timeout.clone(),
-                            stage: RequestStage::Have(have_peers),
-                            cid: cid.clone(),
-                        });
+                        task.requests.insert(
+                            request_id,
+                            Request {
+                                result_tx: SlotOutput::Batch { batch_id, slot_idx },
+                                timeout: timeout.clone(),
+                                stage: RequestStage::Have(have_peers),
+                                cid: cid.clone(),
+                            },
+                        );
                         task.requests_by_timeout
                             .insert((timeout.clone(), request_id));
                         task.requests_by_cid

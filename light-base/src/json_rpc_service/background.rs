@@ -4329,12 +4329,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             )
                             .await;
                     }
-                    subscription_info
-                        .pinned_blocks_headers
-                        .insert(hash, match block {
+                    subscription_info.pinned_blocks_headers.insert(
+                        hash,
+                        match block {
                             either::Left(b) => b.scale_encoded_header,
                             either::Right(b) => b.scale_encoded_header,
-                        });
+                        },
+                    );
                 }
 
                 // Push a new background task that will yield an event when the newly-created
@@ -5031,27 +5032,33 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 let finalized_block_hash = header::hash_from_scale_encoded_header(
                     &subscribe_all.finalized_block_scale_encoded_header,
                 );
-                pinned_blocks.insert(finalized_block_hash, RecentBlock {
-                    scale_encoded_header: subscribe_all.finalized_block_scale_encoded_header,
-                    runtime_version: Arc::new(subscribe_all.finalized_block_runtime),
-                });
+                pinned_blocks.insert(
+                    finalized_block_hash,
+                    RecentBlock {
+                        scale_encoded_header: subscribe_all.finalized_block_scale_encoded_header,
+                        runtime_version: Arc::new(subscribe_all.finalized_block_runtime),
+                    },
+                );
                 finalized_and_pruned_lru.put(finalized_block_hash, ());
 
                 let mut current_best_block = finalized_block_hash;
 
                 for block in subscribe_all.non_finalized_blocks_ancestry_order {
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                    pinned_blocks.insert(hash, RecentBlock {
-                        scale_encoded_header: block.scale_encoded_header,
-                        runtime_version: match block.new_runtime {
-                            Some(r) => Arc::new(r),
-                            None => pinned_blocks
-                                .get(&block.parent_hash)
-                                .unwrap()
-                                .runtime_version
-                                .clone(),
+                    pinned_blocks.insert(
+                        hash,
+                        RecentBlock {
+                            scale_encoded_header: block.scale_encoded_header,
+                            runtime_version: match block.new_runtime {
+                                Some(r) => Arc::new(r),
+                                None => pinned_blocks
+                                    .get(&block.parent_hash)
+                                    .unwrap()
+                                    .runtime_version
+                                    .clone(),
+                            },
                         },
-                    });
+                    );
 
                     if block.is_new_best {
                         current_best_block = hash;
@@ -5177,17 +5184,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     )),
                 );
 
-                let _was_in = pinned_blocks.insert(hash, RecentBlock {
-                    scale_encoded_header: block.scale_encoded_header,
-                    runtime_version: match block.new_runtime {
-                        Some(r) => Arc::new(r),
-                        None => pinned_blocks
-                            .get(&block.parent_hash)
-                            .unwrap()
-                            .runtime_version
-                            .clone(),
+                let _was_in = pinned_blocks.insert(
+                    hash,
+                    RecentBlock {
+                        scale_encoded_header: block.scale_encoded_header,
+                        runtime_version: match block.new_runtime {
+                            Some(r) => Arc::new(r),
+                            None => pinned_blocks
+                                .get(&block.parent_hash)
+                                .unwrap()
+                                .runtime_version
+                                .clone(),
+                        },
                     },
-                });
+                );
                 debug_assert!(_was_in.is_none());
 
                 for subscription_id in &me.all_heads_subscriptions {
@@ -6050,11 +6060,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         };
 
                         let events_rx = handle.events_rx.clone();
-                        let _prev = me
-                            .bitswap_subscriptions
-                            .insert(subscription_id.clone(), BitswapSubscription {
-                                _handle: handle,
-                            });
+                        let _prev = me.bitswap_subscriptions.insert(
+                            subscription_id.clone(),
+                            BitswapSubscription { _handle: handle },
+                        );
                         debug_assert!(_prev.is_none());
 
                         let _ = me

@@ -100,7 +100,9 @@ async fn bulletin_batch() -> Result<()> {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(36000);
-        eprintln!("DEV_MODE: keeping zombienet alive for {secs}s (set KEEP_ALIVE_SECS to override)...");
+        eprintln!(
+            "DEV_MODE: keeping zombienet alive for {secs}s (set KEEP_ALIVE_SECS to override)..."
+        );
         tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
         return Ok(());
     }

@@ -185,9 +185,7 @@ pub fn build_bitswap_message(
 ///
 /// # Arguments
 /// * `cids` - Iterator of CIDs to cancel
-pub fn build_bitswap_cancel_message(
-    cids: impl Iterator<Item = impl AsRef<[u8]>>,
-) -> Vec<u8> {
+pub fn build_bitswap_cancel_message(cids: impl Iterator<Item = impl AsRef<[u8]>>) -> Vec<u8> {
     let cids: Vec<_> = cids.collect();
 
     let mut entries_encoded = Vec::new();
