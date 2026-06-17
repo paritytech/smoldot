@@ -64,9 +64,11 @@ async fn reserved_peer_discovery() -> Result<(), anyhow::Error> {
                 .with_default_command("polkadot")
                 .with_default_image(images.polkadot.as_str())
                 .with_validator(|n| {
-                    n.with_name("validator-a")
-                        .bootnode(true)
-                        .with_args(vec![("--in-peers-light", "0").into()])
+                    n.with_name("validator-a").bootnode(true).with_args(vec![(
+                        "--in-peers-light",
+                        "0",
+                    )
+                        .into()])
                 })
                 .with_validator(|n| n.with_name("validator-b").bootnode(false))
         })

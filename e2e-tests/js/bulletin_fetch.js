@@ -70,6 +70,30 @@ try {
     }
   }
 
+  // Alias coverage: the legacy `bitswap_v1_get` name must still resolve via
+  // the macro alias to the same handler.
+  if (payloads.length > 0) {
+    const payload = payloads[0];
+    try {
+      const hex = await bitswapGetWithRetry(
+        bulletin,
+        payload.cid,
+        180_000,
+        "bitswap_v1_get",
+      );
+      const bytes = hexToBytes(hex);
+      const sha = await sha256Hex(bytes);
+      const ok = bytes.length === payload.size && sha === payload.sha256;
+      report(
+        "alias-v1-get",
+        ok,
+        ok ? `${bytes.length} bytes via bitswap_v1_get alias` : `size/sha256 mismatch via alias`,
+      );
+    } catch (err) {
+      report("alias-v1-get", false, err.message);
+    }
+  }
+
   try {
     // Given
     const cid = missingCid;
@@ -146,23 +170,30 @@ try {
   } catch (_) {}
 }
 
-if (exitCode || process.exitCode) {
-  process.exit(exitCode || 1);
-}
+// Force exit so Node doesn't sit waiting for the smoldot client's underlying
+// WebSocket / TCP handles to drain on their own (takes a few minutes).
+process.exit(exitCode || process.exitCode || 0);
 
 // Retries the transient BlockRequestFailed/Timeout and NoPeers/QueueFull
-// errors smoldot returns while its peer set is warming up.
-async function bitswapGetWithRetry(chain, cid, totalBudgetMs = 180_000) {
+// errors smoldot returns while its peer set is warming up. `method` lets us
+// exercise both the canonical `bitswap_unstable_get` and the legacy
+// `bitswap_v1_get` alias.
+async function bitswapGetWithRetry(
+  chain,
+  cid,
+  totalBudgetMs = 180_000,
+  method = "bitswap_unstable_get",
+) {
   const deadline = Date.now() + totalBudgetMs;
   let attempt = 0;
   while (true) {
     attempt += 1;
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
-      throw new Error(`bitswap_v1_get timed out after ${totalBudgetMs}ms`);
+      throw new Error(`${method} timed out after ${totalBudgetMs}ms`);
     }
     try {
-      return await sendRpcAndWait(chain, "bitswap_v1_get", [cid], Math.min(60_000, remaining));
+      return await sendRpcAndWait(chain, method, [cid], Math.min(60_000, remaining));
     } catch (err) {
       const code = errorCode(err);
       if (code === ERR_FAIL_BACKOFF || code === ERR_FAIL_RETRY) {

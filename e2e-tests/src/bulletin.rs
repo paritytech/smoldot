@@ -15,7 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use smoldot::libp2p::cid::{Cid, CidPrefix, MultihashType};
 
@@ -41,10 +40,13 @@ pub const DEFAULT_SNAPSHOT_HEIGHT: u64 = 1024;
 /// - `bulletin-partial.tgz` — only the first `PARTIAL_FORK_INDEX` payloads
 ///   are injected, then the partial snapshot is captured.
 ///
-/// The CI test for mixed availability loads `bulletin-full` on one
-/// collator and `bulletin-partial` on another, then fetches a CID that
-/// exists only in `bulletin-full` to verify smoldot still finds it via
-/// gossip when a peer reports `DontHave`.
+/// The fetch test loads `bulletin-full` on one collator and
+/// `bulletin-partial` on another, then fetches a CID that exists only in
+/// `bulletin-full` to verify smoldot still finds it via gossip when a
+/// peer reports `DontHave`. Bulletin's `transactionStorage` column does
+/// not sync via libp2p block-sync, so a partial-snapshot collator
+/// permanently lacks the blob bytes for CIDs stored after its snapshot
+/// point.
 pub const PARTIAL_FORK_INDEX: usize = 2;
 
 /// CIDv1 multicodec for the `raw` codec.
@@ -56,7 +58,10 @@ const CODEC_RAW: u64 = 0x55;
 pub struct Payload {
     pub label: &'static str,
     pub content: &'static [u8],
-    /// Whether the partial bulletin snapshot also contains this CID.
+    /// `true` for payloads injected before `PARTIAL_FORK_INDEX`. Their
+    /// blob bytes are present on both `bulletin-full` and
+    /// `bulletin-partial` collators; the others are only on
+    /// `bulletin-full`.
     pub on_partial: bool,
 }
 
@@ -79,11 +84,10 @@ impl Payload {
 }
 
 /// Deterministic payloads the generator injects and the CI tests assert
-/// on. Labels prefixed `all-nodes-*` are present on every bulletin node;
-/// `one-node-*` payloads are present only on the collator that loads
-/// `bulletin-full.tgz`. Order matters: items at
-/// `[..PARTIAL_FORK_INDEX]` go in before the partial snapshot is
-/// captured.
+/// on. Labels prefixed `all-nodes-*` are on both bulletin snapshots;
+/// `one-node-*` payloads are only on `bulletin-full.tgz`. Order matters:
+/// items at `[..PARTIAL_FORK_INDEX]` go in before the partial snapshot
+/// is captured.
 pub fn payloads() -> Vec<Payload> {
     vec![
         Payload {
@@ -174,32 +178,4 @@ fn write_leb128(out: &mut Vec<u8>, mut value: u64) {
         }
         out.push(byte | 0x80);
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ManifestPayload {
-    pub label: String,
-    pub cid: String,
-    pub sha256: String,
-    pub size: u64,
-    pub on_partial: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArchiveChecksums {
-    pub relay_sha256: String,
-    pub bulletin_full_sha256: String,
-    pub bulletin_partial_sha256: String,
-}
-
-/// Manifest emitted alongside the snapshots by the generator. Bumping
-/// `schema_version` is a breaking change.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BulletinManifest {
-    pub schema_version: u32,
-    pub snapshot_height: u64,
-    pub bulletin_release_tag: String,
-    pub polkadot_release_tag: String,
-    pub payloads: Vec<ManifestPayload>,
-    pub archives: ArchiveChecksums,
 }
