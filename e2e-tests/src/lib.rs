@@ -158,6 +158,59 @@ pub async fn run_browser_test(script: &str, env_vars: &[(&str, &str)]) -> Result
     }
 }
 
+/// Download a snapshot to a stable local cache and return its path. If
+/// `override_var` is set, its value is used as the source instead of
+/// `default_url`; if the source is already a local path, it's returned
+/// as-is. URLs are fetched with `curl -fL --retry`. Cached under
+/// `e2e-tests/target/snapshot-cache/<basename>`.
+pub fn prefetch_snapshot(default_url: &str, override_var: &str) -> Result<String, anyhow::Error> {
+    let source = std::env::var(override_var).unwrap_or_else(|_| default_url.to_string());
+    if !source.starts_with("http://") && !source.starts_with("https://") {
+        return Ok(source);
+    }
+    let cache_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("snapshot-cache");
+    std::fs::create_dir_all(&cache_dir)?;
+    let filename = source
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("no filename in URL: {source}"))?;
+    let path = cache_dir.join(filename);
+    if !path.exists() {
+        let tmp = cache_dir.join(format!("{filename}.partial"));
+        let _ = std::fs::remove_file(&tmp);
+        let status = std::process::Command::new("curl")
+            .args([
+                "-fL", "--retry", "5", "--retry-delay", "2",
+                "--retry-max-time", "120", "--max-time", "300", "-o",
+            ])
+            .arg(&tmp)
+            .arg(&source)
+            .status()?;
+        if !status.success() {
+            let _ = std::fs::remove_file(&tmp);
+            anyhow::bail!("curl failed for {source}: {status}");
+        }
+        std::fs::rename(&tmp, &path)?;
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Copy `src` to `<base_dir>/staged-snapshots/<name>.tgz` and return the
+/// destination path. Workaround for zombienet-provider 0.4.11's
+/// `with_db_snapshot`: it keys its extraction cache by `sha256(path)`,
+/// so sibling nodes sharing one source path race on the same
+/// intermediate file. Distinct staged paths land in distinct cache slots.
+pub fn stage_snapshot(src: &str, base_dir: &Path, name: &str) -> Result<String, anyhow::Error> {
+    let dst_dir = base_dir.join("staged-snapshots");
+    std::fs::create_dir_all(&dst_dir)?;
+    let dst = dst_dir.join(format!("{name}.tgz"));
+    std::fs::copy(src, &dst)?;
+    Ok(dst.to_string_lossy().into_owned())
+}
+
 /// Runs a JS test script with the given environment variables.
 ///
 /// Uses `tokio::process::Command` for async compatibility.
