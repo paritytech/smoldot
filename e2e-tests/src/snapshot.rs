@@ -36,7 +36,7 @@ use std::path::PathBuf;
 
 use anyhow::anyhow;
 
-pub const ARTIFACTS_VERSION: &str = "v2";
+pub const ARTIFACTS_VERSION: &str = "v1";
 
 const GCS_BASE: &str =
     "https://storage.googleapis.com/zombienet-db-snaps/zombienet/smoldot_smoke_db";
@@ -46,7 +46,7 @@ const ARTIFACTS_DIR_OVERRIDE_ENV: &str = "ARTIFACTS_DIR_OVERRIDE";
 
 /// SHA256 of the published bundle for `ARTIFACTS_VERSION`. Empty means not
 /// yet pinned — in that case the resolver requires `ARTIFACTS_DIR_OVERRIDE`.
-const BUNDLE_SHA256: &str = "c01cfe6c9f6207c58444b996bfcfdc8074dda406b8ca8122cdfc7afc756c14b7";
+const BUNDLE_SHA256: &str = "abea526d527c13aac54b4e1874602c04963046f7d3c3bc3e0adc217573bdc6da";
 
 pub fn relay_db() -> Result<PathBuf, anyhow::Error> {
     resolve("relaychain-db.tgz")
