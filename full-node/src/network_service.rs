@@ -1073,14 +1073,23 @@ async fn background_task(mut inner: Inner) {
                         PeerId::from_public_key(&peer_id::PublicKey::Ed25519(rand::random()));
 
                     // TODO: select target closest to the random peer instead
+                    // Prefer peers known to speak Kad via Identify; fall back to gossip-open
+                    // peers (we know they share this chain even if we haven't seen Identify yet).
                     let target = inner
                         .network
-                        .gossip_connected_peers(
-                            chain_id,
-                            service::GossipKind::ConsensusTransactions,
-                        )
+                        .kademlia_capable_peers(chain_id)
                         .next()
-                        .cloned();
+                        .cloned()
+                        .or_else(|| {
+                            inner
+                                .network
+                                .gossip_connected_peers(
+                                    chain_id,
+                                    service::GossipKind::ConsensusTransactions,
+                                )
+                                .next()
+                                .cloned()
+                        });
 
                     if let Some(target) = target {
                         match inner.network.start_kademlia_find_node_request(

@@ -4340,7 +4340,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "pin-project",
  "prost 0.13.5",
- "prost-build 0.14.4",
+ "prost-build 0.14.3",
  "rand 0.8.6",
  "ring 0.17.14",
  "serde",
@@ -5223,9 +5223,9 @@ dependencies = [
 
 [[package]]
 name = "picosimd"
-version = "0.9.6"
+version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7823ffd00d2b55ebe51750a19f47f2a33cb1f1d135f5cba893379b81c4d44856"
+checksum = "3f8cf1ae70818c6476eb2da0ac8f3f55ecdea41a7aa16824ea6efc4a31cccf41"
 
 [[package]]
 name = "pin-project"
@@ -5645,12 +5645,12 @@ dependencies = [
 
 [[package]]
 name = "prost"
-version = "0.14.4"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
+checksum = "d2ea70524a2f82d518bce41317d0fae74151505651af45faf1ffbd6fd33f0568"
 dependencies = [
  "bytes",
- "prost-derive 0.14.4",
+ "prost-derive 0.14.3",
 ]
 
 [[package]]
@@ -5675,9 +5675,9 @@ dependencies = [
 
 [[package]]
 name = "prost-build"
-version = "0.14.4"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
+checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck",
  "itertools 0.14.0",
@@ -5685,8 +5685,8 @@ dependencies = [
  "multimap",
  "petgraph 0.8.3",
  "prettyplease",
- "prost 0.14.4",
- "prost-types 0.14.4",
+ "prost 0.14.3",
+ "prost-types 0.14.3",
  "regex",
  "syn 2.0.117",
  "tempfile",
@@ -5720,9 +5720,9 @@ dependencies = [
 
 [[package]]
 name = "prost-derive"
-version = "0.14.4"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
+checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
  "itertools 0.14.0",
@@ -5742,11 +5742,11 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
-version = "0.14.4"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
+checksum = "8991c4cbdb8bc5b11f0b074ffe286c30e523de90fee5ba8132f1399f23cb3dd7"
 dependencies = [
- "prost 0.14.4",
+ "prost 0.14.3",
 ]
 
 [[package]]
@@ -5847,7 +5847,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.3",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7372,12 +7372,14 @@ dependencies = [
  "anyhow",
  "ed25519-dalek",
  "env_logger",
+ "flate2",
  "hex",
  "log",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "smoldot 1.2.0",
+ "tar",
  "tempfile",
  "tokio",
  "zombienet-sdk",
@@ -10528,9 +10530,9 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zombienet-configuration"
-version = "0.4.13"
+version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2c269216bae9a4628882f272d00d5e44be68091e7b468e75dc70fe7f3e838e4"
+checksum = "a6672590ca01487cb17068da995a3da636e015c0323a5f8e524a9c470270c98d"
 dependencies = [
  "anyhow",
  "lazy_static",
@@ -10549,9 +10551,9 @@ dependencies = [
 
 [[package]]
 name = "zombienet-orchestrator"
-version = "0.4.13"
+version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd5fc4ca778d2bf804f6ea1983f248957452f55fbf06bbb47f31a2bfbbac516b"
+checksum = "5f21348258d2488e53714c0bf6af6578053255634f37b40b8d8a49d0ea298379"
 dependencies = [
  "anyhow",
  "array-bytes",
@@ -10587,9 +10589,9 @@ dependencies = [
 
 [[package]]
 name = "zombienet-prom-metrics-parser"
-version = "0.4.13"
+version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa851f64b120ee4f5fc13f453f18bb3eb984225e21a91a480f713ecf23c409a0"
+checksum = "c011c7ec40d6993a7d11b8c807a676a0b2f40e2b24196466a79f49db29ed6f8f"
 dependencies = [
  "pest",
  "pest_derive",
@@ -10598,9 +10600,9 @@ dependencies = [
 
 [[package]]
 name = "zombienet-provider"
-version = "0.4.13"
+version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85a96858350524976ca391e88d637c51a1698de26a2a9de815b79ab99e53911f"
+checksum = "73a75b8661364adec92acdcea35ce70569d9f0d63732a484f54f15a78f5f48eb"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10630,23 +10632,15 @@ dependencies = [
 
 [[package]]
 name = "zombienet-sdk"
-version = "0.4.13"
+version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fac89f216adc651f1bc3c064b53b2a907efee05acb1a6b272dce3d1419a9d9bb"
+checksum = "b3e96f53151093a724f08622e1af75961e040da938333c34b4c8ace2465e50a4"
 dependencies = [
- "anyhow",
  "async-trait",
- "chrono",
- "flate2",
  "futures",
- "hex",
  "lazy_static",
- "serde",
- "serde_json",
- "sha2 0.10.9",
  "subxt",
  "subxt-signer",
- "tar",
  "tokio",
  "zombienet-configuration",
  "zombienet-orchestrator",
@@ -10656,9 +10650,9 @@ dependencies = [
 
 [[package]]
 name = "zombienet-support"
-version = "0.4.13"
+version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e00dc9084a78b16d2c3d0bd1c79a34998466ce7f522187ec1c7880b250af4011"
+checksum = "78c42cb18fcf42d11915e7185daff29b582d0fa651c658a52153706efe7e4cac"
 dependencies = [
  "anyhow",
  "async-trait",
