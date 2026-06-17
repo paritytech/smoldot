@@ -537,7 +537,8 @@ enum Event<TPlat: PlatformRef> {
 struct BitswapSubscription {
     /// Holding the handle keeps the underlying batch alive on the bitswap service. When this
     /// struct is dropped (explicit unsubscribe or whole-task shutdown), the inner
-    /// [`bitswap_service::BatchCancelGuard`] drops too, sending `CancelBatch`.
+    /// cancel guard inside [`bitswap_service::BitswapStreamHandle`] drops too, sending
+    /// `CancelBatch`.
     _handle: bitswap_service::BitswapStreamHandle,
 }
 
