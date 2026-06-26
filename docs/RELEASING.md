@@ -126,6 +126,24 @@ Each lockfile must diff to version bumps only. If any pulls in unrelated
 updates, that lockfile was already stale on `main`; investigate before
 committing — the drift may belong in a separate PR.
 
+There are also **multiple** npm lockfiles. Besides
+`wasm-node/javascript/package-lock.json`, every in-repo npm project that depends
+on smoldot via a `file:` link (currently `e2e-tests/js`, `e2e-tests/browser`,
+`benchmarks/js`) embeds the npm `version` in its lock's
+`../../wasm-node/javascript` entry. `npm ci` does not fail on a stale embedded
+version (it only checks the `file:` specifier), so CI tolerates drift and these
+have historically lagged. Don't hardcode the list — discover every linking
+project and refresh its lock, so current and future consumers stay in sync:
+
+```sh
+# Every package.json that links the local smoldot package, regenerate its lock.
+for pj in $(git grep -l '"smoldot": "file:' -- '*package.json'); do
+    (cd "$(dirname "$pj")" && npm install --package-lock-only)
+done
+```
+
+Then commit whichever locks actually changed (`git diff --name-only`).
+
 ---
 
 ## 5. Update `wasm-node/CHANGELOG.md`
@@ -184,9 +202,16 @@ Run this **only if `smoldot` is not being bumped**. Otherwise it fails on
 git add lib/Cargo.toml light-base/Cargo.toml wasm-node/rust/Cargo.toml \
         wasm-node/javascript/package.json wasm-node/javascript/package-lock.json \
         wasm-node/CHANGELOG.md Cargo.lock e2e-tests/Cargo.lock benchmarks/Cargo.lock
-git --no-gpg-sign commit -m "npm smoldot v<X.Y.Z>"
+# Plus every other npm lock refreshed in step 4 (discovered, not hardcoded):
+git add $(git diff --name-only -- '*package-lock.json')
+git commit -m "npm smoldot v<X.Y.Z>"
 git push origin release/npm-smoldot-v<X.Y.Z>
 ```
+
+On a **major** crate cross (see step 3), also stage the path-dep `version`
+string edits — `full-node/Cargo.toml`, `light-base/Cargo.toml`, and
+`wasm-node/rust/Cargo.toml` for a `smoldot` major; `wasm-node/rust/Cargo.toml`
+for a `smoldot-light` major.
 
 Open a PR. Body template:
 
@@ -308,9 +333,16 @@ Even `suffix=""` produces `dev-<YYYYMMDD>`, not `latest`.
 - Version reads: `wasm-node/javascript/package.json` (`.version`),
   `lib/Cargo.toml`, `light-base/Cargo.toml`, `wasm-node/rust/Cargo.toml`
   (each `package.version`).
-- Version writes: same four, plus `wasm-node/javascript/package-lock.json`
-  (two occurrences) and three Cargo lockfiles (regenerate via `cargo check`):
-  root `Cargo.lock`, `e2e-tests/Cargo.lock`, `benchmarks/Cargo.lock`.
+- Version writes: same four, plus the npm lockfiles and the three Cargo
+  lockfiles (regenerate via `cargo check`): root `Cargo.lock`,
+  `e2e-tests/Cargo.lock`, `benchmarks/Cargo.lock`. npm lockfiles are not a
+  fixed list — `wasm-node/javascript/package-lock.json` (two occurrences) plus
+  every `package-lock.json` whose project links smoldot via `file:` (discover
+  with `git grep -l '"smoldot": "file:' -- '*package.json'`); regenerate each
+  with `npm install --package-lock-only`.
+- Major crate cross only: also write the path-dep `version` strings on the
+  crate that crossed (e.g. a `smoldot` major touches the `smoldot` dep string
+  in `full-node/Cargo.toml`, `light-base/Cargo.toml`, `wasm-node/rust/Cargo.toml`).
 - Changelog: insert new section in `wasm-node/CHANGELOG.md` between
   `## Unreleased` and the previous version heading.
 - Scope detection: `git diff --stat <prev-tag>..HEAD -- <path>` for
