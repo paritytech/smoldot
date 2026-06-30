@@ -1287,6 +1287,11 @@ struct BootstrappedParachain {
 }
 
 /// Downloads the parachain runtime from a P2P peer and determines Aura consensus parameters.
+///
+/// Tries each currently-connected peer in turn, rotating past any peer that fails to answer
+/// (for instance with `RemoteCouldntAnswer`). Returns an error only once every connected peer
+/// has been tried, so the caller can retry against a possibly-changed peer set instead of
+/// spinning forever on a single peer that cannot serve the requested block. See issue #3290.
 async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
@@ -1295,7 +1300,6 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     block_number_bytes: usize,
 ) -> Result<BootstrappedParachain, String> {
     let ci_ref = chain_info.as_ref();
-    let state_root = *ci_ref.finalized_block_header.state_root;
     let block_hash = ci_ref.finalized_block_header.hash(block_number_bytes);
 
     log!(
@@ -1309,24 +1313,95 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         )
     );
 
-    // Wait for a peer to connect.
-    let peer_id = {
-        let mut from_network = Box::pin(network_service.subscribe().await);
+    let peers = connected_peers_or_wait(network_service).await;
 
-        if let Some(peer) = network_service.peers_list().await.next() {
-            peer
-        } else {
-            loop {
-                match from_network.next().await {
-                    Some(network_service::Event::Connected { peer_id, .. }) => break peer_id,
-                    Some(_) => continue,
-                    None => {
-                        from_network = Box::pin(network_service.subscribe().await);
-                    }
-                }
+    first_successful_peer(peers, |peer_id| async move {
+        let result = attempt_bootstrap_with_peer(
+            log_target,
+            platform,
+            network_service,
+            chain_info,
+            block_number_bytes,
+            peer_id.clone(),
+        )
+        .await;
+        if let Err(err) = &result {
+            log!(
+                platform,
+                Debug,
+                log_target,
+                format!("Bootstrap via peer {peer_id} failed: {err}; trying next peer")
+            );
+        }
+        result
+    })
+    .await
+}
+
+/// Returns the list of currently-connected peers, waiting for at least one to connect if none
+/// are yet. The result is a snapshot: the caller tries each peer and, if all fail, calls this
+/// again later, by which point discovery may have added new peers.
+async fn connected_peers_or_wait<TPlat: PlatformRef>(
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+) -> Vec<libp2p::PeerId> {
+    // Subscribe before reading the peer list so a peer connecting in between is not missed.
+    let mut from_network = Box::pin(network_service.subscribe().await);
+
+    let current = network_service.peers_list().await.collect::<Vec<_>>();
+    if !current.is_empty() {
+        return current;
+    }
+
+    loop {
+        match from_network.next().await {
+            Some(network_service::Event::Connected { .. }) => {
+                return network_service.peers_list().await.collect();
+            }
+            Some(_) => continue,
+            None => {
+                from_network = Box::pin(network_service.subscribe().await);
             }
         }
-    };
+    }
+}
+
+/// Calls `attempt` against each peer in turn, returning the first `Ok`. Rotates to the next peer
+/// on any `Err`, and returns an error only once all peers have been tried.
+async fn first_successful_peer<T, F, Fut>(
+    peers: impl IntoIterator<Item = libp2p::PeerId>,
+    mut attempt: F,
+) -> Result<T, String>
+where
+    F: FnMut(libp2p::PeerId) -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    let mut attempts = 0usize;
+    let mut last_err = None;
+    for peer in peers {
+        attempts += 1;
+        match attempt(peer).await {
+            Ok(value) => return Ok(value),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(match last_err {
+        Some(err) => format!("all {attempts} connected peer(s) failed; last error: {err}"),
+        None => String::from("no peers connected"),
+    })
+}
+
+/// Downloads the parachain runtime from a single peer and determines Aura consensus parameters.
+async fn attempt_bootstrap_with_peer<TPlat: PlatformRef>(
+    log_target: &str,
+    platform: &TPlat,
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    chain_info: &chain::chain_information::ValidChainInformation,
+    block_number_bytes: usize,
+    peer_id: libp2p::PeerId,
+) -> Result<BootstrappedParachain, String> {
+    let ci_ref = chain_info.as_ref();
+    let state_root = *ci_ref.finalized_block_header.state_root;
+    let block_hash = ci_ref.finalized_block_header.hash(block_number_bytes);
 
     log!(
         platform,
