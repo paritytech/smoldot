@@ -1664,3 +1664,105 @@ fn run_single_runtime_call(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the peer-rotation driver behind the parachain bootstrap, covering the
+    //! regression described in issue #3290 (bootstrap stuck retrying a single peer that
+    //! responds with `RemoteCouldntAnswer`).
+
+    use super::first_successful_peer;
+    use alloc::{string::String, vec, vec::Vec};
+    use core::cell::RefCell;
+    use futures_lite::future::block_on;
+    use smoldot::libp2p::peer_id::PeerId;
+
+    // Two distinct, valid PeerIds, reused from the network_service tests.
+    const PEER_A: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    const PEER_B: &str = "12D3KooWQk1yQtG1YugyKjiQf6KNk8VjGGAT5xy1FWcnRKN4yXYJ";
+
+    fn peer(s: &str) -> PeerId {
+        PeerId::from_bytes(bs58::decode(s).into_vec().unwrap()).unwrap()
+    }
+
+    // Reproduces #3290: the first peer fails (as a peer returning `RemoteCouldntAnswer`
+    // would), so the driver must rotate to the next peer and succeed there instead of
+    // giving up or spinning on the first peer.
+    #[test]
+    fn rotates_past_peer_that_cannot_answer() {
+        let a = peer(PEER_A);
+        let b = peer(PEER_B);
+        let failing = a.clone();
+        let tried = RefCell::new(Vec::new());
+
+        let result = block_on(first_successful_peer([a.clone(), b.clone()], |peer_id| {
+            let tried = &tried;
+            let failing = &failing;
+            async move {
+                tried.borrow_mut().push(peer_id.clone());
+                if peer_id == *failing {
+                    Err(String::from(
+                        "Storage proof request failed: RemoteCouldntAnswer",
+                    ))
+                } else {
+                    Ok(peer_id)
+                }
+            }
+        }));
+
+        assert_eq!(result, Ok(b.clone()));
+        // Both peers were tried, in order, before succeeding on the second.
+        assert_eq!(*tried.borrow(), vec![a, b]);
+    }
+
+    // When every connected peer fails, the driver returns an error (so the caller can sleep
+    // and retry against a refreshed peer set) rather than looping forever. It must try each
+    // peer exactly once.
+    #[test]
+    fn errors_after_trying_every_peer() {
+        let a = peer(PEER_A);
+        let b = peer(PEER_B);
+        let tried = RefCell::new(Vec::new());
+
+        let result: Result<PeerId, String> = block_on(first_successful_peer([a, b], |peer_id| {
+            let tried = &tried;
+            async move {
+                tried.borrow_mut().push(peer_id);
+                Err(String::from("RemoteCouldntAnswer"))
+            }
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(tried.borrow().len(), 2);
+    }
+
+    // With no connected peers the driver errors immediately without invoking the attempt.
+    #[test]
+    fn errors_when_no_peers() {
+        let result: Result<PeerId, String> = block_on(first_successful_peer(
+            core::iter::empty(),
+            |peer_id| async move { Ok(peer_id) },
+        ));
+        assert!(result.is_err());
+    }
+
+    // The common path: the first peer answers, so no rotation happens and only one attempt
+    // is made.
+    #[test]
+    fn uses_first_peer_when_it_succeeds() {
+        let a = peer(PEER_A);
+        let b = peer(PEER_B);
+        let attempts = RefCell::new(0usize);
+
+        let result = block_on(first_successful_peer([a.clone(), b], |peer_id| {
+            let attempts = &attempts;
+            async move {
+                *attempts.borrow_mut() += 1;
+                Ok(peer_id)
+            }
+        }));
+
+        assert_eq!(result, Ok(a));
+        assert_eq!(*attempts.borrow(), 1);
+    }
+}
