@@ -38,7 +38,7 @@ use anyhow::anyhow;
 use serde_json::Value;
 use smoldot_e2e_tests::{
     elastic_scaling_genesis_overrides, ensure_js_deps_installed, ensure_smoldot_built,
-    resolve_base_dir, run_js_test, BEST_METRIC, ELASTIC_VALIDATOR_COUNT, FINALIZED_METRIC, PARA_ID,
+    resolve_base_dir, run_js_test, ELASTIC_VALIDATOR_COUNT, FINALIZED_METRIC, PARA_ID,
 };
 use zombienet_sdk::{
     snapshot::BundleBuilder, subxt::ext::subxt_rpcs::rpc_params, Bundle, LocalFileSystem, Network,
@@ -142,21 +142,25 @@ async fn smoke_generate_snapshots() -> Result<(), anyhow::Error> {
 
     dump_smoldot_db(&args.out, &network).await?;
 
-    // Step 3: drain in-flight parachain candidates so the unfinalized relay
-    // suffix is candidate-free at snapshot time (see `drain_parachain_pipeline`).
-    drain_parachain_pipeline(&network).await?;
-
-    // Step 4: snapshot the DBs *after* the dump, so they are not frozen behind
+    // Step 3: snapshot the DBs *after* the dump, so they are not frozen behind
     // smoldot's persisted finalized (else the consumer hangs on
     // `storage-proof-request-error`). `snapshot_db` tars `data/` (minus
-    // `keystore/`/`network/`); `BundleBuilder` packs both tarballs + a manifest
+    // `keystore/`/`network/`); `BundleBuilder` packs the tarballs + a manifest
     // carrying the lightSyncState specs and smoldot-db dumps in `user_data`.
+    //
+    // Snapshot every validator so all erasure chunks survive restore; recovery
+    // can then reconstruct in-flight candidates, so no draining is needed.
     log::info!("pausing network for DB snapshots");
     network.pause().await?;
-    let relay_snap = network
-        .get_node("validator-0")?
-        .snapshot_db(args.out.join("relaychain-db.tgz"))
-        .await?;
+    let mut relay_snaps = Vec::new();
+    for i in 0..ELASTIC_VALIDATOR_COUNT {
+        let name = format!("validator-{i}");
+        let snap = network
+            .get_node(&name)?
+            .snapshot_db(args.out.join(format!("relaychain-db-{i}.tgz")))
+            .await?;
+        relay_snaps.push(snap);
+    }
     let para_snap = network
         .get_node("alice")?
         .snapshot_db(args.out.join("parachain-db.tgz"))
@@ -164,47 +168,21 @@ async fn smoke_generate_snapshots() -> Result<(), anyhow::Error> {
     network.resume().await?;
     log::info!("network resumed");
 
-    let bundle = BundleBuilder::new()
-        .add(relay_snap)
+    let mut relay_snaps = relay_snaps.into_iter();
+    let first_relay = relay_snaps
+        .next()
+        .ok_or_else(|| anyhow!("no relay validators to snapshot"))?;
+    let mut builder = BundleBuilder::new().add(first_relay);
+    for snap in relay_snaps {
+        builder = builder.add(snap);
+    }
+    let bundle = builder
         .add(para_snap)
         .user_data(build_user_data(&args.out)?)
         .build(args.out.join("bundle.tar.gz"))?;
 
     print_manifest(&bundle);
     log::info!("done");
-    Ok(())
-}
-
-/// Pauses the collators and waits for the relay to finalize past any in-flight
-/// candidate, so the snapshot has no backed-but-unapproved candidate in its
-/// unfinalized suffix.
-///
-/// Why: the single-node snapshot is restored to every consumer validator, so
-/// network-wide there is only one validator's erasure chunk per candidate. A
-/// candidate still pending approval at snapshot time can't be recovered after
-/// resume (n=6 needs 2 distinct chunks), so its relay block never gets approved
-/// and finality freezes. Post-resume candidates get full chunk distribution and
-/// are fine — only the boundary ones are a problem, and draining removes them.
-async fn drain_parachain_pipeline(network: &Network<LocalFileSystem>) -> Result<(), anyhow::Error> {
-    /// Margin past best-at-pause, covering a collation already in flight.
-    const DRAIN_MARGIN: u64 = 4;
-
-    let relay = network.get_node("validator-0")?;
-    let best_at_pause = relay.reports(BEST_METRIC).await? as u64;
-    log::info!("draining parachain pipeline: pausing collators (relay best #{best_at_pause})");
-    for collator in ["alice", "bob"] {
-        network.get_node(collator)?.pause().await?;
-    }
-
-    let drain_target = best_at_pause + DRAIN_MARGIN;
-    let timeout_secs = (DRAIN_MARGIN * 12).max(180);
-    relay
-        .wait_metric_with_timeout(FINALIZED_METRIC, |h| h >= drain_target as f64, timeout_secs)
-        .await
-        .map_err(|e| {
-            anyhow!("relay did not finalize through #{drain_target} while draining: {e}")
-        })?;
-    log::info!("parachain pipeline drained: relay finalized >= #{drain_target}");
     Ok(())
 }
 

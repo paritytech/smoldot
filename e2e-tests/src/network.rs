@@ -73,8 +73,9 @@ pub fn elastic_scaling_genesis_overrides() -> serde_json::Value {
 }
 
 pub struct SnapshotPaths {
-    /// Substrate-node DB tarballs.
-    pub relay_db_tgz: PathBuf,
+    /// Relay-validator DB tarballs (all validators, element `i` -> `validator-i`),
+    /// so every erasure chunk survives restore.
+    pub relay_db_tgz: Vec<PathBuf>,
     pub para_db_tgz: PathBuf,
     /// Full chain spec with `genesis.raw`. Passed to substrate via
     /// `with_chain_spec_path` so node DB extraction matches.
@@ -206,7 +207,7 @@ fn build_network_config(
     let images = zombienet_sdk::environment::get_images_from_env();
 
     let snap = cfg.snapshot();
-    let relay_db = snap.map(|s| s.relay_db_tgz.clone());
+    let relay_dbs = snap.map(|s| s.relay_db_tgz.clone()).unwrap_or_default();
     let para_db = snap.map(|s| s.para_db_tgz.clone());
     // Substrate gets the *full* spec — it needs `genesis.raw` to bootstrap.
     let relay_spec_path = snap.map(|s| s.relay_full_spec.to_str().expect("UTF-8 path").to_owned());
@@ -217,17 +218,26 @@ fn build_network_config(
             let r = r
                 .with_chain("westend-local")
                 .with_default_command("polkadot")
-                .with_default_image(images.polkadot.as_str())
-                .with_optional_default_db_snapshot(relay_db.clone());
+                .with_default_image(images.polkadot.as_str());
             let r = match relay_spec_path.as_deref() {
                 // Only effective on Fresh's generated genesis; snapshots bring their own.
                 None => r.with_genesis_overrides(elastic_scaling_genesis_overrides()),
                 Some(p) => r.with_chain_spec_path(p),
             }
-            // validator-0 outside the fold sets the typestate the fold builds on.
-            .with_validator(|n| n.with_name("validator-0").bootnode(true));
+            // Per-node DB, element i onto validator-i; empty on Fresh.
+            // validator-0 outside the fold sets the typestate.
+            .with_validator(|n| {
+                n.with_name("validator-0")
+                    .bootnode(true)
+                    .with_optional_db_snapshot(relay_dbs.first().cloned())
+            });
             (1..ELASTIC_VALIDATOR_COUNT).fold(r, |acc, i| {
-                acc.with_validator(|n| n.with_name(&format!("validator-{i}")).bootnode(true))
+                let db = relay_dbs.get(i as usize).cloned();
+                acc.with_validator(|n| {
+                    n.with_name(&format!("validator-{i}"))
+                        .bootnode(true)
+                        .with_optional_db_snapshot(db)
+                })
             })
         })
         .with_parachain(|p| {

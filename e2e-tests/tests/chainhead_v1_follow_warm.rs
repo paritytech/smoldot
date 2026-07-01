@@ -35,7 +35,7 @@ async fn chainhead_v1_follow_warm() -> Result<(), anyhow::Error> {
 
     let cfg = Scenario::Warm {
         snapshot: SnapshotPaths {
-            relay_db_tgz: snapshot::relay_db()?,
+            relay_db_tgz: snapshot::relay_dbs()?,
             para_db_tgz: snapshot::para_db()?,
             relay_full_spec: snapshot::relay_spec()?,
             para_full_spec: snapshot::para_spec()?,

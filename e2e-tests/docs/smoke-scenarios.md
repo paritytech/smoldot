@@ -22,7 +22,7 @@ gs://zombienet-db-snaps/zombienet/smoldot_smoke_db/{ARTIFACTS_VERSION}/bundle.ta
 
 Contains:
 
-- `relaychain-db.tgz`, `parachain-db.tgz` — node DB snapshots produced by `NetworkNode::snapshot_db` (excludes `keystore/` + `network/`). The parachain tarball also carries the collator's embedded relay node DB (`relay-data/`).
+- `relaychain-db-{i}.tgz` (one per relay validator), `parachain-db.tgz` — node DB snapshots produced by `NetworkNode::snapshot_db` (excludes `keystore/` + `network/`). Every relay validator is snapshotted (element `i` restored onto `validator-i`) so all erasure chunks and every backing group's full data survive the restore, letting availability recovery reconstruct candidates that were in flight at snapshot time. The parachain tarball also carries the collator's embedded relay node DB (`relay-data/`).
 - `manifest.json` — `SnapshotManifest` with per-archive checksums and a `user_data` blob holding every non-tarball artifact (all JSON, inlined). `BundleBuilder` only packs `NodeSnapshot` tarballs as files, so these ride in `user_data`:
   - `relay_full_spec`, `para_full_spec` — full chain specs (with `genesis.raw`, loaded by substrate)
   - `relay_spec_light_sync_state`, `para_spec_light_sync_state` — slim smoldot specs (`genesis.stateRootHash` instead of `genesis.raw`)

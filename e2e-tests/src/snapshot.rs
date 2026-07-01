@@ -16,10 +16,10 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Resolves the artifact set consumed by `smoke_cold` / `smoke_warm` from the
-//! single GCS bundle. `BundleBuilder` packs only the two DB tarballs as real
-//! files (`relay_db`, `para_db`); everything else (full specs, lightSyncState
-//! specs, smoldot-db dumps) is JSON carried in the manifest `user_data` and
-//! materialized to disk on first use.
+//! single GCS bundle. `BundleBuilder` packs only the DB tarballs as real files
+//! (one per relay validator + one collator); everything else (full specs,
+//! lightSyncState specs, smoldot-db dumps) is JSON carried in the manifest
+//! `user_data` and materialized to disk on first use.
 //!
 //! The bundle (`{GCS_BASE}/{ARTIFACTS_VERSION}/bundle.tar.gz`) is downloaded to
 //! `~/.cache/smoldot-e2e/{ARTIFACTS_VERSION}/`, SHA256-verified, and extracted on
@@ -44,10 +44,13 @@ const ARTIFACTS_DIR_OVERRIDE_ENV: &str = "ARTIFACTS_DIR_OVERRIDE";
 
 /// SHA256 of the published bundle for `ARTIFACTS_VERSION`. Empty means not
 /// yet pinned — in that case the resolver requires `ARTIFACTS_DIR_OVERRIDE`.
-const BUNDLE_SHA256: &str = "c01cfe6c9f6207c58444b996bfcfdc8074dda406b8ca8122cdfc7afc756c14b7";
+const BUNDLE_SHA256: &str = "661ba1065bac694cb802f30300662d24fdda9b60810dc56561b4540852e4607f";
 
-pub fn relay_db() -> Result<PathBuf, anyhow::Error> {
-    resolve("relaychain-db.tgz")
+/// One DB tarball per relay validator, element `i` restored onto `validator-i`.
+pub fn relay_dbs() -> Result<Vec<PathBuf>, anyhow::Error> {
+    (0..crate::network::ELASTIC_VALIDATOR_COUNT)
+        .map(|i| resolve(&format!("relaychain-db-{i}.tgz")))
+        .collect()
 }
 
 pub fn para_db() -> Result<PathBuf, anyhow::Error> {
