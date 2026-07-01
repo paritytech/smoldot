@@ -18,7 +18,7 @@
 // Generic Node-host runner. Selects the shared test module by TEST_NAME, builds
 // a Node `ctx`, and runs the body. Invoked from Rust via `run_shared_test`.
 
-import { stat } from "node:fs/promises";
+import { stat, readFile } from "node:fs/promises";
 import { makeNodeCtx } from "./ctx.js";
 import { assertCtx } from "../../shared/ctx-primitives.js";
 
@@ -42,7 +42,7 @@ const fileInputs = mod.fileInputs ?? [];
 const files = {};
 for (const name of fileInputs) {
   const p = process.env[name];
-  files[name] = p ? await fs.readFile(p, "utf8") : null;
+  files[name] = p ? await readFile(p, "utf8") : null;
 }
 const env = { ...process.env };
 const base = await makeNodeCtx({ env, files });
