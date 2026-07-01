@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 3.3.0 - 2026-06-26
+
+### Added
+
+- Add `bitswap_unstable_stream` / `bitswap_unstable_unstream`: fetch many Bitswap CIDs in one subscription, receiving each block (or per-CID error) via `bitswap_unstable_streamEvent` notifications as it arrives. ([#3264](https://github.com/paritytech/smoldot/pull/3264))
+
+### Changed
+
+- Rename `bitswap_v1_get` to `bitswap_unstable_get` (`bitswap_v1_get` kept as a legacy alias). ([#3264](https://github.com/paritytech/smoldot/pull/3264))
+- Discover peers via proper Kademlia walks, not only nodes with an open consensus stream, so smoldot keeps finding peers even when connected only to bootnodes with no free sync slots. ([#3284](https://github.com/paritytech/smoldot/pull/3284))
+- Start warp sync without waiting for a GrandPa notification, seeding each source's finalized height from its announced best block; especially speeds up WebRTC, where data-channel setup adds latency. ([#3256](https://github.com/paritytech/smoldot/pull/3256))
+
+### Fixed
+
+- Fix a deadlock in the multistream-select task loop. ([#3256](https://github.com/paritytech/smoldot/pull/3256))
+
 ## 3.2.0 - 2026-06-02
 
 ### Added

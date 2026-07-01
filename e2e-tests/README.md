@@ -74,11 +74,13 @@ Useful overrides (see the script header for the full list):
 
 ## Bulletin / bitswap snapshots
 
-The `bulletin_fetch` test drives smoldot's `bitswap_v1_get` JSON-RPC
-against a polkadot-bulletin-chain network with pre-built DB snapshots.
+The `bulletin_fetch` test drives smoldot's `bitswap_unstable_get` JSON-RPC
+(plus an alias-coverage call to the legacy `bitswap_v1_get` name) against a
+polkadot-bulletin-chain network with pre-built DB snapshots.
 The URLs CI fetches from are hardcoded in
-[`tests/bulletin_fetch.rs`](tests/bulletin_fetch.rs) and point at the
-`zombienet-db-snaps` GCS bucket under `smoldot/bulletin_fetch/`. To
+[`src/harness.rs`](src/harness.rs) (used by both `bulletin_fetch` and
+`bulletin_batch`) and point at the `zombienet-db-snaps` GCS bucket under
+`smoldot/bulletin_fetch/`. To
 refresh those snapshots, regenerate them with
 `bulletin_generate_snapshot` and upload via `gsutil` (only needed when
 the bulletin runtime or `bulletin::payloads()` changes).
@@ -100,11 +102,15 @@ cargo test --manifest-path e2e-tests/Cargo.toml \
   -- --ignored bulletin_generate_snapshot --nocapture
 
 # Tag the archives with the generation date and upload. Bump the date in
-# the DB_SNAPSHOT_* constants in tests/bulletin_fetch.rs to match.
+# the DB_SNAPSHOT_* constants in src/harness.rs to match. The
+# `--canned-acl=publicRead` flag ensures anonymous HTTPS access works for
+# CI (the bucket uses fine-grained per-object ACLs and doesn't default to
+# public read).
 DATE=$(date +%F)
 cd e2e-tests/target/snapshots
 for f in relay bulletin-full bulletin-partial; do
-  gsutil cp "$f.tgz" "gs://zombienet-db-snaps/smoldot/bulletin_fetch/$f-$DATE.tgz"
+  gcloud storage cp --canned-acl=publicRead \
+    "$f.tgz" "gs://zombienet-db-snaps/smoldot/bulletin_fetch/$f-$DATE.tgz"
 done
 ```
 

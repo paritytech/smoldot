@@ -261,6 +261,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             event_senders: either::Left(Vec::new()),
             pending_new_subscriptions: Vec::new(),
             bitswap_event_pending_send: None,
+            bitswap_connected_peers: 0,
             bitswap_event_senders: either::Left(Vec::new()),
             pending_new_bitswap_subscriptions: Vec::new(),
             important_nodes: HashMap::with_capacity_and_hasher(16, Default::default()),
@@ -1081,6 +1082,12 @@ struct BackgroundTask<TPlat: PlatformRef> {
 
     /// Bitswap event about to be sent on the senders of [`BackgroundTask::bitswap_event_senders`].
     bitswap_event_pending_send: Option<BitswapEvent>,
+
+    /// Running count of peers with an open Bitswap substream. Maintained from
+    /// `service::Event::BitswapConnected` / `BitswapDisconnected`. Used for diagnostic logging
+    /// only; the authoritative per-peer state lives in
+    /// [`BackgroundTask::bitswap_peering_strategy`].
+    bitswap_connected_peers: usize,
 
     /// Sending events through the public API.
     ///
@@ -2237,46 +2244,61 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     ),
                 );
 
-                let random_peer_id = {
-                    let mut pub_key = [0; 32];
-                    rand_chacha::rand_core::RngCore::fill_bytes(&mut task.randomness, &mut pub_key);
-                    PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
-                };
+                // Iterative-style discovery: instead of a single FindNode against one peer,
+                // dispatch up to ALPHA=3 FindNode requests in parallel to distinct peers,
+                // each with a distinct random target. This gives substantially better DHT
+                // coverage per discovery round (more peers asked, more diverse keyspace
+                // walked) without requiring a per-query state machine.
+                //
+                // Order of preference for the target peer pool:
+                //  1. Peers we know speak this chain's Kad protocol (from Identify).
+                //  2. Peers with an open block-announces gossip substream (best-effort:
+                //     they're connected and likely speak Kad even if we haven't gotten
+                //     Identify yet).
+                const PARALLEL_FIND_NODE_PER_ROUND: usize = 3;
 
-                // TODO: select target closest to the random peer instead
-                let target = task
+                let mut candidates: Vec<PeerId> = task
+                    .network
+                    .kademlia_capable_peers(chain_id)
+                    .cloned()
+                    .collect();
+                for p in task
                     .network
                     .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
-                    .next()
-                    .cloned();
+                    .cloned()
+                {
+                    if !candidates.contains(&p) {
+                        candidates.push(p);
+                    }
+                }
 
-                if let Some(target) = target {
-                    match task.network.start_kademlia_find_node_request(
-                        &target,
-                        chain_id,
-                        &random_peer_id,
-                        Duration::from_secs(20),
-                    ) {
-                        Ok(_) => {}
-                        Err(service::StartRequestError::NoConnection) => unreachable!(),
-                    };
+                let started = dispatch_find_node_requests(
+                    &mut task.network,
+                    &mut task.randomness,
+                    chain_id,
+                    &candidates,
+                    PARALLEL_FIND_NODE_PER_ROUND,
+                );
 
+                let chain_log_name = &task.network[chain_id].log_name;
+                for (request_target, requested_peer_id) in &started {
                     log!(
                         &task.platform,
                         Debug,
                         "network",
                         "discovery-find-node-started",
-                        chain = &task.network[chain_id].log_name,
-                        request_target = target,
-                        requested_peer_id = random_peer_id
+                        chain = chain_log_name,
+                        request_target,
+                        requested_peer_id
                     );
-                } else {
+                }
+                if started.is_empty() {
                     log!(
                         &task.platform,
                         Debug,
                         "network",
                         "discovery-skipped-no-peer",
-                        chain = &task.network[chain_id].log_name
+                        chain = chain_log_name
                     );
                 }
             }
@@ -2640,12 +2662,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
             }
             WakeUpReason::NetworkEvent(service::Event::BitswapConnected { peer_id }) => {
+                task.bitswap_connected_peers = task.bitswap_connected_peers.saturating_add(1);
                 log!(
                     &task.platform,
                     Debug,
                     "network",
                     "bitswap-open-success",
-                    peer_id
+                    peer_id,
+                    total = task.bitswap_connected_peers
                 );
             }
             WakeUpReason::NetworkEvent(service::Event::BitswapOpenFailed { peer_id, error }) => {
@@ -2692,7 +2716,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     Some(BitswapEvent::BitswapMessage { peer_id, message });
             }
             WakeUpReason::NetworkEvent(service::Event::BitswapDisconnected { peer_id }) => {
-                log!(&task.platform, Debug, "network", "bitswap-closed", peer_id);
+                debug_assert!(task.bitswap_connected_peers > 0);
+                task.bitswap_connected_peers = task.bitswap_connected_peers.saturating_sub(1);
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "bitswap-closed",
+                    peer_id,
+                    total = task.bitswap_connected_peers
+                );
                 let ban_duration = Duration::from_secs(10);
                 if matches!(
                     task.bitswap_peering_strategy
@@ -2907,6 +2940,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 response: service::RequestResult::KademliaFindNode(Ok(nodes)),
                 ..
             }) => {
+                // Track whether this response taught us anything new. If so, we reset the
+                // chain's discovery backoff so that the next FindNode round runs at the
+                // initial 2s interval rather than continuing to back off — Kademlia is
+                // making progress, walk the DHT eagerly.
+                let mut any_new_peer = false;
                 for (peer_id, mut addrs) in nodes {
                     // Make sure to not insert too many address for a single peer.
                     // While the .
@@ -2978,6 +3016,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             peer_removed,
                         } = insert_outcome
                         {
+                            any_new_peer = true;
                             if let Some(peer_removed) = peer_removed {
                                 log!(
                                     &task.platform,
@@ -3011,6 +3050,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             basic_peering_strategy::InsertAddressResult::UnknownPeer
                         ));
                     }
+                }
+
+                if any_new_peer {
+                    task.network[chain_id].next_discovery_period = Duration::from_secs(2);
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
@@ -3539,6 +3582,52 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     }
 }
 
+/// Starts find-node requests against `candidates` until `max` have started, each with a fresh
+/// random target key, and returns the `(request_target, requested_peer_id)` of each.
+///
+/// A `kademlia_capable_peers` candidate may have no usable connection (the flag outlives the
+/// connection it was learned on); such a peer fails with `NoConnection` and is skipped without
+/// counting towards `max`.
+fn dispatch_find_node_requests<TChain, TConn, TNow>(
+    network: &mut service::ChainNetwork<TChain, TConn, TNow>,
+    randomness: &mut impl rand_chacha::rand_core::RngCore,
+    chain_id: service::ChainId,
+    candidates: &[PeerId],
+    max: usize,
+) -> Vec<(PeerId, PeerId)>
+where
+    TNow: Clone
+        + core::ops::Add<Duration, Output = TNow>
+        + core::ops::Sub<TNow, Output = Duration>
+        + Ord,
+{
+    let mut started = Vec::with_capacity(max);
+
+    for target in candidates {
+        if started.len() >= max {
+            break;
+        }
+
+        let random_peer_id = {
+            let mut pub_key = [0; 32];
+            randomness.fill_bytes(&mut pub_key);
+            PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
+        };
+
+        match network.start_kademlia_find_node_request(
+            target,
+            chain_id,
+            &random_peer_id,
+            Duration::from_secs(20),
+        ) {
+            Ok(_) => started.push((target.clone(), random_peer_id)),
+            Err(service::StartRequestError::NoConnection) => {}
+        }
+    }
+
+    started
+}
+
 /// Pops a trailing `/p2p/<peer_id>` from `addr` if it matches `expected_peer`. Returns `false`
 /// (caller must discard the address) on mismatch.
 fn pop_p2p_if_matches(
@@ -3561,7 +3650,9 @@ fn pop_p2p_if_matches(
 
 #[cfg(test)]
 mod tests {
-    use super::pop_p2p_if_matches;
+    use super::{Role, dispatch_find_node_requests, pop_p2p_if_matches, service};
+    use core::time::Duration;
+    use rand_chacha::rand_core::SeedableRng as _;
     use smoldot::libp2p::{multiaddr::Multiaddr, peer_id::PeerId};
 
     // Two distinct, valid PeerIds. The first is reused from existing smoldot tests in
@@ -3600,5 +3691,43 @@ mod tests {
         let mut addr = original.clone();
         assert!(!pop_p2p_if_matches(&mut addr, &peer(PEER_B)));
         assert_eq!(addr, original);
+    }
+
+    fn empty_network() -> (service::ChainNetwork<(), (), Duration>, service::ChainId) {
+        let mut network = service::ChainNetwork::new(service::Config {
+            connections_capacity: 8,
+            chains_capacity: 1,
+            randomness_seed: [0; 32],
+            handshake_timeout: Duration::from_secs(10),
+        });
+        let chain_id = network
+            .add_chain(service::ChainConfig {
+                user_data: (),
+                genesis_hash: [0; 32],
+                fork_id: None,
+                block_number_bytes: 4,
+                grandpa_protocol_config: None,
+                allow_inbound_block_requests: false,
+                best_hash: [0; 32],
+                best_number: 0,
+                role: Role::Light,
+                enable_statement_protocol: false,
+            })
+            .unwrap();
+        (network, chain_id)
+    }
+
+    // With no connections every candidate returns `NoConnection`, so all are skipped and no
+    // request is started. The dispatch loop must not treat that as unreachable.
+    #[test]
+    fn dispatch_skips_unreachable_candidates() {
+        let (mut network, chain_id) = empty_network();
+        let mut randomness = rand_chacha::ChaCha20Rng::from_seed([7; 32]);
+
+        let candidates = [peer(PEER_A), peer(PEER_B)];
+        let started =
+            dispatch_find_node_requests(&mut network, &mut randomness, chain_id, &candidates, 3);
+
+        assert!(started.is_empty());
     }
 }
