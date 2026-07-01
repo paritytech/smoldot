@@ -1311,25 +1311,15 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
 
     let peers = connected_peers_or_wait(network_service).await;
 
-    first_successful_peer(peers, |peer_id| async move {
-        let result = attempt_bootstrap_with_peer(
+    first_successful_peer(peers, |peer_id| {
+        attempt_bootstrap_with_peer(
             log_target,
             platform,
             network_service,
             chain_info,
             block_number_bytes,
-            peer_id.clone(),
+            peer_id,
         )
-        .await;
-        if let Err(err) = &result {
-            log!(
-                platform,
-                Debug,
-                log_target,
-                format!("Bootstrap via peer {peer_id} failed: {err}; trying next peer")
-            );
-        }
-        result
     })
     .await
 }
@@ -1368,19 +1358,14 @@ where
     F: FnMut(libp2p::PeerId) -> Fut,
     Fut: Future<Output = Result<T, String>>,
 {
-    let mut attempts = 0usize;
     let mut last_err = None;
     for peer in peers {
-        attempts += 1;
         match attempt(peer).await {
             Ok(value) => return Ok(value),
             Err(err) => last_err = Some(err),
         }
     }
-    Err(match last_err {
-        Some(err) => format!("all {attempts} connected peer(s) failed; last error: {err}"),
-        None => String::from("no peers connected"),
-    })
+    Err(last_err.unwrap_or_else(|| String::from("no peers connected")))
 }
 
 /// Downloads the parachain runtime from a single peer and determines Aura consensus parameters.
