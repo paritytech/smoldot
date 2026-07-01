@@ -49,6 +49,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     parachain_id: u32,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+    saved_runtime_code: Option<Vec<u8>>,
 ) {
     // Phase 1: Fetch the current finalized parachain head from the relay chain.
     let effective_chain_info = fetch_parachain_head_from_relay(
@@ -70,10 +71,46 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         )
     );
 
-    // Phase 2: Download the parachain runtime from a P2P peer and determine Aura
-    // consensus parameters. Retries indefinitely until successful.
-    let (effective_chain_info, finalized_runtime) = loop {
-        match bootstrap_parachain_consensus(
+    // Phase 2: Obtain Aura consensus parameters and the compiled runtime.
+    //
+    // Warm path: if the database contains cached runtime code, anchor the cached bytes to
+    // the on-chain state root via a `:code\0` absence proof (the absence proof traverses
+    // `:code`'s leaf without bundling its 2 MiB value), then compile and run the Aura call
+    // proofs against state. Skips the ~2 MiB `:code` P2P download.
+    //
+    // Cold path: download `:code` + `:heappages` (~2 MiB), compile, then fetch Aura call
+    // proofs to determine consensus parameters.
+    let (effective_chain_info, finalized_runtime) = if let Some(code) = saved_runtime_code {
+        match warm_bootstrap(
+            &log_target,
+            &platform,
+            &network_service,
+            &effective_chain_info,
+            block_number_bytes,
+            code,
+        )
+        .await
+        {
+            Ok(b) => (b.chain_info, b.finalized_runtime),
+            Err(err) => {
+                log!(
+                    &platform,
+                    Warn,
+                    &log_target,
+                    format!("Warm start failed ({err}), falling back to cold bootstrap...")
+                );
+                cold_bootstrap_loop(
+                    &log_target,
+                    &platform,
+                    &network_service,
+                    &effective_chain_info,
+                    block_number_bytes,
+                )
+                .await
+            }
+        }
+    } else {
+        cold_bootstrap_loop(
             &log_target,
             &platform,
             &network_service,
@@ -81,18 +118,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             block_number_bytes,
         )
         .await
-        {
-            Ok(b) => break (b.chain_info, b.finalized_runtime),
-            Err(err) => {
-                log!(
-                    &platform,
-                    Warn,
-                    &log_target,
-                    format!("Failed to bootstrap parachain consensus: {err}. Retrying in 5s...")
-                );
-                platform.sleep(Duration::from_secs(5)).await;
-            }
-        }
     };
 
     // Phase 3: Spawn the paraheads background service that tracks relay chain
@@ -1156,6 +1181,203 @@ impl<TPlat: PlatformRef> Task<TPlat> {
     }
 }
 
+/// Retries `bootstrap_parachain_consensus` indefinitely with a 5s back-off.
+///
+/// Returns `(chain_info, finalized_runtime)` once a successful bootstrap completes.
+async fn cold_bootstrap_loop<TPlat: PlatformRef>(
+    log_target: &str,
+    platform: &TPlat,
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    chain_info: &chain::chain_information::ValidChainInformation,
+    block_number_bytes: usize,
+) -> (
+    chain::chain_information::ValidChainInformation,
+    FinalizedBlockRuntime,
+) {
+    loop {
+        match bootstrap_parachain_consensus(
+            log_target,
+            platform,
+            network_service,
+            chain_info,
+            block_number_bytes,
+        )
+        .await
+        {
+            Ok(b) => return (b.chain_info, b.finalized_runtime),
+            Err(err) => {
+                log!(
+                    platform,
+                    Warn,
+                    log_target,
+                    format!("Failed to bootstrap parachain consensus: {err}. Retrying in 5s...")
+                );
+                platform.sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+/// Probe key for the warm-start `:code` anchor. A strict descendant of `:code` that doesn't
+/// exist on chain — its absence proof must traverse `:code`'s leaf, exposing the value-hash
+/// (state v1) without bundling the 2 MiB runtime value.
+const CODE_ANCHOR_PROBE_KEY: &[u8] = b":code\0";
+
+/// Warm-start: compile cached runtime code locally, then verify against the
+/// network by fetching `:heappages` and Aura call proofs (~few KB total).
+/// Skips the ~2 MiB `:code` P2P download.
+async fn warm_bootstrap<TPlat: PlatformRef>(
+    log_target: &str,
+    platform: &TPlat,
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    chain_info: &chain::chain_information::ValidChainInformation,
+    block_number_bytes: usize,
+    code: Vec<u8>,
+) -> Result<BootstrappedParachain, String> {
+    let ci_ref = chain_info.as_ref();
+    let state_root = *ci_ref.finalized_block_header.state_root;
+    let block_hash = ci_ref.finalized_block_header.hash(block_number_bytes);
+
+    log!(
+        platform,
+        Info,
+        log_target,
+        format!(
+            "Warm-starting parachain at block #{} ({}) using {} bytes of cached runtime",
+            ci_ref.finalized_block_header.number,
+            HashDisplay(&block_hash),
+            code.len()
+        )
+    );
+
+    let peer_id = wait_for_peer(network_service).await;
+
+    // Fetch the `:code` anchor probe + `:heappages` storage proof and both Aura call proofs
+    // in parallel. See `CODE_ANCHOR_PROBE_KEY` for why we probe an absent descendant of
+    // `:code` rather than `:code` itself.
+    let (code_hp_proof, slot_duration_proof, authorities_proof) = future::try_join3(
+        async {
+            network_service
+                .clone()
+                .storage_proof_request(
+                    peer_id.clone(),
+                    codec::StorageProofRequestConfig {
+                        block_hash,
+                        keys: [CODE_ANCHOR_PROBE_KEY, &b":heappages"[..]].into_iter(),
+                    },
+                    Duration::from_secs(16),
+                )
+                .await
+                .map_err(|e| format!("Storage proof request failed: {e}"))
+        },
+        fetch_call_proof(
+            network_service,
+            &peer_id,
+            block_hash,
+            "AuraApi_slot_duration",
+        ),
+        fetch_call_proof(network_service, &peer_id, block_hash, "AuraApi_authorities"),
+    )
+    .await?;
+
+    let proof_bytes = code_hp_proof.decode().to_vec();
+    let proof_byte_len = proof_bytes.len();
+    let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+        proof: proof_bytes,
+    })
+    .map_err(|e| format!("Failed to decode storage proof: {e}"))?;
+
+    // Anchor the cached runtime to the finalized state root. For state v1 (the design target)
+    // the proof exposes only `:code`'s blake2_256 value-hash via `HashKnownValueMissing`, and
+    // we hash the cached bytes to compare. The `Known` arm is a defensive fallback for state
+    // v0 chains or peers that bundle the value despite the probe key targeting absence — we
+    // still verify, just without the bandwidth saving. Any mismatch returns Err and the
+    // caller falls back to cold bootstrap.
+    let code_info = decoded_proof
+        .trie_node_info(
+            &state_root,
+            trie::bytes_to_nibbles(b":code".iter().copied()),
+        )
+        .map_err(|_| String::from("Proof missing :code path"))?;
+    match code_info.storage_value {
+        trie::proof_decode::StorageValue::HashKnownValueMissing(on_chain_hash) => {
+            log!(
+                platform,
+                Debug,
+                log_target,
+                format!(
+                    "Warm-start :code anchor: branch=HashKnownValueMissing proof_bytes={}",
+                    proof_byte_len,
+                )
+            );
+            let computed = blake2_rfc::blake2b::blake2b(32, &[], &code);
+            if computed.as_bytes() != &on_chain_hash[..] {
+                return Err(String::from(
+                    "cached :code hash does not match on-chain :code hash",
+                ));
+            }
+        }
+        trie::proof_decode::StorageValue::Known { value, inline: _ } => {
+            log!(
+                platform,
+                Warn,
+                log_target,
+                format!(
+                    "Warm-start :code anchor: branch=Known proof_bytes={}, unexpected branch hit",
+                    proof_byte_len,
+                )
+            );
+            if value != code.as_slice() {
+                return Err(String::from("cached :code does not match on-chain bytes"));
+            }
+        }
+        trie::proof_decode::StorageValue::None => {
+            return Err(String::from(":code missing in on-chain state"));
+        }
+    }
+
+    let heap_pages_raw = decoded_proof
+        .storage_value(&state_root, b":heappages")
+        .map_err(|_| String::from("Proof doesn't contain :heappages"))?;
+    let storage_heap_pages = heap_pages_raw.map(|(v, _)| v.to_vec());
+
+    let heap_pages = executor::storage_heap_pages_to_value(storage_heap_pages.as_deref())
+        .map_err(|e| format!("Invalid :heappages value: {e}"))?;
+
+    // Compile cached code with correct heap pages.
+    let vm = executor::host::HostVmPrototype::new(executor::host::Config {
+        module: &code,
+        heap_pages,
+        exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+        allow_unresolved_imports: true,
+    })
+    .map_err(|e| format!("Failed to compile cached runtime: {e}"))?;
+
+    // Verify Aura consensus parameters against the network.
+    let (slot_duration, authorities, vm) =
+        run_aura_calls(vm, slot_duration_proof, authorities_proof, &state_root)?;
+
+    log!(
+        platform,
+        Info,
+        log_target,
+        format!(
+            "Warm start verified: Aura consensus (slot_duration={}ms, authorities={})",
+            slot_duration,
+            authorities.len()
+        )
+    );
+
+    build_bootstrapped_parachain(
+        chain_info,
+        slot_duration,
+        authorities,
+        vm,
+        code,
+        storage_heap_pages,
+    )
+}
+
 // Fetch the included parachain head from a finalized relay chain block.
 async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
     log_target: &str,
@@ -1286,7 +1508,8 @@ struct BootstrappedParachain {
     finalized_runtime: FinalizedBlockRuntime,
 }
 
-/// Downloads the parachain runtime from a P2P peer and determines Aura consensus parameters.
+/// Cold bootstrap: downloads `:code` + `:heappages` from a P2P peer, compiles the
+/// runtime, and verifies Aura consensus parameters via call proofs.
 async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
@@ -1309,24 +1532,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         )
     );
 
-    // Wait for a peer to connect.
-    let peer_id = {
-        let mut from_network = Box::pin(network_service.subscribe().await);
-
-        if let Some(peer) = network_service.peers_list().await.next() {
-            peer
-        } else {
-            loop {
-                match from_network.next().await {
-                    Some(network_service::Event::Connected { peer_id, .. }) => break peer_id,
-                    Some(_) => continue,
-                    None => {
-                        from_network = Box::pin(network_service.subscribe().await);
-                    }
-                }
-            }
-        }
-    };
+    let peer_id = wait_for_peer(network_service).await;
 
     log!(
         platform,
@@ -1388,73 +1594,19 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     })
     .map_err(|e| format!("Failed to compile runtime: {e}"))?;
 
-    // AuraApi_slot_duration
-    let (slot_duration, vm) = {
-        let call_proof = network_service
-            .clone()
-            .call_proof_request(
-                peer_id.clone(),
-                codec::CallProofRequestConfig {
-                    block_hash,
-                    method: Cow::Borrowed("AuraApi_slot_duration"),
-                    parameter_vectored: iter::empty::<Vec<u8>>(),
-                },
-                Duration::from_secs(16),
-            )
-            .await
-            .map_err(|e| format!("AuraApi_slot_duration call proof request failed: {e}"))?;
+    // Fetch Aura call proofs and verify consensus parameters.
+    let slot_duration_proof = fetch_call_proof(
+        network_service,
+        &peer_id,
+        block_hash,
+        "AuraApi_slot_duration",
+    )
+    .await?;
+    let authorities_proof =
+        fetch_call_proof(network_service, &peer_id, block_hash, "AuraApi_authorities").await?;
 
-        let decoded_call_proof =
-            trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-                proof: call_proof.decode().to_vec(),
-            })
-            .map_err(|e| format!("Failed to decode slot_duration call proof: {e}"))?;
-
-        let (output, vm) = run_single_runtime_call(
-            vm,
-            "AuraApi_slot_duration",
-            &decoded_call_proof,
-            &state_root,
-        )?;
-
-        let duration = <[u8; 8]>::try_from(output.as_slice())
-            .ok()
-            .and_then(|b| NonZero::<u64>::new(u64::from_le_bytes(b)))
-            .ok_or_else(|| String::from("Failed to decode AuraApi_slot_duration output"))?;
-        (duration, vm)
-    };
-
-    // AuraApi_authorities
-    let (authorities, vm) = {
-        let call_proof = network_service
-            .clone()
-            .call_proof_request(
-                peer_id,
-                codec::CallProofRequestConfig {
-                    block_hash,
-                    method: Cow::Borrowed("AuraApi_authorities"),
-                    parameter_vectored: iter::empty::<Vec<u8>>(),
-                },
-                Duration::from_secs(16),
-            )
-            .await
-            .map_err(|e| format!("AuraApi_authorities call proof request failed: {e}"))?;
-
-        let decoded_call_proof =
-            trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-                proof: call_proof.decode().to_vec(),
-            })
-            .map_err(|e| format!("Failed to decode authorities call proof: {e}"))?;
-
-        let (output, vm) =
-            run_single_runtime_call(vm, "AuraApi_authorities", &decoded_call_proof, &state_root)?;
-
-        let auths = header::AuraAuthoritiesIter::decode(&output)
-            .map_err(|_| String::from("Failed to decode AuraApi_authorities output"))?
-            .map(header::AuraAuthority::from)
-            .collect::<Vec<_>>();
-        (auths, vm)
-    };
+    let (slot_duration, authorities, vm) =
+        run_aura_calls(vm, slot_duration_proof, authorities_proof, &state_root)?;
 
     log!(
         platform,
@@ -1467,6 +1619,113 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         )
     );
 
+    build_bootstrapped_parachain(
+        chain_info,
+        slot_duration,
+        authorities,
+        vm,
+        code,
+        storage_heap_pages,
+    )
+}
+
+/// Waits for at least one peer to be connected, returning its ID.
+async fn wait_for_peer<TPlat: PlatformRef>(
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+) -> libp2p::PeerId {
+    let mut from_network = Box::pin(network_service.subscribe().await);
+    if let Some(peer) = network_service.peers_list().await.next() {
+        return peer;
+    }
+    loop {
+        match from_network.next().await {
+            Some(network_service::Event::Connected { peer_id, .. }) => return peer_id,
+            Some(_) => continue,
+            None => {
+                from_network = Box::pin(network_service.subscribe().await);
+            }
+        }
+    }
+}
+
+/// Fetches a single call proof from a peer.
+async fn fetch_call_proof<TPlat: PlatformRef>(
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    peer_id: &libp2p::PeerId,
+    block_hash: [u8; 32],
+    method: &str,
+) -> Result<network_service::EncodedMerkleProof, String> {
+    network_service
+        .clone()
+        .call_proof_request(
+            peer_id.clone(),
+            codec::CallProofRequestConfig {
+                block_hash,
+                method: Cow::Borrowed(method),
+                parameter_vectored: iter::empty::<Vec<u8>>(),
+            },
+            Duration::from_secs(16),
+        )
+        .await
+        .map_err(|e| format!("{method} call proof request failed: {e}"))
+}
+
+/// Decodes Aura call proofs and executes them against a compiled VM.
+/// Returns (slot_duration, authorities, vm).
+fn run_aura_calls(
+    vm: executor::host::HostVmPrototype,
+    slot_duration_proof: network_service::EncodedMerkleProof,
+    authorities_proof: network_service::EncodedMerkleProof,
+    state_root: &[u8; 32],
+) -> Result<
+    (
+        NonZero<u64>,
+        Vec<header::AuraAuthority>,
+        executor::host::HostVmPrototype,
+    ),
+    String,
+> {
+    let decoded_sd_proof =
+        trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+            proof: slot_duration_proof.decode().to_vec(),
+        })
+        .map_err(|e| format!("Failed to decode slot_duration call proof: {e}"))?;
+
+    let (sd_output, vm) =
+        run_single_runtime_call(vm, "AuraApi_slot_duration", &decoded_sd_proof, state_root)?;
+
+    let slot_duration = <[u8; 8]>::try_from(sd_output.as_slice())
+        .ok()
+        .and_then(|b| NonZero::<u64>::new(u64::from_le_bytes(b)))
+        .ok_or_else(|| String::from("Failed to decode AuraApi_slot_duration output"))?;
+
+    let decoded_auth_proof =
+        trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+            proof: authorities_proof.decode().to_vec(),
+        })
+        .map_err(|e| format!("Failed to decode authorities call proof: {e}"))?;
+
+    let (auth_output, vm) =
+        run_single_runtime_call(vm, "AuraApi_authorities", &decoded_auth_proof, state_root)?;
+
+    let authorities = header::AuraAuthoritiesIter::decode(&auth_output)
+        .map_err(|_| String::from("Failed to decode AuraApi_authorities output"))?
+        .map(header::AuraAuthority::from)
+        .collect::<Vec<_>>();
+
+    Ok((slot_duration, authorities, vm))
+}
+
+/// Builds a `BootstrappedParachain` from verified Aura parameters and a compiled VM.
+fn build_bootstrapped_parachain(
+    chain_info: &chain::chain_information::ValidChainInformation,
+    slot_duration: NonZero<u64>,
+    authorities: Vec<header::AuraAuthority>,
+    vm: executor::host::HostVmPrototype,
+    code: Vec<u8>,
+    storage_heap_pages: Option<Vec<u8>>,
+) -> Result<BootstrappedParachain, String> {
+    let ci_ref = chain_info.as_ref();
     let new_chain_info = chain::chain_information::ChainInformation {
         finalized_block_header: Box::new(ci_ref.finalized_block_header.into()),
         consensus: chain::chain_information::ChainInformationConsensus::Aura {
@@ -1485,9 +1744,6 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
             virtual_machine: vm,
             storage_code: Some(code),
             storage_heap_pages,
-            // Only consumed by the warp-sync fast path (relay chains); the parachain
-            // sync path has no hint field and drops it. Can be extracted from
-            // `decoded_proof` via `closest_descendant_merkle_value` if ever needed.
             code_merkle_value: None,
             closest_ancestor_excluding: None,
         },
@@ -1587,5 +1843,54 @@ fn run_single_runtime_call(
                 return Err(format!("{function_name}: forbidden offchain host function"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use smoldot::executor;
+
+    /// Verify that the warm-start compilation path rejects invalid WASM bytes
+    /// gracefully (returns an error) rather than panicking.
+    #[test]
+    fn invalid_cached_runtime_fails_compilation() {
+        let garbage = b"this is not valid wasm";
+        let heap_pages = executor::storage_heap_pages_to_value(None).unwrap();
+        let result = executor::host::HostVmPrototype::new(executor::host::Config {
+            module: garbage,
+            heap_pages,
+            exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+            allow_unresolved_imports: true,
+        });
+        assert!(result.is_err(), "garbage bytes should fail compilation");
+    }
+
+    /// Verify that an empty cached runtime fails compilation gracefully.
+    #[test]
+    fn empty_cached_runtime_fails_compilation() {
+        let heap_pages = executor::storage_heap_pages_to_value(None).unwrap();
+        let result = executor::host::HostVmPrototype::new(executor::host::Config {
+            module: b"",
+            heap_pages,
+            exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+            allow_unresolved_imports: true,
+        });
+        assert!(result.is_err(), "empty bytes should fail compilation");
+    }
+
+    /// Verify that a WASM module without a memory section fails with a clear
+    /// error (NoMemory), not a panic. This is the expected behavior when a
+    /// cached runtime is truncated or corrupted but still has valid WASM magic.
+    #[test]
+    fn wasm_without_memory_fails_gracefully() {
+        let minimal_wasm = b"\x00asm\x01\x00\x00\x00";
+        let heap_pages = executor::storage_heap_pages_to_value(None).unwrap();
+        let result = executor::host::HostVmPrototype::new(executor::host::Config {
+            module: minimal_wasm,
+            heap_pages,
+            exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
+            allow_unresolved_imports: true,
+        });
+        assert!(result.is_err(), "WASM without memory should fail");
     }
 }

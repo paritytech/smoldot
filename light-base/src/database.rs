@@ -62,6 +62,13 @@ pub struct DatabaseContent {
     /// Does **not** necessarily match the finalized block found in
     /// [`DatabaseContent::chain_information`].
     pub runtime_code_hint: Option<DatabaseContentRuntimeCodeHint>,
+
+    /// Raw bytes of the runtime code (`:code` storage value) saved from the last session.
+    ///
+    /// When present, a parachain warm-start can compile this code locally and verify
+    /// it against the network via lightweight Aura call proofs, skipping the ~2 MiB
+    /// P2P runtime download.
+    pub runtime_code: Option<Vec<u8>>,
 }
 
 /// See [`DatabaseContent::runtime_code_hint`].
@@ -207,14 +214,24 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         })
         .collect::<Vec<_>>();
 
+    // Decode the runtime code storage value (base64) once. Both `runtime_code_hint`
+    // and `runtime_code` derive from it, avoiding a redundant 2 MiB clone.
+    let decoded_code = decoded
+        .code_storage_value
+        .as_ref()
+        .map(|sv| {
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, sv)
+                .map_err(|_| ())
+        })
+        .transpose()?;
+
     let runtime_code_hint = match (
         decoded.code_merkle_value,
-        decoded.code_storage_value,
+        &decoded_code,
         decoded.code_closest_ancestor_excluding,
     ) {
-        (Some(mv), Some(sv), Some(an)) => Some(DatabaseContentRuntimeCodeHint {
-            code: base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, sv)
-                .map_err(|_| ())?,
+        (Some(mv), Some(code), Some(an)) => Some(DatabaseContentRuntimeCodeHint {
+            code: code.clone(),
             code_merkle_value: hex::decode(mv).map_err(|_| ())?,
             closest_ancestor_excluding: an
                 .as_bytes()
@@ -222,8 +239,8 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
                 .map(|char| Nibble::from_ascii_hex_digit(*char).ok_or(()))
                 .collect::<Result<Vec<Nibble>, ()>>()?,
         }),
-        // A combination of `Some` and `None` is technically invalid, but we simply ignore this
-        // situation.
+        // A combination of `Some` and `None` is technically invalid, but we simply
+        // ignore this situation.
         _ => None,
     };
 
@@ -232,6 +249,7 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         chain_information,
         known_nodes,
         runtime_code_hint,
+        runtime_code: decoded_code,
     })
 }
 
@@ -261,4 +279,94 @@ struct SerdeDatabase {
         skip_serializing_if = "Option::is_none"
     )]
     code_closest_ancestor_excluding: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_db_json(fields: &[(&str, &str)]) -> String {
+        let genesis = format!(r#""genesisHash":"{}""#, "aa".repeat(32));
+        let nodes = r#""nodes":{}"#;
+        let extras: Vec<String> = fields
+            .iter()
+            .map(|(k, v)| format!(r#""{k}":{v}"#))
+            .collect();
+        let mut parts = vec![genesis, nodes.to_string()];
+        parts.extend(extras);
+        format!("{{{}}}", parts.join(","))
+    }
+
+    #[test]
+    fn decode_database_without_runtime_code() {
+        let json = make_db_json(&[]);
+        let db = decode_database(&json, 4).unwrap();
+        assert!(db.runtime_code.is_none());
+        assert!(db.runtime_code_hint.is_none());
+    }
+
+    #[test]
+    fn decode_database_with_runtime_code_only() {
+        let code_bytes = b"\x00asm\x01\x00\x00\x00";
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD_NO_PAD,
+            code_bytes,
+        );
+        let json = make_db_json(&[("runtimeCode", &format!(r#""{encoded}""#))]);
+        let db = decode_database(&json, 4).unwrap();
+        assert_eq!(db.runtime_code.as_deref(), Some(code_bytes.as_slice()));
+        assert!(db.runtime_code_hint.is_none());
+    }
+
+    #[test]
+    fn decode_database_with_full_hint_populates_both() {
+        let code_bytes = b"\x00asm\x01\x00\x00\x00";
+        let encoded_code = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD_NO_PAD,
+            code_bytes,
+        );
+        let merkle_hex = "ab".repeat(32);
+        let ancestor_nibbles = "3a636f";
+        let json = make_db_json(&[
+            ("runtimeCode", &format!(r#""{encoded_code}""#)),
+            ("codeMerkleValue", &format!(r#""{merkle_hex}""#)),
+            ("codeClosestAncestor", &format!(r#""{ancestor_nibbles}""#)),
+        ]);
+        let db = decode_database(&json, 4).unwrap();
+        assert_eq!(db.runtime_code.as_deref(), Some(code_bytes.as_slice()));
+        assert!(db.runtime_code_hint.is_some());
+        let hint = db.runtime_code_hint.unwrap();
+        assert_eq!(hint.code, code_bytes);
+        assert_eq!(hint.code_merkle_value, hex::decode(&merkle_hex).unwrap());
+    }
+
+    #[test]
+    fn decode_database_invalid_base64_runtime_code_returns_error() {
+        let json = make_db_json(&[("runtimeCode", r#""not-valid-base64!!!""#)]);
+        assert!(decode_database(&json, 4).is_err());
+    }
+
+    #[test]
+    fn encode_shrink_drops_runtime_code_when_too_large() {
+        let large_code = "A".repeat(10_000);
+        let db = SerdeDatabase {
+            genesis_hash: "aa".repeat(32),
+            chain: None,
+            nodes: Default::default(),
+            code_storage_value: Some(large_code),
+            code_merkle_value: Some("bb".repeat(32)),
+            code_closest_ancestor_excluding: None,
+        };
+        let serialized = serde_json::to_string(&db).unwrap();
+        assert!(serialized.len() > 1000);
+
+        let mut shrunk = db;
+        shrunk.code_storage_value = None;
+        shrunk.code_merkle_value = None;
+        let shrunk_serialized = serde_json::to_string(&shrunk).unwrap();
+        assert!(shrunk_serialized.len() < 200);
+
+        let decoded = decode_database(&shrunk_serialized, 4).unwrap();
+        assert!(decoded.runtime_code.is_none());
+    }
 }
