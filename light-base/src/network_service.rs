@@ -2257,69 +2257,49 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 //     Identify yet).
                 const PARALLEL_FIND_NODE_PER_ROUND: usize = 3;
 
-                let mut targets: Vec<PeerId> = task
+                let mut candidates: Vec<PeerId> = task
                     .network
                     .kademlia_capable_peers(chain_id)
                     .cloned()
                     .collect();
-                if targets.len() < PARALLEL_FIND_NODE_PER_ROUND {
-                    for p in task
-                        .network
-                        .gossip_connected_peers(
-                            chain_id,
-                            service::GossipKind::ConsensusTransactions,
-                        )
-                        .cloned()
-                    {
-                        if !targets.contains(&p) {
-                            targets.push(p);
-                            if targets.len() >= PARALLEL_FIND_NODE_PER_ROUND {
-                                break;
-                            }
-                        }
+                for p in task
+                    .network
+                    .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
+                    .cloned()
+                {
+                    if !candidates.contains(&p) {
+                        candidates.push(p);
                     }
                 }
-                targets.truncate(PARALLEL_FIND_NODE_PER_ROUND);
 
-                if targets.is_empty() {
+                let started = dispatch_find_node_requests(
+                    &mut task.network,
+                    &mut task.randomness,
+                    chain_id,
+                    &candidates,
+                    PARALLEL_FIND_NODE_PER_ROUND,
+                );
+
+                let chain_log_name = &task.network[chain_id].log_name;
+                for (request_target, requested_peer_id) in &started {
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "discovery-find-node-started",
+                        chain = chain_log_name,
+                        request_target,
+                        requested_peer_id
+                    );
+                }
+                if started.is_empty() {
                     log!(
                         &task.platform,
                         Debug,
                         "network",
                         "discovery-skipped-no-peer",
-                        chain = &task.network[chain_id].log_name
+                        chain = chain_log_name
                     );
-                } else {
-                    for target in &targets {
-                        let random_peer_id = {
-                            let mut pub_key = [0; 32];
-                            rand_chacha::rand_core::RngCore::fill_bytes(
-                                &mut task.randomness,
-                                &mut pub_key,
-                            );
-                            PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
-                        };
-
-                        match task.network.start_kademlia_find_node_request(
-                            target,
-                            chain_id,
-                            &random_peer_id,
-                            Duration::from_secs(20),
-                        ) {
-                            Ok(_) => {}
-                            Err(service::StartRequestError::NoConnection) => unreachable!(),
-                        };
-
-                        log!(
-                            &task.platform,
-                            Debug,
-                            "network",
-                            "discovery-find-node-started",
-                            chain = &task.network[chain_id].log_name,
-                            request_target = target,
-                            requested_peer_id = random_peer_id
-                        );
-                    }
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::HandshakeFinished {
@@ -3602,6 +3582,52 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     }
 }
 
+/// Starts find-node requests against `candidates` until `max` have started, each with a fresh
+/// random target key, and returns the `(request_target, requested_peer_id)` of each.
+///
+/// A `kademlia_capable_peers` candidate may have no usable connection (the flag outlives the
+/// connection it was learned on); such a peer fails with `NoConnection` and is skipped without
+/// counting towards `max`.
+fn dispatch_find_node_requests<TChain, TConn, TNow>(
+    network: &mut service::ChainNetwork<TChain, TConn, TNow>,
+    randomness: &mut impl rand_chacha::rand_core::RngCore,
+    chain_id: service::ChainId,
+    candidates: &[PeerId],
+    max: usize,
+) -> Vec<(PeerId, PeerId)>
+where
+    TNow: Clone
+        + core::ops::Add<Duration, Output = TNow>
+        + core::ops::Sub<TNow, Output = Duration>
+        + Ord,
+{
+    let mut started = Vec::with_capacity(max);
+
+    for target in candidates {
+        if started.len() >= max {
+            break;
+        }
+
+        let random_peer_id = {
+            let mut pub_key = [0; 32];
+            randomness.fill_bytes(&mut pub_key);
+            PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
+        };
+
+        match network.start_kademlia_find_node_request(
+            target,
+            chain_id,
+            &random_peer_id,
+            Duration::from_secs(20),
+        ) {
+            Ok(_) => started.push((target.clone(), random_peer_id)),
+            Err(service::StartRequestError::NoConnection) => {}
+        }
+    }
+
+    started
+}
+
 /// Pops a trailing `/p2p/<peer_id>` from `addr` if it matches `expected_peer`. Returns `false`
 /// (caller must discard the address) on mismatch.
 fn pop_p2p_if_matches(
@@ -3624,7 +3650,9 @@ fn pop_p2p_if_matches(
 
 #[cfg(test)]
 mod tests {
-    use super::pop_p2p_if_matches;
+    use super::{Role, dispatch_find_node_requests, pop_p2p_if_matches, service};
+    use core::time::Duration;
+    use rand_chacha::rand_core::SeedableRng as _;
     use smoldot::libp2p::{multiaddr::Multiaddr, peer_id::PeerId};
 
     // Two distinct, valid PeerIds. The first is reused from existing smoldot tests in
@@ -3663,5 +3691,43 @@ mod tests {
         let mut addr = original.clone();
         assert!(!pop_p2p_if_matches(&mut addr, &peer(PEER_B)));
         assert_eq!(addr, original);
+    }
+
+    fn empty_network() -> (service::ChainNetwork<(), (), Duration>, service::ChainId) {
+        let mut network = service::ChainNetwork::new(service::Config {
+            connections_capacity: 8,
+            chains_capacity: 1,
+            randomness_seed: [0; 32],
+            handshake_timeout: Duration::from_secs(10),
+        });
+        let chain_id = network
+            .add_chain(service::ChainConfig {
+                user_data: (),
+                genesis_hash: [0; 32],
+                fork_id: None,
+                block_number_bytes: 4,
+                grandpa_protocol_config: None,
+                allow_inbound_block_requests: false,
+                best_hash: [0; 32],
+                best_number: 0,
+                role: Role::Light,
+                enable_statement_protocol: false,
+            })
+            .unwrap();
+        (network, chain_id)
+    }
+
+    // With no connections every candidate returns `NoConnection`, so all are skipped and no
+    // request is started. The dispatch loop must not treat that as unreachable.
+    #[test]
+    fn dispatch_skips_unreachable_candidates() {
+        let (mut network, chain_id) = empty_network();
+        let mut randomness = rand_chacha::ChaCha20Rng::from_seed([7; 32]);
+
+        let candidates = [peer(PEER_A), peer(PEER_B)];
+        let started =
+            dispatch_find_node_requests(&mut network, &mut randomness, chain_id, &candidates, 3);
+
+        assert!(started.is_empty());
     }
 }

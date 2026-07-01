@@ -39,8 +39,8 @@ case "${network}" in
   kusama)
     relay_spec="${SPECS_DIR}/ksmcc3.json"
     para_spec="${SPECS_DIR}/ksmcc3_asset_hub.json"
-    relay_rpc=""  # TODO: set Kusama relay RPC URL
-    para_rpc=""  # TODO: set Kusama Asset Hub RPC URL
+    relay_rpc="https://kusama-rpc.n.dwellir.com"
+    para_rpc="https://asset-hub-kusama-rpc.n.dwellir.com"
     ;;
   westend)
     relay_spec="${SPECS_DIR}/westend2.json"
