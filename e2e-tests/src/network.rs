@@ -427,10 +427,12 @@ pub async fn run_chainhead_v1_follow_js(
         .map_err(|e| anyhow!("JS test failed: {e}"))
 }
 
-/// Runs `js/smoke.js` against a live network. Env-injects spec paths, the
-/// expected-initial-finalized floor, and (warm only) smoldot DB content
-/// paths.
-pub async fn run_smoke_js(
+/// Runs the shared `smoke` body against a single live network on both hosts in
+/// sequence: the Node host over TCP, then the Browser host in headless Chrome
+/// with `forbidTcp` (→ WebRTC). Both hosts execute the same `shared/smoke.js`
+/// and load the same chain spec — its `bootNodes` are expected to carry both
+/// TCP and WebRTC multiaddrs.
+pub async fn run_smoke(
     live: &LiveNetwork,
     cfg: &Scenario,
     required_blocks: u32,
@@ -459,9 +461,25 @@ pub async fn run_smoke_js(
     }
 
     log::info!(
-        "running smoldot JS smoke test (relay_spec={relay_spec_str}, para_spec={para_spec_str}, required_blocks={required_blocks}, expected_initial_finalized={expected_finalized})"
+        "running smoldot smoke test (relay_spec={}, para_spec={}, required_blocks={}, expected_initial_finalized={})",
+        relay_spec_str,
+        para_spec_str,
+        required_blocks,
+        expected_finalized
     );
-    crate::run_js_test("js/smoke.js", &env_vars)
+
+    // Node host (TCP).
+    crate::ensure_js_deps_installed();
+    crate::run_shared_test(crate::Host::Node, "smoke", &env_vars)
         .await
-        .map_err(|e| anyhow!("JS test failed: {e}"))
+        .map_err(|e| anyhow!("node smoke test failed: {e}"))?;
+
+    // Browser host (headless Chrome, forbidTcp → WebRTC). Disabled until the
+    // spawned chain spec's `bootNodes` carry WebRTC multiaddrs.
+    crate::ensure_browser_deps_installed();
+    crate::run_shared_test(crate::Host::Browser, "smoke", &env_vars)
+        .await
+        .map_err(|e| anyhow!("browser smoke test failed: {e}"))?;
+
+    Ok(())
 }

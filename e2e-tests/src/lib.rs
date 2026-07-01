@@ -24,9 +24,35 @@ pub mod snapshot;
 pub mod statement;
 
 pub use network::{
-    run_chainhead_v1_follow_js, run_smoke_js, spawn_scenario, spawned_chain_spec_paths,
-    LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC, FINALIZED_METRIC, PARA_ID,
+    run_chainhead_v1_follow_js, run_smoke, spawn_scenario, spawned_chain_spec_paths, LiveNetwork,
+    Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC, FINALIZED_METRIC, PARA_ID,
 };
+
+/// Which host runs a shared test body: the Node build over TCP,
+/// or the browser over WebRTC.
+#[derive(Clone, Copy, Debug)]
+pub enum Host {
+    Node,
+    Browser,
+}
+
+/// Runs the shared test module `test_name` (under `e2e-tests/shared/`) on the
+/// chosen host. Both hosts execute the *same* JS body, the transport and
+/// the generic runner differ. `env_vars` carries the test's inputs.
+pub async fn run_shared_test(
+    host: Host,
+    test_name: &str,
+    env_vars: &[(&str, &str)],
+) -> Result<(), String> {
+    let mut env: Vec<(&str, &str)> = env_vars.to_vec();
+    env.push(("TEST_NAME", test_name));
+    // Both runners are launched via `run_js_test`.
+    let script = match host {
+        Host::Node => "hosts/node/run.js",
+        Host::Browser => "hosts/browser/run.js",
+    };
+    run_js_test(script, &env).await
+}
 
 /// A file-backed Rust → JS message channel. Rust appends newline-terminated
 /// messages with [`SyncFile::send`]; JS polls the file and waits for a given
@@ -89,39 +115,36 @@ pub fn ensure_smoldot_built() {
     assert!(status.success(), "smoldot npm build failed");
 }
 
-/// Ensures JS test dependencies are installed.
-pub fn ensure_js_deps_installed() {
-    let js_dir = project_root().join("e2e-tests/js");
-    let node_modules = js_dir.join("node_modules");
-    if node_modules.exists() {
+/// Installs the unified JS dependencies (smoldot + Playwright) into the single
+/// `e2e-tests/node_modules`. no-op once `node_modules` exists.
+/// Every JS script under `e2e-tests/` resolves its bare imports from here.
+fn ensure_deps_installed() {
+    let e2e_dir = project_root().join("e2e-tests");
+    if e2e_dir.join("node_modules").exists() {
         return;
     }
     let status = std::process::Command::new("npm")
         .arg("install")
-        .current_dir(&js_dir)
+        .current_dir(&e2e_dir)
         .status()
         .expect("failed to run npm install");
-    assert!(status.success(), "npm install in e2e-tests/js failed");
+    assert!(status.success(), "npm install in e2e-tests failed");
 }
 
-/// Ensures browser test dependencies (Playwright + smoldot) are installed and
-/// that Playwright's bundled Chromium is downloaded.
+/// Ensures Node-host test dependencies are installed.
+pub fn ensure_js_deps_installed() {
+    ensure_deps_installed();
+}
+
+/// Ensures browser-host dependencies are installed and that Playwright's bundled
+/// Chromium is downloaded.
 pub fn ensure_browser_deps_installed() {
-    let browser_dir = project_root().join("e2e-tests/browser");
-    let node_modules = browser_dir.join("node_modules");
-    if !node_modules.exists() {
-        let status = std::process::Command::new("npm")
-            .arg("install")
-            .current_dir(&browser_dir)
-            .status()
-            .expect("failed to run npm install for browser tests");
-        assert!(status.success(), "npm install in e2e-tests/browser failed");
-    }
+    ensure_deps_installed();
     // `playwright install chromium` is idempotent and a no-op if the browser
     // is already cached locally.
     let status = std::process::Command::new("npx")
         .args(["playwright", "install", "chromium"])
-        .current_dir(&browser_dir)
+        .current_dir(project_root().join("e2e-tests"))
         .status()
         .expect("failed to run playwright install");
     assert!(status.success(), "playwright install chromium failed");

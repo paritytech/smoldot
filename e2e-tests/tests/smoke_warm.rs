@@ -64,6 +64,6 @@ async fn smoke_warm() -> Result<(), anyhow::Error> {
         })?;
     log::info!("alice reached #{target} (>= baseline+{REQUIRED_BLOCKS})");
 
-    run_smoke_js(&live, &cfg, REQUIRED_BLOCKS).await?;
+    run_smoke(&live, &cfg, REQUIRED_BLOCKS).await?;
     Ok(())
 }
