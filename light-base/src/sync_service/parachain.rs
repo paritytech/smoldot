@@ -1286,12 +1286,8 @@ struct BootstrappedParachain {
     finalized_runtime: FinalizedBlockRuntime,
 }
 
-/// Downloads the parachain runtime from a P2P peer and determines Aura consensus parameters.
-///
-/// Tries each currently-connected peer in turn, rotating past any peer that fails to answer
-/// (for instance with `RemoteCouldntAnswer`). Returns an error only once every connected peer
-/// has been tried, so the caller can retry against a possibly-changed peer set instead of
-/// spinning forever on a single peer that cannot serve the requested block. See issue #3290.
+/// Downloads the parachain runtime and determines Aura consensus parameters, trying each
+/// connected peer in turn and rotating past any that fails. See issue #3290.
 async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
@@ -1338,13 +1334,11 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     .await
 }
 
-/// Returns the list of currently-connected peers, waiting for at least one to connect if none
-/// are yet. The result is a snapshot: the caller tries each peer and, if all fail, calls this
-/// again later, by which point discovery may have added new peers.
+/// Returns a snapshot of the currently-connected peers, waiting for at least one if none yet.
 async fn connected_peers_or_wait<TPlat: PlatformRef>(
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
 ) -> Vec<libp2p::PeerId> {
-    // Subscribe before reading the peer list so a peer connecting in between is not missed.
+    // Subscribe before listing so a peer connecting in between isn't missed.
     let mut from_network = Box::pin(network_service.subscribe().await);
 
     let current = network_service.peers_list().await.collect::<Vec<_>>();
@@ -1365,8 +1359,7 @@ async fn connected_peers_or_wait<TPlat: PlatformRef>(
     }
 }
 
-/// Calls `attempt` against each peer in turn, returning the first `Ok`. Rotates to the next peer
-/// on any `Err`, and returns an error only once all peers have been tried.
+/// Tries `attempt` on each peer in turn, returning the first `Ok`; errors only once all fail.
 async fn first_successful_peer<T, F, Fut>(
     peers: impl IntoIterator<Item = libp2p::PeerId>,
     mut attempt: F,
@@ -1667,9 +1660,7 @@ fn run_single_runtime_call(
 
 #[cfg(test)]
 mod tests {
-    //! Tests for the peer-rotation driver behind the parachain bootstrap, covering the
-    //! regression described in issue #3290 (bootstrap stuck retrying a single peer that
-    //! responds with `RemoteCouldntAnswer`).
+    //! Peer-rotation driver tests for the #3290 regression.
 
     use super::first_successful_peer;
     use alloc::{string::String, vec, vec::Vec};
@@ -1677,7 +1668,7 @@ mod tests {
     use futures_lite::future::block_on;
     use smoldot::libp2p::peer_id::PeerId;
 
-    // Two distinct, valid PeerIds, reused from the network_service tests.
+    // Two distinct, valid PeerIds.
     const PEER_A: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
     const PEER_B: &str = "12D3KooWQk1yQtG1YugyKjiQf6KNk8VjGGAT5xy1FWcnRKN4yXYJ";
 
@@ -1685,9 +1676,7 @@ mod tests {
         PeerId::from_bytes(bs58::decode(s).into_vec().unwrap()).unwrap()
     }
 
-    // Reproduces #3290: the first peer fails (as a peer returning `RemoteCouldntAnswer`
-    // would), so the driver must rotate to the next peer and succeed there instead of
-    // giving up or spinning on the first peer.
+    // Reproduces #3290: first peer fails, driver must rotate to the next and succeed.
     #[test]
     fn rotates_past_peer_that_cannot_answer() {
         let a = peer(PEER_A);
@@ -1711,13 +1700,10 @@ mod tests {
         }));
 
         assert_eq!(result, Ok(b.clone()));
-        // Both peers were tried, in order, before succeeding on the second.
         assert_eq!(*tried.borrow(), vec![a, b]);
     }
 
-    // When every connected peer fails, the driver returns an error (so the caller can sleep
-    // and retry against a refreshed peer set) rather than looping forever. It must try each
-    // peer exactly once.
+    // Every peer fails: driver errors (letting the caller retry later) after trying each once.
     #[test]
     fn errors_after_trying_every_peer() {
         let a = peer(PEER_A);
@@ -1736,7 +1722,7 @@ mod tests {
         assert_eq!(tried.borrow().len(), 2);
     }
 
-    // With no connected peers the driver errors immediately without invoking the attempt.
+    // No peers: driver errors without invoking the attempt.
     #[test]
     fn errors_when_no_peers() {
         let result: Result<PeerId, String> = block_on(first_successful_peer(
@@ -1746,8 +1732,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // The common path: the first peer answers, so no rotation happens and only one attempt
-    // is made.
+    // Happy path: first peer answers, so only one attempt is made.
     #[test]
     fn uses_first_peer_when_it_succeeds() {
         let a = peer(PEER_A);
