@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add support for the `ext_statement_store_remove_by_version_1` host function as a no-op. Fixes wasm-VM traps on runtimes that import this symbol during runtime execution.
+
 ## 3.3.0 - 2026-06-26
 
 ### Added
