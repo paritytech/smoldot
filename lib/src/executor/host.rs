@@ -2340,9 +2340,8 @@ impl ReadyToRun {
             }
             HostFunction::ext_statement_store_remove_by_version_1 => {
                 // Statement store is an off-chain, gossiped side-store; a light client cannot
-                // maintain it. On-chain code paths (e.g. `Core_execute_block`) may still call
-                // this function, so we accept and discard the request. Consuming the 32-byte
-                // account pointer keeps the wasm VM's argument stack balanced.
+                // maintain it. On-chain code paths may still call
+                // this function, so we accept and discard the request.
                 let _who = expect_pointer_constant_size!(0, 32);
                 HostVm::ReadyToRun(ReadyToRun {
                     inner: self.inner,

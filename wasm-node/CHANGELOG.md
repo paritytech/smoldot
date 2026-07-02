@@ -4,7 +4,7 @@
 
 ### Added
 
-- Add support for the `ext_statement_store_remove_by_version_1` host function as a no-op. Fixes wasm-VM traps on runtimes such as `next-people-paseo` that import this symbol during on-chain block execution. ([paritytech/misc-issues#164](https://github.com/paritytech/misc-issues/issues/164))
+- Add support for the `ext_statement_store_remove_by_version_1` host function as a no-op. Fixes wasm-VM traps on runtimes that import this symbol during runtime execution.
 
 ## 3.3.0 - 2026-06-26
 
