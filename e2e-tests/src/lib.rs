@@ -24,8 +24,9 @@ pub mod snapshot;
 pub mod statement;
 
 pub use network::{
-    run_chainhead_v1_follow_js, run_smoke, spawn_scenario, spawned_chain_spec_paths, LiveNetwork,
-    Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC, FINALIZED_METRIC, PARA_ID,
+    listener_args, prepare_runtime_spec, run_chainhead_v1_follow_js, run_smoke, spawn_scenario,
+    spawned_chain_spec_paths, LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC,
+    FINALIZED_METRIC, PARA_ID,
 };
 
 /// Which host runs a shared test body: the Node build over TCP,
@@ -34,6 +35,23 @@ pub use network::{
 pub enum Host {
     Node,
     Browser,
+}
+
+/// Runs the shared test module `test_name` (under `e2e-tests/shared/`) on
+/// both node and headless browser hosts.
+pub async fn run_test(
+    test_name: &str,
+    env_vars: &[(&str, &str)],
+) -> Result<(), String> {
+    log::info!("Running {} test on Node Host", test_name);
+    crate::ensure_js_deps_installed();
+    run_shared_test(Host::Node, test_name, env_vars).await?;
+
+    log::info!("Running {} test on Browser Host", test_name);
+    crate::ensure_browser_deps_installed();
+    run_shared_test(Host::Browser, test_name, env_vars).await?;
+
+    Ok(())
 }
 
 /// Runs the shared test module `test_name` (under `e2e-tests/shared/`) on the

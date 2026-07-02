@@ -29,13 +29,38 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use serde_json::Value;
-use zombienet_sdk::{LocalFileSystem, Network, NetworkConfig, NetworkConfigBuilder};
+use zombienet_sdk::subxt::ext::subxt_rpcs::client::RpcParams;
+use zombienet_sdk::{Arg, LocalFileSystem, Network, NetworkConfig, NetworkConfigBuilder};
 
 /// `BlockNumber` width on substrate-based chains used here (westend, people-westend).
 const BLOCK_NUMBER_BYTES: usize = 4;
 
 pub const PARA_ID: u32 = 1004;
 pub const PARA_CHAIN: &str = "people-westend-local";
+
+/// Per-node UDP ports for the WebRTC listeners.
+const UDP_PORTS: [(&str, u16); 4] = [
+    ("validator-0", 33000),
+    ("validator-1", 33001),
+    ("alice", 33002),
+    ("bob", 33003),
+];
+
+/// Looks up the fixed WebRTC UDP port assigned to `name` and returns the CLI
+/// args that make a substrate node listen for WebRTC on it.
+pub fn listener_args(name: &str) -> Vec<Arg> {
+    let udp_port = UDP_PORTS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, udp )| *udp)
+        .unwrap_or_else(|| panic!("no WebRTC UDP port assigned for node {name}"));
+    vec![
+        ("--listen-addr", "/ip4/0.0.0.0/tcp/0/ws").into(),
+        "--experimental-webrtc".into(),
+        ("--listen-addr", format!("/ip4/127.0.0.1/udp/{udp_port}/webrtc-direct").as_str()).into()
+    ]
+}
+
 pub const FINALIZED_METRIC: &str = "block_height{status=\"finalized\"}";
 pub const BEST_METRIC: &str = "block_height{status=\"best\"}";
 
@@ -130,18 +155,16 @@ pub async fn spawn_scenario(
         wait_for_relay_first_finalized(&network).await?;
     }
 
-    let (relay_spec, para_spec) = match cfg.snapshot() {
+    // If fresh then vanilla spec from zombienet is used
+    // otherwise the committed light-sync-state specs.
+    // In both cases we overwrite bootNodes with the
+    // running nodes current multiaddrs, TCP and WebRTC.
+    let (relay_base, para_base) = match cfg.snapshot() {
         None => spawned_chain_spec_paths(&network)?,
-        // Light-sync-state specs (genesis.stateRootHash + lightSyncState) are
-        // what smoldot loads. Published artifacts have empty `bootNodes`;
-        // inject current multiaddrs into runtime copies.
-        Some(s) => prepare_runtime_specs(
-            &network,
-            &s.smoldot_relay_spec,
-            &s.smoldot_para_spec,
-            base_dir_str,
-        )?,
+        Some(s) => (s.smoldot_relay_spec.clone(), s.smoldot_para_spec.clone()),
     };
+    let (relay_spec, para_spec) =
+        prepare_runtime_specs(&network, &relay_base, &para_base, base_dir_str).await?;
 
     let mut expected_initial_finalized = match cfg.snapshot() {
         None => 0,
@@ -186,14 +209,20 @@ fn build_network_config(
                 Some(p) => r.with_chain_spec_path(p),
             };
             r.with_validator(|n| {
-                let n = n.with_name("validator-0").bootnode(true);
+                let n = n
+                    .with_name("validator-0")
+                    .bootnode(true)
+                    .with_args(listener_args("validator-0"));
                 match relay_db.as_deref() {
                     Some(p) => n.with_db_snapshot(p),
                     None => n,
                 }
             })
             .with_validator(|n| {
-                let n = n.with_name("validator-1").bootnode(true);
+                let n = n
+                    .with_name("validator-1")
+                    .bootnode(true)
+                    .with_args(listener_args("validator-1"));
                 match relay_db.as_deref() {
                     Some(p) => n.with_db_snapshot(p),
                     None => n,
@@ -215,14 +244,30 @@ fn build_network_config(
                 Some(path) => p.with_chain_spec_path(path),
             };
             p.with_collator(|n| {
-                let n = n.with_name("alice").bootnode(true);
+                let mut args = vec![
+                   "--force-authoring".into(),
+                   "--authoring=slot-based".into(),
+                ];
+                args.extend(listener_args("alice"));
+                let n = n
+                    .with_name("alice")
+                    .bootnode(true)
+                    .with_args(args);
                 match para_db.as_deref() {
                     Some(p) => n.with_db_snapshot(p),
                     None => n,
                 }
             })
             .with_collator(|n| {
-                let n = n.with_name("bob").bootnode(true);
+                let mut args = vec![
+                   "--force-authoring".into(),
+                   "--authoring=slot-based".into(),
+                ];
+                args.extend(listener_args("bob"));
+                let n = n
+                    .with_name("bob")
+                    .bootnode(true)
+                    .with_args(args);
                 match para_db.as_deref() {
                     Some(p) => n.with_db_snapshot(p),
                     None => n,
@@ -261,45 +306,87 @@ async fn wait_for_relay_first_finalized(
     Ok(())
 }
 
-/// Reads `committed_relay` / `committed_para` (port-agnostic artifacts with
-/// empty `bootNodes`), injects current bootnode multiaddrs, and writes
-/// runtime copies under `{base_dir}/smoldot-runtime-specs/`.
-fn prepare_runtime_specs(
+/// Reads the relay and para specs, overwrites their `bootNodes`
+/// with the running nodes' current multiaddrs (TCP + WebRTC)
+async fn prepare_runtime_specs(
     network: &Network<LocalFileSystem>,
-    committed_relay: &Path,
-    committed_para: &Path,
+    relay_base: &Path,
+    para_base: &Path,
     base_dir_str: &str,
 ) -> Result<(PathBuf, PathBuf), anyhow::Error> {
-    let runtime_dir = PathBuf::from(base_dir_str).join("smoldot-runtime-specs");
-    std::fs::create_dir_all(&runtime_dir)?;
-
-    let relay_multi = collect_multiaddrs(network, &["validator-0", "validator-1"])?;
-    let para_multi = collect_multiaddrs(network, &["alice", "bob"])?;
-
-    let relay_runtime = runtime_dir.join("relay-spec.json");
-    let para_runtime = runtime_dir.join("para-spec.json");
-    write_spec_with_bootnodes(committed_relay, &relay_runtime, &relay_multi)?;
-    write_spec_with_bootnodes(committed_para, &para_runtime, &para_multi)?;
-    log::info!(
-        "prepared runtime specs (relay={}, para={})",
-        relay_runtime.display(),
-        para_runtime.display()
-    );
+    let relay_runtime = prepare_runtime_spec(
+        network,
+        relay_base,
+        &["validator-0", "validator-1"],
+        base_dir_str,
+        "relay-spec.json",
+    )
+    .await?;
+    let para_runtime =
+        prepare_runtime_spec(network, para_base, &["alice", "bob"], base_dir_str, "para-spec.json")
+            .await?;
     Ok((relay_runtime, para_runtime))
 }
 
-fn collect_multiaddrs(
+/// Writes a copy of `base_spec` to `{base_dir}/smoldot-runtime-specs/{out_name}`
+/// whose `bootNodes` are the current dialable multiaddrs (TCP + WebRTC) of the
+/// named nodes. This is the generic way to hand a live network's chain spec to
+/// smoldot so that both hosts can connect (Node over TCP, browser over WebRTC).
+pub async fn prepare_runtime_spec(
+    network: &Network<LocalFileSystem>,
+    base_spec: &Path,
+    bootnode_names: &[&str],
+    base_dir_str: &str,
+    out_name: &str,
+) -> Result<PathBuf, anyhow::Error> {
+    let runtime_dir = PathBuf::from(base_dir_str).join("smoldot-runtime-specs");
+    std::fs::create_dir_all(&runtime_dir)?;
+    let multiaddrs = collect_bootnode_multiaddrs(network, bootnode_names).await?;
+    let out = runtime_dir.join(out_name);
+    write_spec_with_bootnodes(base_spec, &out, &multiaddrs)?;
+    log::info!("prepared runtime spec {} (bootnodes: {multiaddrs:?})", out.display());
+    Ok(out)
+}
+
+/// For each named node, returns its dialable multiaddrs to seed `bootNodes`.
+async fn collect_bootnode_multiaddrs(
     network: &Network<LocalFileSystem>,
     names: &[&str],
 ) -> Result<Vec<String>, anyhow::Error> {
-    names
-        .iter()
-        .map(|n| {
-            network
-                .get_node(*n)
-                .map(|node| node.multiaddr().to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()
+    let mut out: Vec<String> = Vec::new();
+    for name in names {
+        let node = network.get_node(*name)?;
+        let rpc = node.rpc().await?;
+        let mut listen_addrs: Vec<String> = rpc
+            .request::<Vec<String>>("system_localListenAddresses", RpcParams::new())
+            .await
+            .map_err(|e| anyhow!("{name}: system_localListenAddresses failed: {e}"))?
+            .into_iter()
+            // Keep loopback addresses and only webrtc or tcp protocols.
+            .filter(|addr| {
+                addr.contains("/ip4/127.0.0.1/")
+                    && (addr.contains("/tcp/") || addr.contains("/webrtc-direct/"))
+            })
+            .collect();
+        // Sanitize multiaddrs: system_localListenAddresses currently appends an
+        // extra /p2p/<peer_id> even when one is already present.
+        for addr in listen_addrs.iter_mut() {
+            if addr.matches("/p2p/").count() == 2 {
+                if let Some(idx) = addr.rfind("/p2p/") {
+                    addr.truncate(idx);
+                }
+            }
+        }
+
+        if listen_addrs.len() < 2 {
+            return Err(anyhow!(
+                "{name}: missing TCP or WebRTC listen address (got {listen_addrs:?})"
+            ));
+        }
+
+        out.extend(listen_addrs);
+    }
+    Ok(out)
 }
 
 fn write_spec_with_bootnodes(
@@ -474,8 +561,7 @@ pub async fn run_smoke(
         .await
         .map_err(|e| anyhow!("node smoke test failed: {e}"))?;
 
-    // Browser host (headless Chrome, forbidTcp → WebRTC). Disabled until the
-    // spawned chain spec's `bootNodes` carry WebRTC multiaddrs.
+    // Browser host (WebRTC).
     crate::ensure_browser_deps_installed();
     crate::run_shared_test(crate::Host::Browser, "smoke", &env_vars)
         .await
