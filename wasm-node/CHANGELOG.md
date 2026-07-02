@@ -2,9 +2,21 @@
 
 ## Unreleased
 
+## 3.3.1 - 2026-07-02
+
 ### Added
 
-- Add support for the `ext_statement_store_remove_by_version_1` host function as a no-op. Fixes wasm-VM traps on runtimes that import this symbol during runtime execution.
+- Add support for the `ext_statement_store_remove_by_version_1` host function as a no-op. Fixes wasm-VM traps on runtimes that import this symbol during runtime execution. ([#3295](https://github.com/paritytech/smoldot/pull/3295))
+
+### Changed
+
+- `chainHead_v1_follow` now reports every finalized block: the `finalized` event lists all newly-finalized blocks in ascending order instead of only the highest, so consumers tracking each finalized block no longer skip intermediate ones when several blocks finalize at once. ([#3282](https://github.com/paritytech/smoldot/pull/3282))
+
+### Fixed
+
+- Fix finality stalling across an authority-set change, and no longer discard a warp sync that completes while the sync mode is still being decided. ([#3282](https://github.com/paritytech/smoldot/pull/3282))
+- Fix a panic in peer discovery when a Kademlia-capable peer had no usable connection (its capability flag was learned on a since-closed connection). ([#3293](https://github.com/paritytech/smoldot/pull/3293))
+- Fix parachain bootstrap looping forever when the first connected peer couldn't serve the runtime; smoldot now rotates through the other connected peers before erroring. ([#3294](https://github.com/paritytech/smoldot/pull/3294))
 
 ## 3.3.0 - 2026-06-26
 
