@@ -3137,7 +3137,7 @@ fn compile_runtime<TPlat: PlatformRef>(
                         format!(
                             "Unresolved host function in runtime: `{}`:`{}`. Smoldot might \
                             encounter errors later on. Please report this issue in \
-                            https://github.com/smol-dot/smoldot",
+                            https://github.com/paritytech/smoldot",
                             module_name, function
                         )
                     );
