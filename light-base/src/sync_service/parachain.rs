@@ -1330,6 +1330,16 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
 
     let peers = connected_peers_or_wait(network_service).await;
 
+    log!(
+        platform,
+        Trace,
+        log_target,
+        format!(
+            "Attempting parachain runtime download from {} connected peer(s)",
+            peers.len()
+        )
+    );
+
     first_successful_peer(peers, |peer_id| {
         attempt_bootstrap_with_peer(
             log_target,
