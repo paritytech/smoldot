@@ -261,7 +261,7 @@ jobs:
         working-directory: ./wasm-node/javascript
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: npm-package-${{ github.sha }}
           path: ./wasm-node/javascript/*.tgz
