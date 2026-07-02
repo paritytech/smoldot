@@ -171,7 +171,10 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/bin"
           base="https://github.com/paritytech/polkadot-sdk/releases/download/${RELEASE_TAG}"
           for bin in polkadot polkadot-execute-worker polkadot-prepare-worker polkadot-parachain; do
-            curl -fL --retry 3 -o "$GITHUB_WORKSPACE/bin/${bin}" "${base}/${bin}"
+            # These large binaries occasionally hit a mid-download connection reset from the
+            # GitHub release CDN (curl exit 56). Plain --retry does not retry a reset, so
+            # --retry-all-errors is required to make curl retry and re-fetch the binary.
+            curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o "$GITHUB_WORKSPACE/bin/${bin}" "${base}/${bin}"
             chmod +x "$GITHUB_WORKSPACE/bin/${bin}"
           done
           "$GITHUB_WORKSPACE/bin/polkadot" --version
