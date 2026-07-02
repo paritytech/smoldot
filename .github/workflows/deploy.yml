@@ -59,8 +59,8 @@ jobs:
         context: .
         file: ./full-node/Dockerfile
         load: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        tags: ghcr.io/smol-dot/full-node:main
-    - run: docker push ghcr.io/smol-dot/full-node:main
+        tags: ghcr.io/paritytech/full-node:main
+    - run: docker push ghcr.io/paritytech/full-node:main
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
   build-js-doc:
@@ -261,7 +261,7 @@ jobs:
         working-directory: ./wasm-node/javascript
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: npm-package-${{ github.sha }}
           path: ./wasm-node/javascript/*.tgz

@@ -23,7 +23,7 @@ jobs:
       ZOMBIENET_SDK_LARGE_RUNNER: ${{ steps.vars.outputs.ZOMBIENET_SDK_LARGE_RUNNER }}
       POLKADOT_RELEASE_TAG: ${{ steps.vars.outputs.POLKADOT_RELEASE_TAG }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@v6
 
       - name: Source zombienet-env
         id: vars
@@ -97,7 +97,7 @@ jobs:
             runner-type: "default"
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-node@v6.1.0
         with:
@@ -171,7 +171,10 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/bin"
           base="https://github.com/paritytech/polkadot-sdk/releases/download/${RELEASE_TAG}"
           for bin in polkadot polkadot-execute-worker polkadot-prepare-worker polkadot-parachain; do
-            curl -fL --retry 3 -o "$GITHUB_WORKSPACE/bin/${bin}" "${base}/${bin}"
+            # These large binaries occasionally hit a mid-download connection reset from the
+            # GitHub release CDN (curl exit 56). Plain --retry does not retry a reset, so
+            # --retry-all-errors is required to make curl retry and re-fetch the binary.
+            curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o "$GITHUB_WORKSPACE/bin/${bin}" "${base}/${bin}"
             chmod +x "$GITHUB_WORKSPACE/bin/${bin}"
           done
           "$GITHUB_WORKSPACE/bin/polkadot" --version
@@ -189,7 +192,7 @@ jobs:
 
       - name: Upload zombienet logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: zombienet-logs-${{ matrix.test.job-name }}-${{ github.sha }}
           path: |

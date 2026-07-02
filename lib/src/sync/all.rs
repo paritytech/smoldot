@@ -242,6 +242,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         self.ready_to_transition = None;
     }
 
+    /// Returns `true` if a warp sync completed while suppressed and its result is being held.
+    pub fn has_pending_warp_completion(&self) -> bool {
+        self.ready_to_transition.is_some()
+    }
+
     /// Returns the value that was initially passed in [`Config::block_number_bytes`].
     pub fn block_number_bytes(&self) -> usize {
         self.shared.block_number_bytes
