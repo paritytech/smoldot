@@ -64,13 +64,11 @@ async fn reserved_peer_discovery() -> Result<(), anyhow::Error> {
                 .with_default_command("polkadot")
                 .with_default_image(images.polkadot.as_str())
                 .with_validator(|n| {
-                    n.with_name("validator-a").bootnode(true).with_args(vec![(
-                        "--in-peers-light",
-                        "0",
-                    )
-                        .into()])
+                    let mut args = vec![("--in-peers-light", "0").into()];
+                    args.extend(listener_args("alice"));
+                    n.with_name("validator-a").bootnode(true).with_args(args)
                 })
-                .with_validator(|n| n.with_name("validator-b").bootnode(false))
+                .with_validator(|n| n.with_name("validator-b").bootnode(false).with_args(listener_args("bob")))
         })
         .with_global_settings(|g| g.with_base_dir(base_dir_str.as_str()))
         .build()
@@ -98,19 +96,30 @@ async fn reserved_peer_discovery() -> Result<(), anyhow::Error> {
             .base_dir()
             .ok_or_else(|| anyhow!("network has no base_dir"))?,
     );
-    let relay_spec = zombienet_base.join(format!("{}.json", network.relaychain().chain()));
+    let spawned_spec = zombienet_base.join(format!("{}.json", network.relaychain().chain()));
+
+    // Hand smoldot a spec whose bootNodes carry validator-a's live TCP + WebRTC
+    // multiaddrs. Only A, the test's invariant is that B is reachable solely
+    // through Kademlia discovery.
+    let relay_spec = prepare_runtime_spec(
+        &network,
+        &spawned_spec,
+        &["validator-a"],
+        &base_dir_str,
+        "relay-spec.json",
+    )
+    .await?;
 
     ensure_smoldot_built();
-    ensure_js_deps_installed();
-    run_js_test(
-        "js/reserved_peer_discovery.js",
+    run_test(
+        "reserved_peer_discovery",
         &[
             ("RELAY_CHAIN_SPEC", relay_spec.to_str().expect("UTF-8 path")),
             ("REQUIRED_PEER_ID", validator_b_peer_id.as_str()),
         ],
     )
     .await
-    .map_err(|e| anyhow!("JS test failed: {e}"))?;
+    .map_err(|e| anyhow!("test failed: {e}"))?;
 
     Ok(())
 }

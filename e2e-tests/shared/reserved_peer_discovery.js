@@ -15,22 +15,40 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import {
-  createSmoldotClient,
-  addChainFromSpec,
-  sendRpc,
-  readJsonRpcUntil,
-  report,
-} from "./helpers.js";
+// Kademlia discovery test body — runs on either host via the ctx abstraction.
+// Asserts that smoldot reaches a target node whose multiaddr is NOT in the
+// chain spec `bootNodes`, i.e. that it was discovered through the DHT.
 
-const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
-const requiredPeerId = process.env.REQUIRED_PEER_ID;
+import { createRpc } from "./rpc.js";
 
-if (!relaySpecPath || !requiredPeerId) {
-  console.error(
-    "Required env vars: RELAY_CHAIN_SPEC, REQUIRED_PEER_ID",
+export const fileInputs = ["RELAY_CHAIN_SPEC"];
+
+const DISCOVERY_TIMEOUT_MS = 180_000;
+
+export default async function reservedPeerDiscovery(ctx) {
+  const { report, env, files } = ctx;
+  const rpc = createRpc(ctx.client);
+
+  const requiredPeerId = env.REQUIRED_PEER_ID;
+  if (!files.RELAY_CHAIN_SPEC || !requiredPeerId) {
+    throw new Error("Required env vars: RELAY_CHAIN_SPEC, REQUIRED_PEER_ID");
+  }
+
+  const relay = await rpc.addChain({ chainSpec: files.RELAY_CHAIN_SPEC });
+  report("addChain relay", true);
+
+  const peers = await waitForPeer(rpc, relay, requiredPeerId, Date.now() + DISCOVERY_TIMEOUT_MS);
+  const ok = peers !== null;
+  report(
+    "smoldot reached the required node via Kademlia discovery",
+    ok,
+    ok
+      ? `peers=${peers.map((p) => p.peerId).join(",")}`
+      : `target=${requiredPeerId} not in system_peers within deadline`,
   );
-  process.exit(1);
+  if (!ok) {
+    throw new Error(`peer ${requiredPeerId} not discovered within ${DISCOVERY_TIMEOUT_MS}ms`);
+  }
 }
 
 // Polls `system_peers` until the target peer-id is present, with a deadline.
@@ -38,10 +56,10 @@ if (!relaySpecPath || !requiredPeerId) {
 // here proves smoldot reached the target at the substrate level — which
 // can only happen if Kademlia first surfaced its multiaddr from another
 // peer.
-async function waitForPeer(chain, targetPeerId, deadline) {
+async function waitForPeer(rpc, chain, targetPeerId, deadline) {
   while (Date.now() < deadline) {
-    const reqId = sendRpc(chain, "system_peers", []).toString();
-    const peers = await readJsonRpcUntil(
+    const reqId = rpc.sendRpc(chain, "system_peers", []).toString();
+    const peers = await rpc.readJsonRpcUntil(
       chain,
       (msg) => {
         if (msg.id !== reqId) return undefined;
@@ -59,39 +77,4 @@ async function waitForPeer(chain, targetPeerId, deadline) {
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   return null;
-}
-
-const client = createSmoldotClient();
-let relay;
-let passed = true;
-
-try {
-  relay = await addChainFromSpec(client, relaySpecPath);
-  report("addChain relay", true);
-
-  const peers = await waitForPeer(
-    relay,
-    requiredPeerId,
-    Date.now() + 180_000,
-  );
-  const ok = peers !== null;
-  report(
-    "smoldot reached the required node via Kademlia discovery",
-    ok,
-    ok
-      ? `peers=${peers.map((p) => p.peerId).join(",")}`
-      : `target=${requiredPeerId} not in system_peers within deadline`,
-  );
-  if (!ok) passed = false;
-} catch (e) {
-  report("reserved_peer_discovery", false, e.message);
-  passed = false;
-} finally {
-  try {
-    await client.terminate();
-  } catch (_) {}
-}
-
-if (!passed || process.exitCode) {
-  process.exit(1);
 }
