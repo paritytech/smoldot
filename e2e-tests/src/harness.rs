@@ -174,11 +174,13 @@ pub fn bulletin_network_config(
                 .with_validator(|n| {
                     n.with_name("alice")
                         .bootnode(true)
+                        .with_args(crate::listener_args("alice"))
                         .with_optional_db_snapshot(relay.clone())
                 })
                 .with_validator(|n| {
                     n.with_name("bob")
                         .bootnode(true)
+                        .with_args(crate::listener_args("bob"))
                         .with_optional_db_snapshot(relay.clone())
                 })
         })
@@ -192,19 +194,27 @@ pub fn bulletin_network_config(
             p.with_id(bulletin::PARA_ID)
                 .with_chain_spec_path(chain_spec_str.as_str())
                 .cumulus_based(true)
-                .with_default_args(args)
+                .with_default_args(args.clone())
                 .with_collator(|c| {
+                    // `with_args` overrides the parachain `with_default_args`,
+                    // so the defaults must be repeated per collator.
+                    let mut collator_args = args.clone();
+                    collator_args.extend(crate::listener_args("collator-1"));
                     c.with_name("collator-1")
                         .validator(true)
                         .bootnode(true)
                         .with_command(bulletin::PARA_BINARY)
+                        .with_args(collator_args)
                         .with_optional_db_snapshot(bulletin_full.clone())
                 })
                 .with_collator(|c| {
+                    let mut collator_args = args.clone();
+                    collator_args.extend(crate::listener_args("collator-2"));
                     c.with_name("collator-2")
                         .validator(true)
                         .bootnode(true)
                         .with_command(bulletin::PARA_BINARY)
+                        .with_args(collator_args)
                         .with_optional_db_snapshot(bulletin_partial.clone())
                 })
         })

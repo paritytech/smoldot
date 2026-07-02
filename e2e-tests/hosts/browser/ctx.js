@@ -41,6 +41,7 @@ export async function makeBrowserCtx({ env, files }) {
   const client = window.__smoldot.start({
     maxLogLevel,
     forbidTcp: true,
+    forbidWs: true,
     forbidWss: true,
     logCallback: (level, target, message) => {
       const labels = { 1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE" };

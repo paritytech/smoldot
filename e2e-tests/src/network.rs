@@ -39,11 +39,14 @@ pub const PARA_ID: u32 = 1004;
 pub const PARA_CHAIN: &str = "people-westend-local";
 
 /// Per-node UDP ports for the WebRTC listeners.
-const UDP_PORTS: [(&str, u16); 4] = [
+const UDP_PORTS: [(&str, u16); 6] = [
     ("validator-0", 33000),
     ("validator-1", 33001),
     ("alice", 33002),
     ("bob", 33003),
+    // Bulletin network collators (src/harness.rs).
+    ("collator-1", 33004),
+    ("collator-2", 33005),
 ];
 
 /// Looks up the fixed WebRTC UDP port assigned to `name` and returns the CLI
@@ -363,10 +366,7 @@ async fn collect_bootnode_multiaddrs(
             .map_err(|e| anyhow!("{name}: system_localListenAddresses failed: {e}"))?
             .into_iter()
             // Keep loopback addresses and only webrtc or tcp protocols.
-            .filter(|addr| {
-                addr.contains("/ip4/127.0.0.1/")
-                    && (addr.contains("/tcp/") || addr.contains("/webrtc-direct/"))
-            })
+            .filter(|addr| addr.contains("/ip4/127.0.0.1/"))
             .collect();
         // Sanitize multiaddrs: system_localListenAddresses currently appends an
         // extra /p2p/<peer_id> even when one is already present.
@@ -378,7 +378,9 @@ async fn collect_bootnode_multiaddrs(
             }
         }
 
-        if listen_addrs.len() < 2 {
+        let has_tcp = listen_addrs.iter().any(|a| a.contains("/tcp/"));
+        let has_webrtc = listen_addrs.iter().any(|a| a.contains("/webrtc"));
+        if !has_tcp || !has_webrtc {
             return Err(anyhow!(
                 "{name}: missing TCP or WebRTC listen address (got {listen_addrs:?})"
             ));
