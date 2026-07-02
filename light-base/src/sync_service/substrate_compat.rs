@@ -605,7 +605,11 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             task.known_finalized_runtime = None;
                         }
                         task.dispatch_all_subscribers(Notification::Finalized {
-                            hash: *sync.finalized_block_hash(),
+                            finalized_blocks_hashes: finalized_blocks_newest_to_oldest
+                                .iter()
+                                .rev()
+                                .map(|b| b.block_hash)
+                                .collect(),
                             best_block_hash_if_changed: if updates_best_block {
                                 Some(*sync.best_block_hash())
                             } else {
@@ -1693,9 +1697,12 @@ impl<TPlat: PlatformRef> Task<TPlat> {
     /// Sends a notification to all the notification receivers.
     fn dispatch_all_subscribers(&mut self, notification: Notification) {
         // Elements in `all_notifications` are removed one by one and inserted back if the
-        // channel is still open.
+        // channel is still open and not full.
         for index in (0..self.all_notifications.len()).rev() {
             let subscription = self.all_notifications.swap_remove(index);
+            // try_send can fail for two reasons: the receiver was dropped (closed), or its buffer is full.
+            // Drop the subscriber in both cases: a closed one is already dead, and
+            // keeping a full one would skip this notification, causing a gap in the stream.
             if subscription.try_send(notification.clone()).is_err() {
                 continue;
             }
@@ -1771,10 +1778,15 @@ fn neighbor_packet_outcome(
     }
 }
 
-/// Warp is downloading/building, or a qualifying source is available for the next request.
+/// Warp is downloading/building, holds a completed-but-suppressed result, or a qualifying
+/// source is available for the next request.
 fn warp_sync_can_proceed(
     sync: &all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>,
 ) -> bool {
+    // A result completed while suppressed is fresh; it must be applied, not discarded.
+    if sync.has_pending_warp_completion() {
+        return true;
+    }
     match sync.status() {
         all::Status::WarpSyncFragments {
             source: Some(_), ..
@@ -1783,9 +1795,17 @@ fn warp_sync_can_proceed(
         // At the mode-decision point no warp request is dispatched yet, so this arm decides.
         // The caller already fed the source's finalized height (update_source_finality_state),
         // so desired_requests() is expected to already include a warp request when the gap > 32.
-        _ => sync
-            .desired_requests()
-            .any(|(_, _, rq)| matches!(rq, all::DesiredRequest::WarpSync { .. })),
+        // The storage/call-proof requests are emitted only by the warp machine; they cover the
+        // window between the last fragment verification and the runtime-download dispatch,
+        // where the status still reports `WarpSyncFragments { source: None }`.
+        _ => sync.desired_requests().any(|(_, _, rq)| {
+            matches!(
+                rq,
+                all::DesiredRequest::WarpSync { .. }
+                    | all::DesiredRequest::StorageGetMerkleProof { .. }
+                    | all::DesiredRequest::RuntimeCallMerkleProof { .. }
+            )
+        }),
     }
 }
 
@@ -1848,6 +1868,8 @@ mod tests {
     // - add a `Status::WarpSyncChainInformation` case
     //   (see https://github.com/paritytech/smoldot/pull/3268#discussion_r3311390876)
     //   needs a test-only AllSync setter or crypto-correct warp fragments
+    // - same limitation for the pending-completion and storage/call-proof arms of
+    //   `warp_sync_can_proceed`
     use super::*;
     use smoldot::{
         chain::chain_information,

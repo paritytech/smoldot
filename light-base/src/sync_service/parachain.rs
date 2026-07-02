@@ -350,7 +350,12 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                                     task.known_finalized_runtime = None;
                                 }
                                 task.dispatch_all_subscribers(Notification::Finalized {
-                                    hash: pending_hash,
+                                    finalized_blocks_hashes: result
+                                        .finalized_blocks
+                                        .iter()
+                                        .rev()
+                                        .map(|b| b.block_hash)
+                                        .collect(),
                                     best_block_hash_if_changed: if result.updates_best_block {
                                         Some(*task.sync.as_ref().unwrap().best_block_hash())
                                     } else {
@@ -913,7 +918,12 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             task.known_finalized_runtime = None;
                         }
                         task.dispatch_all_subscribers(Notification::Finalized {
-                            hash: finalized_hash,
+                            finalized_blocks_hashes: result
+                                .finalized_blocks
+                                .iter()
+                                .rev()
+                                .map(|b| b.block_hash)
+                                .collect(),
                             best_block_hash_if_changed: if result.updates_best_block {
                                 Some(*task.sync.as_ref().unwrap().best_block_hash())
                             } else {
@@ -937,10 +947,11 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             }
 
             WakeUpReason::ParaheadNotification(Notification::Finalized {
-                hash,
+                finalized_blocks_hashes,
                 best_block_hash_if_changed: _,
                 pruned_blocks: _,
             }) => {
+                let hash = *finalized_blocks_hashes.last().unwrap();
                 log!(
                     &task.platform,
                     Debug,
@@ -964,7 +975,12 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             task.known_finalized_runtime = None;
                         }
                         task.dispatch_all_subscribers(Notification::Finalized {
-                            hash,
+                            finalized_blocks_hashes: result
+                                .finalized_blocks
+                                .iter()
+                                .rev()
+                                .map(|b| b.block_hash)
+                                .collect(),
                             best_block_hash_if_changed: if result.updates_best_block {
                                 Some(*task.sync.as_ref().unwrap().best_block_hash())
                             } else {
@@ -1141,13 +1157,16 @@ fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
 }
 
 impl<TPlat: PlatformRef> Task<TPlat> {
+    /// Sends a notification to all the notification receivers.
     fn dispatch_all_subscribers(&mut self, notification: Notification) {
+        // Elements in `all_notifications` are removed one by one and inserted back if the
+        // channel is still open and not full.
         for index in (0..self.all_notifications.len()).rev() {
             let subscription = self.all_notifications.swap_remove(index);
+            // try_send can fail for two reasons: the receiver was dropped (closed), or its buffer is full.
+            // Drop the subscriber in both cases: a closed one is already dead, and
+            // keeping a full one would skip this notification, causing a gap in the stream.
             if subscription.try_send(notification.clone()).is_err() {
-                if !subscription.is_closed() {
-                    self.all_notifications.push(subscription);
-                }
                 continue;
             }
 
