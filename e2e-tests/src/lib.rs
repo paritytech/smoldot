@@ -168,38 +168,6 @@ pub fn ensure_browser_deps_installed() {
     assert!(status.success(), "playwright install chromium failed");
 }
 
-/// Runs a Node.js script under `e2e-tests/browser` with the given environment.
-/// Mirrors [`run_js_test`] but the working directory is the browser dir so
-/// that `import { chromium } from 'playwright'` resolves.
-pub async fn run_browser_test(script: &str, env_vars: &[(&str, &str)]) -> Result<(), String> {
-    let browser_dir = project_root().join("e2e-tests/browser");
-    let script_path = browser_dir.join(script);
-
-    let mut cmd = tokio::process::Command::new("node");
-    cmd.arg(&script_path);
-    cmd.current_dir(&browser_dir);
-    for (key, val) in env_vars {
-        cmd.env(key, val);
-    }
-
-    let output = cmd.output().await.expect("failed to run node");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    eprintln!("--- browser stderr ---\n{stderr}");
-    eprintln!("--- browser stdout ---\n{stdout}");
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "browser test exited with {}\nstdout:\n{}\nstderr:\n{}",
-            output.status, stdout, stderr
-        ))
-    }
-}
-
 /// Runs a JS test script with the given environment variables.
 ///
 /// Uses `tokio::process::Command` for async compatibility.
