@@ -311,7 +311,7 @@ async fn wait_for_relay_first_finalized(
 
 /// Reads the relay and para specs, overwrites their `bootNodes`
 /// with the running nodes' current multiaddrs (TCP + WebRTC)
-async fn prepare_runtime_specs(
+pub async fn prepare_runtime_specs(
     network: &Network<LocalFileSystem>,
     relay_base: &Path,
     para_base: &Path,

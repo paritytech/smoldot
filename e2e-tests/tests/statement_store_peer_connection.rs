@@ -47,62 +47,82 @@ async fn recovers_statement_delivery_after_peer_restart() -> Result<(), anyhow::
     let network = spawn_network(&base_dir, &para_spec_path).await?;
     info!("Network spawned");
 
-    let (relay_spec_path, para_spec_path) = spawned_chain_spec_paths(&network)?;
+    let (relay_base, para_base) = spawned_chain_spec_paths(&network)?;
+
+    let base_dir_str = base_dir.to_str().expect("UTF-8 path").to_owned();
+    let (relay_spec_path, para_spec_path) =
+        prepare_runtime_specs(&network, &relay_base, &para_base, &base_dir_str).await?;
 
     let topic = [0x11u8; 32];
-    let stmt_1_hex = create_test_statement(&seed, &topic, b"peer-connection-stmt-1");
-    let stmt_2_hex = create_test_statement(&seed, &topic, b"peer-connection-stmt-2");
-    let stmt_3_hex = create_test_statement(&seed, &topic, b"peer-connection-stmt-3");
-    let statement_hexes = format!("{stmt_1_hex},{stmt_2_hex},{stmt_3_hex}");
 
     info!("Ensuring smoldot JS bundle is built");
     ensure_smoldot_built();
     info!("Ensuring JS test dependencies are installed");
     ensure_js_deps_installed();
+    ensure_browser_deps_installed();
 
     let relay_spec_str = relay_spec_path.to_str().unwrap().to_string();
     let para_spec_str = para_spec_path.to_str().unwrap().to_string();
 
-    info!("Spawning JS test: js/statement_store_peer_connection.js");
-    let js_handle = tokio::spawn(async move {
-        run_js_test(
-            "js/statement_store_peer_connection.js",
-            &[
-                ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
-                ("PARA_CHAIN_SPEC", para_spec_str.as_str()),
-                ("STATEMENT_HEXES", statement_hexes.as_str()),
-            ],
-        )
-        .await
-    });
+    for host in [Host::Node, Host::Browser] {
+        // Statements needs to be re-created for each host otherwise they
+        // persist in the collators' store and get pushed to the next host
+        // right away during the initial sync, making the test pass without
+        // exercising any restart.
+        let stmt_1_hex =
+            create_test_statement(&seed, &topic, format!("stmt-1-{host:?}").as_bytes());
+        let stmt_2_hex =
+            create_test_statement(&seed, &topic, format!("stmt-2-{host:?}").as_bytes());
+        let stmt_3_hex =
+            create_test_statement(&seed, &topic, format!("stmt-3-{host:?}").as_bytes());
+        let statement_hexes = format!("{stmt_1_hex},{stmt_2_hex},{stmt_3_hex}");
 
-    // Wait until smoldot has peered with alice, then submit the baseline
-    // statement. Smoldot's statement-store only delivers statements received
-    // over the gossip protocol while peered, so timing matters.
-    let alice = network.get_node("alice")?;
-    wait_until_peered(alice, 2, 120).await?;
-    submit_statement(alice, &stmt_1_hex, "stmt_1").await?;
+        info!("Spawning test statement_store_peer_connection within host {:?}", host);
+        let js_handle = tokio::spawn({
+            let relay_spec_str = relay_spec_str.clone();
+            let para_spec_str = para_spec_str.clone();
+            let statement_hexes = statement_hexes.clone();
+            async move {
+            run_shared_test(
+                host,
+                "statement_store_peer_connection",
+                &[
+                    ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
+                    ("PARA_CHAIN_SPEC", para_spec_str.as_str()),
+                    ("STATEMENT_HEXES", statement_hexes.as_str()),
+                ],
+            )
+            .await
+        }});
 
-    info!("Restarting alice");
-    alice
-        .restart(None)
-        .await
-        .map_err(|e| anyhow::anyhow!("restart(alice) failed: {e}"))?;
-    wait_until_peered(alice, 2, 120).await?;
-    submit_statement(alice, &stmt_2_hex, "stmt_2").await?;
+        // Wait until smoldot has peered with alice, then submit the baseline
+        // statement. Smoldot's statement-store only delivers statements received
+        // over the gossip protocol while peered, so timing matters.
+        let alice = network.get_node("alice")?;
+        wait_until_peered(alice, 1, 120).await?;
+        submit_statement(alice, &stmt_1_hex, "stmt_1").await?;
 
-    let bob = network.get_node("bob")?;
-    info!("Restarting bob");
-    bob.restart(None)
-        .await
-        .map_err(|e| anyhow::anyhow!("restart(bob) failed: {e}"))?;
-    wait_until_peered(bob, 2, 120).await?;
-    submit_statement(bob, &stmt_3_hex, "stmt_3").await?;
+        info!("Restarting alice");
+        alice
+            .restart(None)
+            .await
+            .map_err(|e| anyhow::anyhow!("restart(alice) failed: {e}"))?;
+        wait_until_peered(alice, 1, 120).await?;
+        submit_statement(alice, &stmt_2_hex, "stmt_2").await?;
 
-    info!("Waiting for JS test to finish");
-    let js_result = js_handle.await.expect("JS task panicked");
-    js_result.map_err(|e| anyhow::anyhow!("JS test failed: {e}"))?;
+        let bob = network.get_node("bob")?;
+        info!("Restarting bob");
+        bob.restart(None)
+            .await
+            .map_err(|e| anyhow::anyhow!("restart(bob) failed: {e}"))?;
+        wait_until_peered(bob, 1, 120).await?;
+        submit_statement(bob, &stmt_3_hex, "stmt_3").await?;
 
-    info!("Light node peer-connection test passed");
+        info!("Waiting for JS test to finish");
+        let js_result = js_handle.await.expect("JS task panicked");
+        js_result.map_err(|e| anyhow::anyhow!("JS test failed: {e}"))?;
+
+        info!("Light node peer-connection test passed");
+    }
     Ok(())
 }

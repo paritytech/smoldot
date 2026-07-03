@@ -24,7 +24,7 @@ pub mod snapshot;
 pub mod statement;
 
 pub use network::{
-    listener_args, prepare_runtime_spec, run_chainhead_v1_follow_js, run_smoke, spawn_scenario,
+    listener_args, prepare_runtime_spec, prepare_runtime_specs, run_chainhead_v1_follow_js, run_smoke, spawn_scenario,
     spawned_chain_spec_paths, LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC,
     FINALIZED_METRIC, PARA_ID,
 };
