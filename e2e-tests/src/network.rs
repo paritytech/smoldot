@@ -466,11 +466,13 @@ fn decode_header_number(hex_str: &str) -> Result<u64, anyhow::Error> {
     Ok(header.number)
 }
 
-/// Runs `js/chainhead_v1_follow_test.js` against a live network. Snapshots the
-/// relay and para best/finalized heights from the validator/collator metrics
-/// immediately before launching JS, so the validator can flag an initialized
-/// finalized that lags too far behind the live network.
-pub async fn run_chainhead_v1_follow_js(
+/// Runs the shared `chainhead_v1_follow` body against a live network on both
+/// hosts in sequence: the Node host over TCP, then the browser host over
+/// WebRTC. Snapshots the relay and para best/finalized heights from the
+/// validator/collator metrics immediately before launching each host, so the
+/// validator can flag an initialized finalized that lags too far behind the
+/// live network.
+pub async fn run_chainhead_v1_follow(
     live: &LiveNetwork,
     cfg: &Scenario,
 ) -> Result<(), anyhow::Error> {
@@ -484,36 +486,45 @@ pub async fn run_chainhead_v1_follow_js(
         )
     });
 
-    let relay_node = live.network.get_node("validator-0")?;
-    let relay_best = relay_node.reports(BEST_METRIC).await? as u64;
-    let relay_finalized = relay_node.reports(FINALIZED_METRIC).await? as u64;
-    let para_node = live.network.get_node("alice")?;
-    let para_best = para_node.reports(BEST_METRIC).await? as u64;
-    let para_finalized = para_node.reports(FINALIZED_METRIC).await? as u64;
-    let relay_best_str = relay_best.to_string();
-    let relay_finalized_str = relay_finalized.to_string();
-    let para_best_str = para_best.to_string();
-    let para_finalized_str = para_finalized.to_string();
+    crate::ensure_js_deps_installed();
+    crate::ensure_browser_deps_installed();
 
-    let mut env_vars: Vec<(&str, &str)> = vec![
-        ("RELAY_CHAIN_SPEC", relay_spec_str),
-        ("PARA_CHAIN_SPEC", para_spec_str),
-        ("RELAY_BEST_AT_LAUNCH", relay_best_str.as_str()),
-        ("RELAY_FINALIZED_AT_LAUNCH", relay_finalized_str.as_str()),
-        ("PARA_BEST_AT_LAUNCH", para_best_str.as_str()),
-        ("PARA_FINALIZED_AT_LAUNCH", para_finalized_str.as_str()),
-    ];
-    if let Some((relay_db, para_db)) = smoldot_db_paths.as_ref() {
-        env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
-        env_vars.push(("SMOLDOT_DB_PARA", para_db.as_str()));
+    for host in [crate::Host::Node, crate::Host::Browser] {
+        // Re-sample the live heights per host: the network keeps advancing
+        // while the previous host runs, and the validator compares smoldot's
+        // initial finalized against these values for the lag-regression check.
+        let relay_node = live.network.get_node("validator-0")?;
+        let relay_best = relay_node.reports(BEST_METRIC).await? as u64;
+        let relay_finalized = relay_node.reports(FINALIZED_METRIC).await? as u64;
+        let para_node = live.network.get_node("alice")?;
+        let para_best = para_node.reports(BEST_METRIC).await? as u64;
+        let para_finalized = para_node.reports(FINALIZED_METRIC).await? as u64;
+        let relay_best_str = relay_best.to_string();
+        let relay_finalized_str = relay_finalized.to_string();
+        let para_best_str = para_best.to_string();
+        let para_finalized_str = para_finalized.to_string();
+
+        let mut env_vars: Vec<(&str, &str)> = vec![
+            ("RELAY_CHAIN_SPEC", relay_spec_str),
+            ("PARA_CHAIN_SPEC", para_spec_str),
+            ("RELAY_BEST_AT_LAUNCH", relay_best_str.as_str()),
+            ("RELAY_FINALIZED_AT_LAUNCH", relay_finalized_str.as_str()),
+            ("PARA_BEST_AT_LAUNCH", para_best_str.as_str()),
+            ("PARA_FINALIZED_AT_LAUNCH", para_finalized_str.as_str()),
+        ];
+        if let Some((relay_db, para_db)) = smoldot_db_paths.as_ref() {
+            env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
+            env_vars.push(("SMOLDOT_DB_PARA", para_db.as_str()));
+        }
+
+        log::info!(
+            "running chainHead_v1_follow on {host:?} host (relay_spec={relay_spec_str}, para_spec={para_spec_str}, relay best/finalized=#{relay_best}/#{relay_finalized}, para best/finalized=#{para_best}/#{para_finalized})"
+        );
+        crate::run_shared_test(host, "chainhead_v1_follow", &env_vars)
+            .await
+            .map_err(|e| anyhow!("chainhead_v1_follow failed on {host:?} host: {e}"))?;
     }
-
-    log::info!(
-        "running chainHead_v1_follow JS driver (relay_spec={relay_spec_str}, para_spec={para_spec_str}, relay best/finalized=#{relay_best}/#{relay_finalized}, para best/finalized=#{para_best}/#{para_finalized})"
-    );
-    crate::run_js_test("js/chainhead_v1_follow_test.js", &env_vars)
-        .await
-        .map_err(|e| anyhow!("JS test failed: {e}"))
+    Ok(())
 }
 
 /// Runs the shared `smoke` body against a single live network on both hosts in

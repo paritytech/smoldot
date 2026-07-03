@@ -43,6 +43,6 @@ async fn chainhead_v1_follow_fresh() -> Result<(), anyhow::Error> {
         .map_err(|e| anyhow!("alice did not produce parachain blocks: {e}"))?;
     log::info!("alice has \u{2265}{REQUIRED_BLOCKS} parachain blocks");
 
-    run_chainhead_v1_follow_js(&live, &cfg).await?;
+    run_chainhead_v1_follow(&live, &cfg).await?;
     Ok(())
 }
