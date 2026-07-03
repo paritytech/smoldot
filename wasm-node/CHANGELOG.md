@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 3.3.1 - 2026-07-02
+
+### Added
+
+- Add support for the `ext_statement_store_remove_by_version_1` host function as a no-op. Fixes wasm-VM traps on runtimes that import this symbol during runtime execution. ([#3295](https://github.com/paritytech/smoldot/pull/3295))
+
+### Changed
+
+- `chainHead_v1_follow` now reports every finalized block: the `finalized` event lists all newly-finalized blocks in ascending order instead of only the highest, so consumers tracking each finalized block no longer skip intermediate ones when several blocks finalize at once. ([#3282](https://github.com/paritytech/smoldot/pull/3282))
+
+### Fixed
+
+- Fix finality stalling across an authority-set change, and no longer discard a warp sync that completes while the sync mode is still being decided. ([#3282](https://github.com/paritytech/smoldot/pull/3282))
+- Fix a panic in peer discovery when a Kademlia-capable peer had no usable connection (its capability flag was learned on a since-closed connection). ([#3293](https://github.com/paritytech/smoldot/pull/3293))
+- Fix parachain bootstrap looping forever when the first connected peer couldn't serve the runtime; smoldot now rotates through the other connected peers before erroring. ([#3294](https://github.com/paritytech/smoldot/pull/3294))
+
+## 3.3.0 - 2026-06-26
+
+### Added
+
+- Add `bitswap_unstable_stream` / `bitswap_unstable_unstream`: fetch many Bitswap CIDs in one subscription, receiving each block (or per-CID error) via `bitswap_unstable_streamEvent` notifications as it arrives. ([#3264](https://github.com/paritytech/smoldot/pull/3264))
+
+### Changed
+
+- Rename `bitswap_v1_get` to `bitswap_unstable_get` (`bitswap_v1_get` kept as a legacy alias). ([#3264](https://github.com/paritytech/smoldot/pull/3264))
+- Discover peers via proper Kademlia walks, not only nodes with an open consensus stream, so smoldot keeps finding peers even when connected only to bootnodes with no free sync slots. ([#3284](https://github.com/paritytech/smoldot/pull/3284))
+- Start warp sync without waiting for a GrandPa notification, seeding each source's finalized height from its announced best block; especially speeds up WebRTC, where data-channel setup adds latency. ([#3256](https://github.com/paritytech/smoldot/pull/3256))
+
+### Fixed
+
+- Fix a deadlock in the multistream-select task loop. ([#3256](https://github.com/paritytech/smoldot/pull/3256))
+
 ## 3.2.0 - 2026-06-02
 
 ### Added

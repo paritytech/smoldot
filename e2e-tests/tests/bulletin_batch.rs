@@ -26,6 +26,9 @@ use smoldot_e2e_tests::{
     resolve_base_dir, run_js_test,
 };
 
+/// Mirrors `light-base/src/bitswap_service.rs::MAX_CIDS_PER_REQUEST`.
+const MAX_CIDS: u32 = 64;
+
 #[derive(Serialize)]
 struct PayloadJson {
     label: &'static str,
@@ -35,11 +38,13 @@ struct PayloadJson {
     on_partial: bool,
 }
 
-/// Smoldot fetches every CID in `bulletin::payloads()`, asserts NotFound
-/// for an unrelated CID, and exercises mixed-availability peer selection
-/// (some CIDs only on the full-snapshot collator).
+/// Drives `bitswap_unstable_stream` against a real bulletin chain. The JS run
+/// exercises: happy path, dedup rejection (-32803), too-many rejection
+/// (-32801), empty-input rejection (-32802), per-CID errors, mixed-availability
+/// (some CIDs only on the full-snapshot collator), and the spec requirement
+/// that `bitswap_unstable_unstream` mid-stream silently suppresses `streamDone`.
 #[tokio::test(flavor = "multi_thread")]
-async fn bulletin_fetch() -> Result<()> {
+async fn bulletin_batch() -> Result<()> {
     env_logger::try_init().ok();
 
     let chain_spec = bulletin_chain_spec();
@@ -47,7 +52,13 @@ async fn bulletin_fetch() -> Result<()> {
 
     let snaps = resolve_bundle(&base_dir)?;
 
-    let network = spawn_with_snapshots(&base_dir, &chain_spec, &snaps, &[]).await?;
+    let network = spawn_with_snapshots(
+        &base_dir,
+        &chain_spec,
+        &snaps,
+        &["-lsub-libp2p::bitswap=trace", "-lsync=debug"],
+    )
+    .await?;
 
     let (relay_spec, bulletin_spec) = chain_spec_paths(&network)?;
 
@@ -67,6 +78,7 @@ async fn bulletin_fetch() -> Result<()> {
             .collect::<Vec<_>>(),
     )?;
     let missing_cid = bulletin::sha256_cid(b"smoldot-bitswap-not-on-chain").to_string();
+    let max_cids = MAX_CIDS.to_string();
     let relay_spec = relay_spec
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 relay spec path"))?;
@@ -79,14 +91,11 @@ async fn bulletin_fetch() -> Result<()> {
         ("BULLETIN_CHAIN_SPEC", bulletin_spec),
         ("PAYLOADS_JSON", payloads_json.as_str()),
         ("MISSING_CID", missing_cid.as_str()),
+        ("MAX_CIDS", max_cids.as_str()),
     ];
 
-    // `DEV_MODE=1` skips the JS bitswap suite and keeps the network alive
-    // for `KEEP_ALIVE_SECS` seconds (default 36000) so a developer can
-    // run the JS client manually (the printed `node …` invocation has
-    // every env var the test would have set).
     if std::env::var("DEV_MODE").is_ok() {
-        print_dev_mode_invocation(&env_pairs, "js/bulletin_fetch.js");
+        print_dev_mode_invocation(&env_pairs, "js/bulletin_batch.js");
         let secs: u64 = std::env::var("KEEP_ALIVE_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -98,7 +107,7 @@ async fn bulletin_fetch() -> Result<()> {
         return Ok(());
     }
 
-    run_js_test("js/bulletin_fetch.js", &env_pairs)
+    run_js_test("js/bulletin_batch.js", &env_pairs)
         .await
         .map_err(|e| anyhow!("JS test failed: {e}"))
 }

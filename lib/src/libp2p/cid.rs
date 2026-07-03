@@ -75,6 +75,12 @@ impl Cid {
 
         CidPrefix(self.0[..prefix_len].to_vec())
     }
+
+    /// 32-byte hash digest portion of this CID. The result borrows from `self`.
+    pub fn digest(&self) -> &[u8; 32] {
+        let decoded = decode_cid(&self.0).expect("Cid is always valid; qed");
+        decoded.digest
+    }
 }
 
 impl FromStr for Cid {

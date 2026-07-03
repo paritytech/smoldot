@@ -40,13 +40,47 @@ What happens inside:
    `waitForMessage`.
 
 
+## chainHead against live networks
+
+[`run_chainhead_test.sh`](run_chainhead_test.sh) drives
+[`js/chainhead_v1_follow_test.js`](js/chainhead_v1_follow_test.js) against a
+live public network, attaching a smoldot light client to bundled chain specs
+from [`demo-chain-specs/`](../demo-chain-specs) and following `chainHead_v1`
+until it sees enough new and finalized blocks. Unlike the Zombienet tests
+above, it needs no local Polkadot binaries — only Node.js 22+ and npm. The
+script builds the smoldot JS bundle and installs `js/` dependencies on first
+run (set `SKIP_BUILD=true` to skip the rebuild on repeat runs).
+
+```sh
+# Relay-only:
+./run_chainhead_test.sh paseo
+
+# Relay + asset-hub parachain:
+./run_chainhead_test.sh paseo-ah
+```
+
+The network argument selects the mode: a bare relay name (`paseo`, `polkadot`,
+`kusama`, `westend`) runs relay-only, while an `-ah`/`-ah-next` variant also
+adds the matching asset-hub parachain. When an RPC URL is configured for the
+network, the script first queries its finalized height so the validator's
+lag-regression check is meaningful.
+
+Useful overrides (see the script header for the full list):
+- `WITH_RUNTIME=true` — subscribe with runtime (default `false`).
+- `RELAY_CHAIN_SPEC` / `PARA_CHAIN_SPEC` — override the bundled specs.
+- `SMOLDOT_DB_DUMP_DIR` — dump smoldot DBs on success and warm-load them on
+  later runs from the same directory.
+
+
 ## Bulletin / bitswap snapshots
 
-The `bulletin_fetch` test drives smoldot's `bitswap_v1_get` JSON-RPC
-against a polkadot-bulletin-chain network with pre-built DB snapshots.
+The `bulletin_fetch` test drives smoldot's `bitswap_unstable_get` JSON-RPC
+(plus an alias-coverage call to the legacy `bitswap_v1_get` name) against a
+polkadot-bulletin-chain network with pre-built DB snapshots.
 The URLs CI fetches from are hardcoded in
-[`tests/bulletin_fetch.rs`](tests/bulletin_fetch.rs) and point at the
-`zombienet-db-snaps` GCS bucket under `smoldot/bulletin_fetch/`. To
+[`src/harness.rs`](src/harness.rs) (used by both `bulletin_fetch` and
+`bulletin_batch`) and point at the `zombienet-db-snaps` GCS bucket under
+`smoldot/bulletin_fetch/`. To
 refresh those snapshots, regenerate them with
 `bulletin_generate_snapshot` and upload via `gsutil` (only needed when
 the bulletin runtime or `bulletin::payloads()` changes).
@@ -68,11 +102,15 @@ cargo test --manifest-path e2e-tests/Cargo.toml \
   -- --ignored bulletin_generate_snapshot --nocapture
 
 # Tag the archives with the generation date and upload. Bump the date in
-# the DB_SNAPSHOT_* constants in tests/bulletin_fetch.rs to match.
+# the DB_SNAPSHOT_* constants in src/harness.rs to match. The
+# `--canned-acl=publicRead` flag ensures anonymous HTTPS access works for
+# CI (the bucket uses fine-grained per-object ACLs and doesn't default to
+# public read).
 DATE=$(date +%F)
 cd e2e-tests/target/snapshots
 for f in relay bulletin-full bulletin-partial; do
-  gsutil cp "$f.tgz" "gs://zombienet-db-snaps/smoldot/bulletin_fetch/$f-$DATE.tgz"
+  gcloud storage cp --canned-acl=publicRead \
+    "$f.tgz" "gs://zombienet-db-snaps/smoldot/bulletin_fetch/$f-$DATE.tgz"
 done
 ```
 

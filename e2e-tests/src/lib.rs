@@ -18,13 +18,16 @@
 use std::path::{Path, PathBuf};
 
 pub mod bulletin;
+pub mod harness;
 pub mod network;
 pub mod snapshot;
 pub mod statement;
 
 pub use network::{
-    run_chainhead_v1_follow_js, run_smoke_js, spawn_scenario, spawned_chain_spec_paths,
-    LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC, FINALIZED_METRIC, PARA_ID,
+    elastic_scaling_genesis_overrides, run_chainhead_v1_follow_js, run_smoke_js, spawn_scenario,
+    spawned_chain_spec_paths, FollowChain, LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths,
+    BEST_METRIC, ELASTIC_MAX_VALIDATORS_PER_CORE, ELASTIC_SCALING_CORES, ELASTIC_VALIDATOR_COUNT,
+    FINALIZED_METRIC, PARA_ID,
 };
 
 /// A file-backed Rust → JS message channel. Rust appends newline-terminated
@@ -76,9 +79,17 @@ fn project_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Ensures the smoldot JS bundle is built.
+/// Ensures the smoldot JS bundle is built, to make cargo test self-sufficient.
 pub fn ensure_smoldot_built() {
     let js_dir = project_root().join("wasm-node/javascript");
+    if !js_dir.join("node_modules").exists() {
+        let status = std::process::Command::new("npm")
+            .arg("ci")
+            .current_dir(&js_dir)
+            .status()
+            .expect("failed to run npm ci");
+        assert!(status.success(), "npm ci in wasm-node/javascript failed");
+    }
     let status = std::process::Command::new("npm")
         .arg("run")
         .arg("build")
