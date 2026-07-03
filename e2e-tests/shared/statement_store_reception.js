@@ -15,65 +15,50 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import {
-  createSmoldotClient,
-  addChainFromSpec,
-  sendRpc,
-  report,
-  readJsonRpcUntil,
-  waitForMessage,
-} from "./helpers.js";
+// Statement-store reception test body — runs on either host via the ctx
+// abstraction. Subscribes with a topic filter and asserts that during the
+// listen window smoldot receives the matching statement exactly once, the
+// non-matching one never, and nothing stray.
 
-const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
-const paraSpecPath = process.env.PARA_CHAIN_SPEC;
-const topicAHex = process.env.TOPIC_A;
-const stmtAHex = process.env.STATEMENT_A_HEX;
-const stmtBHex = process.env.STATEMENT_B_HEX;
-const SYNC_PATH = process.env.SYNC_PATH;
-const LISTEN_MS = Number.parseInt(process.env.LISTEN_MS || "10000", 10);
+import { createRpc } from "./rpc.js";
 
-if (
-  !relaySpecPath ||
-  !paraSpecPath ||
-  !topicAHex ||
-  !stmtAHex ||
-  !stmtBHex ||
-  !SYNC_PATH
-) {
-  console.error(
-    "Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, TOPIC_A, STATEMENT_A_HEX, STATEMENT_B_HEX, SYNC_PATH",
-  );
-  process.exit(1);
-}
+export const fileInputs = ["RELAY_CHAIN_SPEC", "PARA_CHAIN_SPEC"];
 
+export default async function statementStoreReception(ctx) {
+  const { report, env, files } = ctx;
+  const rpc = createRpc(ctx.client);
 
-const client = createSmoldotClient();
-let relay;
-let para;
-let passed = true;
+  const topicAHex = env.TOPIC_A;
+  const stmtAHex = env.STATEMENT_A_HEX;
+  const stmtBHex = env.STATEMENT_B_HEX;
+  const listenMs = Number.parseInt(env.LISTEN_MS || "10000", 10);
 
-try {
-  relay = await addChainFromSpec(client, relaySpecPath);
+  if (!files.RELAY_CHAIN_SPEC || !files.PARA_CHAIN_SPEC || !topicAHex || !stmtAHex || !stmtBHex) {
+    throw new Error(
+      "Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, TOPIC_A, STATEMENT_A_HEX, STATEMENT_B_HEX",
+    );
+  }
+
+  const relay = await rpc.addChain({ chainSpec: files.RELAY_CHAIN_SPEC });
   report("addChain relay", true);
 
-  para = await addChainFromSpec(client, paraSpecPath, {
+  const para = await rpc.addChain({
+    chainSpec: files.PARA_CHAIN_SPEC,
     statementStore: {},
     potentialRelayChains: [relay],
   });
   report("addChain parachain with statementStore", true);
 
-  const subReqId = sendRpc(para, "statement_subscribeStatement", [
-    { matchAny: [topicAHex] },
-  ]).toString();
+  const subReqId = rpc
+    .sendRpc(para, "statement_subscribeStatement", [{ matchAny: [topicAHex] }])
+    .toString();
 
-  const subId = await readJsonRpcUntil(
+  const subId = await rpc.readJsonRpcUntil(
     para,
     (msg) => {
       if (msg.id === subReqId) {
         if (msg.error)
-          throw new Error(
-            `statement_subscribeStatement failed: ${JSON.stringify(msg.error)}`,
-          );
+          throw new Error(`statement_subscribeStatement failed: ${JSON.stringify(msg.error)}`);
         return msg.result;
       }
       return undefined;
@@ -88,7 +73,7 @@ try {
   // Block until Rust signals that smoldot is peered with both collators at
   // the statement-store level. The listen window below only makes sense
   // after that point: both peers push stmt_A during their initial sync.
-  await waitForMessage(SYNC_PATH, "READY");
+  await ctx.waitSync("READY");
   report("Rust signalled READY", true);
 
   let countA = 0;
@@ -98,9 +83,9 @@ try {
   let firstBms = null;
   let firstOtherMs = null;
   const listenStart = Date.now();
-  const listenDeadline = listenStart + LISTEN_MS;
+  const listenDeadline = listenStart + listenMs;
 
-  await readJsonRpcUntil(
+  await rpc.readJsonRpcUntil(
     para,
     (msg) => {
       if (msg.method !== "statement_statement") return undefined;
@@ -127,25 +112,18 @@ try {
   );
 
   const ok = countA === 1 && countB === 0 && countOther === 0;
-  report(
-    "reception: stmt_A received exactly once, stmt_B never, no stray statements",
-    ok,
+  const detail =
     `stmt_A first=${firstAms}ms count=${countA} | ` +
-      `stmt_B first=${firstBms}ms count=${countB} | ` +
-      `other first=${firstOtherMs}ms count=${countOther}`,
-  );
-  if (!ok) passed = false;
+    `stmt_B first=${firstBms}ms count=${countB} | ` +
+    `other first=${firstOtherMs}ms count=${countOther}`;
+  report("reception: stmt_A received exactly once, stmt_B never, no stray statements", ok, detail);
 
   // Unsubscribe as a best-effort cleanup. Terminating the client implicitly
-  // removes the subscription; we don't fail the test on the RPC round-trip
+  // removes the subscription; the test doesn't fail on this RPC round-trip
   // since pending notifications may delay the response past our budget.
   try {
-    sendRpc(para, "statement_unsubscribeStatement", [subId]);
+    rpc.sendRpc(para, "statement_unsubscribeStatement", [subId]);
   } catch (_) {}
-} catch (e) {
-  report("statement_store_reception", false, e.message);
-  passed = false;
-}
 
-// Finish as soon as the result is known
-process.exit(passed && !process.exitCode ? 0 : 1);
+  if (!ok) throw new Error(`reception assertion failed: ${detail}`);
+}
