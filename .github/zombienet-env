@@ -13,7 +13,9 @@ ZOMBIENET_SDK_LARGE_RUNNER_FOR_NATIVE=parity-zombienet-native-large
 
 # polkadot-sdk GitHub release whose binaries the tests run against.
 # Single source of truth — bump this line to track a newer release.
-POLKADOT_RELEASE_TAG=polkadot-stable2603
+# Needs at least stable2603-04: earlier releases reject `--experimental-webrtc`,
+# which every e2e network now passes to its nodes.
+POLKADOT_RELEASE_TAG=polkadot-stable2603-04
 
 # Logging passed to the test process.
 RUST_LOG=info

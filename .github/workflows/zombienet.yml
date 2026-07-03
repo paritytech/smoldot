@@ -74,7 +74,7 @@ jobs:
           - job-name: "zombienet-smoldot-0006-statement_store_peer_connection"
             test: "statement_store_peer_connection"
             runner-type: "default"
-          - job-name: "zombienet-smoldot-0004-statement_store_browser"
+          - job-name: "zombienet-smoldot-0013-statement_store_browser"
             test: "statement_store_browser"
             runner-type: "default"
           - job-name: "zombienet-smoldot-0007-bulletin_fetch"
@@ -125,37 +125,26 @@ jobs:
       - name: Cache e2e-tests JS node_modules
         uses: actions/cache@v4
         with:
-          path: e2e-tests/js/node_modules
-          key: e2e-js-nm-${{ hashFiles('e2e-tests/js/package-lock.json') }}
+          path: e2e-tests/node_modules
+          key: e2e-nm-${{ hashFiles('e2e-tests/package-lock.json') }}
 
-      - name: Cache e2e-tests browser node_modules
-        if: matrix.test.test == 'statement_store_browser'
-        uses: actions/cache@v4
-        with:
-          path: e2e-tests/browser/node_modules
-          key: e2e-browser-nm-${{ hashFiles('e2e-tests/browser/package-lock.json') }}
-
+      # Every test runs the shared body on both hosts (Node over TCP, then
+      # headless Chromium over WebRTC), so Playwright + Chromium are needed
+      # unconditionally.
       - name: Cache Playwright browsers
-        if: matrix.test.test == 'statement_store_browser'
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ hashFiles('e2e-tests/browser/package-lock.json') }}
+          key: playwright-${{ hashFiles('e2e-tests/package-lock.json') }}
 
       - name: Install smoldot JS deps
         shell: bash
         run: npm ci
         working-directory: wasm-node/javascript
 
-      - name: Install e2e-tests JS deps
+      - name: Install e2e-tests JS deps and Chromium
         shell: bash
-        run: npm ci
-        working-directory: e2e-tests/js
-
-      - name: Install browser test deps and Chromium
-        if: matrix.test.test == 'statement_store_browser'
-        shell: bash
-        working-directory: e2e-tests/browser
+        working-directory: e2e-tests
         run: |
           set -euo pipefail
           npm ci
