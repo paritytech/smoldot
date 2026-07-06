@@ -220,7 +220,7 @@ impl StatementSubscriptions {
             for id in &candidates {
                 let sub = subscriptions
                     .get_mut(*id)
-                    .expect("by_topic/wildcard only reference live subscriptions; qed");
+                    .expect("`candidates` is a subset of `subscriptions`; qed");
                 if sub.accept(hash, statement) {
                     let encoded = encoded.get_or_insert_with(|| {
                         HexString(
