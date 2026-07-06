@@ -15,28 +15,26 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Resolves the artifact set consumed by `smoke_cold` / `smoke_warm`.
+//! Resolves the artifact set consumed by `smoke_cold` / `smoke_warm` from the
+//! single GCS bundle. `BundleBuilder` packs only the DB tarballs as real files
+//! (one per relay validator + one collator); everything else (full specs,
+//! lightSyncState specs, smoldot-db dumps) is JSON carried in the manifest
+//! `user_data` and materialized to disk on first use.
 //!
-//! Everything ships as a single bundle on GCS:
-//! `gs://zombienet-db-snaps/zombienet/smoldot_smoke_db/{ARTIFACTS_VERSION}/bundle.tar.gz`.
-//! On first use the bundle is downloaded into
-//! `~/.cache/smoldot-e2e/{ARTIFACTS_VERSION}/`, SHA256-verified, and
-//! extracted in place. A marker file (`.extracted-sha`) records which
-//! version is currently extracted; mismatch triggers re-download.
+//! The bundle (`{GCS_BASE}/{ARTIFACTS_VERSION}/bundle.tar.gz`) is downloaded to
+//! `~/.cache/smoldot-e2e/{ARTIFACTS_VERSION}/`, SHA256-verified, and extracted on
+//! first use; an `.extracted-sha` marker triggers re-download on mismatch.
+//! `ARTIFACTS_DIR_OVERRIDE` points the resolvers at a generator output dir
+//! (no download), where the loose files already exist.
 //!
-//! For local iteration set `ARTIFACTS_DIR_OVERRIDE` to a directory laid out
-//! exactly like the generator output (`relaychain-db.tgz`, `relay-spec.json`,
-//! `smoldot-db/relay.json`, …). All resolvers point inside it; no download
-//! or verification.
-//!
-//! See `e2e-tests/docs/smoke-scenarios.md` for the full layout and the
-//! regeneration procedure.
+//! See `e2e-tests/docs/smoke-scenarios.md` for the layout and regeneration.
 
 use std::path::PathBuf;
 
 use anyhow::anyhow;
+use serde_json::Value;
 
-pub const ARTIFACTS_VERSION: &str = "v1";
+pub const ARTIFACTS_VERSION: &str = "v2";
 
 const GCS_BASE: &str =
     "https://storage.googleapis.com/zombienet-db-snaps/zombienet/smoldot_smoke_db";
@@ -46,10 +44,13 @@ const ARTIFACTS_DIR_OVERRIDE_ENV: &str = "ARTIFACTS_DIR_OVERRIDE";
 
 /// SHA256 of the published bundle for `ARTIFACTS_VERSION`. Empty means not
 /// yet pinned — in that case the resolver requires `ARTIFACTS_DIR_OVERRIDE`.
-const BUNDLE_SHA256: &str = "abea526d527c13aac54b4e1874602c04963046f7d3c3bc3e0adc217573bdc6da";
+const BUNDLE_SHA256: &str = "661ba1065bac694cb802f30300662d24fdda9b60810dc56561b4540852e4607f";
 
-pub fn relay_db() -> Result<PathBuf, anyhow::Error> {
-    resolve("relaychain-db.tgz")
+/// One DB tarball per relay validator, element `i` restored onto `validator-i`.
+pub fn relay_dbs() -> Result<Vec<PathBuf>, anyhow::Error> {
+    (0..crate::network::ELASTIC_VALIDATOR_COUNT)
+        .map(|i| resolve(&format!("relaychain-db-{i}.tgz")))
+        .collect()
 }
 
 pub fn para_db() -> Result<PathBuf, anyhow::Error> {
@@ -57,27 +58,33 @@ pub fn para_db() -> Result<PathBuf, anyhow::Error> {
 }
 
 pub fn relay_spec() -> Result<PathBuf, anyhow::Error> {
-    resolve("relay-spec.json")
+    materialize("relay-spec.json", "relay_full_spec")
 }
 
 pub fn para_spec() -> Result<PathBuf, anyhow::Error> {
-    resolve("para-spec.json")
+    materialize("para-spec.json", "para_full_spec")
 }
 
 pub fn relay_spec_light_sync_state() -> Result<PathBuf, anyhow::Error> {
-    resolve("relay-spec-lightSyncState.json")
+    materialize(
+        "relay-spec-lightSyncState.json",
+        "relay_spec_light_sync_state",
+    )
 }
 
 pub fn para_spec_light_sync_state() -> Result<PathBuf, anyhow::Error> {
-    resolve("para-spec-lightSyncState.json")
+    materialize(
+        "para-spec-lightSyncState.json",
+        "para_spec_light_sync_state",
+    )
 }
 
 pub fn smoldot_db_relay() -> Result<PathBuf, anyhow::Error> {
-    resolve("smoldot-db/relay.json")
+    materialize("smoldot-db/relay.json", "smoldot_db_relay")
 }
 
 pub fn smoldot_db_para() -> Result<PathBuf, anyhow::Error> {
-    resolve("smoldot-db/para.json")
+    materialize("smoldot-db/para.json", "smoldot_db_para")
 }
 
 fn resolve(rel: &str) -> Result<PathBuf, anyhow::Error> {
@@ -89,6 +96,28 @@ fn resolve(rel: &str) -> Result<PathBuf, anyhow::Error> {
             p.display()
         ));
     }
+    Ok(p)
+}
+
+/// Returns the loose `rel` file if present (override dir or prior call),
+/// otherwise writes it from `manifest.json` `user_data[key]` first.
+fn materialize(rel: &str, key: &str) -> Result<PathBuf, anyhow::Error> {
+    let dir = ensure_bundle_extracted()?;
+    let p = dir.join(rel);
+    if p.is_file() {
+        return Ok(p);
+    }
+    let manifest_path = dir.join("manifest.json");
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(&manifest_path).map_err(|e| anyhow!("{}: {e}", manifest_path.display()))?,
+    )?;
+    let blob = manifest
+        .pointer(&format!("/user_data/{key}"))
+        .ok_or_else(|| anyhow!("{}: missing user_data.{key}", manifest_path.display()))?;
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&p, serde_json::to_string_pretty(blob)?)?;
     Ok(p)
 }
 
@@ -148,7 +177,7 @@ fn cache_dir() -> Result<PathBuf, anyhow::Error> {
     Ok(dir)
 }
 
-fn download(url: &str, dst: &std::path::Path) -> Result<(), anyhow::Error> {
+pub(crate) fn download(url: &str, dst: &std::path::Path) -> Result<(), anyhow::Error> {
     let tmp = dst.with_extension("partial");
     let status = std::process::Command::new("curl")
         .arg("-fL")
@@ -182,7 +211,7 @@ fn extract_tarball(tarball: &std::path::Path, dst: &std::path::Path) -> Result<(
     Ok(())
 }
 
-fn verify_sha256(path: &std::path::Path, expected: &str) -> Result<(), anyhow::Error> {
+pub(crate) fn verify_sha256(path: &std::path::Path, expected: &str) -> Result<(), anyhow::Error> {
     let output = std::process::Command::new("sha256sum").arg(path).output()?;
     if !output.status.success() {
         return Err(anyhow!(

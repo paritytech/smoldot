@@ -350,7 +350,12 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                                     task.known_finalized_runtime = None;
                                 }
                                 task.dispatch_all_subscribers(Notification::Finalized {
-                                    hash: pending_hash,
+                                    finalized_blocks_hashes: result
+                                        .finalized_blocks
+                                        .iter()
+                                        .rev()
+                                        .map(|b| b.block_hash)
+                                        .collect(),
                                     best_block_hash_if_changed: if result.updates_best_block {
                                         Some(*task.sync.as_ref().unwrap().best_block_hash())
                                     } else {
@@ -913,7 +918,12 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             task.known_finalized_runtime = None;
                         }
                         task.dispatch_all_subscribers(Notification::Finalized {
-                            hash: finalized_hash,
+                            finalized_blocks_hashes: result
+                                .finalized_blocks
+                                .iter()
+                                .rev()
+                                .map(|b| b.block_hash)
+                                .collect(),
                             best_block_hash_if_changed: if result.updates_best_block {
                                 Some(*task.sync.as_ref().unwrap().best_block_hash())
                             } else {
@@ -937,10 +947,11 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             }
 
             WakeUpReason::ParaheadNotification(Notification::Finalized {
-                hash,
+                finalized_blocks_hashes,
                 best_block_hash_if_changed: _,
                 pruned_blocks: _,
             }) => {
+                let hash = *finalized_blocks_hashes.last().unwrap();
                 log!(
                     &task.platform,
                     Debug,
@@ -964,7 +975,12 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             task.known_finalized_runtime = None;
                         }
                         task.dispatch_all_subscribers(Notification::Finalized {
-                            hash,
+                            finalized_blocks_hashes: result
+                                .finalized_blocks
+                                .iter()
+                                .rev()
+                                .map(|b| b.block_hash)
+                                .collect(),
                             best_block_hash_if_changed: if result.updates_best_block {
                                 Some(*task.sync.as_ref().unwrap().best_block_hash())
                             } else {
@@ -1141,13 +1157,16 @@ fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
 }
 
 impl<TPlat: PlatformRef> Task<TPlat> {
+    /// Sends a notification to all the notification receivers.
     fn dispatch_all_subscribers(&mut self, notification: Notification) {
+        // Elements in `all_notifications` are removed one by one and inserted back if the
+        // channel is still open and not full.
         for index in (0..self.all_notifications.len()).rev() {
             let subscription = self.all_notifications.swap_remove(index);
+            // try_send can fail for two reasons: the receiver was dropped (closed), or its buffer is full.
+            // Drop the subscriber in both cases: a closed one is already dead, and
+            // keeping a full one would skip this notification, causing a gap in the stream.
             if subscription.try_send(notification.clone()).is_err() {
-                if !subscription.is_closed() {
-                    self.all_notifications.push(subscription);
-                }
                 continue;
             }
 
@@ -1286,7 +1305,8 @@ struct BootstrappedParachain {
     finalized_runtime: FinalizedBlockRuntime,
 }
 
-/// Downloads the parachain runtime from a P2P peer and determines Aura consensus parameters.
+/// Downloads the parachain runtime and determines Aura consensus parameters, trying each
+/// connected peer in turn and rotating past any that fails. See issue #3290.
 async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     log_target: &str,
     platform: &TPlat,
@@ -1295,7 +1315,6 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     block_number_bytes: usize,
 ) -> Result<BootstrappedParachain, String> {
     let ci_ref = chain_info.as_ref();
-    let state_root = *ci_ref.finalized_block_header.state_root;
     let block_hash = ci_ref.finalized_block_header.hash(block_number_bytes);
 
     log!(
@@ -1309,24 +1328,87 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
         )
     );
 
-    // Wait for a peer to connect.
-    let peer_id = {
-        let mut from_network = Box::pin(network_service.subscribe().await);
+    let peers = connected_peers_or_wait(network_service).await;
 
-        if let Some(peer) = network_service.peers_list().await.next() {
-            peer
-        } else {
-            loop {
-                match from_network.next().await {
-                    Some(network_service::Event::Connected { peer_id, .. }) => break peer_id,
-                    Some(_) => continue,
-                    None => {
-                        from_network = Box::pin(network_service.subscribe().await);
-                    }
-                }
+    log!(
+        platform,
+        Trace,
+        log_target,
+        format!(
+            "Attempting parachain runtime download from {} connected peer(s)",
+            peers.len()
+        )
+    );
+
+    first_successful_peer(peers, |peer_id| {
+        attempt_bootstrap_with_peer(
+            log_target,
+            platform,
+            network_service,
+            chain_info,
+            block_number_bytes,
+            peer_id,
+        )
+    })
+    .await
+}
+
+/// Returns a snapshot of the currently-connected peers, waiting for at least one if none yet.
+async fn connected_peers_or_wait<TPlat: PlatformRef>(
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+) -> Vec<libp2p::PeerId> {
+    // Subscribe before listing so a peer connecting in between isn't missed.
+    let mut from_network = Box::pin(network_service.subscribe().await);
+
+    let current = network_service.peers_list().await.collect::<Vec<_>>();
+    if !current.is_empty() {
+        return current;
+    }
+
+    loop {
+        match from_network.next().await {
+            Some(network_service::Event::Connected { .. }) => {
+                return network_service.peers_list().await.collect();
+            }
+            Some(_) => continue,
+            None => {
+                from_network = Box::pin(network_service.subscribe().await);
             }
         }
-    };
+    }
+}
+
+/// Tries `attempt` on each peer in turn, returning the first `Ok`; errors only once all fail.
+async fn first_successful_peer<T, F, Fut>(
+    peers: impl IntoIterator<Item = libp2p::PeerId>,
+    mut attempt: F,
+) -> Result<T, String>
+where
+    F: FnMut(libp2p::PeerId) -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    let mut last_err = None;
+    for peer in peers {
+        match attempt(peer).await {
+            Ok(value) => return Ok(value),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| String::from("no peers connected")))
+}
+
+/// Downloads the parachain runtime from a single peer and determines Aura consensus parameters.
+async fn attempt_bootstrap_with_peer<TPlat: PlatformRef>(
+    log_target: &str,
+    platform: &TPlat,
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    chain_info: &chain::chain_information::ValidChainInformation,
+    block_number_bytes: usize,
+    peer_id: libp2p::PeerId,
+) -> Result<BootstrappedParachain, String> {
+    let ci_ref = chain_info.as_ref();
+    let state_root = *ci_ref.finalized_block_header.state_root;
+    let block_hash = ci_ref.finalized_block_header.hash(block_number_bytes);
 
     log!(
         platform,
@@ -1587,5 +1669,99 @@ fn run_single_runtime_call(
                 return Err(format!("{function_name}: forbidden offchain host function"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Peer-rotation driver tests for the #3290 regression.
+
+    use super::first_successful_peer;
+    use alloc::{string::String, vec, vec::Vec};
+    use core::cell::RefCell;
+    use futures_lite::future::block_on;
+    use smoldot::libp2p::peer_id::PeerId;
+
+    // Two distinct, valid PeerIds.
+    const PEER_A: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    const PEER_B: &str = "12D3KooWQk1yQtG1YugyKjiQf6KNk8VjGGAT5xy1FWcnRKN4yXYJ";
+
+    fn peer(s: &str) -> PeerId {
+        PeerId::from_bytes(bs58::decode(s).into_vec().unwrap()).unwrap()
+    }
+
+    // Reproduces #3290: first peer fails, driver must rotate to the next and succeed.
+    #[test]
+    fn rotates_past_peer_that_cannot_answer() {
+        let a = peer(PEER_A);
+        let b = peer(PEER_B);
+        let failing = a.clone();
+        let tried = RefCell::new(Vec::new());
+
+        let result = block_on(first_successful_peer([a.clone(), b.clone()], |peer_id| {
+            let tried = &tried;
+            let failing = &failing;
+            async move {
+                tried.borrow_mut().push(peer_id.clone());
+                if peer_id == *failing {
+                    Err(String::from(
+                        "Storage proof request failed: RemoteCouldntAnswer",
+                    ))
+                } else {
+                    Ok(peer_id)
+                }
+            }
+        }));
+
+        assert_eq!(result, Ok(b.clone()));
+        assert_eq!(*tried.borrow(), vec![a, b]);
+    }
+
+    // Every peer fails: driver errors (letting the caller retry later) after trying each once.
+    #[test]
+    fn errors_after_trying_every_peer() {
+        let a = peer(PEER_A);
+        let b = peer(PEER_B);
+        let tried = RefCell::new(Vec::new());
+
+        let result: Result<PeerId, String> = block_on(first_successful_peer([a, b], |peer_id| {
+            let tried = &tried;
+            async move {
+                tried.borrow_mut().push(peer_id);
+                Err(String::from("RemoteCouldntAnswer"))
+            }
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(tried.borrow().len(), 2);
+    }
+
+    // No peers: driver errors without invoking the attempt.
+    #[test]
+    fn errors_when_no_peers() {
+        let result: Result<PeerId, String> = block_on(first_successful_peer(
+            core::iter::empty(),
+            |peer_id| async move { Ok(peer_id) },
+        ));
+        assert!(result.is_err());
+    }
+
+    // Happy path: first peer answers, so only one attempt is made.
+    #[test]
+    fn uses_first_peer_when_it_succeeds() {
+        let a = peer(PEER_A);
+        let b = peer(PEER_B);
+        let attempts = RefCell::new(0usize);
+
+        let result = block_on(first_successful_peer([a.clone(), b], |peer_id| {
+            let attempts = &attempts;
+            async move {
+                *attempts.borrow_mut() += 1;
+                Ok(peer_id)
+            }
+        }));
+
+        assert_eq!(result, Ok(a));
+        assert_eq!(*attempts.borrow(), 1);
     }
 }

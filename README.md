@@ -7,33 +7,33 @@ This repository contains the following components:
 - `smoldot-light-js` (`/wasm-node`): A JavaScript package that can connect to a Substrate-based chains as a light client. Works both in the browser and in NodeJS/Deno. **This is the main component of this repository. The development mostly focuses around it, and the name `smoldot` generally refers to this component in particular.**
   - 📦 NPM: <https://www.npmjs.com/package/smoldot>. Only versions of NodeJS that [are still maintained](https://nodejs.dev/en/about/releases/) are guaranteed to be supported.
   - 📦 Deno.land/x: <https://deno.land/x/smoldot2> (URL to import: `https://deno.land/x/smoldot2/index-deno.js`)
-  - 📄 CHANGELOG: <https://github.com/smol-dot/smoldot/blob/main/wasm-node/CHANGELOG.md>
-  - 📚 <https://smol-dot.github.io/smoldot/doc-javascript/> (latest commit)
+  - 📄 CHANGELOG: <https://github.com/paritytech/smoldot/blob/main/wasm-node/CHANGELOG.md>
+  - 📚 <https://paritytech.github.io/smoldot/doc-javascript/> (latest commit)
   - Has a stable API that rarely changes.
 
 - `smoldot` (`/lib`): An unopinionated Rust library of general-purpose primitives that relate to Substrate and Polkadot. Serves as a base for the other components.
   - 📦 <https://crates.io/crates/smoldot>
   - 📚 <https://docs.rs/smoldot> (latest published version)
-  - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot/index.html> (latest commit)
-  - Tests coverage: <https://smol-dot.github.io/smoldot/tests-coverage/index.html> (latest commit)
+  - 📚 <https://paritytech.github.io/smoldot/doc-rust/smoldot/index.html> (latest commit)
+  - Tests coverage: <https://paritytech.github.io/smoldot/tests-coverage/index.html> (latest commit)
   - Has an unstable API.
 
 - `smoldot-light` (`/light-base`): A platform-agnostic Rust library that can connect to a Substrate-based chain as a light client. Serves as the base for the `smoldot-light-js` component explained above.
   - 📦 <https://crates.io/crates/smoldot-light>
   - 📚 <https://docs.rs/smoldot-light> (latest published version)
-  - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot_light/index.html> (latest commit)
+  - 📚 <https://paritytech.github.io/smoldot/doc-rust/smoldot_light/index.html> (latest commit)
   - Has a semi-stable API that might change occasionally in minor ways.
 
 - `smoldot-full-node` (`/full-node`): A work-in-progress prototype of a full node binary that can connect to Substrate-base chains. Doesn't yet support many features that the official client supports.
-  - 🐳 <https://github.com/smol-dot/smoldot/pkgs/container/full-node>
+  - 🐳 <https://github.com/paritytech/smoldot/pkgs/container/full-node>
   - 📦 `cargo install --locked smoldot-full-node`
   - Has semi-stable CLI commands that might change occasionally in minor ways.
   - Can also be used as a library to be embedded in other programs:
     - 📦 <https://crates.io/crates/smoldot-full-node>
     - 📚 <https://docs.rs/smoldot-full-node> (latest published version)
-    - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot_full_node/index.html> (latest commit)
+    - 📚 <https://paritytech.github.io/smoldot/doc-rust/smoldot_full_node/index.html> (latest commit)
 
-[![dependency status](https://deps.rs/repo/github/smol-dot/smoldot/status.svg)](https://deps.rs/repo/github/smol-dot/smoldot)
+[![dependency status](https://deps.rs/repo/github/paritytech/smoldot/status.svg)](https://deps.rs/repo/github/paritytech/smoldot)
 
 # Frequently asked questions
 
@@ -105,7 +105,7 @@ Anyone contributing to this project pledges to propose a welcoming, constructive
 
 While the light client is fully maintained, please be aware that at the moment the full node is completely experimental. While none of the source code in this repository comes with any guarantee, it is even more true for the full node. You are at the moment strongly encouraged to not run a validator using the smoldot full node in a production environment, as it could result in a loss of money.
 
-**The following are considered critical security issues**. If you find such an issue, please use the GitHub private disclosure feature found at <https://github.com/smol-dot/smoldot/security/advisories>:
+**The following are considered critical security issues**. If you find such an issue, please use the GitHub private disclosure feature found at <https://github.com/paritytech/smoldot/security/advisories>:
 
 - Smoldot believes that a certain block has been finalized, when it is not actually the case on the blockchain it is connected to.
 - Remote arbitrary memory accesses.

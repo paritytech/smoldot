@@ -153,7 +153,7 @@ pub fn build_bitswap_message(
     // Build wantlist entries
     let mut entries_encoded = Vec::new();
     for cid in cids {
-        let entry = build_wantlist_entry(cid.as_ref(), 1, want_type, send_dont_have);
+        let entry = build_wantlist_entry(cid.as_ref(), 1, want_type, false, send_dont_have);
         // Encode as repeated message field (tag 1, wire type 2)
         for slice in protobuf::message_tag_encode(1, core::iter::once(entry.as_slice())) {
             entries_encoded.extend_from_slice(slice.as_ref());
@@ -176,11 +176,40 @@ pub fn build_bitswap_message(
     out
 }
 
+/// Builds a Bitswap message that withdraws (cancels) previously-issued wantlist entries.
+///
+/// Each entry in the resulting message has the `cancel` flag set, instructing peers to drop
+/// any pending want-list state they were holding for the listed CIDs. `want_type` is set to
+/// `Block` (the wire default) since cancel applies to all variants of a want-list entry for a
+/// given CID.
+///
+/// # Arguments
+/// * `cids` - Iterator of CIDs to cancel
+pub fn build_bitswap_cancel_message(cids: impl Iterator<Item = impl AsRef<[u8]>>) -> Vec<u8> {
+    let cids: Vec<_> = cids.collect();
+
+    let mut entries_encoded = Vec::new();
+    for cid in cids {
+        let entry = build_wantlist_entry(cid.as_ref(), 1, WantType::Block, true, false);
+        for slice in protobuf::message_tag_encode(1, core::iter::once(entry.as_slice())) {
+            entries_encoded.extend_from_slice(slice.as_ref());
+        }
+    }
+
+    let mut out = Vec::with_capacity(entries_encoded.len() + 16);
+    for slice in protobuf::message_tag_encode(1, core::iter::once(entries_encoded.as_slice())) {
+        out.extend_from_slice(slice.as_ref());
+    }
+
+    out
+}
+
 /// Builds a single wantlist entry as a byte vector.
 fn build_wantlist_entry(
     cid: &[u8],
     priority: u32,
     want_type: WantType,
+    cancel: bool,
     send_dont_have: bool,
 ) -> Vec<u8> {
     let mut entry = Vec::new();
@@ -193,6 +222,13 @@ fn build_wantlist_entry(
     // Field 2: priority (int32)
     for slice in protobuf::uint32_tag_encode(2, priority) {
         entry.extend_from_slice(slice.as_ref());
+    }
+
+    // Field 3: cancel (bool) - only encode if true
+    if cancel {
+        for slice in protobuf::bool_tag_encode(3, true) {
+            entry.extend_from_slice(slice.as_ref());
+        }
     }
 
     // Field 4: wantType (enum) - only encode if not Block (default)
@@ -409,6 +445,24 @@ mod tests {
         assert_eq!(wantlist.entries[0].want_type, WantType::Have);
         assert!(!wantlist.entries[0].send_dont_have);
         assert!(wantlist.full);
+    }
+
+    #[test]
+    fn encode_decode_cancel_message() {
+        let cids = vec![[0x10u8; 32], [0x20u8; 32], [0x30u8; 32]];
+        let encoded = build_bitswap_cancel_message(cids.iter());
+
+        let decoded = decode_bitswap_message(&encoded).unwrap();
+        let wantlist = decoded.wantlist.unwrap();
+
+        assert_eq!(wantlist.entries.len(), 3);
+        for (i, entry) in wantlist.entries.iter().enumerate() {
+            assert_eq!(entry.cid, cids[i].as_slice());
+            assert!(entry.cancel, "cancel flag should be set");
+            assert_eq!(entry.want_type, WantType::Block);
+            assert!(!entry.send_dont_have);
+        }
+        assert!(!wantlist.full);
     }
 
     #[test]

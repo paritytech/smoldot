@@ -1,6 +1,6 @@
 [package]
 name = "smoldot-light-wasm"
-version = "3.2.0"
+version = "3.3.1"
 description = "Browser bindings to a light client for Substrate-based blockchains"
 authors.workspace = true
 license.workspace = true
@@ -29,5 +29,5 @@ hashbrown = { version = "0.16.0", default-features = false }
 nom = { version = "8.0.0", default-features = false }
 pin-project = "1.1.5"
 slab = { version = "0.4.8", default-features = false }
-smoldot = { version = "1.0.0", path = "../../lib", default-features = false }
+smoldot = { version = "2.0.0", path = "../../lib", default-features = false }
 smoldot-light = { version = "1.0.0", path = "../../light-base", default-features = false }

@@ -158,6 +158,7 @@ host_functions! {
     ext_panic_handler_abort_on_panic_version_1,
     ext_transaction_index_index_version_1,
     ext_transaction_index_renew_version_1,
+    ext_statement_store_remove_by_version_1,
 }
 
 impl HostFunction {
@@ -463,6 +464,9 @@ impl HostFunction {
             }
             HostFunction::ext_transaction_index_renew_version_1 => {
                 crate::signature!((vm::ValueType::I32, vm::ValueType::I32) => ())
+            }
+            HostFunction::ext_statement_store_remove_by_version_1 => {
+                crate::signature!((vm::ValueType::I32) => ())
             }
         }
     }
