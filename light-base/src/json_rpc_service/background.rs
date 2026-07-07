@@ -244,9 +244,8 @@ struct Background<TPlat: PlatformRef> {
     /// `None` if the statement protocol is disabled.
     max_seen_statements: Option<NonZero<usize>>,
 
-    /// Active statement subscriptions. Maps subscription ID to subscription state.
-    statement_subscriptions:
-        hashbrown::HashMap<String, super::statement::StatementSubscription, fnv::FnvBuildHasher>,
+    /// Active statement subscriptions, indexed by topic for efficient matching.
+    statement_subscriptions: super::statement::StatementSubscriptions,
 
     statement_affinity_stale: bool,
     next_statement_affinity_update: Option<Pin<Box<TPlat::Delay>>>,
@@ -653,10 +652,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: false,
         max_seen_statements: config.max_seen_statements,
-        statement_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-            16,
-            Default::default(),
-        ),
+        statement_subscriptions: super::statement::StatementSubscriptions::with_capacity(16),
         statement_affinity_stale: false,
         next_statement_affinity_update: None,
         last_statement_affinity_update: None,
@@ -843,8 +839,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.statement_affinity_stale = false;
                 me.last_statement_affinity_update = Some(me.platform.now());
 
-                let combined_filter = super::statement::build_combined_affinity_filter(
-                    &me.statement_subscriptions,
+                let combined_filter = me.statement_subscriptions.build_combined_affinity_filter(
                     me.statement_protocol_config
                         .as_ref()
                         .expect("statement affinity requires statement protocol; qed"),
@@ -864,27 +859,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     continue;
                 }
 
-                // TODO: O(n_statements * n_subscriptions * n_topics_in_filter * n_topics_in_statement) complexity.
-                // Create a reverse index `topic` -> `subscription` for adequate complexity.
-                for (sub_id, sub) in me.statement_subscriptions.iter_mut() {
-                    let matching: Vec<methods::HexString> = statements
-                        .iter()
-                        .filter_map(|(hash, s)| {
-                            if !sub.accept(hash, s) {
-                                return None;
-                            }
-                            Some(methods::HexString(codec::encode_statement(s).expect(
-                                "re-encoding a decoded statement always succeeds; qed",
-                            )))
-                        })
-                        .collect();
-
-                    if matching.is_empty() {
-                        continue;
-                    }
-
+                // The reverse `topic` -> `subscription` index inside `statement_subscriptions`
+                // keeps this proportional to the number of subscriptions sharing a topic with the
+                // incoming statements, rather than the total number of subscriptions.
+                for (sub_id, matching) in me.statement_subscriptions.matching(&statements) {
                     let notification = methods::ServerToClient::statement_statement {
-                        subscription: Cow::Borrowed(sub_id),
+                        subscription: Cow::Owned(sub_id),
                         result: methods::StatementEvent::NewStatements {
                             statements: matching,
                             remaining: None,
@@ -3056,10 +3036,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         me.statement_subscriptions.insert(
                             subscription_id.clone(),
-                            super::statement::StatementSubscription::new(
-                                filter,
-                                me.max_seen_statements,
-                            ),
+                            filter,
+                            me.max_seen_statements,
                         );
 
                         me.schedule_statement_affinity_update();
@@ -3076,7 +3054,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::statement_unsubscribeStatement { subscription } => {
-                        let existed = me.statement_subscriptions.remove(&subscription).is_some();
+                        let existed = me.statement_subscriptions.remove(&subscription);
 
                         if existed {
                             me.schedule_statement_affinity_update();
