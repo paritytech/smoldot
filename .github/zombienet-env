@@ -13,7 +13,7 @@ ZOMBIENET_SDK_LARGE_RUNNER_FOR_NATIVE=parity-zombienet-native-large
 
 # polkadot-sdk GitHub release whose binaries the tests run against.
 # Single source of truth — bump this line to track a newer release.
-POLKADOT_RELEASE_TAG=polkadot-stable2603-04
+POLKADOT_RELEASE_TAG=polkadot-stable2603-4
 
 # Logging passed to the test process.
 RUST_LOG=info
