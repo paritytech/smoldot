@@ -50,7 +50,6 @@ async function waitForMessage(path, expected, timeoutMs = 120_000, pollMs = 100)
   throw new Error(`Timed out waiting for sync message "${expected}" at ${path}`);
 }
 
-// export async function makeNodeCtx({ fileInputs = [] } = {}) {
 export async function makeNodeCtx({ env, files }) {
   const maxLogLevel = Number.parseInt(env.SMOLDOT_LOG_LEVEL || "3", 10);
   const client = start({

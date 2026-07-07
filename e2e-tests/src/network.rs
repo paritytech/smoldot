@@ -41,7 +41,7 @@ fn webrtc_udp_port(name: &str) -> u16 {
     let mut base_port = 33000;
     if let Some(i) = name.strip_prefix("validator-").and_then(|s| s.parse::<u16>().ok()) {
         if u32::from(i) >= ELASTIC_VALIDATOR_COUNT {
-            unreachable!("{name} not associaed to any udp port") 
+            unreachable!("validator name: {name}, not associated to any udp port") 
         }
         return base_port  + i
     }
@@ -52,7 +52,7 @@ fn webrtc_udp_port(name: &str) -> u16 {
         // Bulletin network collators (src/harness.rs).
         "collator-1" => base_port + 2,
         "collator-2" => base_port + 3,
-        _ => unreachable!("{name} not associaed to any udp port"),
+        _ => unreachable!("name: {name}, not associated to any udp port"),
     }
 }
 
