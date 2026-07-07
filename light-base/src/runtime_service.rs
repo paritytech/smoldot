@@ -2564,11 +2564,12 @@ async fn run_background<TPlat: PlatformRef>(
             }
 
             WakeUpReason::Notification(sync_service::Notification::Finalized {
-                hash,
+                finalized_blocks_hashes,
                 best_block_hash_if_changed,
                 ..
             }) => {
                 // Sync service has reported a finalized block.
+                let hash = *finalized_blocks_hashes.last().unwrap();
 
                 log!(
                     &background.platform,
@@ -3136,7 +3137,7 @@ fn compile_runtime<TPlat: PlatformRef>(
                         format!(
                             "Unresolved host function in runtime: `{}`:`{}`. Smoldot might \
                             encounter errors later on. Please report this issue in \
-                            https://github.com/smol-dot/smoldot",
+                            https://github.com/paritytech/smoldot",
                             module_name, function
                         )
                     );

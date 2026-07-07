@@ -18,10 +18,10 @@
 // chainHead_v1_follow conformance + regression test body — runs on either
 // host via the ctx abstraction.
 //
-// Subscribes the para chain (withRuntime=true), validates the spec invariants
-// of every event, and on resubscribe (after `stop` or explicit unfollow)
-// reports a regression if the new initial finalized number is below the
-// previous subscription's last finalized number.
+// Subscribes the para chain (or the relay chain when no para spec is given),
+// validates the spec invariants of every event, and on resubscribe (after
+// `stop` or explicit unfollow) reports a regression if the new initial
+// finalized number is below the previous subscription's last finalized number.
 
 import { createRpc } from "./rpc.js";
 import { decodeHeader } from "./codec.js";
@@ -139,7 +139,8 @@ class ChainHeadValidator {
     this.withRuntime = opts.withRuntime;
     this.minNewBlocks = opts.minNewBlocks;
     this.minFinalized = opts.minFinalized;
-    this.paraFinalizedAtLaunch = opts.paraFinalizedAtLaunch;
+    this.finalizedAtLaunch = opts.finalizedAtLaunch;
+    this.chainLabel = opts.chainLabel
     this.initialLagTolerance = opts.initialLagTolerance;
     this.log = opts.log;
     this.subscriptionCount = 0;
@@ -239,6 +240,9 @@ class ChainHeadValidator {
     if (this.withRuntime && !event.finalizedBlockRuntime) {
       this.violation("initialized.finalizedBlockRuntime missing with withRuntime=true");
     }
+    if (!this.withRuntime && event.finalizedBlockRuntime != null) {
+      this.violation("initialized.finalizedBlockRuntime present with withRuntime=false");
+    }
     for (const h of hashes) this.knownHashes.add(h);
     this.initialFinalizedHash = hashes[hashes.length - 1];
     this.lastFinalizedHash = this.initialFinalizedHash;
@@ -260,6 +264,9 @@ class ChainHeadValidator {
         `newBlock parent unknown: parent=${event.parentBlockHash} block=${event.blockHash}`,
       );
       return;
+    }
+    if (!this.withRuntime && event.newRuntime != null) {
+      this.violation(`newBlock.newRuntime present with withRuntime=false: ${event.blockHash}`);
     }
     this.knownHashes.add(event.blockHash);
     this.parents.set(event.blockHash, event.parentBlockHash);
@@ -308,8 +315,12 @@ class ChainHeadValidator {
     for (const h of finalizedHashes) {
       const parent = this.parents.get(h);
       if (parent && parent !== prev) {
-        this.violation(`finalized chain break: ${h} parent=${parent} expected=${prev}`);
-        return;
+        this.violation(
+          `finalized chain break: ${h} parent=${parent} expected=${prev}`,
+        );
+        // Record once; state still advances to the tip below so we don't
+        // re-flag the same gap on every later event.
+        break;
       }
       prev = h;
     }
@@ -336,11 +347,11 @@ class ChainHeadValidator {
       );
     }
     if (
-      this.paraFinalizedAtLaunch > 0 &&
-      n + this.initialLagTolerance < this.paraFinalizedAtLaunch
+      this.finalizedAtLaunch > 0 &&
+      n + this.initialLagTolerance < this.finalizedAtLaunch
     ) {
       this.regression(
-        `initial finalized #${n} lags more than ${this.initialLagTolerance} behind para finalized at launch #${this.paraFinalizedAtLaunch}`,
+        `initial finalized #${n} lags more than ${this.initialLagTolerance} behind ${this.chainLabel} finalized at launch #${this.finalizedAtLaunch}`,
       );
     }
   }
@@ -500,41 +511,59 @@ export default async function chainheadV1Follow(ctx) {
   const paraBestAtLaunch = Number.parseInt(env.PARA_BEST_AT_LAUNCH ?? "0", 10);
   const paraFinalizedAtLaunch = Number.parseInt(env.PARA_FINALIZED_AT_LAUNCH ?? "0", 10);
   const initialLagTolerance = Number.parseInt(env.INITIAL_LAG_TOLERANCE ?? "50", 10);
+  const relayOnly = !files.PARA_CHAIN_SPEC;
 
-  if (!files.RELAY_CHAIN_SPEC || !files.PARA_CHAIN_SPEC) {
-    throw new Error("Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC");
+  if (!files.RELAY_CHAIN_SPEC) {
+    throw new Error("Required env vars: RELAY_CHAIN_SPEC (PARA_CHAIN_SPEC optional; if unset, runs relay-only)");
   }
 
   log(
     `network at launch: relay best=#${relayBestAtLaunch} finalized=#${relayFinalizedAtLaunch} | para best=#${paraBestAtLaunch} finalized=#${paraFinalizedAtLaunch} (lag tolerance=${initialLagTolerance})`,
   );
 
-  // The relay chain goes through `createRpc` (used only for the db dump at the
-  // end). The para chain is added via the client directly: its responses are
-  // consumed exclusively by the mux, and `createRpc`'s background drain would
-  // compete with it.
-  const relay = await rpc.addChain({
-    chainSpec: files.RELAY_CHAIN_SPEC,
-    databaseContent: files.SMOLDOT_DB_RELAY ?? undefined,
-  });
-  report("addChain relay", true);
+  let relay;
+  let target;
+  if (relayOnly) {
+    // Relay-only: the relay chain is the muxed target, so add it via the
+    // client directly — `createRpc`'s background drain would compete with
+    // the mux for its responses.
+    relay = await ctx.client.addChain({
+      chainSpec: files.RELAY_CHAIN_SPEC,
+      databaseContent: files.SMOLDOT_DB_RELAY ?? undefined,
+    });
+    report("addChain relay", true);
+    target = relay;
+  } else {
+    // The relay chain goes through `createRpc` (used only for the db dump at
+    // the end). The para chain is added via the client directly: its responses
+    // are consumed exclusively by the mux, and `createRpc`'s background drain
+    // would compete with it.
+    relay = await rpc.addChain({
+      chainSpec: files.RELAY_CHAIN_SPEC,
+      databaseContent: files.SMOLDOT_DB_RELAY ?? undefined,
+    });
+    report("addChain relay", true);
 
-  const para = await ctx.client.addChain({
-    chainSpec: files.PARA_CHAIN_SPEC,
-    databaseContent: files.SMOLDOT_DB_PARA ?? undefined,
-    potentialRelayChains: [relay],
-  });
-  report("addChain parachain", true);
+    const para = await ctx.client.addChain({
+      chainSpec: files.PARA_CHAIN_SPEC,
+      databaseContent: files.SMOLDOT_DB_PARA ?? undefined,
+      potentialRelayChains: [relay],
+    });
+    report("addChain parachain", true);
+    target = para;
+  }
 
-  const mux = new JsonRpcMux(para);
+  const mux = new JsonRpcMux(target);
   const validator = new ChainHeadValidator({
     withRuntime,
     minNewBlocks,
     minFinalized,
-    paraFinalizedAtLaunch,
+    finalizedAtLaunch: relayOnly ? relayFinalizedAtLaunch : paraFinalizedAtLaunch,
+    chainLabel: relayOnly ? "relay" : "para",
     initialLagTolerance,
     log,
   });
+
   const overallDeadline = Date.now() + overallTimeoutMs;
 
   // Phase 1: primary subscription. Auto-resubscribe on `stop` until thresholds met or budget gone.
@@ -610,15 +639,21 @@ export default async function chainheadV1Follow(ctx) {
 
   if (env.SMOLDOT_DB_DUMP_DIR && validator.violations.length === 0) {
     try {
-      // Relay has no mux, so use the rpc helper directly. Para is muxed.
-      const relayDb = await rpc.sendRpcAndWait(
-        relay,
-        "chainHead_unstable_finalizedDatabase",
-        [],
-        30_000,
-      );
-      const paraDb = await mux.request("chainHead_unstable_finalizedDatabase", [], 30_000);
-      await ctx.dumpDb({ "relay.json": relayDb, "para.json": paraDb });
+      if (relayOnly) {
+        // Relay is the muxed chain here; there is no parachain.
+        const relayDb = await mux.request("chainHead_unstable_finalizedDatabase", [], 30_000);
+        await ctx.dumpDb({ "relay.json": relayDb });
+      } else {
+        // Relay has no mux, so use the rpc helper directly. Para is muxed.
+        const relayDb = await rpc.sendRpcAndWait(
+          relay,
+          "chainHead_unstable_finalizedDatabase",
+          [],
+          30_000,
+        );
+        const paraDb = await mux.request("chainHead_unstable_finalizedDatabase", [], 30_000);
+        await ctx.dumpDb({ "relay.json": relayDb, "para.json": paraDb });
+      }
       report("dumped smoldot databaseContent", true, env.SMOLDOT_DB_DUMP_DIR);
     } catch (e) {
       report("dumped smoldot databaseContent", false, e.message);

@@ -43,6 +43,12 @@ async fn chainhead_v1_follow_fresh() -> Result<(), anyhow::Error> {
         .map_err(|e| anyhow!("alice did not produce parachain blocks: {e}"))?;
     log::info!("alice has \u{2265}{REQUIRED_BLOCKS} parachain blocks");
 
-    run_chainhead_v1_follow(&live, &cfg).await?;
+    // Follow the para chain, with and without runtime.
+    run_chainhead_v1_follow(&live, &cfg, true, FollowChain::Para).await?;
+    run_chainhead_v1_follow(&live, &cfg, false, FollowChain::Para).await?;
+
+    // Follow the relay chain directly, with and without runtime.
+    run_chainhead_v1_follow(&live, &cfg, true, FollowChain::Relay).await?;
+    run_chainhead_v1_follow(&live, &cfg, false, FollowChain::Relay).await?;
     Ok(())
 }

@@ -355,7 +355,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
         smoldot_full_node::LogLevel::Warn,
         "Please note that this full node is experimental. It is not feature complete and is \
         known to panic often. Please report any panic you might encounter to \
-        <https://github.com/smol-dot/smoldot/issues>."
+        <https://github.com/paritytech/smoldot/issues>."
             .to_string(),
     );
 

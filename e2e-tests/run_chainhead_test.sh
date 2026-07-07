@@ -7,8 +7,12 @@
 # Usage:
 #   ./run_chainhead_test.sh <network>
 #
-# Supported networks (asset-hub para by default):
-#   paseo, polkadot, kusama, westend
+# A relay network name runs relay-only; an `-ah`/`-next` variant also adds the
+# corresponding asset-hub parachain (relay = the matching relay chain).
+#   relay-only: paseo, polkadot, kusama, westend
+#   with para:  paseo-ah, paseo-ah-next, polkadot-ah, kusama-ah, westend-ah
+#
+# Set WITH_RUNTIME=true to subscribe with runtime (default false).
 
 set -euo pipefail
 
@@ -17,14 +21,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SPECS_DIR="${REPO_ROOT}/demo-chain-specs"
 
+# A network without a `para_spec` is treated as relay-only.
+relay_spec=""
+para_spec=""
+relay_rpc=""
+para_rpc=""
+
 case "${network}" in
   paseo)
+    relay_spec="${SPECS_DIR}/paseo.json"
+    relay_rpc="https://paseo-rpc.n.dwellir.com"
+    ;;
+  paseo-ah)
     relay_spec="${SPECS_DIR}/paseo.json"
     para_spec="${SPECS_DIR}/paseo_asset_hub.json"
     relay_rpc="https://paseo-rpc.n.dwellir.com"
     para_rpc="https://asset-hub-paseo-rpc.n.dwellir.com"
     ;;
-  paseo-next)
+  paseo-ah-next)
     relay_spec="${SPECS_DIR}/paseo.json"
     para_spec="${SPECS_DIR}/paseo_asset_hub_next.json"
     relay_rpc="https://paseo-rpc.n.dwellir.com"
@@ -32,17 +46,29 @@ case "${network}" in
     ;;
   polkadot)
     relay_spec="${SPECS_DIR}/polkadot.json"
+    relay_rpc=""  # TODO: set Polkadot relay RPC URL
+    ;;
+  polkadot-ah)
+    relay_spec="${SPECS_DIR}/polkadot.json"
     para_spec="${SPECS_DIR}/polkadot_asset_hub.json"
     relay_rpc=""  # TODO: set Polkadot relay RPC URL
     para_rpc=""  # TODO: set Polkadot Asset Hub RPC URL
     ;;
   kusama)
     relay_spec="${SPECS_DIR}/ksmcc3.json"
-    para_spec="${SPECS_DIR}/ksmcc3_asset_hub.json"
     relay_rpc=""  # TODO: set Kusama relay RPC URL
-    para_rpc=""  # TODO: set Kusama Asset Hub RPC URL
+    ;;
+  kusama-ah)
+    relay_spec="${SPECS_DIR}/ksmcc3.json"
+    para_spec="${SPECS_DIR}/ksmcc3_asset_hub.json"
+    relay_rpc="https://kusama-rpc.n.dwellir.com"
+    para_rpc="https://asset-hub-kusama-rpc.n.dwellir.com"
     ;;
   westend)
+    relay_spec="${SPECS_DIR}/westend2.json"
+    relay_rpc=""  # TODO: set Westend relay RPC URL
+    ;;
+  westend-ah)
     relay_spec="${SPECS_DIR}/westend2.json"
     para_spec="${SPECS_DIR}/westend2_asset_hub.json"
     relay_rpc=""  # TODO: set Westend relay RPC URL
@@ -50,7 +76,7 @@ case "${network}" in
     ;;
   *)
     echo "Unknown network: ${network}" >&2
-    echo "Supported: paseo, polkadot, kusama, westend" >&2
+    echo "Supported: paseo[-ah[-next]], polkadot[-ah], kusama[-ah], westend[-ah]" >&2
     exit 1
     ;;
 esac
@@ -64,7 +90,7 @@ if [[ ! -f "${RELAY_CHAIN_SPEC}" ]]; then
   echo "Relay chain spec not found: ${RELAY_CHAIN_SPEC}" >&2
   exit 1
 fi
-if [[ ! -f "${PARA_CHAIN_SPEC}" ]]; then
+if [[ -n "${PARA_CHAIN_SPEC}" && ! -f "${PARA_CHAIN_SPEC}" ]]; then
   echo "Para chain spec not found: ${PARA_CHAIN_SPEC}" >&2
   exit 1
 fi
@@ -137,8 +163,24 @@ if [[ -n "${SMOLDOT_DB_DUMP_DIR:-}" ]]; then
   fi
 fi
 
+# Mirror the Rust harness: build the smoldot JS bundle and install JS deps.
+# Set SKIP_BUILD=true to skip the (idempotent) rebuild on repeat runs.
+if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
+  if [[ ! -d "${REPO_ROOT}/wasm-node/javascript/node_modules" ]]; then
+    echo "Installing smoldot JS deps..." >&2
+    (cd "${REPO_ROOT}/wasm-node/javascript" && npm ci)
+  fi
+  echo "Building smoldot JS bundle..." >&2
+  (cd "${REPO_ROOT}/wasm-node/javascript" && npm run build)
+fi
+if [[ ! -d "${SCRIPT_DIR}/node_modules" ]]; then
+  echo "Installing JS deps..." >&2
+  (cd "${SCRIPT_DIR}" && npm install)
+fi
+
 cd "${SCRIPT_DIR}"
 exec env \
+  WITH_RUNTIME="${WITH_RUNTIME:-false}" \
   RELAY_CHAIN_SPEC="${RELAY_CHAIN_SPEC}" \
   PARA_CHAIN_SPEC="${PARA_CHAIN_SPEC}" \
   RELAY_FINALIZED_AT_LAUNCH="${RELAY_FINALIZED_AT_LAUNCH}" \
@@ -153,4 +195,5 @@ exec env \
   PER_SUB_TIMEOUT_MS="${PER_SUB_TIMEOUT_MS:-600000}" \
   OVERALL_TIMEOUT_MS="${OVERALL_TIMEOUT_MS:-900000}" \
   SMOLDOT_LOG_LEVEL="${SMOLDOT_LOG_LEVEL:-2}" \
-  node js/chainhead_v1_follow_test.js
+  TEST_NAME=chainhead_v1_follow \
+  node hosts/node/run.js

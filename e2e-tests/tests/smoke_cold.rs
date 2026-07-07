@@ -34,7 +34,7 @@ async fn smoke_cold() -> Result<(), anyhow::Error> {
     let base_dir_str = base_dir.to_str().expect("UTF-8 path").to_owned();
 
     let cfg = Scenario::Cold(SnapshotPaths {
-        relay_db_tgz: snapshot::relay_db()?,
+        relay_db_tgz: snapshot::relay_dbs()?,
         para_db_tgz: snapshot::para_db()?,
         relay_full_spec: snapshot::relay_spec()?,
         para_full_spec: snapshot::para_spec()?,

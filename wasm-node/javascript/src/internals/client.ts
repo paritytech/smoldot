@@ -276,7 +276,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                     "Smoldot has panicked" +
                     (event.currentTask ? (" while executing task `" + event.currentTask + "`") : "") +
                     ". This is a bug in smoldot. Please open an issue at " +
-                    "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
+                    "https://github.com/paritytech/smoldot/issues with the following message:\n" +
                     event.message
                 );
 

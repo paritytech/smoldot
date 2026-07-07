@@ -35,7 +35,7 @@ async fn chainhead_v1_follow_warm() -> Result<(), anyhow::Error> {
 
     let cfg = Scenario::Warm {
         snapshot: SnapshotPaths {
-            relay_db_tgz: snapshot::relay_db()?,
+            relay_db_tgz: snapshot::relay_dbs()?,
             para_db_tgz: snapshot::para_db()?,
             relay_full_spec: snapshot::relay_spec()?,
             para_full_spec: snapshot::para_spec()?,
@@ -63,6 +63,13 @@ async fn chainhead_v1_follow_warm() -> Result<(), anyhow::Error> {
         })?;
     log::info!("alice reached #{target} (>= baseline+{REQUIRED_BLOCKS})");
 
-    run_chainhead_v1_follow(&live, &cfg).await?;
+    // Follow the para chain, with and without runtime.
+    run_chainhead_v1_follow(&live, &cfg, true, FollowChain::Para).await?;
+    run_chainhead_v1_follow(&live, &cfg, false, FollowChain::Para).await?;
+
+    // Follow the relay chain directly (validates relay finality resuming from
+    // the snapshot), with and without runtime.
+    run_chainhead_v1_follow(&live, &cfg, true, FollowChain::Relay).await?;
+    run_chainhead_v1_follow(&live, &cfg, false, FollowChain::Relay).await?;
     Ok(())
 }

@@ -5223,9 +5223,9 @@ dependencies = [
 
 [[package]]
 name = "picosimd"
-version = "0.9.3"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f8cf1ae70818c6476eb2da0ac8f3f55ecdea41a7aa16824ea6efc4a31cccf41"
+checksum = "e08357da6268f1d15e41f5e54ec7c9e17b65e54e9a6c22fbaf5ebba61ddf8d18"
 
 [[package]]
 name = "pin-project"
@@ -7316,7 +7316,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot"
-version = "1.2.0"
+version = "2.1.0"
 dependencies = [
  "arrayvec 0.7.6",
  "async-lock",
@@ -7377,7 +7377,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "smoldot 1.2.0",
+ "smoldot 2.1.0",
  "tempfile",
  "tokio",
  "zombienet-sdk",

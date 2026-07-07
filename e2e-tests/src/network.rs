@@ -32,31 +32,34 @@ use serde_json::Value;
 use zombienet_sdk::subxt::ext::subxt_rpcs::client::RpcParams;
 use zombienet_sdk::{Arg, LocalFileSystem, Network, NetworkConfig, NetworkConfigBuilder};
 
-/// `BlockNumber` width on substrate-based chains used here (westend, people-westend).
-const BLOCK_NUMBER_BYTES: usize = 4;
-
 pub const PARA_ID: u32 = 1004;
 pub const PARA_CHAIN: &str = "people-westend-local";
 
-/// Per-node UDP ports for the WebRTC listeners.
-const UDP_PORTS: [(&str, u16); 6] = [
-    ("validator-0", 33000),
-    ("validator-1", 33001),
-    ("alice", 33002),
-    ("bob", 33003),
-    // Bulletin network collators (src/harness.rs).
-    ("collator-1", 33004),
-    ("collator-2", 33005),
-];
+/// UDP port for `name`'s WebRTC listener. `validator-{i}` gets `33000 + i`
+/// (any index below ELASTIC_VALIDATOR_COUNT), the fixed names live above that range.
+fn webrtc_udp_port(name: &str) -> u16 {
+    let mut base_port = 33000;
+    if let Some(i) = name.strip_prefix("validator-").and_then(|s| s.parse::<u16>().ok()) {
+        if u32::from(i) >= ELASTIC_VALIDATOR_COUNT {
+            unreachable!("{name} not associaed to any udp port") 
+        }
+        return base_port  + i
+    }
+    base_port += ELASTIC_VALIDATOR_COUNT as u16;
+    match name {
+        "alice" => base_port,
+        "bob" => base_port + 1,
+        // Bulletin network collators (src/harness.rs).
+        "collator-1" => base_port + 2,
+        "collator-2" => base_port + 3,
+        _ => unreachable!("{name} not associaed to any udp port"),
+    }
+}
 
 /// Looks up the fixed WebRTC UDP port assigned to `name` and returns the CLI
 /// args that make a substrate node listen for WebRTC on it.
-pub fn listener_args(name: &str) -> Vec<Arg> {
-    let udp_port = UDP_PORTS
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, udp )| *udp)
-        .unwrap_or_else(|| panic!("no WebRTC UDP port assigned for node {name}"));
+pub fn listener_args(name: &str) -> Vec<Arg> { 
+    let udp_port = webrtc_udp_port(name);
     vec![
         ("--listen-addr", "/ip4/0.0.0.0/tcp/0/ws").into(),
         "--experimental-webrtc".into(),
@@ -73,9 +76,40 @@ pub const BEST_METRIC: &str = "block_height{status=\"best\"}";
 /// downstream smoldot timeout.
 const RELAY_FIRST_FINALIZED_TIMEOUT_SECS: u64 = 120;
 
+/// smoldot's warp-sync engages only when its finalized-to-tip gap exceeds this;
+/// mirrors `warp_sync_minimum_gap` in `lib/src/sync/all.rs`.
+const WARP_SYNC_MINIMUM_GAP: u64 = 32;
+
+/// Core indices assigned to the parachain for elastic scaling.
+pub const ELASTIC_SCALING_CORES: &[u32] = &[0, 1, 2];
+
+/// Validators per backing group; `cores × this` = validator-set size to back
+/// every core in one relay block.
+pub const ELASTIC_MAX_VALIDATORS_PER_CORE: u32 = 2;
+
+/// Relay validators to spawn for elastic scaling, all genesis authorities.
+pub const ELASTIC_VALIDATOR_COUNT: u32 =
+    ELASTIC_SCALING_CORES.len() as u32 * ELASTIC_MAX_VALIDATORS_PER_CORE;
+
+/// Genesis `scheduler_params` override declaring the cores. Only effective on a
+/// generated genesis; a raw spec / DB snapshot has its core count fixed already.
+pub fn elastic_scaling_genesis_overrides() -> serde_json::Value {
+    serde_json::json!({
+        "configuration": {
+            "config": {
+                "scheduler_params": {
+                    "num_cores": ELASTIC_SCALING_CORES.len(),
+                    "max_validators_per_core": ELASTIC_MAX_VALIDATORS_PER_CORE
+                }
+            }
+        }
+    })
+}
+
 pub struct SnapshotPaths {
-    /// Substrate-node DB tarballs.
-    pub relay_db_tgz: PathBuf,
+    /// Relay-validator DB tarballs (all validators, element `i` -> `validator-i`),
+    /// so every erasure chunk survives restore.
+    pub relay_db_tgz: Vec<PathBuf>,
     pub para_db_tgz: PathBuf,
     /// Full chain spec with `genesis.raw`. Passed to substrate via
     /// `with_chain_spec_path` so node DB extraction matches.
@@ -125,10 +159,8 @@ pub struct LiveNetwork {
     pub network: Network<LocalFileSystem>,
     pub relay_spec: PathBuf,
     pub para_spec: PathBuf,
-    /// Lower bound on the first finalized block smoldot reports after init.
-    /// Asserts smoldot honoured the artifact checkpoint (didn't fall back
-    /// to genesis). Fresh: 0. Cold: from `lightSyncState`. Warm:
-    /// max(cold, persisted DB).
+    /// Lower bound on the finalized block smoldot reports at `chainHead` init:
+    /// the live tip if it will warp-sync, else its start head. Fresh: 0.
     pub expected_initial_finalized: u64,
 }
 
@@ -155,7 +187,8 @@ pub async fn spawn_scenario(
     log::info!("network is up");
 
     if matches!(cfg, Scenario::Fresh) {
-        wait_for_relay_first_finalized(&network).await?;
+        wait_for_relay_finalized(&network).await?;
+        assign_elastic_cores(&network).await?;
     }
 
     // If fresh then vanilla spec from zombienet is used
@@ -169,16 +202,27 @@ pub async fn spawn_scenario(
     let (relay_spec, para_spec) =
         prepare_runtime_specs(&network, &relay_base, &para_base, base_dir_str).await?;
 
-    let mut expected_initial_finalized = match cfg.snapshot() {
+    // Floor for the finalized block smoldot reports at `chainHead` init. It
+    // starts from its DB head (warm) or the spec's `lightSyncState` (cold), then
+    // either warp-syncs to ~tip (gap > WARP_SYNC_MINIMUM_GAP) or commits
+    // AllForksOnly and reports `start` (gap at-or-below it). Mirror that choice.
+    // Reading the tip here, its lowest point, keeps the floor safe under either
+    // outcome: smoldot warps to at-or-past it, and AllForksOnly reports `start`.
+    let expected_initial_finalized = match cfg.snapshot() {
         None => 0,
-        // lightSyncState is in both full and light-sync-state specs; use the
-        // smaller one.
-        Some(s) => parse_finalized_height_from_spec(&s.smoldot_relay_spec)?,
+        Some(snapshot) => {
+            let start = match cfg.smoldot_db() {
+                Some(db) => parse_finalized_height_from_db(&db.relay_db_json)?,
+                None => parse_finalized_height_from_spec(&snapshot.smoldot_relay_spec)?,
+            };
+            let tip = wait_for_relay_finalized(&network).await?;
+            if tip.saturating_sub(start) > WARP_SYNC_MINIMUM_GAP {
+                tip
+            } else {
+                start
+            }
+        }
     };
-    if let Some(db) = cfg.smoldot_db() {
-        let persisted = parse_finalized_height_from_db(&db.relay_db_json)?;
-        expected_initial_finalized = expected_initial_finalized.max(persisted);
-    }
 
     Ok(LiveNetwork {
         network,
@@ -195,8 +239,8 @@ fn build_network_config(
     let images = zombienet_sdk::environment::get_images_from_env();
 
     let snap = cfg.snapshot();
-    let relay_db = snap.map(|s| s.relay_db_tgz.to_str().expect("UTF-8 path").to_owned());
-    let para_db = snap.map(|s| s.para_db_tgz.to_str().expect("UTF-8 path").to_owned());
+    let relay_dbs = snap.map(|s| s.relay_db_tgz.clone()).unwrap_or_default();
+    let para_db = snap.map(|s| s.para_db_tgz.clone());
     // Substrate gets the *full* spec — it needs `genesis.raw` to bootstrap.
     let relay_spec_path = snap.map(|s| s.relay_full_spec.to_str().expect("UTF-8 path").to_owned());
     let para_spec_path = snap.map(|s| s.para_full_spec.to_str().expect("UTF-8 path").to_owned());
@@ -208,28 +252,26 @@ fn build_network_config(
                 .with_default_command("polkadot")
                 .with_default_image(images.polkadot.as_str());
             let r = match relay_spec_path.as_deref() {
-                None => r,
+                // Only effective on Fresh's generated genesis; snapshots bring their own.
+                None => r.with_genesis_overrides(elastic_scaling_genesis_overrides()),
                 Some(p) => r.with_chain_spec_path(p),
-            };
-            r.with_validator(|n| {
-                let n = n
-                    .with_name("validator-0")
-                    .bootnode(true)
-                    .with_args(listener_args("validator-0"));
-                match relay_db.as_deref() {
-                    Some(p) => n.with_db_snapshot(p),
-                    None => n,
-                }
-            })
+            }
+            // Per-node DB, element i onto validator-i; empty on Fresh.
+            // validator-0 outside the fold sets the typestate.
             .with_validator(|n| {
-                let n = n
-                    .with_name("validator-1")
+                n.with_name("validator-0")
                     .bootnode(true)
-                    .with_args(listener_args("validator-1"));
-                match relay_db.as_deref() {
-                    Some(p) => n.with_db_snapshot(p),
-                    None => n,
-                }
+                    .with_args(listener_args("validator-0"))
+                    .with_optional_db_snapshot(relay_dbs.first().cloned())
+            });
+            (1..ELASTIC_VALIDATOR_COUNT).fold(r, |acc, i| {
+                let db = relay_dbs.get(i as usize).cloned();
+                acc.with_validator(|n| {
+                    n.with_name(&format!("validator-{i}"))
+                        .bootnode(true)
+                        .with_args(listener_args(&format!("validator-{i}")))
+                        .with_optional_db_snapshot(db)
+                })
             })
         })
         .with_parachain(|p| {
@@ -241,40 +283,29 @@ fn build_network_config(
                 .with_default_args(vec![
                     "--force-authoring".into(),
                     "--authoring=slot-based".into(),
-                ]);
+                ])
+                .with_optional_default_db_snapshot(para_db.clone());
             let p = match para_spec_path.as_deref() {
                 None => p,
                 Some(path) => p.with_chain_spec_path(path),
             };
             p.with_collator(|n| {
+                // Node-level `with_args` replaces the parachain `default_args`,
+                // so the two default flags must be repeated here.
                 let mut args = vec![
-                   "--force-authoring".into(),
-                   "--authoring=slot-based".into(),
+                    "--force-authoring".into(),
+                    "--authoring=slot-based".into(),
                 ];
                 args.extend(listener_args("alice"));
-                let n = n
-                    .with_name("alice")
-                    .bootnode(true)
-                    .with_args(args);
-                match para_db.as_deref() {
-                    Some(p) => n.with_db_snapshot(p),
-                    None => n,
-                }
+                n.with_name("alice").bootnode(true).with_args(args)
             })
             .with_collator(|n| {
                 let mut args = vec![
-                   "--force-authoring".into(),
-                   "--authoring=slot-based".into(),
+                    "--force-authoring".into(),
+                    "--authoring=slot-based".into(),
                 ];
                 args.extend(listener_args("bob"));
-                let n = n
-                    .with_name("bob")
-                    .bootnode(true)
-                    .with_args(args);
-                match para_db.as_deref() {
-                    Some(p) => n.with_db_snapshot(p),
-                    None => n,
-                }
+                n.with_name("bob").bootnode(true).with_args(args)
             })
         })
         .with_global_settings(|g| {
@@ -292,11 +323,14 @@ fn build_network_config(
     })
 }
 
-async fn wait_for_relay_first_finalized(
+/// Waits until the relay validator reports a finalized block and returns its
+/// height. For snapshot scenarios this is the restored target head; for fresh
+/// it is the first block finalized after genesis.
+async fn wait_for_relay_finalized(
     network: &Network<LocalFileSystem>,
-) -> Result<(), anyhow::Error> {
+) -> Result<u64, anyhow::Error> {
     let validator = network.get_node("validator-0")?;
-    log::info!("waiting for relay to produce its first finalized block");
+    log::info!("waiting for relay to report a finalized block");
     validator
         .wait_metric_with_timeout(
             FINALIZED_METRIC,
@@ -305,7 +339,45 @@ async fn wait_for_relay_first_finalized(
         )
         .await
         .map_err(|e| anyhow!("relay did not finalize any block: {e}"))?;
-    log::info!("relay produced its first finalized block");
+    let finalized = validator.reports(FINALIZED_METRIC).await? as u64;
+    log::info!("relay finalized #{finalized}");
+    Ok(finalized)
+}
+
+/// Assigns [`ELASTIC_SCALING_CORES`] to the parachain at runtime via
+/// `Sudo(Coretime::assign_core)`, mirroring polkadot-sdk's elastic-scaling
+/// zombienet tests. Runtime assignment (rather than the genesis
+/// `with_num_cores` path) is what people-westend's relay runtime actually
+/// honours, and it avoids mutating genesis.
+async fn assign_elastic_cores(network: &Network<LocalFileSystem>) -> Result<(), anyhow::Error> {
+    use zombienet_sdk::subxt::{ext::scale_value::value, OnlineClient, PolkadotConfig};
+
+    let relay = network.get_node("validator-0")?;
+    let client: OnlineClient<PolkadotConfig> = relay.wait_client().await?;
+
+    let assign_calls: Vec<_> = ELASTIC_SCALING_CORES
+        .iter()
+        .map(|core| {
+            value! {
+                Coretime(assign_core { core: *core, begin: 0, assignment: ((Task(PARA_ID), 57600)), end_hint: None() })
+            }
+        })
+        .collect();
+    let tx = zombienet_sdk::subxt::tx::dynamic(
+        "Sudo",
+        "sudo",
+        vec![value! { Utility(batch { calls: assign_calls }) }],
+    );
+
+    log::info!("assigning cores {ELASTIC_SCALING_CORES:?} to para {PARA_ID}");
+    let signer = zombienet_sdk::subxt_signer::sr25519::dev::alice();
+    client
+        .tx()
+        .sign_and_submit_then_watch_default(&tx, &signer)
+        .await?
+        .wait_for_finalized_success()
+        .await?;
+    log::info!("cores assigned to para {PARA_ID}");
     Ok(())
 }
 
@@ -431,6 +503,20 @@ pub fn spawned_chain_spec_paths(
     Ok((relay_spec, para_spec))
 }
 
+/// `BlockNumber` width on the substrate chains used here (westend, people-westend).
+const BLOCK_NUMBER_BYTES: usize = 4;
+
+/// Finalized head smoldot starts a warm resume from (its persisted DB head).
+fn parse_finalized_height_from_db(path: &Path) -> Result<u64, anyhow::Error> {
+    let db: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let header_hex = db
+        .pointer("/chain/finalized_block_header")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("{}: missing chain.finalized_block_header", path.display()))?;
+    decode_header_number(header_hex).map_err(|e| anyhow!("{}: {e}", path.display()))
+}
+
+/// Finalized head smoldot starts a cold sync from (the spec's `lightSyncState`).
 fn parse_finalized_height_from_spec(path: &Path) -> Result<u64, anyhow::Error> {
     let spec: Value = serde_json::from_slice(&std::fs::read(path)?)?;
     let header_hex = spec
@@ -445,25 +531,22 @@ fn parse_finalized_height_from_spec(path: &Path) -> Result<u64, anyhow::Error> {
     decode_header_number(header_hex).map_err(|e| anyhow!("{}: {e}", path.display()))
 }
 
-fn parse_finalized_height_from_db(path: &Path) -> Result<u64, anyhow::Error> {
-    let db: Value = serde_json::from_slice(&std::fs::read(path)?)?;
-    let header_hex = db
-        .pointer("/chain/finalized_block_header")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("{}: missing chain.finalized_block_header", path.display()))?;
-    decode_header_number(header_hex).map_err(|e| anyhow!("{}: {e}", path.display()))
-}
-
 /// Decodes a hex SCALE-encoded substrate header and returns its block number.
 /// Accepts either a `0x`-prefixed string (chain spec lightSyncState format) or
-/// raw hex (smoldot databaseContent format). Uses smoldot's own header
-/// decoder.
+/// raw hex (smoldot databaseContent format). Uses smoldot's own header decoder.
 fn decode_header_number(hex_str: &str) -> Result<u64, anyhow::Error> {
     let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
     let bytes = hex::decode(stripped).map_err(|e| anyhow!("invalid hex: {e}"))?;
     let header = smoldot::header::decode(&bytes, BLOCK_NUMBER_BYTES)
         .map_err(|e| anyhow!("smoldot header decode: {e}"))?;
     Ok(header.number)
+}
+
+/// Chain the JS driver subscribes `chainHead_v1_follow` to. Selected by whether
+/// `PARA_CHAIN_SPEC` is passed: omitting it makes the JS run relay-only.
+pub enum FollowChain {
+    Relay,
+    Para,
 }
 
 /// Runs the shared `chainhead_v1_follow` body against a live network on both
@@ -475,6 +558,8 @@ fn decode_header_number(hex_str: &str) -> Result<u64, anyhow::Error> {
 pub async fn run_chainhead_v1_follow(
     live: &LiveNetwork,
     cfg: &Scenario,
+    with_runtime: bool,
+    follow: FollowChain,
 ) -> Result<(), anyhow::Error> {
     let relay_spec_str = live.relay_spec.to_str().expect("UTF-8 path");
     let para_spec_str = live.para_spec.to_str().expect("UTF-8 path");
@@ -488,6 +573,12 @@ pub async fn run_chainhead_v1_follow(
 
     crate::ensure_js_deps_installed();
     crate::ensure_browser_deps_installed();
+
+    let with_runtime_str = if with_runtime { "true" } else { "false" };
+    let followed = match follow {
+        FollowChain::Relay => "relay",
+        FollowChain::Para => "para",
+    };
 
     for host in [crate::Host::Node, crate::Host::Browser] {
         // Re-sample the live heights per host: the network keeps advancing
@@ -506,19 +597,24 @@ pub async fn run_chainhead_v1_follow(
 
         let mut env_vars: Vec<(&str, &str)> = vec![
             ("RELAY_CHAIN_SPEC", relay_spec_str),
-            ("PARA_CHAIN_SPEC", para_spec_str),
             ("RELAY_BEST_AT_LAUNCH", relay_best_str.as_str()),
             ("RELAY_FINALIZED_AT_LAUNCH", relay_finalized_str.as_str()),
             ("PARA_BEST_AT_LAUNCH", para_best_str.as_str()),
             ("PARA_FINALIZED_AT_LAUNCH", para_finalized_str.as_str()),
+            ("WITH_RUNTIME", with_runtime_str),
         ];
+        // The JS subscribes to the para chain iff PARA_CHAIN_SPEC is set;
+        // omitting it runs relay-only.
+        if matches!(follow, FollowChain::Para) {
+            env_vars.push(("PARA_CHAIN_SPEC", para_spec_str));
+        }
         if let Some((relay_db, para_db)) = smoldot_db_paths.as_ref() {
             env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
             env_vars.push(("SMOLDOT_DB_PARA", para_db.as_str()));
         }
 
         log::info!(
-            "running chainHead_v1_follow on {host:?} host (relay_spec={relay_spec_str}, para_spec={para_spec_str}, relay best/finalized=#{relay_best}/#{relay_finalized}, para best/finalized=#{para_best}/#{para_finalized})"
+            "running chainHead_v1_follow on {host:?} host (follow={followed}, with_runtime={with_runtime}, relay best/finalized=#{relay_best}/#{relay_finalized}, para best/finalized=#{para_best}/#{para_finalized})"
         );
         crate::run_shared_test(host, "chainhead_v1_follow", &env_vars)
             .await

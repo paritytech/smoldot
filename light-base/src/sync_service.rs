@@ -1335,16 +1335,10 @@ pub struct FinalizedBlockRuntime {
 pub enum Notification {
     /// A non-finalized block has been finalized.
     Finalized {
-        /// BLAKE2 hash of the block that has been finalized.
-        ///
-        /// A block with this hash is guaranteed to have earlier been reported in a
-        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
-        /// or in a [`Notification::Block`].
-        ///
-        /// It is, however, not guaranteed that this block is a child of the previously-finalized
-        /// block. In other words, if multiple blocks are finalized at the same time, only one
-        /// [`Notification::Finalized`] is generated and contains the highest finalized block.
-        hash: [u8; 32],
+        /// Newly-finalized blocks in ascending order (each the child of the previous). Never
+        /// empty; chains onto the previously-finalized block. The last element is the highest
+        /// finalized block. All were previously reported as blocks.
+        finalized_blocks_hashes: Vec<[u8; 32]>,
 
         /// If the current best block is pruned by the finalization, contains the updated hash
         /// of the best block after the finalization.
