@@ -30,8 +30,11 @@ src/            harness (run_shared_test, network builders, SyncFile, …)
 - **Node.js 22+**.
 - **Polkadot binaries on `$PATH`**: `polkadot`, `polkadot-parachain`,
   `polkadot-execute-worker`, `polkadot-prepare-worker`, `test-parachain`.
-  CI pins the release tag in `.github/zombienet-env`. Locally, download
-  that release from polkadot-sdk or build from source.
+  The binaries must support `--experimental-webrtc`. CI pins a master
+  short sha in `.github/zombienet-env` and extracts the binaries from the
+  matching `docker.io/paritypr/{polkadot-debug,polkadot-parachain-debug}:master-<sha8>`
+  images. Locally, build polkadot-sdk master from source, or
+  pull the binaries out of those same images.
 
 
 ## How to run

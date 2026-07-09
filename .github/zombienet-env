@@ -11,9 +11,12 @@ ZOMBIENET_SDK_IMAGE_FOR_NATIVE=docker.io/paritytech/ci-unified:bullseye-1.93.0-2
 ZOMBIENET_SDK_DEFAULT_RUNNER_FOR_NATIVE=parity-zombienet-native-default
 ZOMBIENET_SDK_LARGE_RUNNER_FOR_NATIVE=parity-zombienet-native-large
 
-# polkadot-sdk GitHub release whose binaries the tests run against.
-# Single source of truth — bump this line to track a newer release.
-POLKADOT_RELEASE_TAG=polkadot-stable2603-4
+# polkadot-sdk master merge-commit (short sha) whose binaries the tests run
+# against. `--experimental-webrtc` is not in any release yet,
+# so binaries are extracted from the per-merge Docker images that polkadot-sdk's
+# own zombienet CI runs on:
+#  docker.io/paritypr/{polkadot-debug,polkadot-parachain-debug}:master-<sha8>
+POLKADOT_SDK_MASTER_SHA=b018f456
 
 # Logging passed to the test process.
 RUST_LOG=info
