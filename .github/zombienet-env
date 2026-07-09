@@ -16,7 +16,7 @@ ZOMBIENET_SDK_LARGE_RUNNER_FOR_NATIVE=parity-zombienet-native-large
 # so binaries are extracted from the per-merge Docker images that polkadot-sdk's
 # own zombienet CI runs on:
 #  docker.io/paritypr/{polkadot-debug,polkadot-parachain-debug}:master-<sha8>
-POLKADOT_SDK_MASTER_SHA=b018f456
+POLKADOT_SDK_MASTER_SHA=182e7b9
 
 # Logging passed to the test process.
 RUST_LOG=info
