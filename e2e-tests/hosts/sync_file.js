@@ -15,22 +15,26 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// Node-side helpers for the browser host. The page's assets are served by
-// Playwright request interception (see hosts/browser/run.js), so the only
-// remaining helper is the SyncFile poller backing `ctx.waitSync`.
+// Node-side SyncFile poller shared by the node and browser hosts. Pair with
+// `SyncFile` on the Rust side. Both hosts run this in Node: the browser host
+// bridges it into the page via `page.exposeFunction` (see hosts/browser/run.js).
 
 import fs from "node:fs/promises";
 
-/// Polls `filePath` until a line equals `expected`. Pair with `SyncFile` on the
-/// Rust side.
-export async function waitForSyncMessage(filePath, expected, timeoutMs = 120_000) {
+/// Polls `filePath` until a line equals `expected`.
+export async function waitForSyncMessage(
+  filePath,
+  expected,
+  timeoutMs = 120_000,
+  pollMs = 100,
+) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const contents = await fs.readFile(filePath, "utf8").catch(() => "");
     if (contents.split("\n").some((line) => line.trim() === expected)) {
       return;
     }
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, pollMs));
   }
   throw new Error(
     `Timed out waiting for sync message "${expected}" at ${filePath}`,

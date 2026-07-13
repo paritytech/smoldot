@@ -23,6 +23,7 @@
 
 import * as fs from "node:fs";
 import { start } from "smoldot";
+import { waitForSyncMessage } from "../sync_file.js";
 
 // PASS/FAIL accounting for the Node host. Sets `process.exitCode` on failure so
 // the generic runner can exit non-zero.
@@ -35,19 +36,6 @@ function report(name, passed, detail) {
     console.log(`[${ts}] FAIL: ${name}${suffix}`);
     process.exitCode = 1;
   }
-}
-
-// Polls the Rust → JS sync file until a line equals `expected`. Pair with
-// `SyncFile` on the Rust side.
-async function waitForMessage(path, expected, timeoutMs = 120_000, pollMs = 100) {
-  const fsp = await import("node:fs/promises");
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const contents = await fsp.readFile(path, "utf8").catch(() => "");
-    if (contents.split("\n").some((line) => line.trim() === expected)) return;
-    await new Promise((r) => setTimeout(r, pollMs));
-  }
-  throw new Error(`Timed out waiting for sync message "${expected}" at ${path}`);
 }
 
 export async function makeNodeCtx({ env, files }) {
@@ -71,7 +59,7 @@ export async function makeNodeCtx({ env, files }) {
     waitSync: (label, timeoutMs = 120_000) => {
       const p = env.SYNC_PATH;
       if (!p) throw new Error("waitSync called but SYNC_PATH is not set");
-      return waitForMessage(p, label, timeoutMs);
+      return waitForSyncMessage(p, label, timeoutMs);
     },
     dumpDb: (filesObj) => {
       const dir = env.SMOLDOT_DB_DUMP_DIR;

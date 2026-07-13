@@ -75,7 +75,7 @@ pub async fn run_shared_test(
 
 /// A file-backed Rust → JS message channel. Rust appends newline-terminated
 /// messages with [`SyncFile::send`]; JS polls the file and waits for a given
-/// line via the `waitForMessage` helper in `e2e-tests/js/helpers.js`. The
+/// line via the `waitForSyncMessage` helper in `e2e-tests/hosts/sync-file.js`. The
 /// tempfile lives as long as this struct, so keep it alive for the full test.
 pub struct SyncFile {
     file: tempfile::NamedTempFile,

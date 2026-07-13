@@ -23,7 +23,7 @@ import { chromium } from "playwright";
 import path from "node:path";
 import url from "node:url";
 import fs from "node:fs/promises";
-import { waitForSyncMessage } from "./helpers.js";
+import { waitForSyncMessage } from "../sync_file.js";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
