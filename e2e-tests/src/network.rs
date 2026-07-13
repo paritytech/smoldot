@@ -437,7 +437,7 @@ async fn collect_bootnode_multiaddrs(
             .await
             .map_err(|e| anyhow!("{name}: system_localListenAddresses failed: {e}"))?
             .into_iter()
-            // Keep loopback addresses and only webrtc or tcp protocols.
+            // Keep only loopback addresses.
             .filter(|addr| addr.contains("/ip4/127.0.0.1/"))
             .collect();
         // Sanitize multiaddrs: system_localListenAddresses currently appends an
