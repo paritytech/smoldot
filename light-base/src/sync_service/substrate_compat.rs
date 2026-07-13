@@ -54,11 +54,6 @@ const MODE_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 /// first peer locking us into the slow path when our local finalized is a stale checkpoint.
 const MODE_DECISION_MIN_PACKETS: usize = 2;
 
-/// Deadline firings (`MODE_DECISION_TIMEOUT` apart) without warp progress before committing
-/// AllForksOnly, so queued `SubscribeAll` requests always receive a response (the checkpoint
-/// header).
-const MODE_DECISION_MAX_WARP_STALLS: usize = 3;
-
 /// Starts a sync service background task to synchronize a chain (relay chain or not) that is
 /// built with Substrate.
 pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
@@ -124,7 +119,6 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         mode: ModeState::Deciding,
         bootstrap_complete: false,
         deciding_packets_seen: 0,
-        warp_stalls: 0,
         last_warp_progress: 0,
         mode_decision_deadline: future::Either::Left(Box::pin(
             platform.sleep(MODE_DECISION_TIMEOUT),
@@ -151,8 +145,6 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         .as_mut()
         .unwrap_or_else(|| unreachable!())
         .set_warp_completion_suppressed(true);
-    task.last_warp_progress =
-        warp_sync_progress(task.sync.as_ref().unwrap_or_else(|| unreachable!()));
 
     // Main loop of the syncing logic.
     //
@@ -895,6 +887,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             task.mode = ModeState::AwaitingWarp {
                                 target_finalized: finalized_block_height,
                             };
+                            // Baseline for the stall check at the next deadline firing.
+                            task.last_warp_progress = warp_sync_progress(
+                                task.sync.as_ref().unwrap_or_else(|| unreachable!()),
+                            );
                             // Keep the deadline armed as a warp-stall fallback.
                             arm_mode_decision_deadline(&mut task);
                             // Allow warp completion to rebuild all_forks.
@@ -1560,13 +1556,26 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 ModeState::AwaitingWarp { .. } => {
                     let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
                     let progress = warp_sync_progress(sync);
+                    // A pending completion counts as progress: committing here would
+                    // discard it via `commit_all_forks_only`.
                     let advanced =
                         progress > task.last_warp_progress || sync.has_pending_warp_completion();
-                    let can_proceed = warp_sync_can_proceed(sync);
                     task.last_warp_progress = progress;
-                    task.warp_stalls = if advanced { 0 } else { task.warp_stalls + 1 };
 
-                    if task.warp_stalls >= MODE_DECISION_MAX_WARP_STALLS {
+                    if advanced {
+                        arm_mode_decision_deadline(&mut task);
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "mode-decision; awaiting-warp deadline re-armed",
+                            warp_finalized = progress,
+                        );
+                    } else {
+                        // Warp stalled for a full window: commit so queued `SubscribeAll`
+                        // requests receive a response (the checkpoint header). Warp stays
+                        // unsuppressed; a later completion still resets subscriptions at
+                        // the warped head.
                         log!(
                             &task.platform,
                             Debug,
@@ -1575,34 +1584,6 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             warp_finalized = progress,
                         );
                         commit_all_forks_only(&mut task);
-                    } else if advanced || can_proceed {
-                        arm_mode_decision_deadline(&mut task);
-                        log!(
-                            &task.platform,
-                            Debug,
-                            &task.log_target,
-                            "mode-decision; awaiting-warp deadline re-armed",
-                            warp_finalized = progress,
-                            stalls = task.warp_stalls,
-                        );
-                    } else {
-                        // Warp starved: drop back to Deciding so a future warp-eligible peer
-                        // can re-trigger CommitWarpAhead instead of locking in AllForksOnly.
-                        // Re-suppress: no mode chosen yet, no subscribers drained.
-                        // `warp_stalls` is kept so the cycle stays bounded.
-                        task.sync
-                            .as_mut()
-                            .unwrap_or_else(|| unreachable!())
-                            .set_warp_completion_suppressed(true);
-                        task.mode = ModeState::Deciding;
-                        task.deciding_packets_seen = 0;
-                        arm_mode_decision_deadline(&mut task);
-                        log!(
-                            &task.platform,
-                            Debug,
-                            &task.log_target,
-                            "mode-decision; warp starved, back to Deciding",
-                        );
                     }
                 }
                 ModeState::Ready => {
@@ -1659,11 +1640,9 @@ struct Task<TPlat: PlatformRef> {
     /// Below-gap packets observed while [`ModeState::Deciding`]; gates AllForksOnly commit.
     deciding_packets_seen: usize,
 
-    /// Deadline firings without warp progress; reset when warp advances. Survives the
-    /// `AwaitingWarp` → `Deciding` fallback so the starve/re-trigger cycle stays bounded.
-    warp_stalls: usize,
-
-    /// Warp's verified finalized height at the previous deadline firing; progress detector.
+    /// Warp's verified finalized height at `AwaitingWarp` entry or the previous deadline
+    /// firing; an unchanged reading across a `MODE_DECISION_TIMEOUT` window commits
+    /// AllForksOnly.
     last_warp_progress: u64,
 
     /// Replaced with `pending` on mode commit so it never fires again.
