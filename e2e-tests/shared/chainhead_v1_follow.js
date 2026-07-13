@@ -33,6 +33,20 @@ export const fileInputs = [
   "SMOLDOT_DB_PARA",
 ];
 
+export const envInputs = [
+  "WITH_RUNTIME",
+  "MIN_NEW_BLOCKS",
+  "MIN_FINALIZED_EVENTS",
+  "TEST_RESUBSCRIBE",
+  "OVERALL_TIMEOUT_MS",
+  "PER_SUB_TIMEOUT_MS",
+  "RELAY_BEST_AT_LAUNCH",
+  "RELAY_FINALIZED_AT_LAUNCH",
+  "PARA_BEST_AT_LAUNCH",
+  "PARA_FINALIZED_AT_LAUNCH",
+  "INITIAL_LAG_TOLERANCE",
+];
+
 // Multiplexes a smoldot chain's JSON-RPC stream. One pump loop classifies each
 // message into either a `chainHead_v1_followEvent` (queued by subId, awaited
 // via nextEvent) or an id-bearing response (resolved against pending requests

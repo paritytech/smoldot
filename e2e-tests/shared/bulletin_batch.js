@@ -32,6 +32,7 @@ const ERR_FAIL_RETRY = -32811;
 const ERR_FAIL_BACKOFF = -32812;
 
 export const fileInputs = ["RELAY_CHAIN_SPEC", "BULLETIN_CHAIN_SPEC"];
+export const envInputs = ["MISSING_CID", "PAYLOADS_JSON", "MAX_CIDS"];
 
 export default async function bulletinBatch(ctx) {
   const { report, env, files } = ctx;

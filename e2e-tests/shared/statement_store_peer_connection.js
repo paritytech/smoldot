@@ -22,6 +22,7 @@
 import { createRpc } from "./rpc.js";
 
 export const fileInputs = ["RELAY_CHAIN_SPEC", "PARA_CHAIN_SPEC"];
+export const envInputs = ["STATEMENT_HEXES", "LISTEN_MS"];
 
 export default async function statementStorePeerConnection(ctx) {
   const { report, env, files } = ctx;

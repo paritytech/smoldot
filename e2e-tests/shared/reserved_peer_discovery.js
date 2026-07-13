@@ -22,6 +22,7 @@
 import { createRpc } from "./rpc.js";
 
 export const fileInputs = ["RELAY_CHAIN_SPEC"];
+export const envInputs = ["REQUIRED_PEER_ID"];
 
 const DISCOVERY_TIMEOUT_MS = 180_000;
 

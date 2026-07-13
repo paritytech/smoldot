@@ -33,6 +33,8 @@ export const fileInputs = [
   "SMOLDOT_DB_PARA",
 ];
 
+export const envInputs = ["REQUIRED_BLOCKS", "EXPECTED_INITIAL_FINALIZED"];
+
 // Hex → bytes without Node's Buffer, so this runs unchanged in the browser.
 function hexToBytes(hex) {
   const s = hex.startsWith("0x") ? hex.slice(2) : hex;

@@ -23,6 +23,7 @@
 import { createRpc } from "./rpc.js";
 
 export const fileInputs = ["RELAY_CHAIN_SPEC", "PARA_CHAIN_SPEC"];
+export const envInputs = ["TOPIC_A", "STATEMENT_A_HEX", "STATEMENT_B_HEX", "LISTEN_MS"];
 
 export default async function statementStoreReception(ctx) {
   const { report, env, files } = ctx;

@@ -27,6 +27,10 @@
 // `shared/rpc.js`, which bodies import directly and build with
 // `createRpc(ctx.client)`.
 
+// Env vars every host forwards into `ctx.env` regardless of test, on top of the
+// per-test `envInputs` each shared module declares.
+export const commonEnvInputs = ["SMOLDOT_LOG_LEVEL", "SMOLDOT_DB_DUMP_DIR", "SYNC_PATH"];
+
 export const CTX_KEYS = [
   // Which host built this ctx, so a host-agnostic `prepareCtx` can branch on the
   // rare occasion it must.

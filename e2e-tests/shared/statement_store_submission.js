@@ -25,6 +25,7 @@
 import { createRpc } from "./rpc.js";
 
 export const fileInputs = ["RELAY_CHAIN_SPEC", "PARA_CHAIN_SPEC"];
+export const envInputs = ["STATEMENT_HEX"];
 
 // Wait for smoldot to establish peer connections before submitting.
 // statement_submit is a pure gossip operation — no chain sync needed.

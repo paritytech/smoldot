@@ -24,6 +24,7 @@ import path from "node:path";
 import url from "node:url";
 import fs from "node:fs/promises";
 import { waitForSyncMessage } from "../sync_file.js";
+import { commonEnvInputs } from "../../shared/ctx-primitives.js";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
@@ -56,7 +57,11 @@ for (const name of fileInputs) {
   const p = process.env[name];
   files[name] = p ? await fs.readFile(p, "utf8") : null;
 }
-const env = { ...process.env };
+// Same allowlist as the browser host, so `ctx.env` is identical across hosts
+const env = {};
+for (const name of [...commonEnvInputs, ...(mod.envInputs ?? [])]) {
+  if (process.env[name] !== undefined) env[name] = process.env[name];
+}
 
 // Detect an optional per-test, host-specific extension in Node (the browser
 // sandbox can't stat disk). If present it is served at /browser/prepare/<name>.js

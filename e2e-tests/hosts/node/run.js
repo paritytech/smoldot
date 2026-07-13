@@ -20,7 +20,7 @@
 
 import { stat, readFile } from "node:fs/promises";
 import { makeNodeCtx } from "./ctx.js";
-import { assertCtx } from "../../shared/ctx-primitives.js";
+import { assertCtx, commonEnvInputs } from "../../shared/ctx-primitives.js";
 
 const testName = process.env.TEST_NAME;
 if (!testName) {
@@ -44,7 +44,11 @@ for (const name of fileInputs) {
   const p = process.env[name];
   files[name] = p ? await readFile(p, "utf8") : null;
 }
-const env = { ...process.env };
+// Same allowlist as the browser host, so `ctx.env` is identical across hosts
+const env = {};
+for (const name of [...commonEnvInputs, ...(mod.envInputs ?? [])]) {
+  if (process.env[name] !== undefined) env[name] = process.env[name];
+}
 const base = await makeNodeCtx({ env, files });
 
 // Per-test, host-agnostic extension (the common case): the body may export a
