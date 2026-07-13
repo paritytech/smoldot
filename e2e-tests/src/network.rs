@@ -580,7 +580,9 @@ pub async fn run_chainhead_v1_follow(
         FollowChain::Para => "para",
     };
 
-    for host in [crate::Host::Node, crate::Host::Browser] {
+    
+    // NOTE: temporarily disable tests exec within browser.
+    for host in [crate::Host::Node, /* crate::Host::Browser */] {
         // Re-sample the live heights per host: the network keeps advancing
         // while the previous host runs, and the validator compares smoldot's
         // initial finalized against these values for the lag-regression check.

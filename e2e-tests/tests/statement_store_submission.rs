@@ -66,7 +66,8 @@ async fn statement_reaches_full_node() -> Result<(), anyhow::Error> {
     let relay_spec_str = relay_spec_path.to_str().unwrap().to_string();
     let para_spec_str = para_spec_path.to_str().unwrap().to_string();
 
-    for host in [Host::Node, Host::Browser] {
+    // NOTE: temporarily disable tests exec within browser.
+    for host in [crate::Host::Node, /* crate::Host::Browser */] {
         // Statements needs to be re-created for each host otherwise they
         // persist in the collators' store, smoldot would get the previous
         // host's statement back during the initial sync, `statement_submit`

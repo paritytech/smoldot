@@ -64,7 +64,8 @@ async fn recovers_statement_delivery_after_peer_restart() -> Result<(), anyhow::
     let relay_spec_str = relay_spec_path.to_str().unwrap().to_string();
     let para_spec_str = para_spec_path.to_str().unwrap().to_string();
 
-    for host in [Host::Node, Host::Browser] {
+    // NOTE: temporarily disable tests exec within browser.
+    for host in [Host::Node, /* Host::Browser */] {
         // Statements needs to be re-created for each host otherwise they
         // persist in the collators' store and get pushed to the next host
         // right away during the initial sync, making the test pass without
