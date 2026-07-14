@@ -160,8 +160,8 @@ jobs:
     - uses: actions/checkout@v6
     - uses: EmbarkStudios/cargo-deny-action@v2
       with:
-        command: check --config .github/cargo-deny.toml ${{ matrix.checks }}
-        arguments: --workspace --all-features
+        arguments: --workspace --all-features --config .github/cargo-deny.toml
+        command: check ${{ matrix.checks }}
 
   cargo-spellcheck:
     runs-on: ubuntu-latest
