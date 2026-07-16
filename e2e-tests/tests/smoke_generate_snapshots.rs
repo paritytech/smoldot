@@ -37,9 +37,8 @@ use std::path::{Path, PathBuf};
 use anyhow::anyhow;
 use serde_json::Value;
 use smoldot_e2e_tests::{
-    elastic_scaling_genesis_overrides,
-    ensure_js_deps_installed, ensure_smoldot_built, resolve_base_dir, run_shared_test, Host,
-    FINALIZED_METRIC, PARA_ID,ELASTIC_VALIDATOR_COUNT
+    elastic_scaling_genesis_overrides, ensure_js_deps_installed, ensure_smoldot_built,
+    resolve_base_dir, run_shared_test, Host, ELASTIC_VALIDATOR_COUNT, FINALIZED_METRIC, PARA_ID,
 };
 use zombienet_sdk::{
     snapshot::BundleBuilder, subxt::ext::subxt_rpcs::rpc_params, Bundle, LocalFileSystem, Network,

@@ -54,10 +54,17 @@ async fn bulletin_fetch() -> Result<()> {
     // Overwrite the specs' bootNodes with the live TCP + WebRTC multiaddrs so
     // both hosts can connect (Node over TCP, browser over WebRTC). Both
     // collators must be dialable: payloads are split across full/partial.
-    let base_dir_str = base_dir.to_str().ok_or_else(|| anyhow!("non-utf8 base dir"))?;
-    let relay_spec =
-        prepare_runtime_spec(&network, &relay_spec, &["alice", "bob"], base_dir_str, "relay-spec.json")
-            .await?;
+    let base_dir_str = base_dir
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 base dir"))?;
+    let relay_spec = prepare_runtime_spec(
+        &network,
+        &relay_spec,
+        &["alice", "bob"],
+        base_dir_str,
+        "relay-spec.json",
+    )
+    .await?;
     let bulletin_spec = prepare_runtime_spec(
         &network,
         &bulletin_spec,

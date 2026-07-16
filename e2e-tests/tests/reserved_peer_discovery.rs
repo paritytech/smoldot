@@ -68,7 +68,11 @@ async fn reserved_peer_discovery() -> Result<(), anyhow::Error> {
                     args.extend(listener_args("alice"));
                     n.with_name("validator-a").bootnode(true).with_args(args)
                 })
-                .with_validator(|n| n.with_name("validator-b").bootnode(false).with_args(listener_args("bob")))
+                .with_validator(|n| {
+                    n.with_name("validator-b")
+                        .bootnode(false)
+                        .with_args(listener_args("bob"))
+                })
         })
         .with_global_settings(|g| g.with_base_dir(base_dir_str.as_str()))
         .build()

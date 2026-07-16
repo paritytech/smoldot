@@ -25,9 +25,10 @@ pub mod statement;
 
 pub use network::{
     elastic_scaling_genesis_overrides, listener_args, prepare_runtime_spec, prepare_runtime_specs,
-    run_chainhead_v1_follow, run_smoke, spawn_scenario, spawned_chain_spec_paths, LiveNetwork,
-    Scenario, SmoldotDbPaths, SnapshotPaths, FollowChain, BEST_METRIC, ELASTIC_MAX_VALIDATORS_PER_CORE,
-    ELASTIC_SCALING_CORES, ELASTIC_VALIDATOR_COUNT, FINALIZED_METRIC, PARA_ID,
+    run_chainhead_v1_follow, run_smoke, spawn_scenario, spawned_chain_spec_paths, FollowChain,
+    LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC,
+    ELASTIC_MAX_VALIDATORS_PER_CORE, ELASTIC_SCALING_CORES, ELASTIC_VALIDATOR_COUNT,
+    FINALIZED_METRIC, PARA_ID,
 };
 
 /// Which host runs a shared test body: the Node build over TCP,
@@ -40,10 +41,7 @@ pub enum Host {
 
 /// Runs the shared test module `test_name` (under `e2e-tests/shared/`) on
 /// both node and headless browser hosts.
-pub async fn run_test(
-    test_name: &str,
-    env_vars: &[(&str, &str)],
-) -> Result<(), String> {
+pub async fn run_test(test_name: &str, env_vars: &[(&str, &str)]) -> Result<(), String> {
     log::info!("Running {} test on Node Host", test_name);
     crate::ensure_js_deps_installed();
     run_shared_test(Host::Node, test_name, env_vars).await?;
@@ -72,8 +70,7 @@ pub async fn run_shared_test(
         // The reason is a blocking fix needed upstream.
         // Waiting until it is fixed.
         // Host::Browser => "hosts/browser/run.js",
-        _ => return Ok(())
-
+        _ => return Ok(()),
     };
     run_js_test(script, &env).await
 }

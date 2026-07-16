@@ -39,11 +39,14 @@ pub const PARA_CHAIN: &str = "people-westend-local";
 /// (any index below ELASTIC_VALIDATOR_COUNT), the fixed names live above that range.
 fn webrtc_udp_port(name: &str) -> u16 {
     let mut base_port = 33000;
-    if let Some(i) = name.strip_prefix("validator-").and_then(|s| s.parse::<u16>().ok()) {
+    if let Some(i) = name
+        .strip_prefix("validator-")
+        .and_then(|s| s.parse::<u16>().ok())
+    {
         if u32::from(i) >= ELASTIC_VALIDATOR_COUNT {
-            unreachable!("validator name: {name}, not associated to any udp port") 
+            unreachable!("validator name: {name}, not associated to any udp port")
         }
-        return base_port  + i
+        return base_port + i;
     }
     base_port += ELASTIC_VALIDATOR_COUNT as u16;
     match name {
@@ -58,12 +61,16 @@ fn webrtc_udp_port(name: &str) -> u16 {
 
 /// Looks up the fixed WebRTC UDP port assigned to `name` and returns the CLI
 /// args that make a substrate node listen for WebRTC on it.
-pub fn listener_args(name: &str) -> Vec<Arg> { 
+pub fn listener_args(name: &str) -> Vec<Arg> {
     let udp_port = webrtc_udp_port(name);
     vec![
         ("--listen-addr", "/ip4/0.0.0.0/tcp/0/ws").into(),
         "--experimental-webrtc".into(),
-        ("--listen-addr", format!("/ip4/127.0.0.1/udp/{udp_port}/webrtc-direct").as_str()).into()
+        (
+            "--listen-addr",
+            format!("/ip4/127.0.0.1/udp/{udp_port}/webrtc-direct").as_str(),
+        )
+            .into(),
     ]
 }
 
@@ -292,18 +299,12 @@ fn build_network_config(
             p.with_collator(|n| {
                 // Node-level `with_args` replaces the parachain `default_args`,
                 // so the two default flags must be repeated here.
-                let mut args = vec![
-                    "--force-authoring".into(),
-                    "--authoring=slot-based".into(),
-                ];
+                let mut args = vec!["--force-authoring".into(), "--authoring=slot-based".into()];
                 args.extend(listener_args("alice"));
                 n.with_name("alice").bootnode(true).with_args(args)
             })
             .with_collator(|n| {
-                let mut args = vec![
-                    "--force-authoring".into(),
-                    "--authoring=slot-based".into(),
-                ];
+                let mut args = vec!["--force-authoring".into(), "--authoring=slot-based".into()];
                 args.extend(listener_args("bob"));
                 n.with_name("bob").bootnode(true).with_args(args)
             })
@@ -397,9 +398,14 @@ pub async fn prepare_runtime_specs(
         "relay-spec.json",
     )
     .await?;
-    let para_runtime =
-        prepare_runtime_spec(network, para_base, &["alice", "bob"], base_dir_str, "para-spec.json")
-            .await?;
+    let para_runtime = prepare_runtime_spec(
+        network,
+        para_base,
+        &["alice", "bob"],
+        base_dir_str,
+        "para-spec.json",
+    )
+    .await?;
     Ok((relay_runtime, para_runtime))
 }
 
@@ -419,7 +425,10 @@ pub async fn prepare_runtime_spec(
     let multiaddrs = collect_bootnode_multiaddrs(network, bootnode_names).await?;
     let out = runtime_dir.join(out_name);
     write_spec_with_bootnodes(base_spec, &out, &multiaddrs)?;
-    log::info!("prepared runtime spec {} (bootnodes: {multiaddrs:?})", out.display());
+    log::info!(
+        "prepared runtime spec {} (bootnodes: {multiaddrs:?})",
+        out.display()
+    );
     Ok(out)
 }
 
@@ -580,9 +589,8 @@ pub async fn run_chainhead_v1_follow(
         FollowChain::Para => "para",
     };
 
-    
     // NOTE: temporarily disable tests exec within browser.
-    for host in [crate::Host::Node, /* crate::Host::Browser */] {
+    for host in [crate::Host::Node /* crate::Host::Browser */] {
         // Re-sample the live heights per host: the network keeps advancing
         // while the previous host runs, and the validator compares smoldot's
         // initial finalized against these values for the lag-regression check.

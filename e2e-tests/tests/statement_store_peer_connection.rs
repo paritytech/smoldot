@@ -65,7 +65,7 @@ async fn recovers_statement_delivery_after_peer_restart() -> Result<(), anyhow::
     let para_spec_str = para_spec_path.to_str().unwrap().to_string();
 
     // NOTE: temporarily disable tests exec within browser.
-    for host in [Host::Node, /* Host::Browser */] {
+    for host in [Host::Node /* Host::Browser */] {
         // Statements needs to be re-created for each host otherwise they
         // persist in the collators' store and get pushed to the next host
         // right away during the initial sync, making the test pass without
@@ -78,23 +78,27 @@ async fn recovers_statement_delivery_after_peer_restart() -> Result<(), anyhow::
             create_test_statement(&seed, &topic, format!("stmt-3-{host:?}").as_bytes());
         let statement_hexes = format!("{stmt_1_hex},{stmt_2_hex},{stmt_3_hex}");
 
-        info!("Spawning test statement_store_peer_connection within host {:?}", host);
+        info!(
+            "Spawning test statement_store_peer_connection within host {:?}",
+            host
+        );
         let js_handle = tokio::spawn({
             let relay_spec_str = relay_spec_str.clone();
             let para_spec_str = para_spec_str.clone();
             let statement_hexes = statement_hexes.clone();
             async move {
-            run_shared_test(
-                host,
-                "statement_store_peer_connection",
-                &[
-                    ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
-                    ("PARA_CHAIN_SPEC", para_spec_str.as_str()),
-                    ("STATEMENT_HEXES", statement_hexes.as_str()),
-                ],
-            )
-            .await
-        }});
+                run_shared_test(
+                    host,
+                    "statement_store_peer_connection",
+                    &[
+                        ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
+                        ("PARA_CHAIN_SPEC", para_spec_str.as_str()),
+                        ("STATEMENT_HEXES", statement_hexes.as_str()),
+                    ],
+                )
+                .await
+            }
+        });
 
         // Wait until smoldot has peered with alice, then submit the baseline
         // statement. Smoldot's statement-store only delivers statements received

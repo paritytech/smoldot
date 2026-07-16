@@ -18,12 +18,12 @@
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 use smoldot_e2e_tests::{
-    bulletin, ensure_smoldot_built, prepare_runtime_spec, 
+    bulletin, ensure_smoldot_built,
     harness::{
         bulletin_chain_spec, chain_spec_paths, print_dev_mode_invocation, resolve_bundle,
         spawn_with_snapshots,
     },
-    resolve_base_dir, run_test,
+    prepare_runtime_spec, resolve_base_dir, run_test,
 };
 
 /// Mirrors `light-base/src/bitswap_service.rs::MAX_CIDS_PER_REQUEST`.
@@ -65,10 +65,17 @@ async fn bulletin_batch() -> Result<()> {
     // Overwrite the specs' bootNodes with the live TCP + WebRTC multiaddrs so
     // both hosts can connect (Node over TCP, browser over WebRTC). Both
     // collators must be dialable: payloads are split across full/partial.
-    let base_dir_str = base_dir.to_str().ok_or_else(|| anyhow!("non-utf8 base dir"))?;
-    let relay_spec =
-        prepare_runtime_spec(&network, &relay_spec, &["alice", "bob"], base_dir_str, "relay-spec.json")
-            .await?;
+    let base_dir_str = base_dir
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 base dir"))?;
+    let relay_spec = prepare_runtime_spec(
+        &network,
+        &relay_spec,
+        &["alice", "bob"],
+        base_dir_str,
+        "relay-spec.json",
+    )
+    .await?;
     let bulletin_spec = prepare_runtime_spec(
         &network,
         &bulletin_spec,

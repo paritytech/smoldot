@@ -74,7 +74,7 @@ async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
     ensure_browser_deps_installed();
 
     // NOTE: temporarily disable tests exec within browser.
-    for (idx, host) in [Host::Node, /* Host::Browser */].into_iter().enumerate() {
+    for (idx, host) in [Host::Node /* Host::Browser */].into_iter().enumerate() {
         // Statements *and topics* needs to be re-created for each host
         // otherwise they persist in the collators' store and get pushed to
         // the next host right away during the initial sync.
@@ -84,8 +84,16 @@ async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
         let mut topic_b = [0xbbu8; 32];
         topic_a[31] = idx as u8;
         topic_b[31] = idx as u8;
-        let stmt_a_hex = create_test_statement(&seed, &topic_a, format!("reception-test-A-{host:?}").as_bytes());
-        let stmt_b_hex = create_test_statement(&seed, &topic_b, format!("reception-test-B-{host:?}").as_bytes());
+        let stmt_a_hex = create_test_statement(
+            &seed,
+            &topic_a,
+            format!("reception-test-A-{host:?}").as_bytes(),
+        );
+        let stmt_b_hex = create_test_statement(
+            &seed,
+            &topic_b,
+            format!("reception-test-B-{host:?}").as_bytes(),
+        );
         let hash_a = statement_hash(&decode_hex_0x(&stmt_a_hex));
         let hash_b = statement_hash(&decode_hex_0x(&stmt_b_hex));
         info!(
@@ -111,7 +119,9 @@ async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
         let stmt_b_hex_js = stmt_b_hex.clone();
         let topic_a_hex_js = topic_a_hex.clone();
 
-        info!("Spawning test statement_store_reception within host {host:?} (topicA={topic_a_hex})");
+        info!(
+            "Spawning test statement_store_reception within host {host:?} (topicA={topic_a_hex})"
+        );
         let js_handle = tokio::spawn(async move {
             run_shared_test(
                 host,
