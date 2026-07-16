@@ -42,6 +42,6 @@ async fn smoke_fresh() -> Result<(), anyhow::Error> {
         .map_err(|e| anyhow!("alice did not produce parachain blocks: {e}"))?;
     log::info!("alice has ≥{REQUIRED_BLOCKS} parachain blocks");
 
-    run_smoke_js(&live, &cfg, REQUIRED_BLOCKS).await?;
+    run_smoke(&live, &cfg, REQUIRED_BLOCKS).await?;
     Ok(())
 }

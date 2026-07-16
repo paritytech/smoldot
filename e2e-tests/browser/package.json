@@ -1,8 +1,0 @@
-{
-  "type": "module",
-  "private": true,
-  "dependencies": {
-    "playwright": "^1.49.0",
-    "smoldot": "file:../../wasm-node/javascript"
-  }
-}

@@ -15,36 +15,42 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { webcrypto } from "node:crypto";
-import {
-  addChainFromSpec,
-  createSmoldotClient,
-  report,
-  sendRpcAndWait,
-} from "./helpers.js";
+// Bulletin `bitswap_unstable_get` test body — runs on either host via the ctx
+// abstraction. Fetches known payloads by CID (checking size + sha256), the
+// legacy `bitswap_v1_get` alias, and the error paths for missing/invalid CIDs.
+
+import { createRpc } from "./rpc.js";
+import { errorCode, hexToBytes, sha256Hex } from "./codec.js";
 
 const ERR_INVALID_PARAMS = -32602;
 const ERR_FAIL = -32810;
 const ERR_FAIL_RETRY = -32811;
 const ERR_FAIL_BACKOFF = -32812;
 
-const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
-const bulletinSpecPath = process.env.BULLETIN_CHAIN_SPEC;
-const missingCid = process.env.MISSING_CID;
-const payloadsJson = process.env.PAYLOADS_JSON;
-if (!relaySpecPath || !bulletinSpecPath || !missingCid || !payloadsJson) {
-  console.error(
-    "Required env vars: RELAY_CHAIN_SPEC, BULLETIN_CHAIN_SPEC, MISSING_CID, PAYLOADS_JSON",
-  );
-  process.exit(1);
-}
-const payloads = JSON.parse(payloadsJson);
+export const fileInputs = ["RELAY_CHAIN_SPEC", "BULLETIN_CHAIN_SPEC"];
+export const envInputs = ["MISSING_CID", "PAYLOADS_JSON"];
 
-const client = createSmoldotClient();
-let exitCode = 0;
-try {
-  const relay = await addChainFromSpec(client, relaySpecPath);
-  const bulletin = await addChainFromSpec(client, bulletinSpecPath, {
+export default async function bulletinFetch(ctx) {
+  const { report, env, files } = ctx;
+  const rpc = createRpc(ctx.client);
+
+  const missingCid = env.MISSING_CID;
+  const payloadsJson = env.PAYLOADS_JSON;
+  if (!files.RELAY_CHAIN_SPEC || !files.BULLETIN_CHAIN_SPEC || !missingCid || !payloadsJson) {
+    throw new Error(
+      "Required env vars: RELAY_CHAIN_SPEC, BULLETIN_CHAIN_SPEC, MISSING_CID, PAYLOADS_JSON",
+    );
+  }
+  const payloads = JSON.parse(payloadsJson);
+  let failed = false;
+  const check = (name, ok, detail) => {
+    report(name, ok, detail);
+    if (!ok) failed = true;
+  };
+
+  const relay = await rpc.addChain({ chainSpec: files.RELAY_CHAIN_SPEC });
+  const bulletin = await rpc.addChain({
+    chainSpec: files.BULLETIN_CHAIN_SPEC,
     potentialRelayChains: [relay],
   });
 
@@ -54,19 +60,15 @@ try {
       const cid = payload.cid;
 
       // When
-      const hex = await bitswapGetWithRetry(bulletin, cid);
+      const hex = await bitswapGetWithRetry(rpc, bulletin, cid);
 
       // Then
       const bytes = hexToBytes(hex);
       const sha = await sha256Hex(bytes);
       const ok = bytes.length === payload.size && sha === payload.sha256;
-      report(
-        `known-${payload.label}`,
-        ok,
-        ok ? `${bytes.length} bytes` : `size/sha256 mismatch`,
-      );
+      check(`known-${payload.label}`, ok, ok ? `${bytes.length} bytes` : `size/sha256 mismatch`);
     } catch (err) {
-      report(`known-${payload.label}`, false, err.message);
+      check(`known-${payload.label}`, false, err.message);
     }
   }
 
@@ -75,22 +77,17 @@ try {
   if (payloads.length > 0) {
     const payload = payloads[0];
     try {
-      const hex = await bitswapGetWithRetry(
-        bulletin,
-        payload.cid,
-        180_000,
-        "bitswap_v1_get",
-      );
+      const hex = await bitswapGetWithRetry(rpc, bulletin, payload.cid, 180_000, "bitswap_v1_get");
       const bytes = hexToBytes(hex);
       const sha = await sha256Hex(bytes);
       const ok = bytes.length === payload.size && sha === payload.sha256;
-      report(
+      check(
         "alias-v1-get",
         ok,
         ok ? `${bytes.length} bytes via bitswap_v1_get alias` : `size/sha256 mismatch via alias`,
       );
     } catch (err) {
-      report("alias-v1-get", false, err.message);
+      check("alias-v1-get", false, err.message);
     }
   }
 
@@ -99,17 +96,13 @@ try {
     const cid = missingCid;
 
     // When
-    const hex = await bitswapGetWithRetry(bulletin, cid);
+    const hex = await bitswapGetWithRetry(rpc, bulletin, cid);
 
     // Then
-    report(
-      "missing-not-found",
-      false,
-      `expected error ${ERR_FAIL}, got success (${hex.length / 2} bytes)`,
-    );
+    check("missing-not-found", false, `expected error ${ERR_FAIL}, got success (${hex.length / 2} bytes)`);
   } catch (err) {
     const code = errorCode(err);
-    report(
+    check(
       "missing-not-found",
       code === ERR_FAIL,
       code === ERR_FAIL ? `code ${code}` : `expected ${ERR_FAIL}, got ${code}`,
@@ -121,22 +114,16 @@ try {
     const cid = "not-a-cid";
 
     // When
-    await bitswapGetWithRetry(bulletin, cid);
+    await bitswapGetWithRetry(rpc, bulletin, cid);
 
     // Then
-    report(
-      "missing-invalid-cid",
-      false,
-      `expected error ${ERR_INVALID_PARAMS}, got success`,
-    );
+    check("missing-invalid-cid", false, `expected error ${ERR_INVALID_PARAMS}, got success`);
   } catch (err) {
     const code = errorCode(err);
-    report(
+    check(
       "missing-invalid-cid",
       code === ERR_INVALID_PARAMS,
-      code === ERR_INVALID_PARAMS
-        ? `code ${code}`
-        : `expected ${ERR_INVALID_PARAMS}, got ${code}`,
+      code === ERR_INVALID_PARAMS ? `code ${code}` : `expected ${ERR_INVALID_PARAMS}, got ${code}`,
     );
   }
 
@@ -146,39 +133,27 @@ try {
       const cid = payload.cid;
 
       // When
-      const hex = await bitswapGetWithRetry(bulletin, cid);
+      const hex = await bitswapGetWithRetry(rpc, bulletin, cid);
 
       // Then
       const bytes = hexToBytes(hex);
       const sha = await sha256Hex(bytes);
       const ok = bytes.length === payload.size && sha === payload.sha256;
-      report(
-        `mixed-${payload.label}`,
-        ok,
-        ok ? `${bytes.length} bytes` : `size/sha256 mismatch`,
-      );
+      check(`mixed-${payload.label}`, ok, ok ? `${bytes.length} bytes` : `size/sha256 mismatch`);
     } catch (err) {
-      report(`mixed-${payload.label}`, false, err.message);
+      check(`mixed-${payload.label}`, false, err.message);
     }
   }
-} catch (err) {
-  console.error(`bulletin_fetch error: ${err?.stack || err}`);
-  exitCode = 1;
-} finally {
-  try {
-    await client.terminate();
-  } catch (_) {}
-}
 
-// Force exit so Node doesn't sit waiting for the smoldot client's underlying
-// WebSocket / TCP handles to drain on their own (takes a few minutes).
-process.exit(exitCode || process.exitCode || 0);
+  if (failed) throw new Error("one or more bulletin_fetch checks failed");
+}
 
 // Retries the transient BlockRequestFailed/Timeout and NoPeers/QueueFull
 // errors smoldot returns while its peer set is warming up. `method` lets us
 // exercise both the canonical `bitswap_unstable_get` and the legacy
 // `bitswap_v1_get` alias.
 async function bitswapGetWithRetry(
+  rpc,
   chain,
   cid,
   totalBudgetMs = 180_000,
@@ -193,7 +168,7 @@ async function bitswapGetWithRetry(
       throw new Error(`${method} timed out after ${totalBudgetMs}ms`);
     }
     try {
-      return await sendRpcAndWait(chain, method, [cid], Math.min(60_000, remaining));
+      return await rpc.sendRpcAndWait(chain, method, [cid], Math.min(60_000, remaining));
     } catch (err) {
       const code = errorCode(err);
       if (code === ERR_FAIL_BACKOFF || code === ERR_FAIL_RETRY) {
@@ -204,28 +179,4 @@ async function bitswapGetWithRetry(
       throw err;
     }
   }
-}
-
-function errorCode(err) {
-  const m = /"code":(-?\d+)/.exec(err.message ?? "");
-  return m ? Number.parseInt(m[1], 10) : null;
-}
-
-function hexToBytes(hex) {
-  const stripped = hex.startsWith("0x") ? hex.slice(2) : hex;
-  if (stripped.length % 2 !== 0) {
-    throw new Error(`odd-length hex: ${stripped.length}`);
-  }
-  const out = new Uint8Array(stripped.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    out[i] = Number.parseInt(stripped.slice(i * 2, i * 2 + 2), 16);
-  }
-  return out;
-}
-
-async function sha256Hex(bytes) {
-  const digest = await webcrypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 }

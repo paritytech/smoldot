@@ -38,7 +38,7 @@ use anyhow::anyhow;
 use serde_json::Value;
 use smoldot_e2e_tests::{
     elastic_scaling_genesis_overrides, ensure_js_deps_installed, ensure_smoldot_built,
-    resolve_base_dir, run_js_test, ELASTIC_VALIDATOR_COUNT, FINALIZED_METRIC, PARA_ID,
+    resolve_base_dir, run_shared_test, Host, ELASTIC_VALIDATOR_COUNT, FINALIZED_METRIC, PARA_ID,
 };
 use zombienet_sdk::{
     snapshot::BundleBuilder, subxt::ext::subxt_rpcs::rpc_params, Bundle, LocalFileSystem, Network,
@@ -338,8 +338,9 @@ async fn dump_smoldot_db(
         "running smoldot smoke.js to dump databaseContent into {}",
         smoldot_db_dir.display()
     );
-    run_js_test(
-        "js/smoke.js",
+    run_shared_test(
+        Host::Node,
+        "smoke",
         &[
             ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
             ("PARA_CHAIN_SPEC", para_spec_str.as_str()),

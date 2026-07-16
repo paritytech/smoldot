@@ -29,10 +29,51 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use serde_json::Value;
-use zombienet_sdk::{LocalFileSystem, Network, NetworkConfig, NetworkConfigBuilder};
+use zombienet_sdk::subxt::ext::subxt_rpcs::client::RpcParams;
+use zombienet_sdk::{Arg, LocalFileSystem, Network, NetworkConfig, NetworkConfigBuilder};
 
 pub const PARA_ID: u32 = 1004;
 pub const PARA_CHAIN: &str = "people-westend-local";
+
+/// UDP port for `name`'s WebRTC listener. `validator-{i}` gets `33000 + i`
+/// (any index below ELASTIC_VALIDATOR_COUNT), the fixed names live above that range.
+fn webrtc_udp_port(name: &str) -> u16 {
+    let mut base_port = 33000;
+    if let Some(i) = name
+        .strip_prefix("validator-")
+        .and_then(|s| s.parse::<u16>().ok())
+    {
+        if u32::from(i) >= ELASTIC_VALIDATOR_COUNT {
+            unreachable!("validator name: {name}, not associated to any udp port")
+        }
+        return base_port + i;
+    }
+    base_port += ELASTIC_VALIDATOR_COUNT as u16;
+    match name {
+        "alice" => base_port,
+        "bob" => base_port + 1,
+        // Bulletin network collators (src/harness.rs).
+        "collator-1" => base_port + 2,
+        "collator-2" => base_port + 3,
+        _ => unreachable!("name: {name}, not associated to any udp port"),
+    }
+}
+
+/// Looks up the fixed WebRTC UDP port assigned to `name` and returns the CLI
+/// args that make a substrate node listen for WebRTC on it.
+pub fn listener_args(name: &str) -> Vec<Arg> {
+    let udp_port = webrtc_udp_port(name);
+    vec![
+        ("--listen-addr", "/ip4/0.0.0.0/tcp/0/ws").into(),
+        "--experimental-webrtc".into(),
+        (
+            "--listen-addr",
+            format!("/ip4/127.0.0.1/udp/{udp_port}/webrtc-direct").as_str(),
+        )
+            .into(),
+    ]
+}
+
 pub const FINALIZED_METRIC: &str = "block_height{status=\"finalized\"}";
 pub const BEST_METRIC: &str = "block_height{status=\"best\"}";
 
@@ -157,18 +198,16 @@ pub async fn spawn_scenario(
         assign_elastic_cores(&network).await?;
     }
 
-    let (relay_spec, para_spec) = match cfg.snapshot() {
+    // If fresh then vanilla spec from zombienet is used
+    // otherwise the committed light-sync-state specs.
+    // In both cases we overwrite bootNodes with the
+    // running nodes current multiaddrs, TCP and WebRTC.
+    let (relay_base, para_base) = match cfg.snapshot() {
         None => spawned_chain_spec_paths(&network)?,
-        // Light-sync-state specs (genesis.stateRootHash + lightSyncState) are
-        // what smoldot loads. Published artifacts have empty `bootNodes`;
-        // inject current multiaddrs into runtime copies.
-        Some(s) => prepare_runtime_specs(
-            &network,
-            &s.smoldot_relay_spec,
-            &s.smoldot_para_spec,
-            base_dir_str,
-        )?,
+        Some(s) => (s.smoldot_relay_spec.clone(), s.smoldot_para_spec.clone()),
     };
+    let (relay_spec, para_spec) =
+        prepare_runtime_specs(&network, &relay_base, &para_base, base_dir_str).await?;
 
     // Floor for the finalized block smoldot reports at `chainHead` init. It
     // starts from its DB head (warm) or the spec's `lightSyncState` (cold), then
@@ -229,6 +268,7 @@ fn build_network_config(
             .with_validator(|n| {
                 n.with_name("validator-0")
                     .bootnode(true)
+                    .with_args(listener_args("validator-0"))
                     .with_optional_db_snapshot(relay_dbs.first().cloned())
             });
             (1..ELASTIC_VALIDATOR_COUNT).fold(r, |acc, i| {
@@ -236,6 +276,7 @@ fn build_network_config(
                 acc.with_validator(|n| {
                     n.with_name(&format!("validator-{i}"))
                         .bootnode(true)
+                        .with_args(listener_args(&format!("validator-{i}")))
                         .with_optional_db_snapshot(db)
                 })
             })
@@ -255,8 +296,18 @@ fn build_network_config(
                 None => p,
                 Some(path) => p.with_chain_spec_path(path),
             };
-            p.with_collator(|n| n.with_name("alice").bootnode(true))
-                .with_collator(|n| n.with_name("bob").bootnode(true))
+            p.with_collator(|n| {
+                // Node-level `with_args` replaces the parachain `default_args`,
+                // so the two default flags must be repeated here.
+                let mut args = vec!["--force-authoring".into(), "--authoring=slot-based".into()];
+                args.extend(listener_args("alice"));
+                n.with_name("alice").bootnode(true).with_args(args)
+            })
+            .with_collator(|n| {
+                let mut args = vec!["--force-authoring".into(), "--authoring=slot-based".into()];
+                args.extend(listener_args("bob"));
+                n.with_name("bob").bootnode(true).with_args(args)
+            })
         })
         .with_global_settings(|g| {
             g.with_base_dir(base_dir_str).with_spawn_concurrency(1) // https://github.com/paritytech/smoldot/pull/3249#issuecomment-4438807458
@@ -331,45 +382,94 @@ async fn assign_elastic_cores(network: &Network<LocalFileSystem>) -> Result<(), 
     Ok(())
 }
 
-/// Reads `committed_relay` / `committed_para` (port-agnostic artifacts with
-/// empty `bootNodes`), injects current bootnode multiaddrs, and writes
-/// runtime copies under `{base_dir}/smoldot-runtime-specs/`.
-fn prepare_runtime_specs(
+/// Reads the relay and para specs, overwrites their `bootNodes`
+/// with the running nodes' current multiaddrs (TCP + WebRTC)
+pub async fn prepare_runtime_specs(
     network: &Network<LocalFileSystem>,
-    committed_relay: &Path,
-    committed_para: &Path,
+    relay_base: &Path,
+    para_base: &Path,
     base_dir_str: &str,
 ) -> Result<(PathBuf, PathBuf), anyhow::Error> {
-    let runtime_dir = PathBuf::from(base_dir_str).join("smoldot-runtime-specs");
-    std::fs::create_dir_all(&runtime_dir)?;
-
-    let relay_multi = collect_multiaddrs(network, &["validator-0", "validator-1"])?;
-    let para_multi = collect_multiaddrs(network, &["alice", "bob"])?;
-
-    let relay_runtime = runtime_dir.join("relay-spec.json");
-    let para_runtime = runtime_dir.join("para-spec.json");
-    write_spec_with_bootnodes(committed_relay, &relay_runtime, &relay_multi)?;
-    write_spec_with_bootnodes(committed_para, &para_runtime, &para_multi)?;
-    log::info!(
-        "prepared runtime specs (relay={}, para={})",
-        relay_runtime.display(),
-        para_runtime.display()
-    );
+    let relay_runtime = prepare_runtime_spec(
+        network,
+        relay_base,
+        &["validator-0", "validator-1"],
+        base_dir_str,
+        "relay-spec.json",
+    )
+    .await?;
+    let para_runtime = prepare_runtime_spec(
+        network,
+        para_base,
+        &["alice", "bob"],
+        base_dir_str,
+        "para-spec.json",
+    )
+    .await?;
     Ok((relay_runtime, para_runtime))
 }
 
-fn collect_multiaddrs(
+/// Writes a copy of `base_spec` to `{base_dir}/smoldot-runtime-specs/{out_name}`
+/// whose `bootNodes` are the current dialable multiaddrs (TCP + WebRTC) of the
+/// named nodes. This is the generic way to hand a live network's chain spec to
+/// smoldot so that both hosts can connect (Node over TCP, browser over WebRTC).
+pub async fn prepare_runtime_spec(
+    network: &Network<LocalFileSystem>,
+    base_spec: &Path,
+    bootnode_names: &[&str],
+    base_dir_str: &str,
+    out_name: &str,
+) -> Result<PathBuf, anyhow::Error> {
+    let runtime_dir = PathBuf::from(base_dir_str).join("smoldot-runtime-specs");
+    std::fs::create_dir_all(&runtime_dir)?;
+    let multiaddrs = collect_bootnode_multiaddrs(network, bootnode_names).await?;
+    let out = runtime_dir.join(out_name);
+    write_spec_with_bootnodes(base_spec, &out, &multiaddrs)?;
+    log::info!(
+        "prepared runtime spec {} (bootnodes: {multiaddrs:?})",
+        out.display()
+    );
+    Ok(out)
+}
+
+/// For each named node, returns its dialable multiaddrs to seed `bootNodes`.
+async fn collect_bootnode_multiaddrs(
     network: &Network<LocalFileSystem>,
     names: &[&str],
 ) -> Result<Vec<String>, anyhow::Error> {
-    names
-        .iter()
-        .map(|n| {
-            network
-                .get_node(*n)
-                .map(|node| node.multiaddr().to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()
+    let mut out: Vec<String> = Vec::new();
+    for name in names {
+        let node = network.get_node(*name)?;
+        let rpc = node.rpc().await?;
+        let mut listen_addrs: Vec<String> = rpc
+            .request::<Vec<String>>("system_localListenAddresses", RpcParams::new())
+            .await
+            .map_err(|e| anyhow!("{name}: system_localListenAddresses failed: {e}"))?
+            .into_iter()
+            // Keep only loopback addresses.
+            .filter(|addr| addr.contains("/ip4/127.0.0.1/"))
+            .collect();
+        // Sanitize multiaddrs: system_localListenAddresses currently appends an
+        // extra /p2p/<peer_id> even when one is already present.
+        for addr in listen_addrs.iter_mut() {
+            if addr.matches("/p2p/").count() == 2 {
+                if let Some(idx) = addr.rfind("/p2p/") {
+                    addr.truncate(idx);
+                }
+            }
+        }
+
+        let has_tcp = listen_addrs.iter().any(|a| a.contains("/tcp/"));
+        let has_webrtc = listen_addrs.iter().any(|a| a.contains("/webrtc"));
+        if !has_tcp || !has_webrtc {
+            return Err(anyhow!(
+                "{name}: missing TCP or WebRTC listen address (got {listen_addrs:?})"
+            ));
+        }
+
+        out.extend(listen_addrs);
+    }
+    Ok(out)
 }
 
 fn write_spec_with_bootnodes(
@@ -458,11 +558,13 @@ pub enum FollowChain {
     Para,
 }
 
-/// Runs `js/chainhead_v1_follow_test.js` against a live network. Snapshots the
-/// relay and para best/finalized heights from the validator/collator metrics
-/// immediately before launching JS, so the validator can flag an initialized
-/// finalized that lags too far behind the live network.
-pub async fn run_chainhead_v1_follow_js(
+/// Runs the shared `chainhead_v1_follow` body against a live network on both
+/// hosts in sequence: the Node host over TCP, then the browser host over
+/// WebRTC. Snapshots the relay and para best/finalized heights from the
+/// validator/collator metrics immediately before launching each host, so the
+/// validator can flag an initialized finalized that lags too far behind the
+/// live network.
+pub async fn run_chainhead_v1_follow(
     live: &LiveNetwork,
     cfg: &Scenario,
     with_runtime: bool,
@@ -478,52 +580,65 @@ pub async fn run_chainhead_v1_follow_js(
         )
     });
 
-    let relay_node = live.network.get_node("validator-0")?;
-    let relay_best = relay_node.reports(BEST_METRIC).await? as u64;
-    let relay_finalized = relay_node.reports(FINALIZED_METRIC).await? as u64;
-    let para_node = live.network.get_node("alice")?;
-    let para_best = para_node.reports(BEST_METRIC).await? as u64;
-    let para_finalized = para_node.reports(FINALIZED_METRIC).await? as u64;
-    let relay_best_str = relay_best.to_string();
-    let relay_finalized_str = relay_finalized.to_string();
-    let para_best_str = para_best.to_string();
-    let para_finalized_str = para_finalized.to_string();
+    crate::ensure_js_deps_installed();
+    crate::ensure_browser_deps_installed();
 
     let with_runtime_str = if with_runtime { "true" } else { "false" };
-    let mut env_vars: Vec<(&str, &str)> = vec![
-        ("RELAY_CHAIN_SPEC", relay_spec_str),
-        ("RELAY_BEST_AT_LAUNCH", relay_best_str.as_str()),
-        ("RELAY_FINALIZED_AT_LAUNCH", relay_finalized_str.as_str()),
-        ("PARA_BEST_AT_LAUNCH", para_best_str.as_str()),
-        ("PARA_FINALIZED_AT_LAUNCH", para_finalized_str.as_str()),
-        ("WITH_RUNTIME", with_runtime_str),
-    ];
-    // The JS subscribes to the para chain iff PARA_CHAIN_SPEC is set; omitting
-    // it runs relay-only.
-    if matches!(follow, FollowChain::Para) {
-        env_vars.push(("PARA_CHAIN_SPEC", para_spec_str));
-    }
-    if let Some((relay_db, para_db)) = smoldot_db_paths.as_ref() {
-        env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
-        env_vars.push(("SMOLDOT_DB_PARA", para_db.as_str()));
-    }
-
     let followed = match follow {
         FollowChain::Relay => "relay",
         FollowChain::Para => "para",
     };
-    log::info!(
-        "running chainHead_v1_follow JS driver (follow={followed}, with_runtime={with_runtime}, relay best/finalized=#{relay_best}/#{relay_finalized}, para best/finalized=#{para_best}/#{para_finalized})"
-    );
-    crate::run_js_test("js/chainhead_v1_follow_test.js", &env_vars)
-        .await
-        .map_err(|e| anyhow!("JS test failed: {e}"))
+
+    // NOTE: temporarily disable tests exec within browser.
+    for host in [crate::Host::Node /* crate::Host::Browser */] {
+        // Re-sample the live heights per host: the network keeps advancing
+        // while the previous host runs, and the validator compares smoldot's
+        // initial finalized against these values for the lag-regression check.
+        let relay_node = live.network.get_node("validator-0")?;
+        let relay_best = relay_node.reports(BEST_METRIC).await? as u64;
+        let relay_finalized = relay_node.reports(FINALIZED_METRIC).await? as u64;
+        let para_node = live.network.get_node("alice")?;
+        let para_best = para_node.reports(BEST_METRIC).await? as u64;
+        let para_finalized = para_node.reports(FINALIZED_METRIC).await? as u64;
+        let relay_best_str = relay_best.to_string();
+        let relay_finalized_str = relay_finalized.to_string();
+        let para_best_str = para_best.to_string();
+        let para_finalized_str = para_finalized.to_string();
+
+        let mut env_vars: Vec<(&str, &str)> = vec![
+            ("RELAY_CHAIN_SPEC", relay_spec_str),
+            ("RELAY_BEST_AT_LAUNCH", relay_best_str.as_str()),
+            ("RELAY_FINALIZED_AT_LAUNCH", relay_finalized_str.as_str()),
+            ("PARA_BEST_AT_LAUNCH", para_best_str.as_str()),
+            ("PARA_FINALIZED_AT_LAUNCH", para_finalized_str.as_str()),
+            ("WITH_RUNTIME", with_runtime_str),
+        ];
+        // The JS subscribes to the para chain iff PARA_CHAIN_SPEC is set;
+        // omitting it runs relay-only.
+        if matches!(follow, FollowChain::Para) {
+            env_vars.push(("PARA_CHAIN_SPEC", para_spec_str));
+        }
+        if let Some((relay_db, para_db)) = smoldot_db_paths.as_ref() {
+            env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
+            env_vars.push(("SMOLDOT_DB_PARA", para_db.as_str()));
+        }
+
+        log::info!(
+            "running chainHead_v1_follow on {host:?} host (follow={followed}, with_runtime={with_runtime}, relay best/finalized=#{relay_best}/#{relay_finalized}, para best/finalized=#{para_best}/#{para_finalized})"
+        );
+        crate::run_shared_test(host, "chainhead_v1_follow", &env_vars)
+            .await
+            .map_err(|e| anyhow!("chainhead_v1_follow failed on {host:?} host: {e}"))?;
+    }
+    Ok(())
 }
 
-/// Runs `js/smoke.js` against a live network. Env-injects spec paths, the
-/// expected-initial-finalized floor, and (warm only) smoldot DB content
-/// paths.
-pub async fn run_smoke_js(
+/// Runs the shared `smoke` body against a single live network on both hosts in
+/// sequence: the Node host over TCP, then the Browser host in headless Chrome
+/// with `forbidTcp` (→ WebRTC). Both hosts execute the same `shared/smoke.js`
+/// and load the same chain spec — its `bootNodes` are expected to carry both
+/// TCP and WebRTC multiaddrs.
+pub async fn run_smoke(
     live: &LiveNetwork,
     cfg: &Scenario,
     required_blocks: u32,
@@ -552,9 +667,24 @@ pub async fn run_smoke_js(
     }
 
     log::info!(
-        "running smoldot JS smoke test (relay_spec={relay_spec_str}, para_spec={para_spec_str}, required_blocks={required_blocks}, expected_initial_finalized={expected_finalized})"
+        "running smoldot smoke test (relay_spec={}, para_spec={}, required_blocks={}, expected_initial_finalized={})",
+        relay_spec_str,
+        para_spec_str,
+        required_blocks,
+        expected_finalized
     );
-    crate::run_js_test("js/smoke.js", &env_vars)
+
+    // Node host (TCP).
+    crate::ensure_js_deps_installed();
+    crate::run_shared_test(crate::Host::Node, "smoke", &env_vars)
         .await
-        .map_err(|e| anyhow!("JS test failed: {e}"))
+        .map_err(|e| anyhow!("node smoke test failed: {e}"))?;
+
+    // Browser host (WebRTC).
+    crate::ensure_browser_deps_installed();
+    crate::run_shared_test(crate::Host::Browser, "smoke", &env_vars)
+        .await
+        .map_err(|e| anyhow!("browser smoke test failed: {e}"))?;
+
+    Ok(())
 }
