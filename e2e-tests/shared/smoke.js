@@ -23,6 +23,7 @@
 // in `ctx.env` / `ctx.files`.
 
 import { createRpc } from "./rpc.js";
+import { hexToBytes, decodeHeader } from "./codec.js";
 
 // Env var values that name files; the runner reads each into `ctx.files[NAME]`
 // (string contents, or null if unset).
@@ -34,36 +35,6 @@ export const fileInputs = [
 ];
 
 export const envInputs = ["REQUIRED_BLOCKS", "EXPECTED_INITIAL_FINALIZED"];
-
-// Hex → bytes without Node's Buffer, so this runs unchanged in the browser.
-function hexToBytes(hex) {
-  const s = hex.startsWith("0x") ? hex.slice(2) : hex;
-  const out = new Uint8Array(s.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    out[i] = parseInt(s.substr(i * 2, 2), 16);
-  }
-  return out;
-}
-
-// Decodes the block number from a hex SCALE-encoded substrate header.
-// Layout: parent_hash (32 B) | compact-encoded number | rest. The compact
-// modes 0/1/2 cover block numbers up to 2^30; that's the only range we'll
-// ever assert against.
-function decodeHeaderNumber(hexStr) {
-  const bytes = hexToBytes(hexStr);
-  if (bytes.length < 33) throw new Error(`header hex too short: ${bytes.length} bytes`);
-  const off = 32;
-  const b0 = bytes[off];
-  const mode = b0 & 0b11;
-  if (mode === 0) return b0 >>> 2;
-  if (mode === 1) return (b0 | (bytes[off + 1] << 8)) >>> 2;
-  if (mode === 2) {
-    return (
-      (b0 | (bytes[off + 1] << 8) | (bytes[off + 2] << 16) | (bytes[off + 3] << 24)) >>> 2
-    );
-  }
-  throw new Error(`compact mode 3 not supported in decodeHeaderNumber`);
-}
 
 export default async function smoke(ctx) {
   const { report, env, files } = ctx;
@@ -138,16 +109,16 @@ export default async function smoke(ctx) {
       [relaySubId, finalizedHash],
       30_000,
     );
-    const num = decodeHeaderNumber(headerHex);
-    const ok = num >= expectedInitialFinalized;
+    const { number } = decodeHeader(headerHex);
+    const ok = number >= expectedInitialFinalized;
     report(
       "relay finalized at-or-past expected_initial_finalized",
       ok,
-      `finalized=#${num} expected=#${expectedInitialFinalized}`,
+      `finalized=#${number} expected=#${expectedInitialFinalized}`,
     );
     if (!ok)
       throw new Error(
-        `relay finalized #${num} below expected_initial_finalized #${expectedInitialFinalized}`,
+        `relay finalized #${number} below expected_initial_finalized #${expectedInitialFinalized}`,
       );
   }
 
