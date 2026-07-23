@@ -69,6 +69,9 @@ pub async fn run_shared_test(
         // NOTE: temporarily disable test execution within the browser.
         // The reason is a blocking fix needed upstream.
         // Waiting until it is fixed.
+        // When re-enabling, also uncomment the browser-only
+        // `zombienet-smoldot-0014-webrtc_double_open` entry in
+        // `.github/workflows/zombienet.yml`.
         // Host::Browser => "hosts/browser/run.js",
         _ => return Ok(()),
     };
