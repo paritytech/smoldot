@@ -151,7 +151,9 @@ Then commit whichever locks actually changed (`git diff --name-only`).
 Insert a new section **below** the `## Unreleased` heading (leave `Unreleased`
 in place). Use the current date in `YYYY-MM-DD`. Group entries under
 `### Added` / `### Changed` / `### Fixed` / `### Removed`. Each bullet must
-link to its PR.
+link to its PR, and — when the PR fixes or relates to a GitHub issue
+(check the PR/commit body for `Fixes #N` / `Closes #N` / issue mentions) —
+also link the issue(s).
 
 Template:
 
@@ -160,8 +162,11 @@ Template:
 
 ### Fixed
 
-- <user-facing description>. ([#<PR>](https://github.com/paritytech/smoldot/pull/<PR>))
+- <user-facing description>. ([#<PR>](https://github.com/paritytech/smoldot/pull/<PR>); fixes [#<issue>](https://github.com/paritytech/smoldot/issues/<issue>))
 ```
+
+Use `fixes [#N]` when the PR closes the issue, `related to [#N]` when it
+only touches it. Omit the clause when there is no linked issue.
 
 Rules of thumb:
 
