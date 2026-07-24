@@ -448,7 +448,30 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                 break;
             try {
                 state.instance.exports.advance_execution();
-            } catch (_error) {
+            } catch (error) {
+                // Two kinds of exceptions can reach this point:
+                //
+                // - A Rust panic. The `panic` binding has already emitted the `wasm-panic`
+                //   event, notified the shutdown callback, and set `state.instance` to `null`.
+                //
+                // - An exception thrown by JavaScript code called from within the Wasm (for
+                //   example a platform binding, see
+                //   <https://github.com/paritytech/smoldot/issues/3302>). The exception has
+                //   unwound through the Wasm frames without the Rust code being aware of it,
+                //   leaving the instance in an unusable state (locks still held, etc.).
+                //   Swallowing it would leave a zombie instance that panics at every
+                //   subsequent entry point. Instead, report it as a crash, the same way as
+                //   a panic.
+                if (state.instance) {
+                    state.instance = null;
+                    eventCallback({
+                        ty: "wasm-panic",
+                        message: error instanceof Error ? (error.stack ?? error.toString()) : String(error),
+                        currentTask: state.currentTask
+                    });
+                    state.onShutdownExecutorOrWasmPanic();
+                    state.onShutdownExecutorOrWasmPanic = () => { };
+                }
                 return;
             }
 
