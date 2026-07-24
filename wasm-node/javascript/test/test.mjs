@@ -47,3 +47,37 @@ test('system_name works', async t => {
     })
     .then(() => client.terminate());
 });
+
+// An exception thrown by JavaScript code called from within the Wasm (such as a platform
+// binding, or, here, the `logCallback`) unwinds through the Wasm frames without the Rust code
+// being aware of it, leaving the instance unusable. This test verifies that the client detects
+// this situation and turns it into a proper crash, instead of silently leaving a broken client
+// behind. See <https://github.com/paritytech/smoldot/issues/3302>.
+test('exception thrown from a callback crashes the client cleanly', async t => {
+  // `logCallback` is called synchronously from within the Wasm, making it a stand-in for
+  // any JavaScript binding that throws (like the platform `connect()` in #3302).
+  let throwRequested = false;
+  const client = start({
+    maxLogLevel: 4,  // Debug logs, so that background tasks emit log lines frequently.
+    logCallback: () => {
+      if (throwRequested)
+        throw new Error("boom from logCallback");
+    }
+  });
+
+  // Arm the throw only after `addChain`, so that it fires from within the background
+  // execution of tasks rather than from `addChain` itself, which handles errors on its own.
+  const chain = await client.addChain({ chainSpec: westendSpec });
+  const pendingResponse = chain.nextJsonRpcResponse();
+  throwRequested = true;
+
+  // No request was sent, so this promise settles only if the crash releases it.
+  // If the exception were swallowed, the test would fail by timing out.
+  await t.throwsAsync(pendingResponse);
+
+  // A crashed client reports the original exception as the cause, not a generic error.
+  await t.throwsAsync(
+    client.addChain({ chainSpec: westendSpec }),
+    { message: /boom from logCallback/ }
+  );
+});

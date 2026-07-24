@@ -128,7 +128,7 @@ committing — the drift may belong in a separate PR.
 
 There are also **multiple** npm lockfiles. Besides
 `wasm-node/javascript/package-lock.json`, every in-repo npm project that depends
-on smoldot via a `file:` link (currently `e2e-tests/js`, `e2e-tests/browser`,
+on smoldot via a `file:` link (currently `e2e-tests/`,
 `benchmarks/js`) embeds the npm `version` in its lock's
 `../../wasm-node/javascript` entry. `npm ci` does not fail on a stale embedded
 version (it only checks the `file:` specifier), so CI tolerates drift and these

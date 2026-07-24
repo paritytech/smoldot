@@ -15,78 +15,51 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// chainHead_v1_follow conformance + regression driver.
+// chainHead_v1_follow conformance + regression test body — runs on either
+// host via the ctx abstraction.
 //
 // Subscribes the para chain (or the relay chain when no para spec is given),
 // validates the spec invariants of every event, and on resubscribe (after
 // `stop` or explicit unfollow) reports a regression if the new initial
 // finalized number is below the previous subscription's last finalized number.
 
-import * as fs from "node:fs";
-import {
-  createSmoldotClient,
-  addChainFromSpec,
-  readDbContentIfSet,
-  sendRpc,
-  sendRpcAndWait,
-  report,
-} from "./helpers.js";
+import { createRpc } from "./rpc.js";
+import { decodeHeader } from "./codec.js";
 
-// TODO: refactor env hell
-const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
-const paraSpecPath = process.env.PARA_CHAIN_SPEC;
-const withRuntime = (process.env.WITH_RUNTIME ?? "true") === "true";
-const minNewBlocks = Number.parseInt(process.env.MIN_NEW_BLOCKS ?? "5", 10);
-const minFinalized = Number.parseInt(process.env.MIN_FINALIZED_EVENTS ?? "2", 10);
-const testResubscribe = (process.env.TEST_RESUBSCRIBE ?? "true") === "true";
-const overallTimeoutMs = Number.parseInt(process.env.OVERALL_TIMEOUT_MS ?? "300000", 10);
-const perSubTimeoutMs = Number.parseInt(process.env.PER_SUB_TIMEOUT_MS ?? "180000", 10);
-const relayBestAtLaunch = Number.parseInt(process.env.RELAY_BEST_AT_LAUNCH ?? "0", 10);
-const relayFinalizedAtLaunch = Number.parseInt(process.env.RELAY_FINALIZED_AT_LAUNCH ?? "0", 10);
-const paraBestAtLaunch = Number.parseInt(process.env.PARA_BEST_AT_LAUNCH ?? "0", 10);
-const paraFinalizedAtLaunch = Number.parseInt(process.env.PARA_FINALIZED_AT_LAUNCH ?? "0", 10);
-const initialLagTolerance = Number.parseInt(process.env.INITIAL_LAG_TOLERANCE ?? "50", 10);
-const dbDumpDir = process.env.SMOLDOT_DB_DUMP_DIR || null;
-// No para spec means relay-only: subscribe to the relay chain directly.
-const relayOnly = !paraSpecPath;
+export const fileInputs = [
+  "RELAY_CHAIN_SPEC",
+  "PARA_CHAIN_SPEC",
+  "SMOLDOT_DB_RELAY",
+  "SMOLDOT_DB_PARA",
+];
 
-if (!relaySpecPath) {
-  console.error(
-    "Required env vars: RELAY_CHAIN_SPEC (PARA_CHAIN_SPEC optional; if unset, runs relay-only)",
-  );
-  process.exit(1);
-}
-
-// Decodes a hex SCALE-encoded substrate header and returns its parent hash
-// and block number. Header layout: parent_hash (32 B) | compact-encoded
-// number | state_root (32 B) | extrinsics_root (32 B) | digest.
-function decodeHeader(hexStr) {
-  const stripped = hexStr.startsWith("0x") ? hexStr.slice(2) : hexStr;
-  const bytes = Buffer.from(stripped, "hex");
-  if (bytes.length < 33) throw new Error(`header hex too short: ${bytes.length} bytes`);
-  const parentHash = "0x" + bytes.subarray(0, 32).toString("hex");
-  const off = 32;
-  const b0 = bytes[off];
-  const mode = b0 & 0b11;
-  let number;
-  if (mode === 0) number = b0 >>> 2;
-  else if (mode === 1) number = (b0 | (bytes[off + 1] << 8)) >>> 2;
-  else if (mode === 2) {
-    number = (b0 | (bytes[off + 1] << 8) | (bytes[off + 2] << 16) | (bytes[off + 3] << 24)) >>> 2;
-  } else {
-    throw new Error("compact mode 3 not supported");
-  }
-  return { number, parentHash };
-}
+export const envInputs = [
+  "WITH_RUNTIME",
+  "MIN_NEW_BLOCKS",
+  "MIN_FINALIZED_EVENTS",
+  "TEST_RESUBSCRIBE",
+  "OVERALL_TIMEOUT_MS",
+  "PER_SUB_TIMEOUT_MS",
+  "RELAY_BEST_AT_LAUNCH",
+  "RELAY_FINALIZED_AT_LAUNCH",
+  "PARA_BEST_AT_LAUNCH",
+  "PARA_FINALIZED_AT_LAUNCH",
+  "INITIAL_LAG_TOLERANCE",
+];
 
 // Multiplexes a smoldot chain's JSON-RPC stream. One pump loop classifies each
 // message into either a `chainHead_v1_followEvent` (queued by subId, awaited
 // via nextEvent) or an id-bearing response (resolved against pending requests
 // via request). Without this, calling chainHead_v1_header from inside the
 // event loop would drop events arriving between request and response.
+//
+// NOTE: the mux is the sole consumer of this chain's responses — the chain
+// must be added via `client.addChain` directly, NOT via `createRpc`'s
+// `addChain` (whose background drain would steal the mux's messages).
 class JsonRpcMux {
   constructor(chain) {
     this.chain = chain;
+    this.nextId = 1;
     this.eventQueues = new Map();
     this.eventWaiters = new Map();
     this.pendingById = new Map();
@@ -152,7 +125,8 @@ class JsonRpcMux {
   }
 
   request(method, params, timeoutMs) {
-    const id = sendRpc(this.chain, method, params).toString();
+    const id = (this.nextId++).toString();
+    this.chain.sendJsonRpc(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingById.delete(id);
@@ -177,6 +151,12 @@ class JsonRpcMux {
 class ChainHeadValidator {
   constructor(opts) {
     this.withRuntime = opts.withRuntime;
+    this.minNewBlocks = opts.minNewBlocks;
+    this.minFinalized = opts.minFinalized;
+    this.finalizedAtLaunch = opts.finalizedAtLaunch;
+    this.chainLabel = opts.chainLabel
+    this.initialLagTolerance = opts.initialLagTolerance;
+    this.log = opts.log;
     this.subscriptionCount = 0;
     this.counters = {
       initialized: 0,
@@ -221,13 +201,13 @@ class ChainHeadValidator {
   violation(msg) {
     const full = `[${this.subLabel}] ${msg}`;
     this.violations.push(full);
-    console.error(`VIOLATION ${full}`);
+    this.log(`VIOLATION ${full}`);
   }
 
   regression(msg) {
     const full = `[${this.subLabel}] ${msg}`;
     this.regressions.push(full);
-    console.error(`REGRESSION ${full}`);
+    this.log(`REGRESSION ${full}`);
   }
 
   onEvent(event) {
@@ -380,14 +360,12 @@ class ChainHeadValidator {
         `new initial finalized #${n} < previous last finalized #${this.previousSub.lastFinalizedNumber}`,
       );
     }
-    // Compare against the followed chain's own finalized-at-launch.
-    const chainLabel = relayOnly ? "relay" : "para";
-    const finalizedAtLaunch = relayOnly
-      ? relayFinalizedAtLaunch
-      : paraFinalizedAtLaunch;
-    if (finalizedAtLaunch > 0 && n + initialLagTolerance < finalizedAtLaunch) {
+    if (
+      this.finalizedAtLaunch > 0 &&
+      n + this.initialLagTolerance < this.finalizedAtLaunch
+    ) {
       this.regression(
-        `initial finalized #${n} lags more than ${initialLagTolerance} behind ${chainLabel} finalized at launch #${finalizedAtLaunch}`,
+        `initial finalized #${n} lags more than ${this.initialLagTolerance} behind ${this.chainLabel} finalized at launch #${this.finalizedAtLaunch}`,
       );
     }
   }
@@ -401,7 +379,8 @@ class ChainHeadValidator {
 
   thresholdsMet() {
     return (
-      this.counters.newBlock >= minNewBlocks && this.counters.finalized >= minFinalized
+      this.counters.newBlock >= this.minNewBlocks &&
+      this.counters.finalized >= this.minFinalized
     );
   }
 }
@@ -439,21 +418,21 @@ function heightStr(validator, hash) {
   return h != null ? `#${h}` : "#?";
 }
 
-function logEvent(label, event, validator) {
+function logEvent(log, label, event, validator) {
   const name = event.event.padEnd(16);
   switch (event.event) {
     case "initialized": {
       const last = validator.initialFinalizedHash;
-      console.log(`[${label}] ${name} ${heightStr(validator, last)} ${shortHash(last)}`);
+      log(`[${label}] ${name} ${heightStr(validator, last)} ${shortHash(last)}`);
       break;
     }
     case "newBlock":
-      console.log(
+      log(
         `[${label}] ${name} ${heightStr(validator, event.blockHash)} ${shortHash(event.blockHash)} parent=${shortHash(event.parentBlockHash)}`,
       );
       break;
     case "bestBlockChanged":
-      console.log(
+      log(
         `[${label}] ${name} ${heightStr(validator, event.bestBlockHash)} ${shortHash(event.bestBlockHash)}`,
       );
       break;
@@ -461,20 +440,20 @@ function logEvent(label, event, validator) {
       const f = event.finalizedBlockHashes ?? [];
       const p = event.prunedBlockHashes ?? [];
       const last = f[f.length - 1];
-      console.log(
+      log(
         `[${label}] ${name} ${heightStr(validator, last)} ${shortHash(last)} finalized_cnt=${f.length} pruned_cnt=${p.length}`,
       );
       break;
     }
     case "stop":
-      console.log(`[${label}] ${name}`);
+      log(`[${label}] ${name}`);
       break;
     default:
       break;
   }
 }
 
-async function followSubscription(mux) {
+async function followSubscription(mux, withRuntime) {
   const subId = await mux.request("chainHead_v1_follow", [withRuntime], 30_000);
   if (typeof subId !== "string" || !subId) {
     throw new Error(`Unexpected follow subscription id: ${JSON.stringify(subId)}`);
@@ -482,7 +461,7 @@ async function followSubscription(mux) {
   return subId;
 }
 
-async function runSubscription(mux, validator, subId, perSubDeadline, isDone) {
+async function runSubscription(log, mux, validator, subId, perSubDeadline, isDone) {
   // First event must be `initialized`.
   const first = await mux.nextEvent(subId, perSubDeadline - Date.now());
   validator.onEvent(first);
@@ -493,11 +472,11 @@ async function runSubscription(mux, validator, subId, perSubDeadline, isDone) {
   if (initialHeader != null) {
     validator.recordInitialFinalizedNumber(initialHeader.number);
   } else {
-    console.error(
+    log(
       `[${validator.subLabel}] chainHead_v1_header returned null for initial finalized; number-based checks for this sub skipped`,
     );
   }
-  logEvent(validator.subLabel, first, validator);
+  logEvent(log, validator.subLabel, first, validator);
 
   while (!validator.stopped && Date.now() < perSubDeadline) {
     if (isDone()) return { reason: "done" };
@@ -523,7 +502,7 @@ async function runSubscription(mux, validator, subId, perSubDeadline, isDone) {
       default:
         break;
     }
-    logEvent(validator.subLabel, ev, validator);
+    logEvent(log, validator.subLabel, ev, validator);
   }
 
   if (validator.stopped) return { reason: "stop" };
@@ -531,28 +510,57 @@ async function runSubscription(mux, validator, subId, perSubDeadline, isDone) {
   return { reason: "per_sub_timeout" };
 }
 
-const client = createSmoldotClient();
-let relay;
-let para;
-let exitOk = false;
+export default async function chainheadV1Follow(ctx) {
+  const { report, env, files, log } = ctx;
+  const rpc = createRpc(ctx.client);
 
-try {
-  const relayDbContent = readDbContentIfSet("SMOLDOT_DB_RELAY");
-  const paraDbContent = readDbContentIfSet("SMOLDOT_DB_PARA");
+  const withRuntime = (env.WITH_RUNTIME ?? "true") === "true";
+  const minNewBlocks = Number.parseInt(env.MIN_NEW_BLOCKS ?? "5", 10);
+  const minFinalized = Number.parseInt(env.MIN_FINALIZED_EVENTS ?? "2", 10);
+  const testResubscribe = (env.TEST_RESUBSCRIBE ?? "true") === "true";
+  const overallTimeoutMs = Number.parseInt(env.OVERALL_TIMEOUT_MS ?? "300000", 10);
+  const perSubTimeoutMs = Number.parseInt(env.PER_SUB_TIMEOUT_MS ?? "180000", 10);
+  const relayBestAtLaunch = Number.parseInt(env.RELAY_BEST_AT_LAUNCH ?? "0", 10);
+  const relayFinalizedAtLaunch = Number.parseInt(env.RELAY_FINALIZED_AT_LAUNCH ?? "0", 10);
+  const paraBestAtLaunch = Number.parseInt(env.PARA_BEST_AT_LAUNCH ?? "0", 10);
+  const paraFinalizedAtLaunch = Number.parseInt(env.PARA_FINALIZED_AT_LAUNCH ?? "0", 10);
+  const initialLagTolerance = Number.parseInt(env.INITIAL_LAG_TOLERANCE ?? "50", 10);
+  const relayOnly = !files.PARA_CHAIN_SPEC;
 
-  console.log(
+  if (!files.RELAY_CHAIN_SPEC) {
+    throw new Error("Required env vars: RELAY_CHAIN_SPEC (PARA_CHAIN_SPEC optional; if unset, runs relay-only)");
+  }
+
+  log(
     `network at launch: relay best=#${relayBestAtLaunch} finalized=#${relayFinalizedAtLaunch} | para best=#${paraBestAtLaunch} finalized=#${paraFinalizedAtLaunch} (lag tolerance=${initialLagTolerance})`,
   );
 
-  relay = await addChainFromSpec(client, relaySpecPath, { databaseContent: relayDbContent });
-  report("addChain relay", true);
-
+  let relay;
   let target;
   if (relayOnly) {
+    // Relay-only: the relay chain is the muxed target, so add it via the
+    // client directly — `createRpc`'s background drain would compete with
+    // the mux for its responses.
+    relay = await ctx.client.addChain({
+      chainSpec: files.RELAY_CHAIN_SPEC,
+      databaseContent: files.SMOLDOT_DB_RELAY ?? undefined,
+    });
+    report("addChain relay", true);
     target = relay;
   } else {
-    para = await addChainFromSpec(client, paraSpecPath, {
-      databaseContent: paraDbContent,
+    // The relay chain goes through `createRpc` (used only for the db dump at
+    // the end). The para chain is added via the client directly: its responses
+    // are consumed exclusively by the mux, and `createRpc`'s background drain
+    // would compete with it.
+    relay = await rpc.addChain({
+      chainSpec: files.RELAY_CHAIN_SPEC,
+      databaseContent: files.SMOLDOT_DB_RELAY ?? undefined,
+    });
+    report("addChain relay", true);
+
+    const para = await ctx.client.addChain({
+      chainSpec: files.PARA_CHAIN_SPEC,
+      databaseContent: files.SMOLDOT_DB_PARA ?? undefined,
       potentialRelayChains: [relay],
     });
     report("addChain parachain", true);
@@ -560,21 +568,31 @@ try {
   }
 
   const mux = new JsonRpcMux(target);
-  const validator = new ChainHeadValidator({ withRuntime });
+  const validator = new ChainHeadValidator({
+    withRuntime,
+    minNewBlocks,
+    minFinalized,
+    finalizedAtLaunch: relayOnly ? relayFinalizedAtLaunch : paraFinalizedAtLaunch,
+    chainLabel: relayOnly ? "relay" : "para",
+    initialLagTolerance,
+    log,
+  });
+
   const overallDeadline = Date.now() + overallTimeoutMs;
 
   // Phase 1: primary subscription. Auto-resubscribe on `stop` until thresholds met or budget gone.
   validator.beginNewSubscription();
-  let subId = await followSubscription(mux);
+  let subId = await followSubscription(mux, withRuntime);
   report("chainHead_v1_follow accepted", true, `subId=${subId}`);
   let result;
   do {
     if (result?.reason === "stop") {
-      console.log(`[${validator.subLabel}] received stop, resubscribing`);
+      log(`[${validator.subLabel}] received stop, resubscribing`);
       validator.beginNewSubscription();
-      subId = await followSubscription(mux);
+      subId = await followSubscription(mux, withRuntime);
     }
     result = await runSubscription(
+      log,
       mux,
       validator,
       subId,
@@ -599,16 +617,17 @@ try {
       report("chainHead_v1_unfollow accepted", false, e.message);
     }
     validator.beginNewSubscription();
-    let phase2SubId = await followSubscription(mux);
+    let phase2SubId = await followSubscription(mux, withRuntime);
     report("chainHead_v1_follow after unfollow accepted", true, `subId=${phase2SubId}`);
     let phase2Result;
     do {
       if (phase2Result?.reason === "stop") {
-        console.log(`[${validator.subLabel}] received stop, resubscribing`);
+        log(`[${validator.subLabel}] received stop, resubscribing`);
         validator.beginNewSubscription();
-        phase2SubId = await followSubscription(mux);
+        phase2SubId = await followSubscription(mux, withRuntime);
       }
       phase2Result = await runSubscription(
+        log,
         mux,
         validator,
         phase2SubId,
@@ -627,37 +646,39 @@ try {
   const reportList = (name, items) => {
     const suffix = `${items.length} issue${items.length === 1 ? "" : "s"}`;
     report(name, items.length === 0, suffix);
-    for (const item of items) console.log(`  ${item}`);
+    for (const item of items) log(`  ${item}`);
   };
   reportList("no spec violations", validator.violations);
   reportList("no regressions", validator.regressions);
 
-  if (dbDumpDir && validator.violations.length === 0) {
+  if (env.SMOLDOT_DB_DUMP_DIR && validator.violations.length === 0) {
     try {
-      fs.mkdirSync(dbDumpDir, { recursive: true });
       if (relayOnly) {
         // Relay is the muxed chain here; there is no parachain.
         const relayDb = await mux.request("chainHead_unstable_finalizedDatabase", [], 30_000);
-        fs.writeFileSync(`${dbDumpDir}/relay.json`, relayDb);
+        await ctx.dumpDb({ "relay.json": relayDb });
       } else {
-        // Relay has no mux, so use sendRpcAndWait directly. Para is muxed.
-        const relayDb = await sendRpcAndWait(relay, "chainHead_unstable_finalizedDatabase", [], 30_000);
+        // Relay has no mux, so use the rpc helper directly. Para is muxed.
+        const relayDb = await rpc.sendRpcAndWait(
+          relay,
+          "chainHead_unstable_finalizedDatabase",
+          [],
+          30_000,
+        );
         const paraDb = await mux.request("chainHead_unstable_finalizedDatabase", [], 30_000);
-        fs.writeFileSync(`${dbDumpDir}/relay.json`, relayDb);
-        fs.writeFileSync(`${dbDumpDir}/para.json`, paraDb);
+        await ctx.dumpDb({ "relay.json": relayDb, "para.json": paraDb });
       }
-      report("dumped smoldot databaseContent", true, dbDumpDir);
+      report("dumped smoldot databaseContent", true, env.SMOLDOT_DB_DUMP_DIR);
     } catch (e) {
       report("dumped smoldot databaseContent", false, e.message);
     }
   }
 
-  exitOk =
-    validator.violations.length === 0 &&
-    validator.regressions.length === 0 &&
-    primaryOk;
-} catch (e) {
-  report("chainhead_v1_follow_test", false, e.message);
+  const exitOk =
+    validator.violations.length === 0 && validator.regressions.length === 0 && primaryOk;
+  if (!exitOk) {
+    throw new Error(
+      `chainhead_v1_follow failed: violations=${validator.violations.length} regressions=${validator.regressions.length} thresholds_met=${primaryOk}`,
+    );
+  }
 }
-
-process.exit(exitOk && !process.exitCode ? 0 : 1);

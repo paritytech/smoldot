@@ -15,57 +15,48 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import {
-  createSmoldotClient,
-  addChainFromSpec,
-  sendRpc,
-  report,
-  readJsonRpcUntil,
-} from "./helpers.js";
+// Statement-store peer-connection test body — runs on either host via the ctx
+// abstraction. Subscribes to all statements and asserts every expected hash
+// eventually arrives while the Rust side drives peer churn + submissions.
 
-const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
-const paraSpecPath = process.env.PARA_CHAIN_SPEC;
-const stmtHexes = (process.env.STATEMENT_HEXES || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-const LISTEN_MS = Number.parseInt(process.env.LISTEN_MS || "300000", 10);
+import { createRpc } from "./rpc.js";
 
-if (!relaySpecPath || !paraSpecPath || stmtHexes.length === 0) {
-  console.error(
-    "Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, STATEMENT_HEXES",
-  );
-  process.exit(1);
-}
+export const fileInputs = ["RELAY_CHAIN_SPEC", "PARA_CHAIN_SPEC"];
+export const envInputs = ["STATEMENT_HEXES", "LISTEN_MS"];
 
-const client = createSmoldotClient();
-let relay;
-let para;
-let passed = true;
+export default async function statementStorePeerConnection(ctx) {
+  const { report, env, files } = ctx;
+  const rpc = createRpc(ctx.client);
 
-try {
-  relay = await addChainFromSpec(client, relaySpecPath);
+  const stmtHexes = (env.STATEMENT_HEXES || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const listenMs = Number.parseInt(env.LISTEN_MS || "300000", 10);
+
+  if (!files.RELAY_CHAIN_SPEC || !files.PARA_CHAIN_SPEC || stmtHexes.length === 0) {
+    throw new Error("Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, STATEMENT_HEXES");
+  }
+
+  const relay = await rpc.addChain({ chainSpec: files.RELAY_CHAIN_SPEC });
   report("addChain relay", true);
 
-  para = await addChainFromSpec(client, paraSpecPath, {
+  const para = await rpc.addChain({
+    chainSpec: files.PARA_CHAIN_SPEC,
     statementStore: {},
     potentialRelayChains: [relay],
   });
   report("addChain parachain with statementStore", true);
 
   // Subscribe to all statements so the full nodes know our interest.
-  const subReqId = sendRpc(para, "statement_subscribeStatement", [
-    "any",
-  ]).toString();
+  const subReqId = rpc.sendRpc(para, "statement_subscribeStatement", ["any"]).toString();
 
-  const subId = await readJsonRpcUntil(
+  const subId = await rpc.readJsonRpcUntil(
     para,
     (msg) => {
       if (msg.id === subReqId) {
         if (msg.error)
-          throw new Error(
-            `statement_subscribeStatement failed: ${JSON.stringify(msg.error)}`,
-          );
+          throw new Error(`statement_subscribeStatement failed: ${JSON.stringify(msg.error)}`);
         return msg.result;
       }
       return undefined;
@@ -77,12 +68,12 @@ try {
   }
   report("statement_subscribeStatement accepted", true, `subId=${subId}`);
 
-  // Record the first time we see each expected hash. Rust will drive the
-  // churn + submissions; we just confirm each statement lands eventually.
+  // Record the first time each expected hash is seen. Rust drives the churn +
+  // submissions; this side just confirms each statement lands eventually.
   const seen = new Map(stmtHexes.map((h) => [h, null]));
-  const listenDeadline = Date.now() + LISTEN_MS;
+  const listenDeadline = Date.now() + listenMs;
 
-  await readJsonRpcUntil(
+  await rpc.readJsonRpcUntil(
     para,
     (msg) => {
       if (msg.method !== "statement_statement") return undefined;
@@ -93,7 +84,7 @@ try {
       for (const s of stmts) {
         if (seen.has(s) && seen.get(s) === null) {
           seen.set(s, Date.now());
-          console.error(`[received] ${s.slice(0, 18)}…`);
+          ctx.log(`[received] ${s.slice(0, 18)}…`);
         }
       }
       // Stop listening once every expected hash has been seen.
@@ -112,19 +103,14 @@ try {
   report(
     "peer_connection: all expected statements received",
     ok,
-    ok
-      ? `received=${seen.size}`
-      : `missing=${missing.length}: ${missing.join(", ")}`,
+    ok ? `received=${seen.size}` : `missing=${missing.length}: ${missing.join(", ")}`,
   );
-  if (!ok) passed = false;
 
   try {
-    sendRpc(para, "statement_unsubscribeStatement", [subId]);
+    rpc.sendRpc(para, "statement_unsubscribeStatement", [subId]);
   } catch (_) {}
-} catch (e) {
-  report("statement_store_peer_connection", false, e.message);
-  passed = false;
-}
 
-// Finish as soon as the result is known
-process.exit(passed && !process.exitCode ? 0 : 1);
+  if (!ok) {
+    throw new Error(`missing ${missing.length} expected statements: ${missing.join(", ")}`);
+  }
+}

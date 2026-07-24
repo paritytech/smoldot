@@ -18,12 +18,12 @@
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 use smoldot_e2e_tests::{
-    bulletin, ensure_js_deps_installed, ensure_smoldot_built,
+    bulletin, ensure_smoldot_built,
     harness::{
         bulletin_chain_spec, chain_spec_paths, print_dev_mode_invocation, resolve_bundle,
         spawn_with_snapshots,
     },
-    resolve_base_dir, run_js_test,
+    prepare_runtime_spec, resolve_base_dir, run_test,
 };
 
 /// Mirrors `light-base/src/bitswap_service.rs::MAX_CIDS_PER_REQUEST`.
@@ -62,8 +62,30 @@ async fn bulletin_batch() -> Result<()> {
 
     let (relay_spec, bulletin_spec) = chain_spec_paths(&network)?;
 
+    // Overwrite the specs' bootNodes with the live TCP + WebRTC multiaddrs so
+    // both hosts can connect (Node over TCP, browser over WebRTC). Both
+    // collators must be dialable: payloads are split across full/partial.
+    let base_dir_str = base_dir
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 base dir"))?;
+    let relay_spec = prepare_runtime_spec(
+        &network,
+        &relay_spec,
+        &["alice", "bob"],
+        base_dir_str,
+        "relay-spec.json",
+    )
+    .await?;
+    let bulletin_spec = prepare_runtime_spec(
+        &network,
+        &bulletin_spec,
+        &["collator-1", "collator-2"],
+        base_dir_str,
+        "bulletin-spec.json",
+    )
+    .await?;
+
     ensure_smoldot_built();
-    ensure_js_deps_installed();
 
     let payloads_json = serde_json::to_string(
         &bulletin::payloads()
@@ -107,7 +129,7 @@ async fn bulletin_batch() -> Result<()> {
         return Ok(());
     }
 
-    run_js_test("js/bulletin_batch.js", &env_pairs)
+    run_test("bulletin_batch", &env_pairs)
         .await
         .map_err(|e| anyhow!("JS test failed: {e}"))
 }

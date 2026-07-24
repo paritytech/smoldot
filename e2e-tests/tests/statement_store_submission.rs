@@ -21,7 +21,7 @@ use smoldot_e2e_tests::*;
 
 /// A statement submitted by smoldot propagates to the full-node network.
 ///
-/// Flow:
+/// Flow (per host):
 ///   1. Spawn alice + bob; subscribe on both over RPC.
 ///   2. Start smoldot; it peers with the collators and submits a statement.
 ///   3. Both collators must deliver that exact statement to their subscribers.
@@ -44,16 +44,11 @@ async fn statement_reaches_full_node() -> Result<(), anyhow::Error> {
     let network = spawn_network(&base_dir, &para_spec_path).await?;
     info!("Network spawned");
 
-    let (relay_spec_path, para_spec_path) = spawned_chain_spec_paths(&network)?;
+    let (relay_base, para_base) = spawned_chain_spec_paths(&network)?;
 
-    // Create statement in Rust
-    let topic = [0u8; 32];
-    let data = b"light-node-submission-test";
-    let statement_hex = create_test_statement(&seed, &topic, data);
-    info!(
-        "Test statement created ({} bytes encoded)",
-        statement_hex.len() / 2
-    );
+    let base_dir_str = base_dir.to_str().expect("UTF-8 path").to_owned();
+    let (relay_spec_path, para_spec_path) =
+        prepare_runtime_specs(&network, &relay_base, &para_base, &base_dir_str).await?;
 
     // Subscribe on both collators
     let alice_rpc = network.get_node("alice")?.rpc().await?;
@@ -62,47 +57,66 @@ async fn statement_reaches_full_node() -> Result<(), anyhow::Error> {
     let mut bob_sub = subscribe_any(&bob_rpc).await?;
     info!("Subscribed to statements on alice and bob");
 
-    // Ensure smoldot is built and JS deps are installed
     info!("Ensuring smoldot JS bundle is built");
     ensure_smoldot_built();
     info!("Ensuring JS test dependencies are installed");
     ensure_js_deps_installed();
+    ensure_browser_deps_installed();
 
-    // Run smoldot JS test and wait for statement concurrently
     let relay_spec_str = relay_spec_path.to_str().unwrap().to_string();
     let para_spec_str = para_spec_path.to_str().unwrap().to_string();
-    let statement_hex_clone = statement_hex.clone();
 
-    info!(
-        "Spawning JS test: js/statement_store_submission.js (relay_spec={}, para_spec={})",
-        relay_spec_str, para_spec_str
-    );
-    let js_handle = tokio::spawn(async move {
-        run_js_test(
-            "js/statement_store_submission.js",
-            &[
-                ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
-                ("PARA_CHAIN_SPEC", para_spec_str.as_str()),
-                ("STATEMENT_HEX", statement_hex_clone.as_str()),
-            ],
-        )
-        .await
-    });
+    // NOTE: temporarily disable tests exec within browser.
+    for host in [crate::Host::Node /* crate::Host::Browser */] {
+        // Statements needs to be re-created for each host otherwise they
+        // persist in the collators' store, smoldot would get the previous
+        // host's statement back during the initial sync, `statement_submit`
+        // would return `"known"` instead of `"new"`, and the collators'
+        // subscriptions would never fire for it again.
+        let topic = [0u8; 32];
+        let statement_hex = create_test_statement(
+            &seed,
+            &topic,
+            format!("light-node-submission-test-{host:?}").as_bytes(),
+        );
+        info!(
+            "Test statement created ({} bytes encoded)",
+            statement_hex.len() / 2
+        );
 
-    info!("Waiting up to 180s for statement to arrive on both collators");
-    let (alice_received, bob_received) = tokio::try_join!(
-        receive_statements(1, &mut alice_sub, 180),
-        receive_statements(1, &mut bob_sub, 180),
-    )?;
-    assert_eq!(alice_received[0], statement_hex);
-    assert_eq!(bob_received[0], statement_hex);
-    info!("Submitted statement received on both alice and bob");
+        info!("Spawning test statement_store_submission within host {host:?}");
+        let js_handle = tokio::spawn({
+            let relay_spec_str = relay_spec_str.clone();
+            let para_spec_str = para_spec_str.clone();
+            let statement_hex = statement_hex.clone();
+            async move {
+                run_shared_test(
+                    host,
+                    "statement_store_submission",
+                    &[
+                        ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
+                        ("PARA_CHAIN_SPEC", para_spec_str.as_str()),
+                        ("STATEMENT_HEX", statement_hex.as_str()),
+                    ],
+                )
+                .await
+            }
+        });
 
-    info!("Waiting for JS test to finish");
-    let js_result = js_handle.await.expect("JS task panicked");
-    js_result.map_err(|e| anyhow::anyhow!("JS test failed: {e}"))?;
-    info!("JS test finished successfully");
+        info!("Waiting up to 180s for statement to arrive on both collators");
+        let (alice_received, bob_received) = tokio::try_join!(
+            receive_statements(1, &mut alice_sub, 180),
+            receive_statements(1, &mut bob_sub, 180),
+        )?;
+        assert_eq!(alice_received[0], statement_hex);
+        assert_eq!(bob_received[0], statement_hex);
+        info!("Submitted statement received on both alice and bob");
 
-    info!("Light node statement submission test passed");
+        info!("Waiting for JS test to finish");
+        let js_result = js_handle.await.expect("JS task panicked");
+        js_result.map_err(|e| anyhow::anyhow!("JS test failed: {e}"))?;
+
+        info!("Submission test passed on host {host:?}");
+    }
     Ok(())
 }

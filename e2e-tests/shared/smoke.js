@@ -15,67 +15,50 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import * as fs from "node:fs";
-import {
-  createSmoldotClient,
-  addChainFromSpec,
-  readDbContentIfSet,
-  sendRpc,
-  readJsonRpcUntil,
-  sendRpcAndWait,
-  report,
-} from "./helpers.js";
+// Smoke test body — runs identically on the Node host (TCP) and the browser
+// host (WebRTC). Its only import is the host-agnostic `shared/rpc.js` helper
+// library (a relative sibling that resolves on both hosts); everything
+// host-specific goes through `ctx` (see hosts/node/ctx.js and
+// hosts/browser/ctx.js for the two builders) and all inputs arrive pre-resolved
+// in `ctx.env` / `ctx.files`.
 
-const relaySpecPath = process.env.RELAY_CHAIN_SPEC;
-const paraSpecPath = process.env.PARA_CHAIN_SPEC;
-const requiredBlocks = Number.parseInt(process.env.REQUIRED_BLOCKS, 10);
-const expectedInitialFinalized = Number.parseInt(process.env.EXPECTED_INITIAL_FINALIZED ?? "0", 10);
-const dbDumpDir = process.env.SMOLDOT_DB_DUMP_DIR;
+import { createRpc } from "./rpc.js";
+import { hexToBytes, decodeHeader } from "./codec.js";
 
-if (!relaySpecPath || !paraSpecPath || !Number.isFinite(requiredBlocks)) {
-  console.error(
-    "Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, REQUIRED_BLOCKS",
+// Env var values that name files; the runner reads each into `ctx.files[NAME]`
+// (string contents, or null if unset).
+export const fileInputs = [
+  "RELAY_CHAIN_SPEC",
+  "PARA_CHAIN_SPEC",
+  "SMOLDOT_DB_RELAY",
+  "SMOLDOT_DB_PARA",
+];
+
+export const envInputs = ["REQUIRED_BLOCKS", "EXPECTED_INITIAL_FINALIZED"];
+
+export default async function smoke(ctx) {
+  const { report, env, files } = ctx;
+  const { addChain, sendRpc, readJsonRpcUntil, sendRpcAndWait } = createRpc(ctx.client);
+
+  const requiredBlocks = Number.parseInt(env.REQUIRED_BLOCKS, 10);
+  const expectedInitialFinalized = Number.parseInt(
+    env.EXPECTED_INITIAL_FINALIZED ?? "0",
+    10,
   );
-  process.exit(1);
-}
 
-// Decodes the block number from a hex SCALE-encoded substrate header.
-// Layout: parent_hash (32 B) | compact-encoded number | rest. The compact
-// modes 0/1/2 cover block numbers up to 2^30; that's the only range we'll
-// ever assert against.
-function decodeHeaderNumber(hexStr) {
-  const stripped = hexStr.startsWith("0x") ? hexStr.slice(2) : hexStr;
-  const bytes = Buffer.from(stripped, "hex");
-  if (bytes.length < 33) throw new Error(`header hex too short: ${bytes.length} bytes`);
-  const off = 32;
-  const b0 = bytes[off];
-  const mode = b0 & 0b11;
-  if (mode === 0) return b0 >>> 2;
-  if (mode === 1) return (b0 | (bytes[off + 1] << 8)) >>> 2;
-  if (mode === 2) {
-    return (
-      (b0 | (bytes[off + 1] << 8) | (bytes[off + 2] << 16) | (bytes[off + 3] << 24)) >>> 2
-    );
+  if (!files.RELAY_CHAIN_SPEC || !files.PARA_CHAIN_SPEC || !Number.isFinite(requiredBlocks)) {
+    throw new Error("Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, REQUIRED_BLOCKS");
   }
-  throw new Error(`compact mode 3 not supported in decodeHeaderNumber`);
-}
 
-const client = createSmoldotClient();
-let relay;
-let para;
-let passed = true;
-
-try {
-  const relayDbContent = readDbContentIfSet("SMOLDOT_DB_RELAY");
-  const paraDbContent = readDbContentIfSet("SMOLDOT_DB_PARA");
-
-  relay = await addChainFromSpec(client, relaySpecPath, {
-    databaseContent: relayDbContent,
+  const relay = await addChain({
+    chainSpec: files.RELAY_CHAIN_SPEC,
+    databaseContent: files.SMOLDOT_DB_RELAY ?? undefined,
   });
   report("addChain relay", true);
 
-  para = await addChainFromSpec(client, paraSpecPath, {
-    databaseContent: paraDbContent,
+  const para = await addChain({
+    chainSpec: files.PARA_CHAIN_SPEC,
+    databaseContent: files.SMOLDOT_DB_PARA ?? undefined,
     potentialRelayChains: [relay],
   });
   report("addChain parachain", true);
@@ -92,9 +75,7 @@ try {
       (msg) => {
         if (msg.id === relayFollowReqId) {
           if (msg.error)
-            throw new Error(
-              `relay chainHead_v1_follow failed: ${JSON.stringify(msg.error)}`,
-            );
+            throw new Error(`relay chainHead_v1_follow failed: ${JSON.stringify(msg.error)}`);
           return msg.result;
         }
         return undefined;
@@ -128,16 +109,16 @@ try {
       [relaySubId, finalizedHash],
       30_000,
     );
-    const num = decodeHeaderNumber(headerHex);
-    const ok = num >= expectedInitialFinalized;
+    const { number } = decodeHeader(headerHex);
+    const ok = number >= expectedInitialFinalized;
     report(
       "relay finalized at-or-past expected_initial_finalized",
       ok,
-      `finalized=#${num} expected=#${expectedInitialFinalized}`,
+      `finalized=#${number} expected=#${expectedInitialFinalized}`,
     );
     if (!ok)
       throw new Error(
-        `relay finalized #${num} below expected_initial_finalized #${expectedInitialFinalized}`,
+        `relay finalized #${number} below expected_initial_finalized #${expectedInitialFinalized}`,
       );
   }
 
@@ -147,9 +128,7 @@ try {
     (msg) => {
       if (msg.id === followReqId) {
         if (msg.error)
-          throw new Error(
-            `chainHead_v1_follow failed: ${JSON.stringify(msg.error)}`,
-          );
+          throw new Error(`chainHead_v1_follow failed: ${JSON.stringify(msg.error)}`);
         return msg.result;
       }
       return undefined;
@@ -185,35 +164,15 @@ try {
   );
 
   const ok = newBlocks >= requiredBlocks;
-  report(
-    "smoldot saw new parachain blocks",
-    ok,
-    `count=${newBlocks}/${requiredBlocks}`,
-  );
-  if (!ok) passed = false;
+  report("smoldot saw new parachain blocks", ok, `count=${newBlocks}/${requiredBlocks}`);
+  if (!ok) throw new Error(`only saw ${newBlocks}/${requiredBlocks} new parachain blocks`);
 
-  if (passed && dbDumpDir) {
-    fs.mkdirSync(dbDumpDir, { recursive: true });
-    const relayDb = await sendRpcAndWait(
-      relay,
-      "chainHead_unstable_finalizedDatabase",
-      [],
-      30_000,
-    );
-    const paraDb = await sendRpcAndWait(
-      para,
-      "chainHead_unstable_finalizedDatabase",
-      [],
-      30_000,
-    );
-    fs.writeFileSync(`${dbDumpDir}/relay.json`, relayDb);
-    fs.writeFileSync(`${dbDumpDir}/para.json`, paraDb);
-    report("dumped smoldot databaseContent", true, dbDumpDir);
+  // Node host only: dump the persisted databaseContent for snapshot generation.
+  // The browser host never sets SMOLDOT_DB_DUMP_DIR, so this is skipped there.
+  if (env.SMOLDOT_DB_DUMP_DIR) {
+    const relayDb = await sendRpcAndWait(relay, "chainHead_unstable_finalizedDatabase", [], 30_000);
+    const paraDb = await sendRpcAndWait(para, "chainHead_unstable_finalizedDatabase", [], 30_000);
+    await ctx.dumpDb({ "relay.json": relayDb, "para.json": paraDb });
+    report("dumped smoldot databaseContent", true, env.SMOLDOT_DB_DUMP_DIR);
   }
-} catch (e) {
-  report("smoke", false, e.message);
-  passed = false;
 }
-
-// Finish as soon as the result is known
-process.exit(passed && !process.exitCode ? 0 : 1);

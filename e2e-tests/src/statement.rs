@@ -29,7 +29,7 @@ use zombienet_sdk::{
         backend::rpc::RpcClient,
         ext::subxt_rpcs::{client::RpcSubscription, rpc_params},
     },
-    LocalFileSystem, Network, NetworkConfigBuilder, NetworkNode,
+    Arg, LocalFileSystem, Network, NetworkConfigBuilder, NetworkNode,
 };
 
 use crate::network::PARA_CHAIN;
@@ -110,14 +110,43 @@ pub async fn spawn_network(
         .expect("base_dir is valid UTF-8")
         .to_owned();
 
+    // Per-node `with_args` replaces the chain-level `with_default_args`, so
+    // every node that gets `listener_args` must repeat the defaults.
+    let validator_args = |name: &str| {
+        let mut args: Vec<Arg> = vec!["-lparachain=debug".into()];
+        args.extend(crate::listener_args(name));
+        args
+    };
+    let collator_args = |name: &str| {
+        let log_filter = std::env::var("SMOLDOT_E2E_COLLATOR_LOG")
+            .unwrap_or_else(|_| "info,statement-store=info,statement-gossip=info".to_string());
+        let log_arg = format!("-l{log_filter}");
+        let mut args = vec![
+            "--force-authoring".into(),
+            "--authoring=slot-based".into(),
+            "--enable-statement-store".into(),
+            log_arg.as_str().into(),
+        ];
+        args.extend(crate::listener_args(name));
+        args
+    };
+
     let config = NetworkConfigBuilder::new()
         .with_relaychain(|r| {
             r.with_chain("westend-local")
                 .with_default_command("polkadot")
                 .with_default_image(images.polkadot.as_str())
                 .with_default_args(vec!["-lparachain=debug".into()])
-                .with_validator(|node| node.with_name("validator-0").bootnode(true))
-                .with_validator(|node| node.with_name("validator-1").bootnode(true))
+                .with_validator(|node| {
+                    node.with_name("validator-0")
+                        .bootnode(true)
+                        .with_args(validator_args("validator-0"))
+                })
+                .with_validator(|node| {
+                    node.with_name("validator-1")
+                        .bootnode(true)
+                        .with_args(validator_args("validator-1"))
+                })
         })
         .with_parachain(|p| {
             p.with_id(PARA_ID)
@@ -125,21 +154,16 @@ pub async fn spawn_network(
                 .with_chain_spec_path(para_spec_path.to_str().expect("Valid UTF-8 path"))
                 .with_default_command("polkadot-parachain")
                 .with_default_image(images.cumulus.as_str())
-                .with_default_args({
-                    let log_filter =
-                        std::env::var("SMOLDOT_E2E_COLLATOR_LOG").unwrap_or_else(|_| {
-                            "info,statement-store=info,statement-gossip=info".to_string()
-                        });
-                    let log_arg = format!("-l{log_filter}");
-                    vec![
-                        "--force-authoring".into(),
-                        "--authoring=slot-based".into(),
-                        "--enable-statement-store".into(),
-                        log_arg.as_str().into(),
-                    ]
+                .with_collator(|n| {
+                    n.with_name("alice")
+                        .bootnode(true)
+                        .with_args(collator_args("alice"))
                 })
-                .with_collator(|n| n.with_name("alice").bootnode(true))
-                .with_collator(|n| n.with_name("bob").bootnode(true))
+                .with_collator(|n| {
+                    n.with_name("bob")
+                        .bootnode(true)
+                        .with_args(collator_args("bob"))
+                })
         })
         .with_global_settings(|g| {
             g.with_base_dir(base_dir_str.as_str())
@@ -175,13 +199,15 @@ pub fn test_keypair() -> ([u8; 32], [u8; 32]) {
     (seed, pubkey)
 }
 
-/// Waits until `node` is up and has at least `min_peers` statement-store peers
-/// connected. Uses the `substrate_sync_statement_peers_connected` Prometheus
-/// metric — stricter than the libp2p peer count from `system_health`. Shares
-/// a single deadline between the "up" check and the metric poll.
+/// Waits until `node` is up and has at least one *full* statement-store peer
+/// (the other collator) plus `min_light` *light* statement-store
+/// peers connected. Uses the `substrate_sync_statement_peers_connected`
+/// Prometheus metric, which is labeled by peer kind — stricter than the
+/// libp2p peer count from `system_health`. Shares a single deadline between
+/// the "up" check and the metric polls.
 pub async fn wait_until_peered(
     node: &NetworkNode,
-    min_peers: usize,
+    min_light: usize,
     timeout_secs: u64,
 ) -> Result<(), anyhow::Error> {
     let node_name = node.name();
@@ -197,15 +223,25 @@ pub async fn wait_until_peered(
         .await
         .map_err(|e| anyhow!("{node_name} did not come up: {e}"))?;
 
+    // Waiting on the bare metric name never matches once the family carries
+    // several `kind`-labeled series, so each kind is asserted separately.
     node.wait_metric_with_timeout(
-        "substrate_sync_statement_peers_connected",
-        |v| v >= min_peers as f64,
+        "substrate_sync_statement_peers_connected{kind=\"full\"}",
+        |v| v >= 1.0,
         remaining(),
     )
     .await
-    .map_err(|e| anyhow!("{node_name} did not reach {min_peers} peers: {e}"))?;
+    .map_err(|e| anyhow!("{node_name} did not reach 1 full statement peer: {e}"))?;
 
-    info!("{node_name} reached {min_peers} statement-store peers");
+    node.wait_metric_with_timeout(
+        "substrate_sync_statement_peers_connected{kind=\"light\"}",
+        |v| v >= min_light as f64,
+        remaining(),
+    )
+    .await
+    .map_err(|e| anyhow!("{node_name} did not reach {min_light} light statement peers: {e}"))?;
+
+    info!("{node_name} reached 1 full + {min_light} light statement-store peers");
     Ok(())
 }
 

@@ -173,9 +173,9 @@ if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
   echo "Building smoldot JS bundle..." >&2
   (cd "${REPO_ROOT}/wasm-node/javascript" && npm run build)
 fi
-if [[ ! -d "${SCRIPT_DIR}/js/node_modules" ]]; then
+if [[ ! -d "${SCRIPT_DIR}/node_modules" ]]; then
   echo "Installing JS deps..." >&2
-  (cd "${SCRIPT_DIR}/js" && npm install)
+  (cd "${SCRIPT_DIR}" && npm install)
 fi
 
 cd "${SCRIPT_DIR}"
@@ -195,4 +195,5 @@ exec env \
   PER_SUB_TIMEOUT_MS="${PER_SUB_TIMEOUT_MS:-600000}" \
   OVERALL_TIMEOUT_MS="${OVERALL_TIMEOUT_MS:-900000}" \
   SMOLDOT_LOG_LEVEL="${SMOLDOT_LOG_LEVEL:-2}" \
-  node js/chainhead_v1_follow_test.js
+  TEST_NAME=chainhead_v1_follow \
+  node hosts/node/run.js

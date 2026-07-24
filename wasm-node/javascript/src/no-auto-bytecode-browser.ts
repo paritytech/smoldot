@@ -45,6 +45,11 @@ export {
 export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
     options.forbidTcp = true;
 
+    // Browsers only expose the WebRTC API on `Window`, it doesn't exist in worker global
+    // scopes, and consequently there is no way to open WebRTC connections from here.
+    if (typeof RTCPeerConnection === 'undefined')
+        options.forbidWebRtc = true;
+
     // When in a secure context, browsers refuse to open non-secure WebSocket connections to
     // non-localhost. There is an exception if the page is localhost, in which case all connections
     // are allowed.
@@ -191,6 +196,28 @@ function connect(config: ConnectionConfig): Connection {
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
     } else if (config.address.ty === "webrtc") {
+        // Browsers only expose the WebRTC API on `Window`.
+        // When running in a worker, opening a WebRTC connection is impossible.
+        // Instead of throwing an exception (which would crash the entire client),
+        // report the connection as reset so that smoldot moves on to other
+        // addresses.
+        //
+        // Note: `startWithBytecode` sets `forbidWebRtc` in that situation, making
+        // this code path unreachable, but better be defensive.
+        if (typeof RTCPeerConnection === 'undefined') {
+            let cancelled = false;
+            setTimeout(() => {
+                if (!cancelled)
+                    config.onConnectionReset('RTCPeerConnection is not available in this environment');
+            }, 1);
+            return {
+                reset: (): void => { cancelled = true; },
+                send: (): void => { throw new Error('Connection is closed') },
+                closeSend: (): void => { throw new Error('Connection is closed') },
+                openOutSubstream: () => { throw new Error('Connection is closed') },
+            };
+        }
+
         const { targetPort, ipVersion, targetIp, remoteTlsCertificateSha256 } =
             config.address;
 
@@ -253,7 +280,13 @@ function connect(config: ConnectionConfig): Connection {
             let isOpen = { value: false };
 
             dataChannel.onopen = () => {
+                // Guard against the `open` event firing more than once for the same channel.
+                // Reporting the same stream id twice would make smoldot panic (observed in
+                // production as "same stream_id used multiple times in
+                // connection_stream_opened").
                 console.assert(!isOpen.value, "substream opened twice")
+                if (isOpen.value)
+                    return;
                 isOpen.value = true;
                 config.onStreamOpened(streamId, direction);
                 config.onWritableBytes(65536, streamId);
