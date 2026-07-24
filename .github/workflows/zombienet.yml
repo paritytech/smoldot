@@ -95,6 +95,13 @@ jobs:
           - job-name: "zombienet-smoldot-0012-reserved_peer_discovery"
             test: "reserved_peer_discovery"
             runner-type: "default"
+          # TODO: uncomment when browser test execution is re-enabled
+          # (`Host::Browser` arm in e2e-tests/src/lib.rs `run_shared_test`).
+          # This test runs on the browser host only; until then the job would
+          # pass without executing anything.
+          # - job-name: "zombienet-smoldot-0014-webrtc_double_open"
+          #   test: "webrtc_double_open"
+          #   runner-type: "default"
 
     steps:
       - uses: actions/checkout@v6

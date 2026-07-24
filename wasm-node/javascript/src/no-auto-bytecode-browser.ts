@@ -280,7 +280,13 @@ function connect(config: ConnectionConfig): Connection {
             let isOpen = { value: false };
 
             dataChannel.onopen = () => {
+                // Guard against the `open` event firing more than once for the same channel.
+                // Reporting the same stream id twice would make smoldot panic (observed in
+                // production as "same stream_id used multiple times in
+                // connection_stream_opened").
                 console.assert(!isOpen.value, "substream opened twice")
+                if (isOpen.value)
+                    return;
                 isOpen.value = true;
                 config.onStreamOpened(streamId, direction);
                 config.onWritableBytes(65536, streamId);
