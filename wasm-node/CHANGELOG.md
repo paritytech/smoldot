@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 3.3.2 - 2026-07-24
+
+### Changed
+
+- Match incoming statements against statement-store subscriptions through a topic index instead of scanning every subscription, making statement matching efficient when many subscriptions are active. Filter semantics are unchanged. ([#3281](https://github.com/paritytech/smoldot/pull/3281); fixes [#3144](https://github.com/paritytech/smoldot/issues/3144), [#3147](https://github.com/paritytech/smoldot/issues/3147))
+
+### Fixed
+
+- Fix a panic (`called Result::unwrap() on an Err value` in `runtime_service`) during parachain sync, caused by a relay chain block being unpinned twice when its parahead fetch finished but the block was pruned before being reported. ([#3287](https://github.com/paritytech/smoldot/pull/3287); fixes [#3286](https://github.com/paritytech/smoldot/issues/3286))
+- No longer crash the entire client when WebRTC is unavailable in the environment (e.g. inside a worker thread, where `RTCPeerConnection` doesn't exist); WebRTC connections are now forbidden instead. ([#3303](https://github.com/paritytech/smoldot/pull/3303); fixes [#3302](https://github.com/paritytech/smoldot/issues/3302))
+- JS exceptions thrown by code called from within the Wasm are no longer silently swallowed (which left an unusable instance and misleading errors on later calls); they now trigger the regular crash handling with a `wasm-panic` event carrying the original message and stack. ([#3308](https://github.com/paritytech/smoldot/pull/3308); related to [#3302](https://github.com/paritytech/smoldot/issues/3302), [#3306](https://github.com/paritytech/smoldot/issues/3306), [#3307](https://github.com/paritytech/smoldot/issues/3307))
+- Fix a panic (`same stream_id used multiple times in connection_stream_opened`) when a browser delivers the `open` event of an `RTCDataChannel` more than once. ([#3309](https://github.com/paritytech/smoldot/pull/3309); fixes [#3305](https://github.com/paritytech/smoldot/issues/3305))
+
 ## 3.3.1 - 2026-07-02
 
 ### Added
