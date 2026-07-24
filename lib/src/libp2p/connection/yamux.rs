@@ -1722,7 +1722,7 @@ impl<TNow, TSub> ops::Index<SubstreamId> for Yamux<TNow, TSub> {
             .inner
             .substreams
             .get(&substream_id.0)
-            .unwrap()
+            .unwrap_or_else(|| panic!("no substream with id {} in yamux state", substream_id.0))
             .user_data
     }
 }
@@ -1733,7 +1733,7 @@ impl<TNow, TSub> ops::IndexMut<SubstreamId> for Yamux<TNow, TSub> {
             .inner
             .substreams
             .get_mut(&substream_id.0)
-            .unwrap_or_else(|| panic!())
+            .unwrap_or_else(|| panic!("no substream with id {} in yamux state", substream_id.0))
             .user_data
     }
 }
