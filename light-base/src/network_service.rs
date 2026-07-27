@@ -41,7 +41,7 @@
 //! network connectivity.
 
 use crate::{
-    log,
+    log, metrics,
     platform::{self, PlatformRef, address_parse},
 };
 
@@ -140,6 +140,9 @@ pub struct ConfigChain {
 
     /// If `true`, enables the statement store protocol.
     pub enable_statement_protocol: bool,
+
+    /// Metrics of the chain, updated by the network service.
+    pub metrics: Arc<metrics::ChainMetrics>,
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
@@ -148,12 +151,17 @@ pub struct NetworkService<TPlat: PlatformRef> {
 
     /// See [`Config::platform`].
     platform: TPlat,
+
+    /// Process-wide network metrics, shared with the background service.
+    metrics: Arc<metrics::NetworkMetrics>,
 }
 
 impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// Initializes the network service with the given configuration.
     pub fn new(config: Config<TPlat>) -> Arc<Self> {
         let (main_messages_tx, main_messages_rx) = async_channel::bounded(4);
+
+        let metrics = Arc::new(metrics::NetworkMetrics::default());
 
         let network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains_capacity,
@@ -205,6 +213,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             num_recent_connection_opening: 0,
             next_recent_connection_restore: None,
             platform: config.platform.clone(),
+            metrics: metrics.clone(),
             open_gossip_links: BTreeMap::new(),
             chains_ever_gossip_connected: HashSet::with_capacity_and_hasher(4, Default::default()),
             v2_statement_peers: HashMap::with_capacity_and_hasher(4, Default::default()),
@@ -238,7 +247,13 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         Arc::new(NetworkService {
             messages_tx: main_messages_tx,
             platform: config.platform,
+            metrics,
         })
+    }
+
+    /// Returns the process-wide network metrics.
+    pub fn metrics(&self) -> &Arc<metrics::NetworkMetrics> {
+        &self.metrics
     }
 
     /// Adds a chain to the list of chains that the network service connects to.
@@ -248,6 +263,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// purges that chain.
     pub fn add_chain(&self, config: ConfigChain) -> Arc<NetworkServiceChain<TPlat>> {
         let (messages_tx, messages_rx) = async_channel::bounded(32);
+        let chain_metrics = config.metrics.clone();
 
         // TODO: this code is hacky because we don't want to make `add_chain` async at the moment, because it's not convenient for lib.rs
         self.platform.spawn_task("add-chain-message-send".into(), {
@@ -274,6 +290,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     num_references: NonZero::<usize>::new(1).unwrap(),
                     next_discovery_period: Duration::from_secs(2),
                     next_discovery_when: self.platform.now(),
+                    metrics: config.metrics,
                 },
             };
 
@@ -291,6 +308,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         Arc::new(NetworkServiceChain {
             _keep_alive_messages_tx: self.messages_tx.clone(),
             messages_tx,
+            metrics: chain_metrics,
             marker: core::marker::PhantomData,
         })
     }
@@ -303,6 +321,9 @@ pub struct NetworkServiceChain<TPlat: PlatformRef> {
 
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackgroundChain>,
+
+    /// Metrics of the chain, updated when requests finish.
+    metrics: Arc<metrics::ChainMetrics>,
 
     /// Dummy to hold the `TPlat` type.
     marker: core::marker::PhantomData<TPlat>,
@@ -385,6 +406,8 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         severity: BanSeverity,
         reason: &'static str,
     ) {
+        self.metrics.peer_bans.inc();
+
         let _ = self
             .messages_tx
             .send(ToBackgroundChain::DisconnectAndBan {
@@ -415,7 +438,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        rx.await.unwrap()
+        let result = rx.await.unwrap();
+        self.metrics.blocks_requests.observe(result.is_ok());
+        result
     }
 
     /// Sends a grandpa warp sync request to the given peer.
@@ -438,7 +463,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        rx.await.unwrap()
+        let result = rx.await.unwrap();
+        self.metrics.warp_sync_requests.observe(result.is_ok());
+        result
     }
 
     pub async fn set_local_best_block(&self, best_hash: [u8; 32], best_number: u64) {
@@ -485,7 +512,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        rx.await.unwrap()
+        let result = rx.await.unwrap();
+        self.metrics.storage_proof_requests.observe(result.is_ok());
+        result
     }
 
     /// Sends a call proof request to the given peer.
@@ -518,7 +547,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        rx.await.unwrap()
+        let result = rx.await.unwrap();
+        self.metrics.call_proof_requests.observe(result.is_ok());
+        result
     }
 
     /// Sends a child storage proof request to the given peer.
@@ -550,7 +581,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        rx.await.unwrap()
+        let result = rx.await.unwrap();
+        self.metrics.storage_proof_requests.observe(result.is_ok());
+        result
     }
 
     /// Announces transaction to the peers we are connected to.
@@ -968,6 +1001,9 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// See [`Config::platform`].
     platform: TPlat,
 
+    /// Process-wide network metrics. Also accessible through [`NetworkService::metrics`].
+    metrics: Arc<metrics::NetworkMetrics>,
+
     /// Random number generator.
     randomness: rand_chacha::ChaCha20Rng,
 
@@ -1129,6 +1165,9 @@ struct Chain<TPlat: PlatformRef> {
 
     /// See [`ConfigChain::num_out_slots`].
     num_out_slots: usize,
+
+    /// See [`ConfigChain::metrics`].
+    metrics: Arc<metrics::ChainMetrics>,
 
     /// When the next discovery should be started for this chain.
     next_discovery_when: TPlat::Instant,
@@ -1652,6 +1691,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
                     debug_assert!(_was_in.is_some());
+                    task.network[chain_id].metrics.gossip_peers_connected.dec();
 
                     if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
                         peers.remove(&peer_id);
@@ -2302,6 +2342,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     );
                 }
 
+                task.metrics.connections_handshakes_finished.inc();
                 task.bitswap_peering_strategy
                     .increase_peer_connections(&peer_id);
             }
@@ -2337,6 +2378,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     address,
                     ?handshake_finished
                 );
+                task.metrics.connections_shutdowns.inc();
 
                 // Ban the peer in order to avoid trying over and over again the same address(es).
                 // Even if the handshake was finished, it is possible that the peer simply shuts
@@ -2496,6 +2538,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     },
                 );
                 debug_assert!(_prev_value.is_none());
+                task.network[chain_id].metrics.gossip_peers_connected.inc();
 
                 task.chains_ever_gossip_connected.insert(chain_id);
 
@@ -2584,6 +2627,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
                 debug_assert!(_was_in.is_some());
+                task.network[chain_id].metrics.gossip_peers_connected.dec();
 
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
@@ -2926,6 +2970,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                         addr = &a,
                                         obtained_from = requestee_peer_id
                                     );
+                                    task.metrics.discovery_addresses_dropped.inc();
                                     continue;
                                 }
                                 if platform::address_parse::multiaddr_to_address(&a)
@@ -2946,6 +2991,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                         addr = &a,
                                         obtained_from = requestee_peer_id
                                     );
+                                    task.metrics.discovery_addresses_dropped.inc();
                                 }
                             }
                             Err((error, addr)) => {
@@ -2960,6 +3006,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     addr = hex::encode(&addr),
                                     obtained_from = requestee_peer_id
                                 );
+                                task.metrics.discovery_addresses_dropped.inc();
                             }
                         }
                     }
@@ -3399,6 +3446,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 task.num_recent_connection_opening += 1;
+                task.metrics.connections_started.inc();
 
                 let (coordinator_to_connection_tx, coordinator_to_connection_rx) =
                     async_channel::bounded(8);

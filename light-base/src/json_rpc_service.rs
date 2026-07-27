@@ -102,6 +102,12 @@ pub struct Config<TPlat: PlatformRef> {
     /// Service that fulfills IPFS CID requests.
     pub bitswap_service: Arc<bitswap_service::BitswapService>,
 
+    /// Metrics of the chain, returned by `sudo_unstable_metrics`.
+    pub chain_metrics: Arc<crate::metrics::ChainMetrics>,
+
+    /// Process-wide network metrics, returned by `sudo_unstable_metrics`.
+    pub network_metrics: Arc<crate::metrics::NetworkMetrics>,
+
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
     /// Type of chain, as found in the chain specification.
@@ -142,6 +148,7 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
         log_target: log_target.clone(),
         responses_rx: Arc::new(async_lock::Mutex::new(Box::pin(responses_rx))),
         requests_tx,
+        metrics: config.chain_metrics.clone(),
     };
 
     let platform = config.platform.clone();
@@ -156,6 +163,8 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
                 transactions_service: config.transactions_service,
                 runtime_service: config.runtime_service,
                 bitswap_service: config.bitswap_service,
+                chain_metrics: config.chain_metrics,
+                network_metrics: config.network_metrics,
                 chain_name: config.chain_name,
                 chain_ty: config.chain_ty,
                 chain_properties_json: config.chain_properties_json,
@@ -193,6 +202,9 @@ pub struct Frontend<TPlat> {
 
     /// Target to use when emitting logs.
     log_target: String,
+
+    /// Metrics of the chain. The JSON-RPC requests counter is incremented here.
+    metrics: Arc<crate::metrics::ChainMetrics>,
 }
 
 impl<TPlat: PlatformRef> Frontend<TPlat> {
@@ -208,6 +220,7 @@ impl<TPlat: PlatformRef> Frontend<TPlat> {
 
         match self.requests_tx.try_send(json_rpc_request) {
             Ok(()) => {
+                self.metrics.json_rpc_requests.inc();
                 log!(
                     &self.platform,
                     Debug,

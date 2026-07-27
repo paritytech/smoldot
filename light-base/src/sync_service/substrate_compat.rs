@@ -64,8 +64,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
     runtime_code_hint: Option<ConfigSubstrateCompatibleRuntimeCodeHint>,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+    metrics: Arc<crate::metrics::ChainMetrics>,
 ) {
     let mut task = Task {
+        metrics,
         sync: Some(all::AllSync::new(all::Config {
             chain_information,
             block_number_bytes,
@@ -438,6 +440,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             verified_hash = HashDisplay(&fragment_hash),
                             verified_height = fragment_number
                         );
+                        task.metrics.sync_warp_fragments_verified.inc();
                     }
                     Err(err) => {
                         log!(
@@ -500,6 +503,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             hash = HashDisplay(&verified_hash),
                             is_new_best = if is_new_best { "yes" } else { "no" }
                         );
+                        task.metrics.sync_blocks_verified.inc();
 
                         if is_new_best {
                             task.network_up_to_date_best = false;
@@ -539,6 +543,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             hash = HashDisplay(&verified_hash),
                             ?error
                         );
+                        task.metrics.sync_block_verify_errors.inc();
 
                         log!(
                             &task.platform,
@@ -589,6 +594,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             finalized_blocks = finalized_blocks_newest_to_oldest.len(),
                             sender
                         );
+                        task.metrics.sync_finality_proofs_verified.inc();
 
                         if updates_best_block {
                             task.network_up_to_date_best = false;
@@ -657,6 +663,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             ?error,
                             sender,
                         );
+                        task.metrics.sync_finality_proof_verify_errors.inc();
 
                         // Errors of type `JustificationEngineMismatch` indicate that the chain
                         // uses a finality engine that smoldot doesn't recognize. This is a benign
@@ -702,6 +709,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             ?error,
                             sender,
                         );
+                        task.metrics.sync_finality_proof_verify_errors.inc();
 
                         log!(
                             &task.platform,
@@ -1004,6 +1012,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     unreachable!()
                 };
 
+                task.metrics
+                    .sync_best_block_height
+                    .set(sync.best_block_number());
+
                 let fut = task
                     .network_service
                     .set_local_best_block(*sync.best_block_hash(), sync.best_block_number());
@@ -1020,6 +1032,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 let Some(sync) = &mut task.sync else {
                     unreachable!()
                 };
+
+                task.metrics
+                    .sync_finalized_block_height
+                    .set(sync.finalized_block_number());
 
                 let grandpa_set_id =
                     if let chain::chain_information::ChainInformationFinalityRef::Grandpa {
@@ -1620,6 +1636,9 @@ struct Task<TPlat: PlatformRef> {
 
     /// Access to the platform's capabilities.
     platform: TPlat,
+
+    /// Metrics of the chain, updated when blocks and finality proofs are verified.
+    metrics: Arc<crate::metrics::ChainMetrics>,
 
     /// Main syncing state machine. Contains a list of peers, requests, and blocks, and manages
     /// everything about the non-finalized chain.

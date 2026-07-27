@@ -92,6 +92,9 @@ pub struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
+    /// Metrics of the chain, updated when runtimes are compiled.
+    pub metrics: Arc<crate::metrics::ChainMetrics>,
+
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
 
@@ -126,6 +129,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         let background_task_config = BackgroundTaskConfig {
             log_target: log_target.clone(),
             platform: config.platform.clone(),
+            metrics: config.metrics,
             sync_service: config.sync_service,
             network_service: config.network_service,
             genesis_block_scale_encoded_header: config.genesis_block_scale_encoded_header,
@@ -772,6 +776,7 @@ struct Block {
 struct BackgroundTaskConfig<TPlat: PlatformRef> {
     log_target: String,
     platform: TPlat,
+    metrics: Arc<crate::metrics::ChainMetrics>,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     genesis_block_scale_encoded_header: Vec<u8>,
@@ -820,6 +825,7 @@ async fn run_background<TPlat: PlatformRef>(
         Background {
             log_target: config.log_target.clone(),
             platform: config.platform.clone(),
+            metrics: config.metrics.clone(),
             sync_service: config.sync_service.clone(),
             network_service: config.network_service.clone(),
             to_background: Box::pin(to_background.clone()),
@@ -1770,6 +1776,7 @@ async fn run_background<TPlat: PlatformRef>(
                         &background.log_target,
                         "foreground-compile-and-pin-runtime-cache-hit"
                     );
+                    background.metrics.runtime_cache_hits.inc();
                     existing_runtime
                 } else {
                     // No identical runtime was found. Try compiling the new runtime.
@@ -1789,6 +1796,9 @@ async fn run_background<TPlat: PlatformRef>(
                         ?compilation_duration,
                         compilation_success = runtime.is_ok()
                     );
+                    background
+                        .metrics
+                        .observe_runtime_compilation(compilation_duration, runtime.is_ok());
                     let runtime = Arc::new(Runtime {
                         heap_pages: storage_heap_pages,
                         runtime_code: storage_code,
@@ -2712,6 +2722,7 @@ async fn run_background<TPlat: PlatformRef>(
                         "runtime-download-finish-compilation-cache-hit",
                         block_hashes = concerned_blocks,
                     );
+                    background.metrics.runtime_cache_hits.inc();
                     existing_runtime
                 } else {
                     let before_compilation = background.platform.now();
@@ -2731,6 +2742,9 @@ async fn run_background<TPlat: PlatformRef>(
                         compilation_success = runtime.is_ok(),
                         block_hashes = concerned_blocks,
                     );
+                    background
+                        .metrics
+                        .observe_runtime_compilation(compilation_duration, runtime.is_ok());
                     match &runtime {
                         Ok(runtime) => {
                             log!(
@@ -2862,6 +2876,9 @@ struct Background<TPlat: PlatformRef> {
 
     /// See [`Config::platform`].
     platform: TPlat,
+
+    /// See [`Config::metrics`].
+    metrics: Arc<crate::metrics::ChainMetrics>,
 
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,

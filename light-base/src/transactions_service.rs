@@ -102,6 +102,9 @@ pub struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
+    /// Metrics of the chain, updated when transactions are dropped.
+    pub metrics: Arc<crate::metrics::ChainMetrics>,
+
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
 
@@ -145,6 +148,7 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         let background_task_config = BackgroundTaskConfig {
             log_target: log_target.clone(),
             platform: config.platform.clone(),
+            metrics: config.metrics,
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
             network_service: config.network_service,
@@ -403,6 +407,7 @@ enum ToBackground {
 struct BackgroundTaskConfig<TPlat: PlatformRef> {
     log_target: String,
     platform: TPlat,
+    metrics: Arc<crate::metrics::ChainMetrics>,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
@@ -422,6 +427,7 @@ async fn background_task<TPlat: PlatformRef>(
 
     let mut worker = Worker {
         platform: config.platform,
+        metrics: config.metrics,
         sync_service: config.sync_service,
         runtime_service: config.runtime_service,
         network_service: config.network_service,
@@ -462,6 +468,7 @@ async fn background_task<TPlat: PlatformRef>(
             // Because `runtime_service.subscribe_all()` might take a long time (potentially
             // forever), we need to process messages coming from the foreground in parallel.
             let from_foreground = &mut from_foreground;
+            let metrics = worker.metrics.clone();
             let messages_process = async move {
                 loop {
                     match from_foreground.next().await {
@@ -469,6 +476,7 @@ async fn background_task<TPlat: PlatformRef>(
                             updates_report: Some(updates_report),
                             ..
                         }) => {
+                            metrics.transactions_dropped.inc();
                             let _ = updates_report
                                 .0
                                 .send(TransactionStatus::Dropped(DropReason::GapInChain))
@@ -493,6 +501,7 @@ async fn background_task<TPlat: PlatformRef>(
         // Drop all pending transactions of the pool.
         for (_, pending) in worker.pending_transactions.transactions_iter_mut() {
             // TODO: only do this if transaction hasn't been validated yet
+            worker.metrics.transactions_dropped.inc();
             pending.update_status(TransactionStatus::Dropped(DropReason::GapInChain));
         }
 
@@ -671,6 +680,7 @@ async fn background_task<TPlat: PlatformRef>(
                     ?error
                 );
 
+                worker.metrics.transactions_dropped.inc();
                 transaction.update_status(TransactionStatus::Dropped(match error {
                     InvalidOrError::Invalid(err) => DropReason::Invalid(err),
                     InvalidOrError::ValidateError(err) => DropReason::ValidateError(err),
@@ -1225,6 +1235,7 @@ async fn background_task<TPlat: PlatformRef>(
                     if worker.pending_transactions.num_transactions()
                         >= worker.max_pending_transactions
                     {
+                        worker.metrics.transactions_dropped.inc();
                         if let Some((updates_report, _)) = updates_report {
                             let _ = updates_report.try_send(TransactionStatus::Dropped(
                                 DropReason::MaxPendingTransactionsReached,
@@ -1263,6 +1274,9 @@ async fn background_task<TPlat: PlatformRef>(
 struct Worker<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     platform: TPlat,
+
+    /// Metrics of the chain, updated when transactions are dropped.
+    metrics: Arc<crate::metrics::ChainMetrics>,
 
     // How to download the bodies of blocks and synchronize the chain.
     sync_service: Arc<sync_service::SyncService<TPlat>>,

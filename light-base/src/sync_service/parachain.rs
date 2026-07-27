@@ -49,6 +49,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     parachain_id: u32,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+    metrics: Arc<crate::metrics::ChainMetrics>,
 ) {
     // Phase 1: Fetch the current finalized parachain head from the relay chain.
     let effective_chain_info = fetch_parachain_head_from_relay(
@@ -147,6 +148,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
 
     // Phase 4: Create AllSync with Aura consensus from the bootstrapped chain information.
     let mut task = Task {
+        metrics,
         sync: Some(all::AllSync::new(all::Config {
             chain_information: effective_chain_info,
             block_number_bytes,
@@ -308,6 +310,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             hash = HashDisplay(&verified_hash),
                             is_new_best = if is_new_best { "yes" } else { "no" }
                         );
+                        task.metrics.sync_blocks_verified.inc();
 
                         if is_new_best {
                             task.network_up_to_date_best = false;
@@ -339,6 +342,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             let sync = task.sync.as_mut().unwrap();
                             if let Ok(result) = sync.set_finalized_block(&pending_hash) {
                                 task.pending_parachain_finalization = None;
+                                task.metrics
+                                    .sync_finalized_block_height
+                                    .set(sync.finalized_block_number());
                                 if result.updates_best_block {
                                     task.network_up_to_date_best = false;
                                 }
@@ -378,6 +384,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             hash = HashDisplay(&verified_hash),
                             ?error
                         );
+                        task.metrics.sync_block_verify_errors.inc();
 
                         log!(
                             &task.platform,
@@ -545,6 +552,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 let Some(sync) = &task.sync else {
                     unreachable!()
                 };
+                task.metrics
+                    .sync_best_block_height
+                    .set(sync.best_block_number());
                 task.network_service
                     .set_local_best_block(*sync.best_block_hash(), sync.best_block_number())
                     .await;
@@ -907,6 +917,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 match sync.set_finalized_block(&finalized_hash) {
                     Ok(result) => {
                         task.pending_parachain_finalization = None;
+                        task.metrics
+                            .sync_finalized_block_height
+                            .set(sync.finalized_block_number());
                         if result.updates_best_block {
                             task.network_up_to_date_best = false;
                         }
@@ -964,6 +977,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 match sync.set_finalized_block(&hash) {
                     Ok(result) => {
                         task.pending_parachain_finalization = None;
+                        task.metrics
+                            .sync_finalized_block_height
+                            .set(sync.finalized_block_number());
                         if result.updates_best_block {
                             task.network_up_to_date_best = false;
                         }
@@ -1064,6 +1080,9 @@ struct Task<TPlat: PlatformRef> {
     peers_source_id_map: HashMap<libp2p::PeerId, all::SourceId, util::SipHasherBuild>,
 
     network_up_to_date_best: bool,
+
+    /// Metrics of the chain, updated when blocks are verified and finalized.
+    metrics: Arc<crate::metrics::ChainMetrics>,
 
     /// Channel to the paraheads background service.
     paraheads: async_channel::Sender<super::ToBackground>,
