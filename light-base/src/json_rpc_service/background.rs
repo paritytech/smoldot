@@ -1014,6 +1014,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::rpc_methods { .. }
                     | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
                     | methods::MethodCall::sudo_unstable_version { .. }
+                    | methods::MethodCall::sudo_unstable_metrics { .. }
                     | methods::MethodCall::transaction_v1_broadcast { .. }
                     | methods::MethodCall::transaction_v1_stop { .. }
                     | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. }
@@ -2888,6 +2889,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 methods::Response::sudo_unstable_version(
                                     format!("{} {}", me.system_name, me.system_version).into(),
                                 )
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::sudo_unstable_metrics {} => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::sudo_unstable_metrics(crate::metrics::snapshot(
+                                    &me.network_metrics,
+                                    &me.chain_metrics,
+                                ))
                                 .to_json_response(request_id_json),
                             )
                             .await;

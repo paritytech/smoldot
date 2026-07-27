@@ -23,7 +23,9 @@
 //! corresponding events are logged. Reads and writes use relaxed ordering: metrics are
 //! advisory and never synchronize other memory.
 
+use alloc::{borrow::Cow, collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
+use smoldot::json_rpc::methods;
 
 /// Monotonically increasing counter.
 #[derive(Debug, Default)]
@@ -131,4 +133,129 @@ impl ChainMetrics {
         self.runtime_compilation_time_us
             .add(u64::try_from(duration.as_micros()).unwrap_or(u64::MAX));
     }
+}
+
+fn labels(
+    entries: &[(&'static str, &'static str)],
+) -> BTreeMap<Cow<'static, str>, Cow<'static, str>> {
+    entries
+        .iter()
+        .map(|(k, v)| (Cow::Borrowed(*k), Cow::Borrowed(*v)))
+        .collect()
+}
+
+fn counter(name: &'static str, value: u64) -> methods::Metric {
+    methods::Metric {
+        name: Cow::Borrowed(name),
+        ty: methods::MetricType::Counter,
+        entries: alloc::vec![methods::MetricEntry {
+            labels: BTreeMap::new(),
+            value: value as f64,
+        }],
+    }
+}
+
+fn gauge(name: &'static str, value: u64) -> methods::Metric {
+    methods::Metric {
+        name: Cow::Borrowed(name),
+        ty: methods::MetricType::Gauge,
+        entries: alloc::vec![methods::MetricEntry {
+            labels: BTreeMap::new(),
+            value: value as f64,
+        }],
+    }
+}
+
+/// Builds the response to `sudo_unstable_metrics` out of the process-wide network metrics and
+/// the metrics of the chain the JSON-RPC client is connected to.
+pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::MetricsSnapshot {
+    let requests_entries = [
+        ("blocks", &chain.blocks_requests),
+        ("warpSync", &chain.warp_sync_requests),
+        ("storageProof", &chain.storage_proof_requests),
+        ("callProof", &chain.call_proof_requests),
+    ]
+    .into_iter()
+    .flat_map(|(protocol, metrics)| {
+        [
+            methods::MetricEntry {
+                labels: labels(&[("protocol", protocol), ("outcome", "success")]),
+                value: metrics.success.get() as f64,
+            },
+            methods::MetricEntry {
+                labels: labels(&[("protocol", protocol), ("outcome", "failure")]),
+                value: metrics.failure.get() as f64,
+            },
+        ]
+    })
+    .collect::<Vec<_>>();
+
+    let metrics = alloc::vec![
+        counter(
+            "networkConnectionsStartedTotal",
+            network.connections_started.get()
+        ),
+        counter(
+            "networkConnectionsHandshakesFinishedTotal",
+            network.connections_handshakes_finished.get()
+        ),
+        counter(
+            "networkConnectionsShutdownsTotal",
+            network.connections_shutdowns.get()
+        ),
+        counter(
+            "networkDiscoveryAddressesDroppedTotal",
+            network.discovery_addresses_dropped.get()
+        ),
+        methods::Metric {
+            name: Cow::Borrowed("networkRequestsTotal"),
+            ty: methods::MetricType::Counter,
+            entries: requests_entries,
+        },
+        counter("networkPeerBansTotal", chain.peer_bans.get()),
+        gauge(
+            "networkGossipPeersConnected",
+            chain.gossip_peers_connected.get()
+        ),
+        counter("syncBlocksVerifiedTotal", chain.sync_blocks_verified.get()),
+        counter(
+            "syncBlockVerifyErrorsTotal",
+            chain.sync_block_verify_errors.get()
+        ),
+        counter(
+            "syncFinalityProofsVerifiedTotal",
+            chain.sync_finality_proofs_verified.get()
+        ),
+        counter(
+            "syncFinalityProofVerifyErrorsTotal",
+            chain.sync_finality_proof_verify_errors.get()
+        ),
+        counter(
+            "syncWarpFragmentsVerifiedTotal",
+            chain.sync_warp_fragments_verified.get()
+        ),
+        gauge("syncBestBlockHeight", chain.sync_best_block_height.get()),
+        gauge(
+            "syncFinalizedBlockHeight",
+            chain.sync_finalized_block_height.get()
+        ),
+        counter("runtimeCompilationsTotal", chain.runtime_compilations.get()),
+        counter(
+            "runtimeCompilationErrorsTotal",
+            chain.runtime_compilation_errors.get()
+        ),
+        methods::Metric {
+            name: Cow::Borrowed("runtimeCompilationSecondsTotal"),
+            ty: methods::MetricType::Counter,
+            entries: alloc::vec![methods::MetricEntry {
+                labels: BTreeMap::new(),
+                value: chain.runtime_compilation_time_us.get() as f64 / 1_000_000.0,
+            }],
+        },
+        counter("runtimeCacheHitsTotal", chain.runtime_cache_hits.get()),
+        counter("transactionsDroppedTotal", chain.transactions_dropped.get()),
+        counter("jsonrpcRequestsTotal", chain.json_rpc_requests.get()),
+    ];
+
+    methods::MetricsSnapshot { metrics }
 }
