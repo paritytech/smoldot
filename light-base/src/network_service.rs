@@ -54,7 +54,7 @@ use alloc::{
     sync::Arc,
     vec::{self, Vec},
 };
-use core::{cmp, mem, num::NonZero, num::NonZeroUsize, pin::Pin, time::Duration};
+use core::{cmp, mem, num::NonZero, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{StreamExt as _, future, stream};
@@ -77,54 +77,6 @@ use service::SendTopicAffinityError;
 pub use service::{
     ChainId, EncodedMerkleProof, PeerId, QueueNotificationError, SendBitswapMessageError,
 };
-
-/// Configuration for the Statement Store protocol.
-#[derive(Debug, Clone)]
-pub struct StatementProtocolConfig {
-    /// Per-subscription LRU cache size used for deduplicating delivered statements.
-    max_seen_statements: NonZeroUsize,
-    false_positive_rate: f64,
-    bloom_seed: u128,
-    affinity_update_interval: Duration,
-}
-
-impl StatementProtocolConfig {
-    pub fn new(
-        max_seen_statements: NonZeroUsize,
-        false_positive_rate: f64,
-        bloom_seed: u128,
-        affinity_update_interval: Duration,
-    ) -> Self {
-        assert!(
-            false_positive_rate.is_finite()
-                && false_positive_rate > 0.0
-                && false_positive_rate < 1.0
-        );
-        assert!(!affinity_update_interval.is_zero());
-        StatementProtocolConfig {
-            max_seen_statements,
-            false_positive_rate,
-            bloom_seed,
-            affinity_update_interval,
-        }
-    }
-
-    pub fn max_seen_statements(&self) -> NonZeroUsize {
-        self.max_seen_statements
-    }
-
-    pub fn false_positive_rate(&self) -> f64 {
-        self.false_positive_rate
-    }
-
-    pub fn bloom_seed(&self) -> u128 {
-        self.bloom_seed
-    }
-
-    pub fn affinity_update_interval(&self) -> Duration {
-        self.affinity_update_interval
-    }
-}
 
 mod tasks;
 
@@ -186,8 +138,8 @@ pub struct ConfigChain {
     /// number of the finalized block at the time of the initialization.
     pub grandpa_protocol_finalized_block_height: Option<u64>,
 
-    /// If `Some`, enables the statement store protocol.
-    pub statement_protocol_config: Option<StatementProtocolConfig>,
+    /// If `true`, enables the statement store protocol.
+    pub enable_statement_protocol: bool,
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
@@ -307,7 +259,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                         set_id: 0,
                     },
                 ),
-                enable_statement_protocol: config.statement_protocol_config.is_some(),
+                enable_statement_protocol: config.enable_statement_protocol,
                 fork_id: config.fork_id.clone(),
                 block_number_bytes: config.block_number_bytes,
                 best_hash: config.best_block.1,

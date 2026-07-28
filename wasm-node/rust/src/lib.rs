@@ -144,7 +144,7 @@ fn add_chain(
                     .map(|max_seen| {
                         let mut seed_bytes = [0u8; 16];
                         smoldot_light::platform::PlatformRef::fill_random_bytes(&platform::PLATFORM_REF, &mut seed_bytes);
-                        smoldot_light::network_service::StatementProtocolConfig::new(max_seen, statement_store_false_positive_rate, u128::from_le_bytes(seed_bytes), Duration::from_millis(u64::from(statement_store_affinity_update_interval_ms)))
+                        smoldot_light::StatementProtocolConfig::new(max_seen, statement_store_false_positive_rate, u128::from_le_bytes(seed_bytes), Duration::from_millis(u64::from(statement_store_affinity_update_interval_ms)))
                     }),
                 }) {
                 Ok(c) => c,

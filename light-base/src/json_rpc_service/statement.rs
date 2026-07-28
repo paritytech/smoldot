@@ -17,11 +17,59 @@
 
 use crate::network_service::{self, BroadcastStatementResult};
 use alloc::{string::String, vec::Vec};
-use core::num::NonZero;
+use core::{num::NonZero, time::Duration};
 use smoldot::json_rpc::methods::{
     HexString, InternalError, InvalidReason, StatementSubmitResult, TopicFilter,
 };
 use smoldot::network::codec;
+
+/// Configuration for the Statement Store protocol.
+#[derive(Debug, Clone)]
+pub struct StatementProtocolConfig {
+    /// Per-subscription LRU cache size used for deduplicating delivered statements.
+    max_seen_statements: NonZero<usize>,
+    false_positive_rate: f64,
+    bloom_seed: u128,
+    affinity_update_interval: Duration,
+}
+
+impl StatementProtocolConfig {
+    pub fn new(
+        max_seen_statements: NonZero<usize>,
+        false_positive_rate: f64,
+        bloom_seed: u128,
+        affinity_update_interval: Duration,
+    ) -> Self {
+        assert!(
+            false_positive_rate.is_finite()
+                && false_positive_rate > 0.0
+                && false_positive_rate < 1.0
+        );
+        assert!(!affinity_update_interval.is_zero());
+        StatementProtocolConfig {
+            max_seen_statements,
+            false_positive_rate,
+            bloom_seed,
+            affinity_update_interval,
+        }
+    }
+
+    pub fn max_seen_statements(&self) -> NonZero<usize> {
+        self.max_seen_statements
+    }
+
+    pub fn false_positive_rate(&self) -> f64 {
+        self.false_positive_rate
+    }
+
+    pub fn bloom_seed(&self) -> u128 {
+        self.bloom_seed
+    }
+
+    pub fn affinity_update_interval(&self) -> Duration {
+        self.affinity_update_interval
+    }
+}
 
 /// Validates a SCALE-encoded statement and broadcasts it to the network.
 ///
@@ -240,7 +288,7 @@ impl StatementSubscriptions {
 
     pub(super) fn build_combined_affinity_filter(
         &self,
-        config: &network_service::StatementProtocolConfig,
+        config: &StatementProtocolConfig,
     ) -> network_service::AffinityFilter {
         let mut all_topics: Vec<&[u8; 32]> = Vec::new();
 
@@ -273,8 +321,8 @@ mod tests {
     const SEED: u128 = 0x5EED_5EED_5EED_5EED_5EED_5EED_5EED_5EED;
     const FPR: f64 = 0.01;
 
-    fn test_config() -> network_service::StatementProtocolConfig {
-        network_service::StatementProtocolConfig::new(
+    fn test_config() -> StatementProtocolConfig {
+        StatementProtocolConfig::new(
             NonZero::new(128).unwrap(),
             FPR,
             SEED,
