@@ -16,7 +16,9 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    bitswap_service, log, network_service,
+    bitswap_service,
+    json_rpc_service::StatementProtocolConfig,
+    log, network_service,
     platform::PlatformRef,
     runtime_service, sync_service, transactions_service,
     util::{self, SipHasherBuild},
@@ -91,11 +93,7 @@ pub(super) struct Config<TPlat: PlatformRef> {
     pub genesis_block_hash: [u8; 32],
 
     /// Statement protocol configuration. `None` if the statement protocol is disabled.
-    pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
-
-    /// Maximum number of seen statement hashes tracked per subscription for dedup.
-    /// `None` if the statement protocol is disabled.
-    pub max_seen_statements: Option<NonZero<usize>>,
+    pub statement_protocol_config: Option<StatementProtocolConfig>,
 }
 
 /// Fields used to process JSON-RPC requests in the background.
@@ -126,7 +124,7 @@ struct Background<TPlat: PlatformRef> {
     /// Randomness used for various purposes, such as generating subscription IDs.
     randomness: ChaCha20Rng,
 
-    statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+    statement_protocol_config: Option<StatementProtocolConfig>,
 
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
@@ -239,10 +237,6 @@ struct Background<TPlat: PlatformRef> {
     /// The values are list of keys.
     state_get_keys_paged_cache:
         lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
-
-    /// Maximum number of seen statement hashes tracked per subscription for dedup.
-    /// `None` if the statement protocol is disabled.
-    max_seen_statements: Option<NonZero<usize>>,
 
     /// Active statement subscriptions, indexed by topic for efficient matching.
     statement_subscriptions: super::statement::StatementSubscriptions,
@@ -651,7 +645,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
         ),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: false,
-        max_seen_statements: config.max_seen_statements,
         statement_subscriptions: super::statement::StatementSubscriptions::with_capacity(16),
         statement_affinity_stale: false,
         next_statement_affinity_update: None,
@@ -3037,7 +3030,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         me.statement_subscriptions.insert(
                             subscription_id.clone(),
                             filter,
-                            me.max_seen_statements,
+                            me.statement_protocol_config
+                                .as_ref()
+                                .map(|c| c.max_seen_statements()),
                         );
 
                         me.schedule_statement_affinity_update();
