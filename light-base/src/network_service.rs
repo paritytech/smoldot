@@ -48,7 +48,7 @@ use crate::{
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     format,
     string::{String, ToString as _},
     sync::Arc,
@@ -209,7 +209,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             chains_ever_gossip_connected: HashSet::with_capacity_and_hasher(4, Default::default()),
             v2_statement_peers: HashMap::with_capacity_and_hasher(4, Default::default()),
             current_affinity_filter: HashMap::with_capacity_and_hasher(4, Default::default()),
-            event_pending_send: None,
+            events_pending_send: VecDeque::with_capacity(4),
             event_senders: either::Left(Vec::new()),
             pending_new_subscriptions: Vec::new(),
             bitswap_event_pending_send: None,
@@ -1029,8 +1029,12 @@ struct BackgroundTask<TPlat: PlatformRef> {
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
 
-    /// Event about to be sent on the senders of [`BackgroundTask::event_senders`].
-    event_pending_send: Option<(ChainId, Event)>,
+    /// Events about to be sent on the senders of [`BackgroundTask::event_senders`].
+    ///
+    /// Network events are only pulled when this queue is empty, keeping it small. A queue is
+    /// nonetheless necessary, as processing a [`ToBackgroundChain::DisconnectAndBan`] message can
+    /// generate an event while another event is already waiting to be dispatched.
+    events_pending_send: VecDeque<(ChainId, Event)>,
 
     /// Bitswap event about to be sent on the senders of [`BackgroundTask::bitswap_event_senders`].
     bitswap_event_pending_send: Option<BitswapEvent>,
@@ -1197,7 +1201,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
             };
             let service_event = async {
-                if let Some(event) = (task.event_pending_send.is_none()
+                if let Some(event) = (task.events_pending_send.is_empty()
                     && task.bitswap_event_pending_send.is_none()
                     && task.pending_new_subscriptions.is_empty()
                     && task.pending_new_bitswap_subscriptions.is_empty())
@@ -1343,7 +1347,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let event_senders = event_sending_future.await;
                     task.event_senders = either::Left(event_senders);
                     WakeUpReason::EventSendersReady
-                } else if task.event_pending_send.is_some()
+                } else if !task.events_pending_send.is_empty()
                     || !task.pending_new_subscriptions.is_empty()
                 {
                     WakeUpReason::EventSendersReady
@@ -1442,7 +1446,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 };
 
                 if let Some((event_to_dispatch_chain_id, event_to_dispatch)) =
-                    task.event_pending_send.take()
+                    task.events_pending_send.pop_front()
                 {
                     let mut event_senders = mem::take(event_senders);
                     task.event_senders = either::Right(Box::pin(async move {
@@ -1653,8 +1657,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         peers.remove(&peer_id);
                     }
 
-                    debug_assert!(task.event_pending_send.is_none());
-                    task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
+                    // Unlike the network-event handlers below, this message handler can run
+                    // while another event is already queued, hence the push to a queue.
+                    task.events_pending_send
+                        .push_back((chain_id, Event::Disconnected { peer_id }));
                 }
             }
             WakeUpReason::MessageForChain(
@@ -2457,9 +2463,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send =
-                    Some((chain_id, Event::BlockAnnounce { peer_id, announce }));
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send
+                    .push_back((chain_id, Event::BlockAnnounce { peer_id, announce }));
             }
             WakeUpReason::NetworkEvent(service::Event::GossipConnected {
                 peer_id,
@@ -2493,8 +2499,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 task.chains_ever_gossip_connected.insert(chain_id);
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send = Some((
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send.push_back((
                     chain_id,
                     Event::Connected {
                         peer_id,
@@ -2610,8 +2616,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peers.remove(&peer_id);
                 }
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send
+                    .push_back((chain_id, Event::Disconnected { peer_id }));
             }
             WakeUpReason::NetworkEvent(service::Event::BitswapConnected { peer_id }) => {
                 task.bitswap_connected_peers = task.bitswap_connected_peers.saturating_add(1);
@@ -3161,8 +3168,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .unwrap()
                     .finalized_block_height = Some(state.commit_finalized_height);
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send = Some((
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send.push_back((
                     chain_id,
                     Event::GrandpaNeighborPacket {
                         peer_id,
@@ -3185,22 +3192,22 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     target_block_hash = HashDisplay(message.decode().target_hash),
                 );
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send =
-                    Some((chain_id, Event::GrandpaCommitMessage { peer_id, message }));
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send
+                    .push_back((chain_id, Event::GrandpaCommitMessage { peer_id, message }));
             }
             WakeUpReason::NetworkEvent(service::Event::StatementsNotification {
                 chain_id,
                 peer_id,
                 statements,
             }) => {
-                debug_assert!(task.event_pending_send.is_none());
+                debug_assert!(task.events_pending_send.is_empty());
 
                 if statements.is_empty() {
                     continue;
                 }
 
-                task.event_pending_send = Some((
+                task.events_pending_send.push_back((
                     chain_id,
                     Event::StatementsNotification {
                         peer_id,
