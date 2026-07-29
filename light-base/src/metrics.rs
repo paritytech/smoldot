@@ -71,20 +71,23 @@ impl Gauge {
     }
 }
 
-/// Success/failure counters of one network request protocol.
+/// Success/failure counters and total duration of one network request protocol.
 #[derive(Debug, Default)]
 pub struct RequestMetrics {
     pub success: Counter,
     pub failure: Counter,
+    pub duration_us: Counter,
 }
 
 impl RequestMetrics {
-    pub fn observe(&self, is_success: bool) {
+    pub fn observe(&self, is_success: bool, duration: core::time::Duration) {
         if is_success {
             self.success.inc();
         } else {
             self.failure.inc();
         }
+        self.duration_us
+            .add(u64::try_from(duration.as_micros()).unwrap_or(u64::MAX));
     }
 }
 
@@ -169,26 +172,36 @@ fn gauge(name: &'static str, value: u64) -> methods::Metric {
 /// Builds the response to `sudo_unstable_metrics` out of the process-wide network metrics and
 /// the metrics of the chain the JSON-RPC client is connected to.
 pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::MetricsSnapshot {
-    let requests_entries = [
+    let request_protocols = [
         ("blocks", &chain.blocks_requests),
         ("warpSync", &chain.warp_sync_requests),
         ("storageProof", &chain.storage_proof_requests),
         ("callProof", &chain.call_proof_requests),
-    ]
-    .into_iter()
-    .flat_map(|(protocol, metrics)| {
-        [
-            methods::MetricEntry {
-                labels: labels(&[("protocol", protocol), ("outcome", "success")]),
-                value: metrics.success.get() as f64,
-            },
-            methods::MetricEntry {
-                labels: labels(&[("protocol", protocol), ("outcome", "failure")]),
-                value: metrics.failure.get() as f64,
-            },
-        ]
-    })
-    .collect::<Vec<_>>();
+    ];
+
+    let requests_entries = request_protocols
+        .into_iter()
+        .flat_map(|(protocol, metrics)| {
+            [
+                methods::MetricEntry {
+                    labels: labels(&[("protocol", protocol), ("outcome", "success")]),
+                    value: metrics.success.get() as f64,
+                },
+                methods::MetricEntry {
+                    labels: labels(&[("protocol", protocol), ("outcome", "failure")]),
+                    value: metrics.failure.get() as f64,
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    let requests_duration_entries = request_protocols
+        .into_iter()
+        .map(|(protocol, metrics)| methods::MetricEntry {
+            labels: labels(&[("protocol", protocol)]),
+            value: metrics.duration_us.get() as f64 / 1_000_000.0,
+        })
+        .collect::<Vec<_>>();
 
     let metrics = alloc::vec![
         counter(
@@ -211,6 +224,11 @@ pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::Metr
             name: Cow::Borrowed("networkRequestsTotal"),
             ty: methods::MetricType::Counter,
             entries: requests_entries,
+        },
+        methods::Metric {
+            name: Cow::Borrowed("networkRequestSecondsTotal"),
+            ty: methods::MetricType::Counter,
+            entries: requests_duration_entries,
         },
         counter("networkPeerBansTotal", chain.peer_bans.get()),
         gauge(

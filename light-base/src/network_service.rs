@@ -309,7 +309,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             _keep_alive_messages_tx: self.messages_tx.clone(),
             messages_tx,
             metrics: chain_metrics,
-            marker: core::marker::PhantomData,
+            platform: self.platform.clone(),
         })
     }
 }
@@ -325,8 +325,8 @@ pub struct NetworkServiceChain<TPlat: PlatformRef> {
     /// Metrics of the chain, updated when requests finish.
     metrics: Arc<metrics::ChainMetrics>,
 
-    /// Dummy to hold the `TPlat` type.
-    marker: core::marker::PhantomData<TPlat>,
+    /// See [`Config::platform`]. Used to measure the duration of requests.
+    platform: TPlat,
 }
 
 /// Severity of a ban. See [`NetworkServiceChain::ban_and_disconnect`].
@@ -426,6 +426,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         config: codec::BlocksRequestConfig,
         timeout: Duration,
     ) -> Result<Vec<codec::BlockData>, BlocksRequestError> {
+        let when_started = self.platform.now();
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -439,7 +440,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .unwrap();
 
         let result = rx.await.unwrap();
-        self.metrics.blocks_requests.observe(result.is_ok());
+        self.metrics
+            .blocks_requests
+            .observe(result.is_ok(), self.platform.now() - when_started);
         result
     }
 
@@ -451,6 +454,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         begin_hash: [u8; 32],
         timeout: Duration,
     ) -> Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError> {
+        let when_started = self.platform.now();
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -464,7 +468,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .unwrap();
 
         let result = rx.await.unwrap();
-        self.metrics.warp_sync_requests.observe(result.is_ok());
+        self.metrics
+            .warp_sync_requests
+            .observe(result.is_ok(), self.platform.now() - when_started);
         result
     }
 
@@ -493,6 +499,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         config: codec::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
         timeout: Duration,
     ) -> Result<service::EncodedMerkleProof, StorageProofRequestError> {
+        let when_started = self.platform.now();
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -513,7 +520,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .unwrap();
 
         let result = rx.await.unwrap();
-        self.metrics.storage_proof_requests.observe(result.is_ok());
+        self.metrics
+            .storage_proof_requests
+            .observe(result.is_ok(), self.platform.now() - when_started);
         result
     }
 
@@ -527,6 +536,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
     ) -> Result<EncodedMerkleProof, CallProofRequestError> {
+        let when_started = self.platform.now();
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -548,7 +558,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .unwrap();
 
         let result = rx.await.unwrap();
-        self.metrics.call_proof_requests.observe(result.is_ok());
+        self.metrics
+            .call_proof_requests
+            .observe(result.is_ok(), self.platform.now() - when_started);
         result
     }
 
@@ -562,6 +574,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         >,
         timeout: Duration,
     ) -> Result<service::EncodedMerkleProof, ChildStorageProofRequestError> {
+        let when_started = self.platform.now();
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -582,7 +595,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .unwrap();
 
         let result = rx.await.unwrap();
-        self.metrics.storage_proof_requests.observe(result.is_ok());
+        self.metrics
+            .storage_proof_requests
+            .observe(result.is_ok(), self.platform.now() - when_started);
         result
     }
 
