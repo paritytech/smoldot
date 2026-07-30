@@ -504,7 +504,7 @@ function renderChart(cfg) {
 
   return `<figure class="chart">
   <figcaption>${esc(cfg.title)}${cfg.unit ? ` <span class="unit">(${esc(cfg.unit)})</span>` : ""}</figcaption>
-  ${cfg.series.length > 1 ? `<div class="legend">${cfg.series.map((s) => `<span><i style="background:var(--s${s.slot})"></i>${esc(s.name)}</span>`).join("")}</div>` : ""}
+  ${cfg.series.length > 1 || cfg.stacked ? `<div class="legend">${cfg.series.map((s) => `<span><i style="background:var(--s${s.slot})"></i>${esc(s.name)}</span>`).join("")}</div>` : ""}
   <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(cfg.title)}">${svg}</svg>
   <div class="tooltip" id="${id}-tip" hidden></div>
   <script type="application/json" id="${id}-data">${JSON.stringify(hover)}</script>
