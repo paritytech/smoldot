@@ -80,6 +80,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             &network_service,
             &effective_chain_info,
             block_number_bytes,
+            &metrics,
         )
         .await
         {
@@ -1332,6 +1333,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
+    metrics: &Arc<crate::metrics::ChainMetrics>,
 ) -> Result<BootstrappedParachain, String> {
     let ci_ref = chain_info.as_ref();
     let block_hash = ci_ref.finalized_block_header.hash(block_number_bytes);
@@ -1367,6 +1369,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
             chain_info,
             block_number_bytes,
             peer_id,
+            metrics,
         )
     })
     .await
@@ -1424,6 +1427,7 @@ async fn attempt_bootstrap_with_peer<TPlat: PlatformRef>(
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
     peer_id: libp2p::PeerId,
+    metrics: &Arc<crate::metrics::ChainMetrics>,
 ) -> Result<BootstrappedParachain, String> {
     let ci_ref = chain_info.as_ref();
     let state_root = *ci_ref.finalized_block_header.state_root;
@@ -1481,13 +1485,15 @@ async fn attempt_bootstrap_with_peer<TPlat: PlatformRef>(
         )
     );
 
+    let before_compilation = platform.now();
     let vm = executor::host::HostVmPrototype::new(executor::host::Config {
         module: &code,
         heap_pages,
         exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
         allow_unresolved_imports: true,
-    })
-    .map_err(|e| format!("Failed to compile runtime: {e}"))?;
+    });
+    metrics.observe_runtime_compilation(platform.now() - before_compilation, vm.is_ok());
+    let vm = vm.map_err(|e| format!("Failed to compile runtime: {e}"))?;
 
     // AuraApi_slot_duration
     let (slot_duration, vm) = {

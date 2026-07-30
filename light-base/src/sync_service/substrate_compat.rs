@@ -277,6 +277,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 let (new_sync, error) =
                     req.build(all::ExecHint::CompileWithNonDeterministicValidation, true);
                 let elapsed = task.platform.now() - before_instant;
+                task.metrics
+                    .observe_runtime_compilation(elapsed, error.is_ok());
                 match error {
                     Ok(()) => {
                         log!(
