@@ -476,7 +476,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                                     .ban_and_disconnect(
                                         sender_if_still_connected,
                                         network_service::BanSeverity::High,
-                                        "bad-warp-sync-fragment",
+                                        network_service::BanReason::BadWarpSyncFragment,
                                     )
                                     .await;
                             }
@@ -563,7 +563,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                                 .ban_and_disconnect(
                                     peer_id,
                                     network_service::BanSeverity::High,
-                                    "bad-block",
+                                    network_service::BanReason::BadBlock,
                                 )
                                 .await;
                         }*/
@@ -693,7 +693,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                                 .ban_and_disconnect(
                                     sender,
                                     network_service::BanSeverity::High,
-                                    "bad-justification",
+                                    network_service::BanReason::BadJustification,
                                 )
                                 .await;
                         }
@@ -723,7 +723,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             .ban_and_disconnect(
                                 sender,
                                 network_service::BanSeverity::High,
-                                "bad-grandpa-commit",
+                                network_service::BanReason::BadGrandpaCommit,
                             )
                             .await;
                     }
@@ -860,7 +860,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             .ban_and_disconnect(
                                 peer_id,
                                 network_service::BanSeverity::High,
-                                "bad-block-announce",
+                                network_service::BanReason::BadBlockAnnounce,
                             )
                             .await;
                     }
@@ -1206,7 +1206,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         source_peer_id,
                         network_service::BanSeverity::Low,
-                        "failed-blocks-request",
+                        network_service::BanReason::BlocksRequestFailed,
                     )
                     .await;
 
@@ -1240,7 +1240,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         sync[sync.request_source_id(request_id)].0.clone(),
                         network_service::BanSeverity::Low,
-                        "failed-warp-sync-request",
+                        network_service::BanReason::WarpSyncRequestFailed,
                     )
                     .await;
 
@@ -1266,7 +1266,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         sync[sync.request_source_id(request_id)].0.clone(),
                         network_service::BanSeverity::Low,
-                        "failed-storage-request",
+                        network_service::BanReason::StorageRequestFailed,
                     )
                     .await;
 
@@ -1292,7 +1292,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         sync[sync.request_source_id(request_id)].0.clone(),
                         network_service::BanSeverity::Low,
-                        "failed-call-proof-request",
+                        network_service::BanReason::CallProofRequestFailed,
                     )
                     .await;
 

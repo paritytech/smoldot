@@ -2144,7 +2144,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     .ban_and_disconnect(
                                         storage_request_sender,
                                         network_service::BanSeverity::Low,
-                                        "storage-proof-request-failed",
+                                        network_service::BanReason::StorageRequestFailed,
                                     )
                                     .await;
                                 handle_storage_on_demand_progress(
@@ -2198,7 +2198,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     .ban_and_disconnect(
                                         storage_request_sender,
                                         network_service::BanSeverity::Low,
-                                        "child-storage-proof-request-failed",
+                                        network_service::BanReason::ChildStorageRequestFailed,
                                     )
                                     .await;
                                 handle_storage_on_demand_progress(
@@ -2292,7 +2292,7 @@ async fn run_background<TPlat: PlatformRef>(
                             .ban_and_disconnect(
                                 call_proof_sender,
                                 network_service::BanSeverity::Low,
-                                "call-proof-request-failed",
+                                network_service::BanReason::CallProofRequestFailed,
                             )
                             .await;
                         (operation, None)
@@ -2380,7 +2380,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 .ban_and_disconnect(
                                     call_proof_sender,
                                     network_service::BanSeverity::High,
-                                    "invalid-call-proof",
+                                    network_service::BanReason::InvalidCallProof,
                                 )
                                 .await;
                         }

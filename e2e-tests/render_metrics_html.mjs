@@ -108,6 +108,17 @@ function lastValue(chain, name, labels) {
   return rows[rows.length - 1].values.get(metricKey(name, labels)) ?? null;
 }
 
+// Sum of a metric's entries across all label values, at the last sample.
+function lastValueSum(chain, name) {
+  const rows = indexed.get(chain);
+  if (rows.length === 0) return null;
+  let sum = null;
+  for (const [key, value] of rows[rows.length - 1].values) {
+    if (key.startsWith(`${name}|`)) sum = (sum ?? 0) + value;
+  }
+  return sum;
+}
+
 // ------------------------------------------------------------- chart configs
 
 // Categorical slots (reference dataviz palette, order is the CVD mechanism).
@@ -250,7 +261,7 @@ const tiles = [];
 for (const chain of chains) {
   tiles.push({ label: `${chain} finalized`, value: lastValue(chain, "syncFinalizedBlockHeight") });
   tiles.push({ label: `${chain} peers`, value: lastValue(chain, "networkGossipPeersConnected") });
-  const bans = lastValue(chain, "networkPeerBansTotal");
+  const bans = lastValueSum(chain, "networkPeerBansTotal");
   const verifyErr =
     (lastValue(chain, "syncBlocksVerifiedTotal", { outcome: "failure" }) ?? 0) +
     (lastValue(chain, "syncFinalityProofsVerifiedTotal", { outcome: "failure" }) ?? 0);

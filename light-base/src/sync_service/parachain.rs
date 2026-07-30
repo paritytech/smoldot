@@ -526,7 +526,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             .ban_and_disconnect(
                                 peer_id,
                                 network_service::BanSeverity::High,
-                                "bad-block-announce",
+                                network_service::BanReason::BadBlockAnnounce,
                             )
                             .await;
                     }
@@ -680,7 +680,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         source_peer_id,
                         network_service::BanSeverity::Low,
-                        "failed-blocks-request",
+                        network_service::BanReason::BlocksRequestFailed,
                     )
                     .await;
 
@@ -703,7 +703,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         sync[sync.request_source_id(request_id)].0.clone(),
                         network_service::BanSeverity::Low,
-                        "failed-storage-request",
+                        network_service::BanReason::StorageRequestFailed,
                     )
                     .await;
 
@@ -726,7 +726,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         sync[sync.request_source_id(request_id)].0.clone(),
                         network_service::BanSeverity::Low,
-                        "failed-call-proof-request",
+                        network_service::BanReason::CallProofRequestFailed,
                     )
                     .await;
 

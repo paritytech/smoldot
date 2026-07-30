@@ -23,7 +23,10 @@
 //! corresponding events are logged. Reads and writes use relaxed ordering: metrics are
 //! advisory and never synchronize other memory.
 
-use crate::{network_service::DiscoveredAddressDropReason, transactions_service::DropReasonKind};
+use crate::{
+    network_service::{BanReason, DiscoveredAddressDropReason},
+    transactions_service::DropReasonKind,
+};
 use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap, vec::Vec};
 use core::{
     fmt,
@@ -157,7 +160,7 @@ pub struct ChainMetrics {
     pub warp_sync_requests: RequestMetrics,
     pub storage_proof_requests: RequestMetrics,
     pub call_proof_requests: RequestMetrics,
-    pub peer_bans: Counter,
+    pub peer_bans: LabeledCounter<BanReason>,
     pub gossip_peers_connected: Gauge,
 
     pub sync_blocks_verified: Counter,
@@ -306,7 +309,7 @@ pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::Metr
             ty: methods::MetricType::Counter,
             entries: requests_duration_entries,
         },
-        counter("networkPeerBansTotal", chain.peer_bans.get()),
+        labeled_counter("networkPeerBansTotal", "reason", &chain.peer_bans),
         gauge(
             "networkGossipPeersConnected",
             chain.gossip_peers_connected.get()
@@ -391,6 +394,31 @@ mod tests {
                 "maxPendingTransactionsReached",
                 "invalid",
                 "validateError"
+            ]
+        );
+    }
+
+    #[test]
+    fn peer_ban_labels() {
+        let labels = BanReason::iter()
+            .map(<&'static str>::from)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "badBlock",
+                "badBlockAnnounce",
+                "badChildTrieRoot",
+                "badGrandpaCommit",
+                "badJustification",
+                "badMerkleProof",
+                "badWarpSyncFragment",
+                "invalidCallProof",
+                "blocksRequestFailed",
+                "callProofRequestFailed",
+                "childStorageRequestFailed",
+                "storageRequestFailed",
+                "warpSyncRequestFailed"
             ]
         );
     }

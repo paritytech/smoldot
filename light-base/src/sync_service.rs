@@ -349,7 +349,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         .ban_and_disconnect(
                             target,
                             network_service::BanSeverity::Low,
-                            "blocks-request-failed",
+                            network_service::BanReason::BlocksRequestFailed,
                         )
                         .await;
                     continue;
@@ -845,7 +845,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                             .ban_and_disconnect(
                                 target,
                                 network_service::BanSeverity::Low,
-                                "storage-request-failed",
+                                network_service::BanReason::StorageRequestFailed,
                             )
                             .await;
                         self.outcome_errors
@@ -871,7 +871,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         .ban_and_disconnect(
                             target,
                             network_service::BanSeverity::High,
-                            "bad-merkle-proof",
+                            network_service::BanReason::BadMerkleProof,
                         )
                         .await;
                     self.outcome_errors
@@ -897,7 +897,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                 .ban_and_disconnect(
                                     target,
                                     network_service::BanSeverity::High,
-                                    "bad-child-trie-root",
+                                    network_service::BanReason::BadChildTrieRoot,
                                 )
                                 .await;
                             self.outcome_errors

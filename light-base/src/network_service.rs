@@ -336,6 +336,29 @@ pub enum BanSeverity {
     High,
 }
 
+/// Reason for banning a peer. See [`NetworkServiceChain::ban_and_disconnect`].
+///
+/// Printed in the logs and used as the `reason` label of the `networkPeerBansTotal` metric.
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, strum::Display, strum::EnumIter, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "camelCase")]
+pub enum BanReason {
+    BadBlock,
+    BadBlockAnnounce,
+    BadChildTrieRoot,
+    BadGrandpaCommit,
+    BadJustification,
+    BadMerkleProof,
+    BadWarpSyncFragment,
+    InvalidCallProof,
+    BlocksRequestFailed,
+    CallProofRequestFailed,
+    ChildStorageRequestFailed,
+    StorageRequestFailed,
+    WarpSyncRequestFailed,
+}
+
 impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     /// Subscribes to the networking events that happen on the given chain.
     ///
@@ -393,7 +416,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     /// generated. Prevents a new gossip link with the same peer from being reopened for a
     /// little while.
     ///
-    /// `reason` is a human-readable string printed in the logs.
+    /// `reason` is printed in the logs and counted in the metrics.
     ///
     /// Due to race conditions, it is possible to reconnect to the peer soon after, in case the
     /// reconnection was already happening as the call to this function is still being processed.
@@ -404,9 +427,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         &self,
         peer_id: PeerId,
         severity: BanSeverity,
-        reason: &'static str,
+        reason: BanReason,
     ) {
-        self.metrics.peer_bans.inc();
+        self.metrics.peer_bans.inc(reason);
 
         let _ = self
             .messages_tx
@@ -943,7 +966,7 @@ enum ToBackgroundChain {
     DisconnectAndBan {
         peer_id: PeerId,
         severity: BanSeverity,
-        reason: &'static str,
+        reason: BanReason,
     },
     // TODO: serialize the request before sending over channel
     StartBlocksRequest {
