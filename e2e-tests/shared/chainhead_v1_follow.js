@@ -25,6 +25,7 @@
 
 import { createRpc } from "./rpc.js";
 import { decodeHeader } from "./codec.js";
+import { startMetricsSampler } from "./metrics_sampler.js";
 
 export const fileInputs = [
   "RELAY_CHAIN_SPEC",
@@ -45,6 +46,8 @@ export const envInputs = [
   "PARA_BEST_AT_LAUNCH",
   "PARA_FINALIZED_AT_LAUNCH",
   "INITIAL_LAG_TOLERANCE",
+  "SMOLDOT_METRICS_OUT",
+  "SMOLDOT_METRICS_INTERVAL_MS",
 ];
 
 // Multiplexes a smoldot chain's JSON-RPC stream. One pump loop classifies each
@@ -568,6 +571,24 @@ export default async function chainheadV1Follow(ctx) {
   }
 
   const mux = new JsonRpcMux(target);
+
+  // Optional metrics time series (SMOLDOT_METRICS_OUT): poll
+  // `sudo_unstable_metrics` on every chain for the whole run. The muxed chain
+  // is polled through the mux (id-routed, safe alongside the event loop); the
+  // rpc-managed relay through the out-of-band route (safe alongside the FIFO).
+  let metricsSampler = null;
+  if (env.SMOLDOT_METRICS_OUT && ctx.dumpMetrics) {
+    const intervalMs = Number.parseInt(env.SMOLDOT_METRICS_INTERVAL_MS ?? "5000", 10);
+    const targets = relayOnly
+      ? [{ chain: "relay", request: (m, p, t) => mux.request(m, p, t) }]
+      : [
+          { chain: "relay", request: (m, p, t) => rpc.sendRpcOutOfBand(relay, m, p, t) },
+          { chain: "para", request: (m, p, t) => mux.request(m, p, t) },
+        ];
+    metricsSampler = startMetricsSampler({ targets, intervalMs, log });
+    log(`metrics sampler started (interval ${intervalMs}ms -> ${env.SMOLDOT_METRICS_OUT})`);
+  }
+
   const validator = new ChainHeadValidator({
     withRuntime,
     minNewBlocks,
@@ -578,107 +599,121 @@ export default async function chainheadV1Follow(ctx) {
     log,
   });
 
-  const overallDeadline = Date.now() + overallTimeoutMs;
+  try {
+    const overallDeadline = Date.now() + overallTimeoutMs;
 
-  // Phase 1: primary subscription. Auto-resubscribe on `stop` until thresholds met or budget gone.
-  validator.beginNewSubscription();
-  let subId = await followSubscription(mux, withRuntime);
-  report("chainHead_v1_follow accepted", true, `subId=${subId}`);
-  let result;
-  do {
-    if (result?.reason === "stop") {
-      log(`[${validator.subLabel}] received stop, resubscribing`);
-      validator.beginNewSubscription();
-      subId = await followSubscription(mux, withRuntime);
-    }
-    result = await runSubscription(
-      log,
-      mux,
-      validator,
-      subId,
-      Math.min(Date.now() + perSubTimeoutMs, overallDeadline),
-      () => validator.thresholdsMet(),
-    );
-  } while (result.reason === "stop" && Date.now() < overallDeadline);
-
-  const primaryOk = validator.thresholdsMet();
-  report(
-    "primary subscription thresholds met",
-    primaryOk,
-    `newBlock=${validator.counters.newBlock}/${minNewBlocks} finalized=${validator.counters.finalized}/${minFinalized}`,
-  );
-
-  // Phase 2: explicit resubscribe. Same thresholds; counters reset per sub.
-  if (testResubscribe && primaryOk && Date.now() < overallDeadline) {
-    try {
-      await mux.request("chainHead_v1_unfollow", [subId], 30_000);
-      report("chainHead_v1_unfollow accepted", true, `subId=${subId}`);
-    } catch (e) {
-      report("chainHead_v1_unfollow accepted", false, e.message);
-    }
+    // Phase 1: primary subscription. Auto-resubscribe on `stop` until thresholds met or budget gone.
     validator.beginNewSubscription();
-    let phase2SubId = await followSubscription(mux, withRuntime);
-    report("chainHead_v1_follow after unfollow accepted", true, `subId=${phase2SubId}`);
-    let phase2Result;
+    let subId = await followSubscription(mux, withRuntime);
+    report("chainHead_v1_follow accepted", true, `subId=${subId}`);
+    let result;
     do {
-      if (phase2Result?.reason === "stop") {
+      if (result?.reason === "stop") {
         log(`[${validator.subLabel}] received stop, resubscribing`);
         validator.beginNewSubscription();
-        phase2SubId = await followSubscription(mux, withRuntime);
+        subId = await followSubscription(mux, withRuntime);
       }
-      phase2Result = await runSubscription(
+      result = await runSubscription(
         log,
         mux,
         validator,
-        phase2SubId,
+        subId,
         Math.min(Date.now() + perSubTimeoutMs, overallDeadline),
         () => validator.thresholdsMet(),
       );
-    } while (phase2Result.reason === "stop" && Date.now() < overallDeadline);
-    const phase2Ok = validator.thresholdsMet();
+    } while (result.reason === "stop" && Date.now() < overallDeadline);
+
+    const primaryOk = validator.thresholdsMet();
     report(
-      "resubscribe phase thresholds met",
-      phase2Ok,
+      "primary subscription thresholds met",
+      primaryOk,
       `newBlock=${validator.counters.newBlock}/${minNewBlocks} finalized=${validator.counters.finalized}/${minFinalized}`,
     );
-  }
 
-  const reportList = (name, items) => {
-    const suffix = `${items.length} issue${items.length === 1 ? "" : "s"}`;
-    report(name, items.length === 0, suffix);
-    for (const item of items) log(`  ${item}`);
-  };
-  reportList("no spec violations", validator.violations);
-  reportList("no regressions", validator.regressions);
-
-  if (env.SMOLDOT_DB_DUMP_DIR && validator.violations.length === 0) {
-    try {
-      if (relayOnly) {
-        // Relay is the muxed chain here; there is no parachain.
-        const relayDb = await mux.request("chainHead_unstable_finalizedDatabase", [], 30_000);
-        await ctx.dumpDb({ "relay.json": relayDb });
-      } else {
-        // Relay has no mux, so use the rpc helper directly. Para is muxed.
-        const relayDb = await rpc.sendRpcAndWait(
-          relay,
-          "chainHead_unstable_finalizedDatabase",
-          [],
-          30_000,
-        );
-        const paraDb = await mux.request("chainHead_unstable_finalizedDatabase", [], 30_000);
-        await ctx.dumpDb({ "relay.json": relayDb, "para.json": paraDb });
+    // Phase 2: explicit resubscribe. Same thresholds; counters reset per sub.
+    if (testResubscribe && primaryOk && Date.now() < overallDeadline) {
+      try {
+        await mux.request("chainHead_v1_unfollow", [subId], 30_000);
+        report("chainHead_v1_unfollow accepted", true, `subId=${subId}`);
+      } catch (e) {
+        report("chainHead_v1_unfollow accepted", false, e.message);
       }
-      report("dumped smoldot databaseContent", true, env.SMOLDOT_DB_DUMP_DIR);
-    } catch (e) {
-      report("dumped smoldot databaseContent", false, e.message);
+      validator.beginNewSubscription();
+      let phase2SubId = await followSubscription(mux, withRuntime);
+      report("chainHead_v1_follow after unfollow accepted", true, `subId=${phase2SubId}`);
+      let phase2Result;
+      do {
+        if (phase2Result?.reason === "stop") {
+          log(`[${validator.subLabel}] received stop, resubscribing`);
+          validator.beginNewSubscription();
+          phase2SubId = await followSubscription(mux, withRuntime);
+        }
+        phase2Result = await runSubscription(
+          log,
+          mux,
+          validator,
+          phase2SubId,
+          Math.min(Date.now() + perSubTimeoutMs, overallDeadline),
+          () => validator.thresholdsMet(),
+        );
+      } while (phase2Result.reason === "stop" && Date.now() < overallDeadline);
+      const phase2Ok = validator.thresholdsMet();
+      report(
+        "resubscribe phase thresholds met",
+        phase2Ok,
+        `newBlock=${validator.counters.newBlock}/${minNewBlocks} finalized=${validator.counters.finalized}/${minFinalized}`,
+      );
     }
-  }
 
-  const exitOk =
-    validator.violations.length === 0 && validator.regressions.length === 0 && primaryOk;
-  if (!exitOk) {
-    throw new Error(
-      `chainhead_v1_follow failed: violations=${validator.violations.length} regressions=${validator.regressions.length} thresholds_met=${primaryOk}`,
-    );
+    const reportList = (name, items) => {
+      const suffix = `${items.length} issue${items.length === 1 ? "" : "s"}`;
+      report(name, items.length === 0, suffix);
+      for (const item of items) log(`  ${item}`);
+    };
+    reportList("no spec violations", validator.violations);
+    reportList("no regressions", validator.regressions);
+
+    if (env.SMOLDOT_DB_DUMP_DIR && validator.violations.length === 0) {
+      try {
+        if (relayOnly) {
+          // Relay is the muxed chain here; there is no parachain.
+          const relayDb = await mux.request("chainHead_unstable_finalizedDatabase", [], 30_000);
+          await ctx.dumpDb({ "relay.json": relayDb });
+        } else {
+          // Relay has no mux, so use the rpc helper directly. Para is muxed.
+          const relayDb = await rpc.sendRpcAndWait(
+            relay,
+            "chainHead_unstable_finalizedDatabase",
+            [],
+            30_000,
+          );
+          const paraDb = await mux.request("chainHead_unstable_finalizedDatabase", [], 30_000);
+          await ctx.dumpDb({ "relay.json": relayDb, "para.json": paraDb });
+        }
+        report("dumped smoldot databaseContent", true, env.SMOLDOT_DB_DUMP_DIR);
+      } catch (e) {
+        report("dumped smoldot databaseContent", false, e.message);
+      }
+    }
+
+    const exitOk =
+      validator.violations.length === 0 && validator.regressions.length === 0 && primaryOk;
+    if (!exitOk) {
+      throw new Error(
+        `chainhead_v1_follow failed: violations=${validator.violations.length} regressions=${validator.regressions.length} thresholds_met=${primaryOk}`,
+      );
+    }
+  } finally {
+    // Always persist the metrics time series, including on failure - a failing
+    // run is where the graphs matter most.
+    if (metricsSampler) {
+      try {
+        const dump = await metricsSampler.stop();
+        await ctx.dumpMetrics(dump);
+        report("metrics dump written", true, env.SMOLDOT_METRICS_OUT);
+      } catch (e) {
+        report("metrics dump written", false, e.message);
+      }
+    }
   }
 }

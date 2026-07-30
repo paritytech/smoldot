@@ -30,16 +30,27 @@
 
 export function createRpc(client) {
   let nextId = 1;
-  const stores = new Map(); // chain -> { q: [] }
+  const stores = new Map(); // chain -> { q: [], oob: Map<id, resolver> }
 
   // Adds a chain and starts draining its responses into a per-chain FIFO.
+  // Responses whose id is registered in `oob` (out-of-band requests) resolve
+  // their waiter directly and never enter the FIFO.
   async function addChain(opts) {
     const chain = await client.addChain(opts);
-    const store = { q: [] };
+    const store = { q: [], oob: new Map() };
     stores.set(chain, store);
     (async () => {
       try {
-        for await (const raw of chain.jsonRpcResponses) store.q.push(JSON.parse(raw));
+        for await (const raw of chain.jsonRpcResponses) {
+          const msg = JSON.parse(raw);
+          const waiter = msg.id != null ? store.oob.get(msg.id) : undefined;
+          if (waiter) {
+            store.oob.delete(msg.id);
+            waiter(msg);
+          } else {
+            store.q.push(msg);
+          }
+        }
       } catch (_) {
         // chain removed / client terminated
       }
@@ -95,6 +106,32 @@ export function createRpc(client) {
     throw new Error(`Timed out waiting for ${method} response after ${timeoutMs}ms`);
   }
 
+  // Like `sendRpcAndWait`, but safe to run concurrently with the queue-draining
+  // readers above: the response is routed by id in the drain loop and never
+  // enters the FIFO, so it can neither steal nor be stolen by queued messages.
+  // Used by background pollers (e.g. the metrics sampler).
+  function sendRpcOutOfBand(chain, method, params = [], timeoutMs = 60000) {
+    const store = stores.get(chain);
+    if (!store) {
+      throw new Error("rpc.sendRpcOutOfBand on a chain that was never added via this rpc");
+    }
+    const id = sendRpc(chain, method, params).toString();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        store.oob.delete(id);
+        reject(new Error(`Timed out waiting for ${method} response after ${timeoutMs}ms`));
+      }, timeoutMs);
+      store.oob.set(id, (msg) => {
+        clearTimeout(timer);
+        if (msg.error) {
+          reject(new Error(`RPC error for ${method}: ${JSON.stringify(msg.error)}`));
+        } else {
+          resolve(msg.result);
+        }
+      });
+    });
+  }
+
   async function waitForJsonRpcMatch(chain, predicate, timeoutMs = 60000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -110,6 +147,7 @@ export function createRpc(client) {
     sendRpc,
     readJsonRpcUntil,
     sendRpcAndWait,
+    sendRpcOutOfBand,
     waitForJsonRpcMatch,
   };
 }
