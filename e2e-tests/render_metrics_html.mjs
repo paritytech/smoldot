@@ -119,6 +119,21 @@ function lastValueSum(chain, name) {
   return sum;
 }
 
+// Distinct values of `labelKey` seen for a metric across the whole dump, first-seen order.
+function labelValues(chain, name, labelKey) {
+  const seen = new Set();
+  for (const row of indexed.get(chain)) {
+    for (const key of row.values.keys()) {
+      if (!key.startsWith(`${name}|`)) continue;
+      for (const pair of key.slice(name.length + 1).split(",")) {
+        const [k, v] = pair.split("=");
+        if (k === labelKey && v) seen.add(v);
+      }
+    }
+  }
+  return [...seen];
+}
+
 // ------------------------------------------------------------- chart configs
 
 // Categorical slots (reference dataviz palette, order is the CVD mechanism).
@@ -240,6 +255,41 @@ for (const chain of chains) {
       { name: "compileTime", slot: 0, points: gaugeSeries(chain, "runtimeCompilationSecondsTotal") },
     ],
   });
+  // Peer bans by reason. Only reasons that actually fired become series; the
+  // chart is omitted entirely on a ban-free run (the stat tile still shows 0).
+  // At most 4 slots: top 3 reasons plus an aggregated "other" if needed.
+  {
+    const active = labelValues(chain, "networkPeerBansTotal", "reason")
+      .map((r) => ({ r, last: lastValue(chain, "networkPeerBansTotal", { reason: r }) ?? 0 }))
+      .filter((x) => x.last > 0)
+      .sort((a, b) => b.last - a.last);
+    const named = active.length > 4 ? active.slice(0, 3) : active;
+    const series = named.map((x, i) => ({
+      name: x.r,
+      slot: i,
+      points: gaugeSeries(chain, "networkPeerBansTotal", { reason: x.r }),
+    }));
+    const rest = active.slice(named.length);
+    if (rest.length > 0) {
+      const parts = rest.map((x) => gaugeSeries(chain, "networkPeerBansTotal", { reason: x.r }));
+      series.push({
+        name: "other",
+        slot: 3,
+        points: parts[0].map((p, i) => ({
+          t: p.t,
+          v: parts.reduce((sum, sr) => sum + (sr[i].v ?? 0), 0),
+        })),
+      });
+    }
+    addChart({
+      group: chain,
+      title: "Peer bans (cumulative)",
+      unit: "ban",
+      zeroBase: true,
+      stacked: true,
+      series,
+    });
+  }
 }
 
 // Process-wide connection churn (identical in every chain's snapshot).
@@ -253,6 +303,20 @@ addChart({
     { name: "handshaken", slot: 1, points: rateSeries(chains[0], "networkConnectionsHandshakesFinishedTotal") },
     { name: "shutdown", slot: 2, points: rateSeries(chains[0], "networkConnectionsShutdownsTotal") },
   ],
+});
+
+// Process-wide discovery drops (fixed slot per reason, matching the enum order).
+addChart({
+  group: "process",
+  title: "Discovery addresses dropped (cumulative)",
+  unit: "addr",
+  zeroBase: true,
+  stacked: true,
+  series: ["peer-id-mismatch", "not-supported", "invalid"].map((r, i) => ({
+    name: r,
+    slot: i,
+    points: gaugeSeries(chains[0], "networkDiscoveryAddressesDroppedTotal", { reason: r }),
+  })),
 });
 
 // ------------------------------------------------------------------ stat tiles
@@ -306,7 +370,22 @@ const fmtElapsed = (t) => {
 let chartSeq = 0;
 function renderChart(cfg) {
   const id = `c${chartSeq++}`;
-  const pts = cfg.series.flatMap((s) => s.points.filter((p) => p.v != null).map((p) => p.v));
+  // Stacked mode: filled bands between running-sum boundaries; nulls count as 0.
+  // Assumes index-aligned timestamps across series (true for series built from
+  // the same dump rows).
+  let bands = null;
+  if (cfg.stacked) {
+    const n = Math.max(...cfg.series.map((s) => s.points.length));
+    const base = new Array(n).fill(0);
+    bands = cfg.series.map((s) => {
+      const low = [...base];
+      for (let i = 0; i < n; i++) base[i] += s.points[i]?.v ?? 0;
+      return { s, low, high: [...base] };
+    });
+  }
+  const pts = bands
+    ? bands[bands.length - 1].high
+    : cfg.series.flatMap((s) => s.points.filter((p) => p.v != null).map((p) => p.v));
   let yMin = cfg.zeroBase ? 0 : Math.min(...pts);
   let yMax = Math.max(...pts);
   if (!cfg.zeroBase) { const pad = (yMax - yMin || 1) * 0.08; yMin -= pad; yMax += pad; }
@@ -330,7 +409,30 @@ function renderChart(cfg) {
   svg += `<line class="axis" x1="${M.l}" x2="${W - M.r}" y1="${H - M.b}" y2="${H - M.b}"/>`;
 
   const endLabels = [];
-  cfg.series.forEach((s) => {
+  if (bands) {
+    const times = cfg.series[0].points.map((p) => p.t);
+    const edge = (arr) => arr.map((v, i) => `${x(times[i]).toFixed(1)},${y(v).toFixed(1)}`);
+    for (const b of bands) {
+      const top = edge(b.high);
+      const bottom = edge(b.low).reverse();
+      svg += `<path d="M${top.join(" L")} L${bottom.join(" L")} Z" fill="var(--s${b.s.slot})"/>`;
+    }
+    // 2px surface gap between adjacent bands.
+    for (const b of bands.slice(0, -1)) {
+      svg += `<polyline points="${edge(b.high).join(" ")}" fill="none" stroke="var(--surface)" stroke-width="2"/>`;
+    }
+    const last = times.length - 1;
+    for (const b of bands) {
+      if (cfg.series.length > 1 && b.high[last] > b.low[last]) {
+        endLabels.push({
+          slot: b.s.slot,
+          name: b.s.name,
+          y: (y(b.low[last]) + y(b.high[last])) / 2,
+        });
+      }
+    }
+  }
+  if (!bands) cfg.series.forEach((s) => {
     // Split into segments at nulls so gaps stay gaps.
     let seg = [];
     const segs = [];
@@ -366,7 +468,8 @@ function renderChart(cfg) {
   }
   for (const l of endLabels) {
     svg += `<circle cx="${W - M.r + 6}" cy="${l.y}" r="3" fill="var(--s${l.slot})"/>`;
-    svg += `<text class="endlbl" x="${W - M.r + 12}" y="${l.y + 3}">${esc(l.name)}</text>`;
+    const short = l.name.length > 13 ? `${l.name.slice(0, 12)}…` : l.name;
+    svg += `<text class="endlbl" x="${W - M.r + 12}" y="${l.y + 3}">${esc(short)}</text>`;
   }
 
   svg += `<line id="${id}-x" class="crosshair" y1="${M.t}" y2="${H - M.b}" x1="-10" x2="-10"/>`;
