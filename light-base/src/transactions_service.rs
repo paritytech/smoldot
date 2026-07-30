@@ -327,7 +327,7 @@ pub enum TransactionStatus {
 #[derive(Debug, Clone, strum::EnumDiscriminants)]
 #[strum_discriminants(name(DropReasonKind))]
 #[strum_discriminants(derive(strum::EnumIter, strum::IntoStaticStr))]
-#[strum_discriminants(strum(serialize_all = "camelCase"))]
+#[strum_discriminants(strum(serialize_all = "kebab-case"))]
 pub enum DropReason {
     /// Transaction has been included in a finalized block.
     ///

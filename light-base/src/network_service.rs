@@ -342,7 +342,7 @@ pub enum BanSeverity {
 #[derive(
     Debug, Copy, Clone, PartialEq, Eq, strum::Display, strum::EnumIter, strum::IntoStaticStr,
 )]
-#[strum(serialize_all = "camelCase")]
+#[strum(serialize_all = "kebab-case")]
 pub enum BanReason {
     BadBlock,
     BadBlockAnnounce,
@@ -931,7 +931,7 @@ impl ChildStorageProofRequestError {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::EnumIter, strum::IntoStaticStr,
 )]
-#[strum(serialize_all = "camelCase")]
+#[strum(serialize_all = "kebab-case")]
 pub(crate) enum DiscoveredAddressDropReason {
     /// Address contains a `/p2p/` component that doesn't match the peer it was announced for.
     PeerIdMismatch,

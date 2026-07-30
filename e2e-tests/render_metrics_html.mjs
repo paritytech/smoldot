@@ -128,7 +128,7 @@ const SLOTS = [
   { light: "#1baf7a", dark: "#199e70" },
   { light: "#eda100", dark: "#c98500" },
 ];
-const PROTOCOLS = ["blocks", "warpSync", "storageProof", "callProof"];
+const PROTOCOLS = ["blocks", "warp-sync", "storage-proof", "call-proof"];
 
 const charts = [];
 function addChart(cfg) {

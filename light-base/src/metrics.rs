@@ -101,7 +101,7 @@ impl RequestMetrics {
 }
 
 /// Value usable as a metric label: a fieldless enum deriving `strum::EnumIter` and
-/// `strum::IntoStaticStr` (with `#[strum(serialize_all = "camelCase")]`). For enums with
+/// `strum::IntoStaticStr` (with `#[strum(serialize_all = "kebab-case")]`). For enums with
 /// payloads, derive `strum::EnumDiscriminants` and use the generated discriminants enum.
 /// Variants marked `#[strum(disabled)]` are excluded from the metric.
 pub trait MetricLabel: IntoEnumIterator + Into<&'static str> + PartialEq {}
@@ -252,9 +252,9 @@ fn gauge(name: &'static str, value: u64) -> methods::Metric {
 pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::MetricsSnapshot {
     let request_protocols = [
         ("blocks", &chain.blocks_requests),
-        ("warpSync", &chain.warp_sync_requests),
-        ("storageProof", &chain.storage_proof_requests),
-        ("callProof", &chain.call_proof_requests),
+        ("warp-sync", &chain.warp_sync_requests),
+        ("storage-proof", &chain.storage_proof_requests),
+        ("call-proof", &chain.call_proof_requests),
     ];
 
     let requests_entries = request_protocols
@@ -390,10 +390,10 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "gapInChain",
-                "maxPendingTransactionsReached",
+                "gap-in-chain",
+                "max-pending-transactions-reached",
                 "invalid",
-                "validateError"
+                "validate-error"
             ]
         );
     }
@@ -406,19 +406,19 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "badBlock",
-                "badBlockAnnounce",
-                "badChildTrieRoot",
-                "badGrandpaCommit",
-                "badJustification",
-                "badMerkleProof",
-                "badWarpSyncFragment",
-                "invalidCallProof",
-                "blocksRequestFailed",
-                "callProofRequestFailed",
-                "childStorageRequestFailed",
-                "storageRequestFailed",
-                "warpSyncRequestFailed"
+                "bad-block",
+                "bad-block-announce",
+                "bad-child-trie-root",
+                "bad-grandpa-commit",
+                "bad-justification",
+                "bad-merkle-proof",
+                "bad-warp-sync-fragment",
+                "invalid-call-proof",
+                "blocks-request-failed",
+                "call-proof-request-failed",
+                "child-storage-request-failed",
+                "storage-request-failed",
+                "warp-sync-request-failed"
             ]
         );
     }
@@ -428,7 +428,7 @@ mod tests {
         let labels = DiscoveredAddressDropReason::iter()
             .map(<&'static str>::from)
             .collect::<Vec<_>>();
-        assert_eq!(labels, ["peerIdMismatch", "notSupported", "invalid"]);
+        assert_eq!(labels, ["peer-id-mismatch", "not-supported", "invalid"]);
     }
 
     #[test]
