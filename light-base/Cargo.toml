@@ -38,6 +38,7 @@ serde_json = { version = "1.0.104", default-features = false, features = ["alloc
 siphasher = { version = "1.0.1", default-features = false }
 slab = { version = "0.4.8", default-features = false }
 smoldot = { version = "2.0.0", path = "../lib", default-features = false }
+strum = { version = "0.27", default-features = false, features = ["derive"] }
 zeroize = { version = "1.7.0", default-features = false, features = ["alloc"] }
 
 # `std` feature

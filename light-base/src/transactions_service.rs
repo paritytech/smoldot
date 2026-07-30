@@ -324,11 +324,15 @@ pub enum TransactionStatus {
 }
 
 /// See [`TransactionStatus::Dropped`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, strum::EnumDiscriminants)]
+#[strum_discriminants(name(DropReasonKind))]
+#[strum_discriminants(derive(strum::EnumIter, strum::IntoStaticStr))]
+#[strum_discriminants(strum(serialize_all = "camelCase"))]
 pub enum DropReason {
     /// Transaction has been included in a finalized block.
     ///
     /// This is a success path.
+    #[strum_discriminants(strum(disabled))]
     Finalized { block_hash: [u8; 32], index: u32 },
 
     /// Transaction has been dropped because there was a gap in the chain of blocks. It is
@@ -346,6 +350,10 @@ pub enum DropReason {
     ValidateError(ValidateTransactionError),
 
     /// Transaction service background task has crashed.
+    ///
+    /// Excluded from `transactionsDroppedTotal`: yielded outside the background task, so
+    /// there is no site that could count it.
+    #[strum_discriminants(strum(disabled))]
     Crashed,
 }
 
@@ -476,7 +484,7 @@ async fn background_task<TPlat: PlatformRef>(
                             updates_report: Some(updates_report),
                             ..
                         }) => {
-                            metrics.transactions_dropped.inc();
+                            metrics.transactions_dropped.inc(&DropReason::GapInChain);
                             let _ = updates_report
                                 .0
                                 .send(TransactionStatus::Dropped(DropReason::GapInChain))
@@ -501,7 +509,10 @@ async fn background_task<TPlat: PlatformRef>(
         // Drop all pending transactions of the pool.
         for (_, pending) in worker.pending_transactions.transactions_iter_mut() {
             // TODO: only do this if transaction hasn't been validated yet
-            worker.metrics.transactions_dropped.inc();
+            worker
+                .metrics
+                .transactions_dropped
+                .inc(&DropReason::GapInChain);
             pending.update_status(TransactionStatus::Dropped(DropReason::GapInChain));
         }
 
@@ -680,11 +691,12 @@ async fn background_task<TPlat: PlatformRef>(
                     ?error
                 );
 
-                worker.metrics.transactions_dropped.inc();
-                transaction.update_status(TransactionStatus::Dropped(match error {
+                let reason = match error {
                     InvalidOrError::Invalid(err) => DropReason::Invalid(err),
                     InvalidOrError::ValidateError(err) => DropReason::ValidateError(err),
-                }));
+                };
+                worker.metrics.transactions_dropped.inc(&reason);
+                transaction.update_status(TransactionStatus::Dropped(reason));
             }
 
             // Start block bodies downloads that need to be started.
@@ -1235,7 +1247,10 @@ async fn background_task<TPlat: PlatformRef>(
                     if worker.pending_transactions.num_transactions()
                         >= worker.max_pending_transactions
                     {
-                        worker.metrics.transactions_dropped.inc();
+                        worker
+                            .metrics
+                            .transactions_dropped
+                            .inc(&DropReason::MaxPendingTransactionsReached);
                         if let Some((updates_report, _)) = updates_report {
                             let _ = updates_report.try_send(TransactionStatus::Dropped(
                                 DropReason::MaxPendingTransactionsReached,

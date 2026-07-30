@@ -23,9 +23,15 @@
 //! corresponding events are logged. Reads and writes use relaxed ordering: metrics are
 //! advisory and never synchronize other memory.
 
-use alloc::{borrow::Cow, collections::BTreeMap, vec::Vec};
-use core::sync::atomic::{AtomicU64, Ordering};
+use crate::{network_service::DiscoveredAddressDropReason, transactions_service::DropReasonKind};
+use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap, vec::Vec};
+use core::{
+    fmt,
+    marker::PhantomData,
+    sync::atomic::{AtomicU64, Ordering},
+};
 use smoldot::json_rpc::methods;
+use strum::IntoEnumIterator;
 
 /// Monotonically increasing counter.
 #[derive(Debug, Default)]
@@ -91,13 +97,57 @@ impl RequestMetrics {
     }
 }
 
+/// Value usable as a metric label: a fieldless enum deriving `strum::EnumIter` and
+/// `strum::IntoStaticStr` (with `#[strum(serialize_all = "camelCase")]`). For enums with
+/// payloads, derive `strum::EnumDiscriminants` and use the generated discriminants enum.
+/// Variants marked `#[strum(disabled)]` are excluded from the metric.
+pub trait MetricLabel: IntoEnumIterator + Into<&'static str> + PartialEq {}
+impl<T: IntoEnumIterator + Into<&'static str> + PartialEq> MetricLabel for T {}
+
+/// Counter broken down by the variants of `L`.
+pub struct LabeledCounter<L: MetricLabel> {
+    counters: Box<[Counter]>,
+    marker: PhantomData<fn(&L)>,
+}
+
+impl<L: MetricLabel> LabeledCounter<L> {
+    pub fn inc(&self, value: impl Into<L>) {
+        let value = value.into();
+        // A value absent from the iterator is a `#[strum(disabled)]` variant: not counted.
+        if let Some(position) = L::iter().position(|v| v == value) {
+            self.counters[position].inc();
+        }
+    }
+}
+
+impl<L: MetricLabel> Default for LabeledCounter<L> {
+    fn default() -> Self {
+        LabeledCounter {
+            counters: L::iter().map(|_| Counter::default()).collect(),
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<L: MetricLabel> fmt::Debug for LabeledCounter<L> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_map()
+            .entries(
+                L::iter()
+                    .map(Into::into)
+                    .zip(self.counters.iter().map(Counter::get)),
+            )
+            .finish()
+    }
+}
+
 /// Metrics of the network service. One instance per process, shared between all chains.
 #[derive(Debug, Default)]
 pub struct NetworkMetrics {
     pub connections_started: Counter,
     pub connections_handshakes_finished: Counter,
     pub connections_shutdowns: Counter,
-    pub discovery_addresses_dropped: Counter,
+    pub(crate) discovery_addresses_dropped: LabeledCounter<DiscoveredAddressDropReason>,
 }
 
 /// Per-chain metrics. One instance per chain, shared between all the services of that chain.
@@ -125,7 +175,7 @@ pub struct ChainMetrics {
     pub runtime_compilation_time_us: Counter,
     pub runtime_cache_hits: Counter,
 
-    pub transactions_dropped: Counter,
+    pub transactions_dropped: LabeledCounter<DropReasonKind>,
     pub json_rpc_requests: Counter,
 }
 
@@ -149,6 +199,13 @@ fn labels(
         .collect()
 }
 
+fn entry(labels_list: &[(&'static str, &'static str)], value: u64) -> methods::MetricEntry {
+    methods::MetricEntry {
+        labels: labels(labels_list),
+        value: value as f64,
+    }
+}
+
 fn counter(name: &'static str, value: u64) -> methods::Metric {
     methods::Metric {
         name: Cow::Borrowed(name),
@@ -157,6 +214,22 @@ fn counter(name: &'static str, value: u64) -> methods::Metric {
             labels: BTreeMap::new(),
             value: value as f64,
         }],
+    }
+}
+
+fn labeled_counter<L: MetricLabel>(
+    name: &'static str,
+    label_key: &'static str,
+    counter: &LabeledCounter<L>,
+) -> methods::Metric {
+    methods::Metric {
+        name: Cow::Borrowed(name),
+        ty: methods::MetricType::Counter,
+        entries: L::iter()
+            .map(Into::into)
+            .zip(counter.counters.iter())
+            .map(|(label, counter)| entry(&[(label_key, label)], counter.get()))
+            .collect(),
     }
 }
 
@@ -218,9 +291,10 @@ pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::Metr
             "networkConnectionsShutdownsTotal",
             network.connections_shutdowns.get()
         ),
-        counter(
+        labeled_counter(
             "networkDiscoveryAddressesDroppedTotal",
-            network.discovery_addresses_dropped.get()
+            "reason",
+            &network.discovery_addresses_dropped,
         ),
         methods::Metric {
             name: Cow::Borrowed("networkRequestsTotal"),
@@ -237,19 +311,31 @@ pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::Metr
             "networkGossipPeersConnected",
             chain.gossip_peers_connected.get()
         ),
-        counter("syncBlocksVerifiedTotal", chain.sync_blocks_verified.get()),
-        counter(
-            "syncBlockVerifyErrorsTotal",
-            chain.sync_block_verify_errors.get()
-        ),
-        counter(
-            "syncFinalityProofsVerifiedTotal",
-            chain.sync_finality_proofs_verified.get()
-        ),
-        counter(
-            "syncFinalityProofVerifyErrorsTotal",
-            chain.sync_finality_proof_verify_errors.get()
-        ),
+        methods::Metric {
+            name: Cow::Borrowed("syncBlocksVerifiedTotal"),
+            ty: methods::MetricType::Counter,
+            entries: alloc::vec![
+                entry(&[("outcome", "success")], chain.sync_blocks_verified.get()),
+                entry(
+                    &[("outcome", "failure")],
+                    chain.sync_block_verify_errors.get(),
+                ),
+            ],
+        },
+        methods::Metric {
+            name: Cow::Borrowed("syncFinalityProofsVerifiedTotal"),
+            ty: methods::MetricType::Counter,
+            entries: alloc::vec![
+                entry(
+                    &[("outcome", "success")],
+                    chain.sync_finality_proofs_verified.get(),
+                ),
+                entry(
+                    &[("outcome", "failure")],
+                    chain.sync_finality_proof_verify_errors.get(),
+                ),
+            ],
+        },
         counter(
             "syncWarpFragmentsVerifiedTotal",
             chain.sync_warp_fragments_verified.get()
@@ -278,9 +364,52 @@ pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::Metr
             }],
         },
         counter("runtimeCacheHitsTotal", chain.runtime_cache_hits.get()),
-        counter("transactionsDroppedTotal", chain.transactions_dropped.get()),
+        labeled_counter(
+            "transactionsDroppedTotal",
+            "reason",
+            &chain.transactions_dropped,
+        ),
         counter("jsonrpcRequestsTotal", chain.json_rpc_requests.get()),
     ];
 
     methods::MetricsSnapshot { metrics }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transactions_dropped_labels() {
+        let labels = DropReasonKind::iter()
+            .map(<&'static str>::from)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "gapInChain",
+                "maxPendingTransactionsReached",
+                "invalid",
+                "validateError"
+            ]
+        );
+    }
+
+    #[test]
+    fn discovered_address_drop_labels() {
+        let labels = DiscoveredAddressDropReason::iter()
+            .map(<&'static str>::from)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["peerIdMismatch", "notSupported", "invalid"]);
+    }
+
+    #[test]
+    fn disabled_variants_not_counted() {
+        let counter = LabeledCounter::<DropReasonKind>::default();
+        counter.inc(&crate::transactions_service::DropReason::Crashed);
+        counter.inc(&crate::transactions_service::DropReason::GapInChain);
+        let entries = labeled_counter("test", "reason", &counter).entries;
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries.iter().map(|e| e.value).sum::<f64>(), 1.0);
+    }
 }

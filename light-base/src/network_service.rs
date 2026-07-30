@@ -904,6 +904,20 @@ impl ChildStorageProofRequestError {
     }
 }
 
+/// Why an address obtained through discovery was discarded.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::EnumIter, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "camelCase")]
+pub(crate) enum DiscoveredAddressDropReason {
+    /// Address contains a `/p2p/` component that doesn't match the peer it was announced for.
+    PeerIdMismatch,
+    /// Platform doesn't support connecting to this type of address.
+    NotSupported,
+    /// Address failed to parse.
+    Invalid,
+}
+
 /// Owned version of [`codec::ChildStorageProofRequestConfig`] for sending across channel.
 struct ChildStorageProofRequestConfigOwned {
     block_hash: [u8; 32],
@@ -2975,17 +2989,19 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         match Multiaddr::from_bytes(addr) {
                             Ok(mut a) => {
                                 if !pop_p2p_if_matches(&mut a, &peer_id) {
+                                    let reason = DiscoveredAddressDropReason::PeerIdMismatch;
                                     log!(
                                         &task.platform,
                                         Debug,
                                         "network",
-                                        "discovered-address-peer-id-mismatch",
+                                        "discovered-address-dropped",
                                         chain = &task.network[chain_id].log_name,
+                                        reason,
                                         announced_peer_id = peer_id,
                                         addr = &a,
                                         obtained_from = requestee_peer_id
                                     );
-                                    task.metrics.discovery_addresses_dropped.inc();
+                                    task.metrics.discovery_addresses_dropped.inc(reason);
                                     continue;
                                 }
                                 if platform::address_parse::multiaddr_to_address(&a)
@@ -2996,32 +3012,36 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 {
                                     valid_addrs.push(a)
                                 } else {
+                                    let reason = DiscoveredAddressDropReason::NotSupported;
                                     log!(
                                         &task.platform,
                                         Debug,
                                         "network",
-                                        "discovered-address-not-supported",
+                                        "discovered-address-dropped",
                                         chain = &task.network[chain_id].log_name,
+                                        reason,
                                         peer_id,
                                         addr = &a,
                                         obtained_from = requestee_peer_id
                                     );
-                                    task.metrics.discovery_addresses_dropped.inc();
+                                    task.metrics.discovery_addresses_dropped.inc(reason);
                                 }
                             }
                             Err((error, addr)) => {
+                                let reason = DiscoveredAddressDropReason::Invalid;
                                 log!(
                                     &task.platform,
                                     Debug,
                                     "network",
-                                    "discovered-address-invalid",
+                                    "discovered-address-dropped",
                                     chain = &task.network[chain_id].log_name,
+                                    reason,
                                     peer_id,
                                     error,
                                     addr = hex::encode(&addr),
                                     obtained_from = requestee_peer_id
                                 );
-                                task.metrics.discovery_addresses_dropped.inc();
+                                task.metrics.discovery_addresses_dropped.inc(reason);
                             }
                         }
                     }
