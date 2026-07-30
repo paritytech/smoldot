@@ -255,46 +255,56 @@ for (const chain of chains) {
       { name: "compileTime", slot: 0, points: gaugeSeries(chain, "runtimeCompilationSecondsTotal") },
     ],
   });
-  // Peer bans by reason. Only reasons that actually fired become series; the
-  // chart is omitted entirely on a ban-free run (the stat tile still shows 0).
-  // At most 4 slots: top 3 reasons plus an aggregated "other" if needed.
-  {
-    const active = labelValues(chain, "networkPeerBansTotal", "reason")
-      .map((r) => ({ r, last: lastValue(chain, "networkPeerBansTotal", { reason: r }) ?? 0 }))
-      .filter((x) => x.last > 0)
-      .sort((a, b) => b.last - a.last);
+}
+
+// Peer bans by reason, in each chain's own section (the counter is per-chain).
+// Only reasons that actually fired become stacked bands; a ban-free run shows
+// a single flat zero line instead. At most 4 slots: top 3 reasons plus an
+// aggregated "other".
+for (const chain of chains) {
+  const reasons = labelValues(chain, "networkPeerBansTotal", "reason");
+  const sumOf = (list) => {
+    const parts = list.map((r) => gaugeSeries(chain, "networkPeerBansTotal", { reason: r }));
+    return parts[0].map((p, i) => ({
+      t: p.t,
+      v: parts.reduce((sum, sr) => sum + (sr[i].v ?? 0), 0),
+    }));
+  };
+  const active = reasons
+    .map((r) => ({ r, last: lastValue(chain, "networkPeerBansTotal", { reason: r }) ?? 0 }))
+    .filter((x) => x.last > 0)
+    .sort((a, b) => b.last - a.last);
+  let series, stacked;
+  if (active.length === 0) {
+    if (reasons.length === 0) continue; // metric absent from the dump
+    series = [{ name: "total", slot: 0, points: sumOf(reasons) }];
+    stacked = false;
+  } else {
     const named = active.length > 4 ? active.slice(0, 3) : active;
-    const series = named.map((x, i) => ({
+    series = named.map((x, i) => ({
       name: x.r,
       slot: i,
       points: gaugeSeries(chain, "networkPeerBansTotal", { reason: x.r }),
     }));
     const rest = active.slice(named.length);
     if (rest.length > 0) {
-      const parts = rest.map((x) => gaugeSeries(chain, "networkPeerBansTotal", { reason: x.r }));
-      series.push({
-        name: "other",
-        slot: 3,
-        points: parts[0].map((p, i) => ({
-          t: p.t,
-          v: parts.reduce((sum, sr) => sum + (sr[i].v ?? 0), 0),
-        })),
-      });
+      series.push({ name: "other", slot: 3, points: sumOf(rest.map((x) => x.r)) });
     }
-    addChart({
-      group: chain,
-      title: "Peer bans (cumulative)",
-      unit: "ban",
-      zeroBase: true,
-      stacked: true,
-      series,
-    });
+    stacked = true;
   }
+  addChart({
+    group: chain,
+    title: "Peer bans (cumulative)",
+    unit: "ban",
+    zeroBase: true,
+    stacked,
+    series,
+  });
 }
 
 // Process-wide connection churn (identical in every chain's snapshot).
 addChart({
-  group: "process",
+  group: "network",
   title: "Connection churn",
   unit: "conn/s",
   zeroBase: true,
@@ -307,7 +317,7 @@ addChart({
 
 // Process-wide discovery drops (fixed slot per reason, matching the enum order).
 addChart({
-  group: "process",
+  group: "network",
   title: "Discovery addresses dropped (cumulative)",
   unit: "addr",
   zeroBase: true,
