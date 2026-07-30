@@ -209,8 +209,8 @@ for (const chain of chains) {
   tiles.push({ label: `${chain} peers`, value: lastValue(chain, "networkGossipPeersConnected") });
   const bans = lastValue(chain, "networkPeerBansTotal");
   const verifyErr =
-    (lastValue(chain, "syncBlockVerifyErrorsTotal") ?? 0) +
-    (lastValue(chain, "syncFinalityProofVerifyErrorsTotal") ?? 0);
+    (lastValue(chain, "syncBlocksVerifiedTotal", { outcome: "failure" }) ?? 0) +
+    (lastValue(chain, "syncFinalityProofsVerifiedTotal", { outcome: "failure" }) ?? 0);
   tiles.push({ label: `${chain} peer bans`, value: bans, bad: bans > 0 });
   tiles.push({ label: `${chain} verify errors`, value: verifyErr, bad: verifyErr > 0 });
 }
