@@ -64,7 +64,7 @@ pub struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
-    /// Metrics of the chain, updated by the sync service.
+    /// Metrics of the chain.
     pub metrics: Arc<crate::metrics::ChainMetrics>,
 
     /// Access to the network, and index of the chain to sync from the point of view of the

@@ -19,9 +19,8 @@
 //!
 //! See <https://github.com/paritytech/smoldot/issues/3285>.
 //!
-//! Counters and gauges are plain atomics incremented at the same places where the
-//! corresponding events are logged. Reads and writes use relaxed ordering: metrics are
-//! advisory and never synchronize other memory.
+//! Counters and gauges are plain relaxed atomics: metrics are advisory and never
+//! synchronize other memory.
 
 use crate::{
     network_service::{BanReason, DiscoveredAddressDropReason},
@@ -100,10 +99,9 @@ impl RequestMetrics {
     }
 }
 
-/// Value usable as a metric label: a fieldless enum deriving `strum::EnumIter` and
-/// `strum::IntoStaticStr` (with `#[strum(serialize_all = "kebab-case")]`). For enums with
-/// payloads, derive `strum::EnumDiscriminants` and use the generated discriminants enum.
-/// Variants marked `#[strum(disabled)]` are excluded from the metric.
+/// Metric label: a fieldless enum deriving `strum::EnumIter` and `strum::IntoStaticStr`.
+/// For enums with payloads, use the `strum::EnumDiscriminants` enum instead. Variants
+/// marked `#[strum(disabled)]` are not counted.
 pub trait MetricLabel: IntoEnumIterator + Into<&'static str> + PartialEq {}
 impl<T: IntoEnumIterator + Into<&'static str> + PartialEq> MetricLabel for T {}
 

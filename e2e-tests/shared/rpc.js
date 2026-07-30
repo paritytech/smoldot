@@ -107,9 +107,7 @@ export function createRpc(client) {
   }
 
   // Like `sendRpcAndWait`, but safe to run concurrently with the queue-draining
-  // readers above: the response is routed by id in the drain loop and never
-  // enters the FIFO, so it can neither steal nor be stolen by queued messages.
-  // Used by background pollers (e.g. the metrics sampler).
+  // readers above: the response is routed by id and never enters the FIFO.
   function sendRpcOutOfBand(chain, method, params = [], timeoutMs = 60000) {
     const store = stores.get(chain);
     if (!store) {

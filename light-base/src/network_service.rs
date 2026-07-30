@@ -141,7 +141,7 @@ pub struct ConfigChain {
     /// If `true`, enables the statement store protocol.
     pub enable_statement_protocol: bool,
 
-    /// Metrics of the chain, updated by the network service.
+    /// Metrics of the chain.
     pub metrics: Arc<metrics::ChainMetrics>,
 }
 
@@ -322,10 +322,10 @@ pub struct NetworkServiceChain<TPlat: PlatformRef> {
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackgroundChain>,
 
-    /// Metrics of the chain, updated when requests finish.
+    /// Metrics of the chain.
     metrics: Arc<metrics::ChainMetrics>,
 
-    /// See [`Config::platform`]. Used to measure the duration of requests.
+    /// See [`Config::platform`].
     platform: TPlat,
 }
 
@@ -336,9 +336,8 @@ pub enum BanSeverity {
     High,
 }
 
-/// Reason for banning a peer. See [`NetworkServiceChain::ban_and_disconnect`].
-///
-/// Printed in the logs and used as the `reason` label of the `networkPeerBansTotal` metric.
+/// Reason for banning a peer. Printed in the logs and used as the `reason` label
+/// of the `networkPeerBansTotal` metric.
 #[derive(
     Debug, Copy, Clone, PartialEq, Eq, strum::Display, strum::EnumIter, strum::IntoStaticStr,
 )]

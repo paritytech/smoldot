@@ -15,15 +15,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// Periodic `sudo_unstable_metrics` sampler. Host-agnostic: it only needs, per
-// chain, a `request(method, params, timeoutMs) -> Promise<result>` function
-// that is safe to call concurrently with whatever else the test is doing on
-// that chain (`JsonRpcMux.request` or `rpc.sendRpcOutOfBand` both qualify;
-// `rpc.sendRpcAndWait` does NOT — it drains and discards queued messages).
-//
-// The resulting dump is a flat sample list; `render_metrics_html.mjs` turns it
-// into graphs. Counters are cumulative, so consumers diff consecutive samples
-// for rates.
+// Periodic `sudo_unstable_metrics` sampler. Needs, per chain, a
+// `request(method, params, timeoutMs) -> Promise<result>` function that is safe
+// to call concurrently with the rest of the test (`JsonRpcMux.request` or
+// `rpc.sendRpcOutOfBand`; `rpc.sendRpcAndWait` is NOT - it discards queued
+// messages). `render_metrics_html.mjs` turns the dump into graphs.
 
 const REQUEST_TIMEOUT_MS = 10_000;
 

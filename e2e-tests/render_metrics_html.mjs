@@ -212,9 +212,8 @@ for (const chain of chains) {
       ),
     })),
   });
-  // Warp progress through the observed gap: (height - first observed height)
-  // / (target - first observed height). Gap-relative, because the absolute
-  // height/target ratio starts near 100% whenever the checkpoint is recent.
+  // Warp progress relative to the observed gap; the absolute height/target
+  // ratio starts near 100% whenever the checkpoint is recent.
   {
     const warp = warpGauge("syncWarpSyncHeight");
     const target = warpGauge("syncWarpSyncTargetHeight");
@@ -257,10 +256,8 @@ for (const chain of chains) {
   });
 }
 
-// Peer bans by reason, in each chain's own section (the counter is per-chain).
-// Only reasons that actually fired become stacked bands; a ban-free run shows
-// a single flat zero line instead. At most 4 slots: top 3 reasons plus an
-// aggregated "other".
+// Peer bans by reason, one chart per chain. Reasons that fired become stacked
+// bands (top 3 plus "other"); a ban-free run shows a flat zero line instead.
 for (const chain of chains) {
   const reasons = labelValues(chain, "networkPeerBansTotal", "reason");
   const sumOf = (list) => {
@@ -315,7 +312,7 @@ addChart({
   ],
 });
 
-// Process-wide discovery drops (fixed slot per reason, matching the enum order).
+// Process-wide discovery drops.
 addChart({
   group: "network",
   title: "Discovery addresses dropped (cumulative)",
@@ -381,8 +378,7 @@ let chartSeq = 0;
 function renderChart(cfg) {
   const id = `c${chartSeq++}`;
   // Stacked mode: filled bands between running-sum boundaries; nulls count as 0.
-  // Assumes index-aligned timestamps across series (true for series built from
-  // the same dump rows).
+  // Assumes index-aligned timestamps across series.
   let bands = null;
   if (cfg.stacked) {
     const n = Math.max(...cfg.series.map((s) => s.points.length));
@@ -427,7 +423,6 @@ function renderChart(cfg) {
       const bottom = edge(b.low).reverse();
       svg += `<path d="M${top.join(" L")} L${bottom.join(" L")} Z" fill="var(--s${b.s.slot})"/>`;
     }
-    // 2px surface gap between adjacent bands.
     for (const b of bands.slice(0, -1)) {
       svg += `<polyline points="${edge(b.high).join(" ")}" fill="none" stroke="var(--surface)" stroke-width="2"/>`;
     }
@@ -459,7 +454,7 @@ function renderChart(cfg) {
         svg += `<polyline class="line" points="${sg.join(" ")}" style="stroke:var(--s${s.slot})"/>`;
       }
     }
-    // Direct end label (relief for low-contrast light slots; identity not color-alone).
+    // Direct end labels so identity isn't color-alone.
     const last = [...s.points].reverse().find((p) => p.v != null);
     if (last && cfg.series.length > 1) endLabels.push({ slot: s.slot, name: s.name, y: y(last.v) });
   });

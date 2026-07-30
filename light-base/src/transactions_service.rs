@@ -102,7 +102,7 @@ pub struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
-    /// Metrics of the chain, updated when transactions are dropped.
+    /// Metrics of the chain.
     pub metrics: Arc<crate::metrics::ChainMetrics>,
 
     /// Service responsible for synchronizing the chain.
@@ -351,8 +351,7 @@ pub enum DropReason {
 
     /// Transaction service background task has crashed.
     ///
-    /// Excluded from `transactionsDroppedTotal`: yielded outside the background task, so
-    /// there is no site that could count it.
+    /// Not counted in `transactionsDroppedTotal`: yielded outside the background task.
     #[strum_discriminants(strum(disabled))]
     Crashed,
 }
@@ -1290,7 +1289,7 @@ struct Worker<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     platform: TPlat,
 
-    /// Metrics of the chain, updated when transactions are dropped.
+    /// Metrics of the chain.
     metrics: Arc<crate::metrics::ChainMetrics>,
 
     // How to download the bodies of blocks and synchronize the chain.

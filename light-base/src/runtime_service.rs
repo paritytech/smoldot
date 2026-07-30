@@ -92,7 +92,7 @@ pub struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
-    /// Metrics of the chain, updated when runtimes are compiled.
+    /// Metrics of the chain.
     pub metrics: Arc<crate::metrics::ChainMetrics>,
 
     /// Service responsible for synchronizing the chain.

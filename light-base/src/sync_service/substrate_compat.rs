@@ -1643,7 +1643,7 @@ struct Task<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     platform: TPlat,
 
-    /// Metrics of the chain, updated when blocks and finality proofs are verified.
+    /// Metrics of the chain.
     metrics: Arc<crate::metrics::ChainMetrics>,
 
     /// Main syncing state machine. Contains a list of peers, requests, and blocks, and manages

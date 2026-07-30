@@ -573,9 +573,7 @@ export default async function chainheadV1Follow(ctx) {
   const mux = new JsonRpcMux(target);
 
   // Optional metrics time series (SMOLDOT_METRICS_OUT): poll
-  // `sudo_unstable_metrics` on every chain for the whole run. The muxed chain
-  // is polled through the mux (id-routed, safe alongside the event loop); the
-  // rpc-managed relay through the out-of-band route (safe alongside the FIFO).
+  // `sudo_unstable_metrics` on every chain for the whole run.
   let metricsSampler = null;
   if (env.SMOLDOT_METRICS_OUT && ctx.dumpMetrics) {
     const intervalMs = Number.parseInt(env.SMOLDOT_METRICS_INTERVAL_MS ?? "5000", 10);
@@ -704,8 +702,7 @@ export default async function chainheadV1Follow(ctx) {
       );
     }
   } finally {
-    // Always persist the metrics time series, including on failure - a failing
-    // run is where the graphs matter most.
+    // Persist the metrics time series even on failure.
     if (metricsSampler) {
       try {
         const dump = await metricsSampler.stop();

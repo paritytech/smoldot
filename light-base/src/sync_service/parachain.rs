@@ -1082,7 +1082,7 @@ struct Task<TPlat: PlatformRef> {
 
     network_up_to_date_best: bool,
 
-    /// Metrics of the chain, updated when blocks are verified and finalized.
+    /// Metrics of the chain.
     metrics: Arc<crate::metrics::ChainMetrics>,
 
     /// Channel to the paraheads background service.

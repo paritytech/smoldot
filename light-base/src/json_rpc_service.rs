@@ -203,7 +203,7 @@ pub struct Frontend<TPlat> {
     /// Target to use when emitting logs.
     log_target: String,
 
-    /// Metrics of the chain. The JSON-RPC requests counter is incremented here.
+    /// Metrics of the chain.
     metrics: Arc<crate::metrics::ChainMetrics>,
 }
 
