@@ -186,6 +186,49 @@ for (const chain of chains) {
       ),
     })),
   });
+  // Warp progress through the observed gap: (height - first observed height)
+  // / (target - first observed height). Gap-relative, because the absolute
+  // height/target ratio starts near 100% whenever the checkpoint is recent.
+  {
+    const warp = warpGauge("syncWarpSyncHeight");
+    const target = warpGauge("syncWarpSyncTargetHeight");
+    const w0 = warp.find((p) => p.v != null)?.v;
+    const progress = warp.map((p, i) => {
+      const tv = target[i]?.v;
+      const denom = tv != null && w0 != null ? tv - w0 : 0;
+      return {
+        t: p.t,
+        v: p.v != null && denom > 0 ? Math.min(100, ((p.v - w0) / denom) * 100) : null,
+      };
+    });
+    addChart({
+      group: chain,
+      title: "Warp sync progress",
+      unit: "%",
+      zeroBase: true,
+      series: [{ name: "progress", slot: 0, points: progress }],
+    });
+  }
+  addChart({
+    group: chain,
+    title: "Runtime compilations (cumulative)",
+    unit: "",
+    zeroBase: true,
+    series: [
+      { name: "compilations", slot: 0, points: gaugeSeries(chain, "runtimeCompilationsTotal") },
+      { name: "errors", slot: 1, points: gaugeSeries(chain, "runtimeCompilationErrorsTotal") },
+      { name: "cacheHits", slot: 2, points: gaugeSeries(chain, "runtimeCacheHitsTotal") },
+    ],
+  });
+  addChart({
+    group: chain,
+    title: "Runtime compilation time (cumulative)",
+    unit: "s",
+    zeroBase: true,
+    series: [
+      { name: "compileTime", slot: 0, points: gaugeSeries(chain, "runtimeCompilationSecondsTotal") },
+    ],
+  });
 }
 
 // Process-wide connection churn (identical in every chain's snapshot).
@@ -234,7 +277,11 @@ function niceTicks(min, max, n = 4) {
 
 function fmtVal(v, unit) {
   if (v == null) return "—";
-  if (unit === "s") return v >= 1 ? `${v.toFixed(2)}s` : `${(v * 1000).toFixed(0)}ms`;
+  if (unit === "%") return `${v.toFixed(1)}%`;
+  if (unit === "s") {
+    if (v === 0) return "0s";
+    return v >= 1 ? `${v.toFixed(2)}s` : `${(v * 1000).toFixed(0)}ms`;
+  }
   if (Math.abs(v) >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
   if (Math.abs(v) >= 1e4) return `${(v / 1e3).toFixed(1)}k`;
   if (Number.isInteger(v)) return v.toLocaleString("en-US");
