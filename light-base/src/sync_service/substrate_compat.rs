@@ -441,6 +441,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             verified_height = fragment_number
                         );
                         task.metrics.sync_warp_fragments_verified.inc();
+                        task.metrics.sync_warp_sync_height.set(fragment_number);
                     }
                     Err(err) => {
                         log!(
@@ -894,6 +895,9 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             task.mode = ModeState::AwaitingWarp {
                                 target_finalized: finalized_block_height,
                             };
+                            task.metrics
+                                .sync_warp_sync_target_height
+                                .set(finalized_block_height);
                             // Keep the deadline armed as a warp-stall fallback.
                             task.mode_decision_deadline = future::Either::Left(Box::pin(
                                 task.platform.sleep(MODE_DECISION_TIMEOUT),

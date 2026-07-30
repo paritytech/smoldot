@@ -117,6 +117,8 @@ pub struct ChainMetrics {
     pub sync_warp_fragments_verified: Counter,
     pub sync_best_block_height: Gauge,
     pub sync_finalized_block_height: Gauge,
+    pub sync_warp_sync_height: Gauge,
+    pub sync_warp_sync_target_height: Gauge,
 
     pub runtime_compilations: Counter,
     pub runtime_compilation_errors: Counter,
@@ -256,6 +258,11 @@ pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::Metr
         gauge(
             "syncFinalizedBlockHeight",
             chain.sync_finalized_block_height.get()
+        ),
+        gauge("syncWarpSyncHeight", chain.sync_warp_sync_height.get()),
+        gauge(
+            "syncWarpSyncTargetHeight",
+            chain.sync_warp_sync_target_height.get()
         ),
         counter("runtimeCompilationsTotal", chain.runtime_compilations.get()),
         counter(
