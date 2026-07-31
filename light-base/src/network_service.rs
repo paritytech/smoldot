@@ -3503,7 +3503,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 task.num_recent_connection_opening += 1;
-                task.metrics.connections_started.inc();
+                task.metrics.connections_dialed.inc();
 
                 let (coordinator_to_connection_tx, coordinator_to_connection_rx) =
                     async_channel::bounded(8);

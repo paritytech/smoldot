@@ -306,7 +306,7 @@ addChart({
   unit: "conn/s",
   zeroBase: true,
   series: [
-    { name: "started", slot: 0, points: rateSeries(chains[0], "networkConnectionsStartedTotal") },
+    { name: "dialed", slot: 0, points: rateSeries(chains[0], "networkConnectionsDialedTotal") },
     { name: "handshaken", slot: 1, points: rateSeries(chains[0], "networkConnectionsHandshakesFinishedTotal") },
     { name: "shutdown", slot: 2, points: rateSeries(chains[0], "networkConnectionsShutdownsTotal") },
   ],

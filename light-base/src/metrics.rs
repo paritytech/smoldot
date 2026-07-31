@@ -155,8 +155,8 @@ impl<L: MetricLabel> fmt::Debug for LabeledCounter<L> {
 #[derive(Debug, Default)]
 pub struct NetworkMetrics {
     /// Dial attempts, no matter the result.
-    pub connections_started: Counter,
-    /// Subset of [`NetworkMetrics::connections_started`] that completed the libp2p handshake.
+    pub connections_dialed: Counter,
+    /// Subset of [`NetworkMetrics::connections_dialed`] that completed the libp2p handshake.
     pub connections_handshakes_finished: Counter,
     /// Connections closed, whether or not the handshake had finished.
     pub connections_shutdowns: Counter,
@@ -294,8 +294,8 @@ pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::Metr
 
     let metrics = alloc::vec![
         counter(
-            "networkConnectionsStartedTotal",
-            network.connections_started.get()
+            "networkConnectionsDialedTotal",
+            network.connections_dialed.get()
         ),
         counter(
             "networkConnectionsHandshakesFinishedTotal",
