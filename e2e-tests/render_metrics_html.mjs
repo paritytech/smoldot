@@ -330,7 +330,11 @@ addChart({
 
 const tiles = [];
 for (const chain of chains) {
-  tiles.push({ label: `${chain} finalized`, value: lastValue(chain, "syncFinalizedBlockHeight") });
+  tiles.push({
+    label: `${chain} finalized`,
+    value: lastValue(chain, "syncFinalizedBlockHeight"),
+    unit: "block",
+  });
   tiles.push({ label: `${chain} peers`, value: lastValue(chain, "networkGossipPeersConnected") });
   const bans = lastValueSum(chain, "networkPeerBansTotal");
   const verifyErr =
@@ -342,7 +346,7 @@ for (const chain of chains) {
 
 // ------------------------------------------------------------------ rendering
 
-const W = 620, H = 240, M = { l: 56, r: 96, t: 12, b: 26 };
+const W = 620, H = 240, M = { l: 72, r: 96, t: 12, b: 26 };
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 function niceTicks(min, max, n = 4) {
@@ -364,6 +368,7 @@ function fmtVal(v, unit) {
     if (v === 0) return "0s";
     return v >= 1 ? `${v.toFixed(2)}s` : `${(v * 1000).toFixed(0)}ms`;
   }
+  if (unit === "block") return Math.round(v).toLocaleString("en-US");
   if (Math.abs(v) >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
   if (Math.abs(v) >= 1e4) return `${(v / 1e3).toFixed(1)}k`;
   if (Number.isInteger(v)) return v.toLocaleString("en-US");
@@ -514,7 +519,7 @@ const sections = groups
 
 const tileHtml = tiles
   .filter((t) => t.value != null)
-  .map((t) => `<div class="tile${t.bad ? " bad" : ""}"><div class="v">${fmtVal(t.value)}</div><div class="l">${esc(t.label)}</div></div>`)
+  .map((t) => `<div class="tile${t.bad ? " bad" : ""}"><div class="v">${fmtVal(t.value, t.unit)}</div><div class="l">${esc(t.label)}</div></div>`)
   .join("");
 
 const durationMin = ((tEnd - t0) / 60000).toFixed(1);
