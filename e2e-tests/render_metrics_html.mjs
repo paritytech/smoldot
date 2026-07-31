@@ -220,11 +220,11 @@ for (const chain of chains) {
     const w0 = warp.find((p) => p.v != null)?.v;
     const progress = warp.map((p, i) => {
       const tv = target[i]?.v;
-      const denom = tv != null && w0 != null ? tv - w0 : 0;
-      return {
-        t: p.t,
-        v: p.v != null && denom > 0 ? Math.min(100, ((p.v - w0) / denom) * 100) : null,
-      };
+      if (p.v == null || tv == null || w0 == null) return { t: p.t, v: null };
+      const denom = tv - w0;
+      // A zero gap means warp completed within one sampling interval: show the
+      // 100% step instead of dropping the chart.
+      return { t: p.t, v: denom > 0 ? Math.min(100, ((p.v - w0) / denom) * 100) : 100 };
     });
     addChart({
       group: chain,
