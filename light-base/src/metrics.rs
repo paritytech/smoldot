@@ -149,11 +149,18 @@ impl<L: MetricLabel> fmt::Debug for LabeledCounter<L> {
 }
 
 /// Metrics of the network service. One instance per process, shared between all chains.
+///
+/// The connection counters are transport-agnostic (TCP, WebSocket, WebRTC) and count
+/// connections, not peers. The light client never listens, so all connections are outbound.
 #[derive(Debug, Default)]
 pub struct NetworkMetrics {
+    /// Dial attempts, no matter the result.
     pub connections_started: Counter,
+    /// Subset of [`NetworkMetrics::connections_started`] that completed the libp2p handshake.
     pub connections_handshakes_finished: Counter,
+    /// Connections closed, whether or not the handshake had finished.
     pub connections_shutdowns: Counter,
+    /// Addresses obtained through discovery and discarded instead of stored.
     pub(crate) discovery_addresses_dropped: LabeledCounter<DiscoveredAddressDropReason>,
 }
 
