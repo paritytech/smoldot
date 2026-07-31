@@ -16,7 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{
-    BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground, paraheads,
+    BlockNotification, BootstrapMode, FinalizedBlockRuntime, Notification, SubscribeAll,
+    ToBackground, paraheads,
 };
 use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 
@@ -632,6 +633,18 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                         .as_chain_information()
                         .into(),
                 ));
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::BootstrapMode { send_back }) => {
+                // Parachains never warp-sync; the mode is fixed at AllForks and can
+                // be answered immediately.
+                let _ = send_back.send(BootstrapMode::AllForks);
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::WarpSyncPosition { send_back }) => {
+                // Parachains never warp-sync, so there is never a warp-fragment
+                // position to report.
+                let _ = send_back.send(None);
             }
 
             WakeUpReason::ForegroundClosed => {

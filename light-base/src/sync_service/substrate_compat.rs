@@ -16,8 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{
-    BlockNotification, ConfigSubstrateCompatibleRuntimeCodeHint, FinalizedBlockRuntime,
-    Notification, SubscribeAll, ToBackground,
+    BlockNotification, BootstrapMode, ConfigSubstrateCompatibleRuntimeCodeHint,
+    FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground,
 };
 use crate::{log, network_service, platform::PlatformRef, util};
 
@@ -118,6 +118,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         .fuse(),
         mode: ModeState::Deciding,
         bootstrap_complete: false,
+        chosen_bootstrap_mode: None,
+        pending_bootstrap_mode_requests: Vec::new(),
         deciding_packets_seen: 0,
         mode_decision_deadline: future::Either::Left(Box::pin(
             platform.sleep(MODE_DECISION_TIMEOUT),
@@ -400,6 +402,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         "mode-decision; transition=Ready (WarpSyncFinished)",
                     );
                     drain_pending_subscriptions(&mut task);
+                    commit_bootstrap_mode(&mut task, BootstrapMode::WarpSync);
                     task.bootstrap_complete = true;
                     // Post-bootstrap re-warp is allowed; the `Stop` flows through
                     // `all_notifications.clear()` above.
@@ -1138,6 +1141,41 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 ));
             }
 
+            WakeUpReason::ForegroundMessage(ToBackground::BootstrapMode { send_back }) => {
+                // Frontend is querying the committed bootstrap mode. Answer immediately
+                // once it's known; otherwise queue until the mode is committed.
+                if let Some(mode) = task.chosen_bootstrap_mode {
+                    let _ = send_back.send(mode);
+                } else {
+                    task.pending_bootstrap_mode_requests.push(send_back);
+                }
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::WarpSyncPosition { send_back }) => {
+                // Frontend is polling for warp-sync fragment progress. `Status::Sync`
+                // means warp is not (or no longer) engaged, so answer `None`. Both
+                // `WarpSyncFragments` and `WarpSyncChainInformation` expose the height
+                // of the highest block proven finalized by the fragments verified so
+                // far; that is the "current warp position" the lifecycle poller wants.
+                let position = match task
+                    .sync
+                    .as_ref()
+                    .unwrap_or_else(|| unreachable!())
+                    .status()
+                {
+                    all::Status::Sync => None,
+                    all::Status::WarpSyncFragments {
+                        finalized_block_number,
+                        ..
+                    }
+                    | all::Status::WarpSyncChainInformation {
+                        finalized_block_number,
+                        ..
+                    } => Some(finalized_block_number),
+                };
+                let _ = send_back.send(position);
+            }
+
             WakeUpReason::ForegroundClosed => {
                 // The channel with the frontend sync service has been closed.
                 // Closing the sync background task as a result.
@@ -1638,6 +1676,18 @@ struct Task<TPlat: PlatformRef> {
     /// Once `true`, warp may re-engage and any later completion is allowed to fire a `Stop`.
     bootstrap_complete: bool,
 
+    /// The mode chosen at bootstrap-commit time. `None` while [`ModeState::Deciding`] or
+    /// [`ModeState::AwaitingWarp`]; set to [`BootstrapMode::WarpSync`] when
+    /// `WarpSyncFinished` promotes us to [`ModeState::Ready`], and to
+    /// [`BootstrapMode::AllForks`] when [`commit_all_forks_only`] fires (including the
+    /// `CaughtUpViaFinality` path, where warp was pre-empted by finality catching up).
+    /// Exposed via [`SyncService::bootstrap_mode`].
+    chosen_bootstrap_mode: Option<BootstrapMode>,
+
+    /// [`ToBackground::BootstrapMode`] requests received before
+    /// [`Task::chosen_bootstrap_mode`] was set. Drained at commit time.
+    pending_bootstrap_mode_requests: Vec<oneshot::Sender<BootstrapMode>>,
+
     /// Below-gap packets observed while [`ModeState::Deciding`]; gates AllForksOnly commit.
     deciding_packets_seen: usize,
 
@@ -1853,11 +1903,26 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
     task.network_up_to_date_best = false;
 
     drain_pending_subscriptions(task);
+    commit_bootstrap_mode(task, BootstrapMode::AllForks);
     task.bootstrap_complete = true;
     task.sync
         .as_mut()
         .unwrap_or_else(|| unreachable!())
         .set_warp_completion_suppressed(false);
+}
+
+/// Records the bootstrap mode chosen at commit time and responds to any callers of
+/// [`SyncService::bootstrap_mode`] that queued while the decision was pending.
+/// Idempotent: subsequent calls (e.g. from a post-bootstrap re-warp completion) are
+/// ignored so that the reported mode always reflects the initial bootstrap.
+fn commit_bootstrap_mode<TPlat: PlatformRef>(task: &mut Task<TPlat>, mode: BootstrapMode) {
+    if task.chosen_bootstrap_mode.is_some() {
+        return;
+    }
+    task.chosen_bootstrap_mode = Some(mode);
+    for send_back in task.pending_bootstrap_mode_requests.drain(..) {
+        let _ = send_back.send(mode);
+    }
 }
 
 #[cfg(test)]

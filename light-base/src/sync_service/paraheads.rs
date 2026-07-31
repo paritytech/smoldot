@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::ToBackground;
+use super::{BootstrapMode, ToBackground};
 use crate::{log, platform::PlatformRef, runtime_service};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
@@ -1134,6 +1134,20 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     }),
                     _,
                 ) => {
+                    let _ = send_back.send(None);
+                }
+
+                (WakeUpReason::ForegroundMessage(ToBackground::BootstrapMode { send_back }), _) => {
+                    // Parachains never warp-sync; the mode is fixed at AllForks.
+                    let _ = send_back.send(BootstrapMode::AllForks);
+                }
+
+                (
+                    WakeUpReason::ForegroundMessage(ToBackground::WarpSyncPosition { send_back }),
+                    _,
+                ) => {
+                    // Parachains never warp-sync, so there is never a warp-fragment
+                    // position to report.
                     let _ = send_back.send(None);
                 }
 

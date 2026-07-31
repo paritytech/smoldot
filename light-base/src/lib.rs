@@ -104,6 +104,7 @@ mod sync_service;
 mod transactions_service;
 mod util;
 
+pub mod lifecycle_service;
 pub mod network_service;
 pub mod platform;
 
@@ -291,6 +292,7 @@ struct ChainServices<TPlat: platform::PlatformRef> {
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
     bitswap_service: Arc<bitswap_service::BitswapService>,
+    lifecycle_service: Arc<lifecycle_service::LifecycleService>,
 }
 
 impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
@@ -301,6 +303,7 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
             runtime_service: self.runtime_service.clone(),
             transactions_service: self.transactions_service.clone(),
             bitswap_service: self.bitswap_service.clone(),
+            lifecycle_service: self.lifecycle_service.clone(),
         }
     }
 }
@@ -933,6 +936,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 transactions_service: services.transactions_service.clone(),
                 runtime_service: services.runtime_service.clone(),
                 bitswap_service: services.bitswap_service.clone(),
+                lifecycle_service: services.lifecycle_service.clone(),
                 chain_name: chain_spec.name().to_owned(),
                 chain_ty: chain_spec.chain_type().to_owned(),
                 chain_is_live: chain_spec.has_live_network(),
@@ -1061,6 +1065,27 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         json_rpc_sender.queue_rpc_request(json_rpc_request)
+    }
+
+    /// Returns a stream of typed lifecycle events for the given chain.
+    ///
+    /// The returned channel is pre-populated with a snapshot of the events already
+    /// emitted for this chain, so late subscribers see the full history. See
+    /// [`lifecycle_service::LifecycleEvent`] for the event schema.
+    ///
+    /// The event schema is unstable and versioned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    pub async fn lifecycle_events(
+        &self,
+        chain_id: ChainId,
+    ) -> async_channel::Receiver<lifecycle_service::LifecycleEvent> {
+        let key = &self.public_api_chains.get(chain_id.0).unwrap().key;
+        let chains_by_key = self.chains_by_key.as_ref().unwrap();
+        let running = chains_by_key.get(key).unwrap();
+        running.services.lifecycle_service.subscribe().await
     }
 }
 
@@ -1277,11 +1302,344 @@ fn start_services<TPlat: platform::PlatformRef>(
     // JSON-RPC requests by querying remote nodes for IPFS blocks.
     let bitswap_service = Arc::new(bitswap_service::BitswapService::new(
         bitswap_service::Config {
-            log_name,
+            log_name: log_name.clone(),
             platform: platform.clone(),
             network_service: network_service_chain.clone(),
         },
     ));
+
+    // Lifecycle events are a typed projection of what the sync and network services
+    // already publish. Small projection tasks watch those streams (plus an
+    // out-of-band watchdog for `Stalled`) and emit into the broadcaster.
+    let lifecycle_service = lifecycle_service::LifecycleService::new();
+
+    // `Connecting` is emitted synchronously via a fire-and-forget task so it lands
+    // before any other lifecycle event.
+    platform.spawn_task("lifecycle-connecting".into(), {
+        let lifecycle_service = lifecycle_service.clone();
+        async move {
+            lifecycle_service
+                .emit(lifecycle_service::LifecycleEvent::Connecting)
+                .await;
+        }
+    });
+
+    // `FirstPeer` on the initial `Connected`. Drop the `NetworkServiceChain` Arc
+    // as soon as the subscription is created so the task holds only the
+    // `Receiver` — otherwise the captured Arc keeps the per-chain network
+    // background task alive after `remove_chain`, which in turn keeps the
+    // subscriber `Sender` alive so `recv()` never returns `Err`, leaking the
+    // whole chain's state.
+    platform.spawn_task("lifecycle-first-peer".into(), {
+        let network_service_chain = network_service_chain.clone();
+        let lifecycle_service = lifecycle_service.clone();
+        async move {
+            let events = network_service_chain.subscribe().await;
+            drop(network_service_chain);
+            while let Ok(event) = events.recv().await {
+                if matches!(event, network_service::Event::Connected { .. }) {
+                    lifecycle_service
+                        .emit(lifecycle_service::LifecycleEvent::FirstPeer)
+                        .await;
+                    return;
+                }
+            }
+        }
+    });
+
+    // Single bootstrap sequence — the emissions inside it are strictly ordered:
+    //   ModeDecision → (WarpSyncProgress*)* → WarpSyncFinished → BootstrapComplete
+    // The warp-progress poller is spawned FROM inside this task, after
+    // `ModeDecision`, so it can't race ahead. The task exits (dropping its
+    // spawned poller's completion flag) once BootstrapComplete has been emitted.
+    platform.spawn_task("lifecycle-bootstrap".into(), {
+        let lifecycle_service = lifecycle_service.clone();
+        let sync_service = sync_service.clone();
+        let platform = platform.clone();
+        async move {
+            // `subscribe_all` blocks until the sync service commits its bootstrap
+            // mode, so its return marks the ModeDecision boundary.
+            let subscription = sync_service.subscribe_all(16, false).await;
+            // The sync service commits the mode at the same point that unblocks
+            // `subscribe_all`, so `bootstrap_mode()` is guaranteed to answer
+            // immediately here without introducing a new wait.
+            let mode = match sync_service.bootstrap_mode().await {
+                sync_service::BootstrapMode::WarpSync => lifecycle_service::SyncMode::WarpSync,
+                sync_service::BootstrapMode::AllForks => lifecycle_service::SyncMode::AllForks,
+            };
+            lifecycle_service
+                .emit(lifecycle_service::LifecycleEvent::ModeDecision { mode })
+                .await;
+
+            // Warp progress polling starts here — strictly after ModeDecision.
+            // A shared flag lets us stop the poller as soon as we reach
+            // WarpSyncFinished (below), so no stray progress event lands after.
+            let warp_done = Arc::new(async_lock::RwLock::new(false));
+            if matches!(mode, lifecycle_service::SyncMode::WarpSync) {
+                // Hold `Weak` clones of `lifecycle_service` and `sync_service` so
+                // that after `remove_chain` this poller doesn't keep the chain
+                // alive for the remainder of its 60s window. Upgrade on each
+                // iteration; if the chain has been dropped, exit early.
+                platform.spawn_task("lifecycle-warp-progress".into(), {
+                    let lifecycle_service = Arc::downgrade(&lifecycle_service);
+                    let sync_service = Arc::downgrade(&sync_service);
+                    let platform = platform.clone();
+                    let warp_done = warp_done.clone();
+                    async move {
+                        // `at` comes from the sync service's warp-sync state machine
+                        // and is the height of the highest block whose finality has
+                        // been proven by the fragments verified so far. `target` is
+                        // the highest best-block height advertised by any connected
+                        // peer (the sync service doesn't publish the warp target
+                        // separately) and is clamped to a running max so it never
+                        // regresses when a high-best peer drops out.
+                        let mut last_reported: Option<(u64, u64)> = None;
+                        let mut max_target: u64 = 0;
+                        for _ in 0..120 {
+                            platform.sleep(Duration::from_millis(500)).await;
+                            if *warp_done.read().await {
+                                return;
+                            }
+                            let Some(sync_service_arc) = sync_service.upgrade() else {
+                                return;
+                            };
+                            let at = match sync_service_arc.warp_sync_position().await {
+                                Some(at) => at,
+                                None => {
+                                    // Warp is no longer engaged (the state machine
+                                    // has already transitioned to `Sync`). The
+                                    // outer task will emit `WarpSyncFinished` when
+                                    // the first block streams in; we just stop
+                                    // polling.
+                                    drop(sync_service_arc);
+                                    return;
+                                }
+                            };
+                            let peer_best = sync_service_arc
+                                .syncing_peers()
+                                .await
+                                .map(|(_, _, best, _)| best)
+                                .max()
+                                .unwrap_or(0);
+                            drop(sync_service_arc);
+                            if peer_best > max_target {
+                                max_target = peer_best;
+                            }
+                            // Defensive clamp: keep `target >= at` even if the
+                            // best-peer sample lags behind the fragments we've
+                            // already verified.
+                            if at > max_target {
+                                max_target = at;
+                            }
+                            let progress = (at, max_target);
+                            if last_reported != Some(progress) {
+                                last_reported = Some(progress);
+                                let Some(lifecycle_service_arc) = lifecycle_service.upgrade()
+                                else {
+                                    return;
+                                };
+                                lifecycle_service_arc
+                                    .emit(lifecycle_service::LifecycleEvent::WarpSyncProgress {
+                                        at: progress.0,
+                                        target: progress.1,
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Drop the outer `sync_service` Arc now that the warp-progress
+            // task (if any) has taken its own clone. The `new_blocks`
+            // `Receiver` below doesn't need `sync_service` — dropping here
+            // prevents this task from holding the chain alive after
+            // `remove_chain`.
+            drop(sync_service);
+
+            // The first item on `new_blocks` (either `Block` or `Finalized`)
+            // means live-block streaming has started; the client is ready to
+            // serve queries. Waiting only for `Finalized` would push this out
+            // by the GRANDPA round cadence for no additional signal.
+            let new_blocks = subscription.new_blocks;
+            if new_blocks.recv().await.is_ok() {
+                if matches!(mode, lifecycle_service::SyncMode::WarpSync) {
+                    // Stop the progress poller before the finished event so we
+                    // can't emit `WarpSyncProgress` after `WarpSyncFinished`.
+                    *warp_done.write().await = true;
+                    let header = subscription.finalized_block_scale_encoded_header;
+                    let finalized_height = header::decode(&header, block_number_bytes)
+                        .map(|h| h.number)
+                        .unwrap_or(0);
+                    lifecycle_service
+                        .emit(lifecycle_service::LifecycleEvent::WarpSyncFinished {
+                            finalized: finalized_height,
+                        })
+                        .await;
+                }
+                lifecycle_service
+                    .emit(lifecycle_service::LifecycleEvent::BootstrapComplete)
+                    .await;
+            }
+        }
+    });
+
+    // Log-line projection sink deliberately omitted. The RPC path in
+    // `json_rpc_service::background` already logs every emitted event under
+    // the `json-rpc-<chain>` debug target as part of the standard
+    // `json-rpc-response-yielded` line, so log-scraping tooling already sees
+    // the full stream from any active `lifecycle_unstable_follow` subscriber.
+    // Adding a parallel projection task here created an Arc cycle - the task
+    // clone of the service kept it alive while its subscriber Sender was
+    // retained inside `LifecycleService::subscribers`, so the state stayed
+    // resident forever after chain removal. See paritytech/smoldot#3301: the
+    // "logs as projection" bullet is a follow-up sweep that migrates the
+    // existing sync/network debug lines onto the event-derived path, not an
+    // additional parallel source.
+
+    // Stall watchdog. A single polling loop tracks three heuristics and
+    // re-arms after each trip so a chain that recovers gets a matching
+    // `Recovered` event. Heuristics are approximate on purpose - the goal is
+    // a signal for a UI to nudge the user, not a proof of failure.
+    platform.spawn_task("lifecycle-watchdog".into(), {
+        // Hold `Weak` clones so that after `remove_chain` the watchdog does
+        // not keep the chain alive for the remainder of its 60s window.
+        // Each iteration upgrades the `Weak`s; if any has been dropped, the
+        // task exits.
+        let lifecycle_service = Arc::downgrade(&lifecycle_service);
+        let sync_service = Arc::downgrade(&sync_service);
+        let network_service_chain = Arc::downgrade(&network_service_chain);
+        let platform = platform.clone();
+        async move {
+            // Windows: NoPeers trips after 30s without a live peer, matching
+            // the connect-timeout order of magnitude. BootstrapTimeout trips
+            // if the sync service has not looked near-head 60s after chain-add.
+            // SyncNoProgress uses the same 60s window post-bootstrap.
+            const POLL_INTERVAL: Duration = Duration::from_secs(5);
+            const NO_PEERS_TIMEOUT: Duration = Duration::from_secs(30);
+            const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
+            const SYNC_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
+
+            // Subscribe to network events for live peer-count tracking. Drop
+            // the per-chain Arc immediately so this task holds only the
+            // Receiver — otherwise the captured Arc keeps the per-chain
+            // network background task alive after `remove_chain`.
+            let events = {
+                let Some(network_service_chain_arc) = network_service_chain.upgrade() else {
+                    return;
+                };
+                network_service_chain_arc.subscribe().await
+            };
+
+            let started = platform.now();
+            // Most recent moment we observed at least one live peer. Seeded
+            // to `started` so the "no peer in the last 30s" test only trips
+            // once the window has actually elapsed.
+            let mut last_peer_seen = started.clone();
+            // Live peer count derived from Connected/Disconnected events.
+            let mut peer_count: usize = 0;
+            // Set the first time `is_near_head_of_chain_heuristic()` returns
+            // true. Marks the BootstrapComplete boundary for the two
+            // post-bootstrap heuristics.
+            let mut bootstrap_complete = false;
+            // Most recent moment we observed `is_near_head_of_chain_heuristic()`
+            // == true. Only consulted after `bootstrap_complete`. The
+            // "polling `is_near_head` continuously" approximation of "no new
+            // block in 60s" tolerates brief dips, but a sustained flip to
+            // false past the window is treated as `SyncNoProgress`.
+            let mut last_near_head_seen = started.clone();
+            // The reason latched by the most recent unmatched `Stalled`
+            // emission, `None` if we're currently in a healthy state. Used
+            // to gate emissions to at most one per transition and to fill in
+            // the `previously` field of `Recovered`.
+            let mut last_stall_reason: Option<lifecycle_service::StallReason> = None;
+
+            loop {
+                // Drain pending network events non-blockingly. A closed
+                // sender means the per-chain network task is gone (which
+                // implies the chain is being torn down); exit the watchdog.
+                loop {
+                    match events.try_recv() {
+                        Ok(network_service::Event::Connected { .. }) => {
+                            peer_count = peer_count.saturating_add(1);
+                        }
+                        Ok(network_service::Event::Disconnected { .. }) => {
+                            peer_count = peer_count.saturating_sub(1);
+                        }
+                        Ok(_) => {}
+                        Err(async_channel::TryRecvError::Empty) => break,
+                        Err(async_channel::TryRecvError::Closed) => return,
+                    }
+                }
+                if peer_count > 0 {
+                    last_peer_seen = platform.now();
+                }
+
+                // Poll the sync-service head heuristic. Exiting on a dropped
+                // sync_service keeps this loop from outliving the chain.
+                {
+                    let Some(sync_service_arc) = sync_service.upgrade() else {
+                        return;
+                    };
+                    let near_head = sync_service_arc.is_near_head_of_chain_heuristic().await;
+                    drop(sync_service_arc);
+                    if near_head {
+                        last_near_head_seen = platform.now();
+                        bootstrap_complete = true;
+                    }
+                }
+
+                // Decide which single stall condition (if any) is currently
+                // tripping. NoPeers wins over BootstrapTimeout wins over
+                // SyncNoProgress so a chain that's disconnected doesn't
+                // silently switch categories mid-outage.
+                let now = platform.now();
+                let no_peers = now.clone() - last_peer_seen.clone() >= NO_PEERS_TIMEOUT;
+                let bootstrap_stuck =
+                    !bootstrap_complete && now.clone() - started.clone() >= BOOTSTRAP_TIMEOUT;
+                let sync_stuck = bootstrap_complete
+                    && now.clone() - last_near_head_seen.clone() >= SYNC_NO_PROGRESS_TIMEOUT;
+                let active = if no_peers {
+                    Some(lifecycle_service::StallReason::NoPeers)
+                } else if bootstrap_stuck {
+                    Some(lifecycle_service::StallReason::BootstrapTimeout)
+                } else if sync_stuck {
+                    Some(lifecycle_service::StallReason::SyncNoProgress)
+                } else {
+                    None
+                };
+
+                match (last_stall_reason, active) {
+                    (None, Some(reason)) => {
+                        let Some(lifecycle_service_arc) = lifecycle_service.upgrade() else {
+                            return;
+                        };
+                        lifecycle_service_arc
+                            .emit(lifecycle_service::LifecycleEvent::Stalled { reason })
+                            .await;
+                        last_stall_reason = Some(reason);
+                    }
+                    (Some(prev), None) => {
+                        let Some(lifecycle_service_arc) = lifecycle_service.upgrade() else {
+                            return;
+                        };
+                        lifecycle_service_arc
+                            .emit(lifecycle_service::LifecycleEvent::Recovered { previously: prev })
+                            .await;
+                        last_stall_reason = None;
+                    }
+                    // Same state as last iteration (either still healthy or
+                    // still stalled for the same reason): no emission. A
+                    // shift from one stall reason directly to another is
+                    // treated as a continuing stall rather than a rapid
+                    // Recovered+Stalled pair; the follow-up is welcome.
+                    _ => {}
+                }
+
+                platform.sleep(POLL_INTERVAL).await;
+            }
+        }
+    });
 
     ChainServices {
         network_service: network_service_chain,
@@ -1289,5 +1647,6 @@ fn start_services<TPlat: platform::PlatformRef>(
         sync_service,
         transactions_service,
         bitswap_service,
+        lifecycle_service,
     }
 }

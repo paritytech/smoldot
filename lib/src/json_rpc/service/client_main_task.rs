@@ -474,7 +474,8 @@ impl ClientMainTask {
                 | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. }
                 | methods::MethodCall::sudo_network_unstable_watch { .. }
                 | methods::MethodCall::bitswap_unstable_stream { .. }
-                | methods::MethodCall::chainHead_v1_follow { .. } => {
+                | methods::MethodCall::chainHead_v1_follow { .. }
+                | methods::MethodCall::lifecycle_unstable_follow { .. } => {
                     // Subscription starting requests.
 
                     // We must check the maximum number of subscriptions.
@@ -550,6 +551,7 @@ impl ClientMainTask {
                 | methods::MethodCall::transactionWatch_v1_unwatch { subscription, .. }
                 | methods::MethodCall::sudo_network_unstable_unwatch { subscription, .. }
                 | methods::MethodCall::bitswap_unstable_unstream { subscription, .. }
+                | methods::MethodCall::lifecycle_unstable_unfollow { subscription, .. }
                 | methods::MethodCall::chainHead_v1_unfollow {
                     follow_subscription: subscription,
                     ..
@@ -586,6 +588,9 @@ impl ClientMainTask {
                                     methods::MethodCall::chainHead_v1_unfollow { .. } => {
                                         methods::Response::chainHead_v1_unfollow(())
                                     }
+                                    methods::MethodCall::lifecycle_unstable_unfollow { .. } => {
+                                        methods::Response::lifecycle_unstable_unfollow(())
+                                    }
                                     _ => unreachable!(),
                                 }
                                 .to_json_response(request_id),
@@ -611,6 +616,11 @@ impl ClientMainTask {
                                 methods::MethodCall::bitswap_unstable_unstream { .. } => {
                                     // Per spec: no error if subscription is unknown or already-completed.
                                     methods::Response::bitswap_unstable_unstream(())
+                                        .to_json_response(request_id)
+                                }
+                                methods::MethodCall::lifecycle_unstable_unfollow { .. } => {
+                                    // Per spec: no error if subscription is unknown or already-completed.
+                                    methods::Response::lifecycle_unstable_unfollow(())
                                         .to_json_response(request_id)
                                 }
                                 _ => parse::build_error_response(

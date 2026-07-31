@@ -18,7 +18,7 @@
 use crate::{
     bitswap_service,
     json_rpc_service::StatementProtocolConfig,
-    log, network_service,
+    lifecycle_service, log, network_service,
     platform::PlatformRef,
     runtime_service, sync_service, transactions_service,
     util::{self, SipHasherBuild},
@@ -71,6 +71,9 @@ pub(super) struct Config<TPlat: PlatformRef> {
 
     /// Service that fulfills IPFS CID requests.
     pub bitswap_service: Arc<bitswap_service::BitswapService>,
+
+    /// Broadcaster of typed lifecycle events for the chain.
+    pub lifecycle_service: Arc<lifecycle_service::LifecycleService>,
 
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
@@ -136,6 +139,11 @@ struct Background<TPlat: PlatformRef> {
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
     /// See [`Config::bitswap_service`].
     bitswap_service: Arc<bitswap_service::BitswapService>,
+    /// See [`Config::lifecycle_service`].
+    lifecycle_service: Arc<lifecycle_service::LifecycleService>,
+
+    /// Active `lifecycle_unstable_follow` subscriptions, keyed by subscription id.
+    lifecycle_subscriptions: hashbrown::HashMap<String, (), fnv::FnvBuildHasher>,
 
     /// Tasks that are spawned by the service and running in the background.
     background_tasks: stream::FuturesUnordered<Pin<Box<dyn Future<Output = Event<TPlat>> + Send>>>,
@@ -525,6 +533,21 @@ enum Event<TPlat: PlatformRef> {
         event: Option<(String, bitswap_service::BlockResult)>,
         events_rx: async_channel::Receiver<(String, bitswap_service::BlockResult)>,
     },
+    /// Result of [`lifecycle_service::LifecycleService::subscribe`] (which holds an inner
+    /// `Mutex`). Resolving this off the main dispatch loop keeps `lifecycle_unstable_follow`
+    /// non-blocking.
+    LifecycleFollowReady {
+        request_id_json: String,
+        events_rx: async_channel::Receiver<lifecycle_service::LifecycleEvent>,
+    },
+    /// One event from a `lifecycle_unstable_follow` subscription. `event` is `None`
+    /// when the broadcaster channel closes (in practice never during normal operation). The
+    /// receiver rides along so the main loop can re-arm the next pump iteration.
+    LifecycleFollowEvent {
+        subscription_id: String,
+        event: Option<lifecycle_service::LifecycleEvent>,
+        events_rx: async_channel::Receiver<lifecycle_service::LifecycleEvent>,
+    },
 }
 
 struct BitswapSubscription {
@@ -589,6 +612,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
         bitswap_service: config.bitswap_service.clone(),
+        lifecycle_service: config.lifecycle_service.clone(),
+        lifecycle_subscriptions: hashbrown::HashMap::with_hasher(Default::default()),
         background_tasks: stream::FuturesUnordered::new(),
         runtime_service_subscription: RuntimeServiceSubscription::NotCreated,
         all_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
@@ -822,6 +847,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.runtime_version_subscriptions.shrink_to_fit();
                 me.transactions_subscriptions.shrink_to_fit();
                 me.statement_subscriptions.shrink_to_fit();
+                me.bitswap_subscriptions.shrink_to_fit();
+                me.lifecycle_subscriptions.shrink_to_fit();
                 me.legacy_api_stale_storage_subscriptions.shrink_to_fit();
                 me.multistage_requests_to_advance.shrink_to_fit();
                 me.block_headers_pending.shrink_to_fit();
@@ -1011,7 +1038,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
                     | methods::MethodCall::bitswap_unstable_get { .. }
                     | methods::MethodCall::bitswap_unstable_stream { .. }
-                    | methods::MethodCall::bitswap_unstable_unstream { .. } => {}
+                    | methods::MethodCall::bitswap_unstable_unstream { .. }
+                    | methods::MethodCall::lifecycle_unstable_follow { .. }
+                    | methods::MethodCall::lifecycle_unstable_unfollow { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -3059,6 +3088,39 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::Response::statement_unsubscribeStatement(existed)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::lifecycle_unstable_follow {} => {
+                        // `LifecycleService::subscribe` holds an inner `Mutex` for the whole
+                        // call. Running it inline would stall the dispatch loop, so resolve
+                        // it off-loop and finish setup in the
+                        // `Event::LifecycleFollowReady` handler.
+                        me.background_tasks.push({
+                            let lifecycle_service = me.lifecycle_service.clone();
+                            let request_id_json = request_id_json.to_owned();
+                            Box::pin(async move {
+                                let events_rx = lifecycle_service.subscribe().await;
+                                Event::LifecycleFollowReady {
+                                    request_id_json,
+                                    events_rx,
+                                }
+                            })
+                        });
+                    }
+
+                    methods::MethodCall::lifecycle_unstable_unfollow { subscription } => {
+                        // Removing the entry orphans the ongoing background task: when it
+                        // next yields an event, the wake-up handler will observe the missing
+                        // subscription and drop the event without re-arming. Per spec, the
+                        // call succeeds regardless of whether the id was known.
+                        me.lifecycle_subscriptions.remove(&*subscription);
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::lifecycle_unstable_unfollow(())
                                     .to_json_response(request_id_json),
                             )
                             .await;
@@ -6132,6 +6194,170 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         .to_json_request_object_parameters(None);
                         let _ = me.responses_tx.send(notification).await;
                         me.bitswap_subscriptions.remove(&subscription_id);
+                    }
+                }
+            }
+
+            WakeUpReason::Event(Event::LifecycleFollowReady {
+                request_id_json,
+                events_rx,
+            }) => {
+                // Subscription setup resolved off the dispatch loop; finish it now:
+                // allocate the id, record the entry, acknowledge the caller, and arm
+                // the first pump iteration.
+                let subscription_id = {
+                    let mut bytes = [0u8; 32];
+                    me.randomness.fill_bytes(&mut bytes);
+                    bs58::encode(bytes).into_string()
+                };
+
+                let _prev_value = me
+                    .lifecycle_subscriptions
+                    .insert(subscription_id.clone(), ());
+                debug_assert!(_prev_value.is_none());
+
+                let _ = me
+                    .responses_tx
+                    .send(
+                        methods::Response::lifecycle_unstable_follow(Cow::Borrowed(
+                            &subscription_id,
+                        ))
+                        .to_json_response(&request_id_json),
+                    )
+                    .await;
+
+                me.background_tasks.push(Box::pin(async move {
+                    let event = events_rx.recv().await.ok();
+                    Event::LifecycleFollowEvent {
+                        subscription_id,
+                        event,
+                        events_rx,
+                    }
+                }));
+            }
+
+            WakeUpReason::Event(Event::LifecycleFollowEvent {
+                subscription_id,
+                event,
+                events_rx,
+            }) => {
+                // If the caller has already unfollowed (or the id was never issued), drop
+                // the event without emitting a notification and without re-arming the pump.
+                if !me.lifecycle_subscriptions.contains_key(&subscription_id) {
+                    continue;
+                }
+
+                match event {
+                    Some(ev) => {
+                        let result = match ev {
+                            lifecycle_service::LifecycleEvent::Connecting => {
+                                methods::LifecycleEvent::Connecting
+                            }
+                            lifecycle_service::LifecycleEvent::FirstPeer => {
+                                methods::LifecycleEvent::FirstPeer
+                            }
+                            lifecycle_service::LifecycleEvent::ModeDecision { mode } => {
+                                methods::LifecycleEvent::ModeDecision {
+                                    mode: match mode {
+                                        lifecycle_service::SyncMode::WarpSync => {
+                                            methods::LifecycleSyncMode::WarpSync
+                                        }
+                                        lifecycle_service::SyncMode::AllForks => {
+                                            methods::LifecycleSyncMode::AllForks
+                                        }
+                                    },
+                                }
+                            }
+                            lifecycle_service::LifecycleEvent::WarpSyncProgress { at, target } => {
+                                methods::LifecycleEvent::WarpSyncProgress { at, target }
+                            }
+                            lifecycle_service::LifecycleEvent::WarpSyncFinished { finalized } => {
+                                methods::LifecycleEvent::WarpSyncFinished { finalized }
+                            }
+                            lifecycle_service::LifecycleEvent::BootstrapComplete => {
+                                methods::LifecycleEvent::BootstrapComplete
+                            }
+                            lifecycle_service::LifecycleEvent::Stalled { reason } => {
+                                methods::LifecycleEvent::Stalled {
+                                    reason: match reason {
+                                        lifecycle_service::StallReason::NoPeers => {
+                                            methods::LifecycleStallReason::NoPeers
+                                        }
+                                        lifecycle_service::StallReason::WarpNoProgress => {
+                                            methods::LifecycleStallReason::WarpNoProgress
+                                        }
+                                        lifecycle_service::StallReason::SyncNoProgress => {
+                                            methods::LifecycleStallReason::SyncNoProgress
+                                        }
+                                        lifecycle_service::StallReason::BootstrapTimeout => {
+                                            methods::LifecycleStallReason::BootstrapTimeout
+                                        }
+                                    },
+                                }
+                            }
+                            lifecycle_service::LifecycleEvent::Recovered { previously } => {
+                                methods::LifecycleEvent::Recovered {
+                                    previously: match previously {
+                                        lifecycle_service::StallReason::NoPeers => {
+                                            methods::LifecycleStallReason::NoPeers
+                                        }
+                                        lifecycle_service::StallReason::WarpNoProgress => {
+                                            methods::LifecycleStallReason::WarpNoProgress
+                                        }
+                                        lifecycle_service::StallReason::SyncNoProgress => {
+                                            methods::LifecycleStallReason::SyncNoProgress
+                                        }
+                                        lifecycle_service::StallReason::BootstrapTimeout => {
+                                            methods::LifecycleStallReason::BootstrapTimeout
+                                        }
+                                    },
+                                }
+                            }
+                            lifecycle_service::LifecycleEvent::Stopped { reason } => {
+                                methods::LifecycleEvent::Stopped {
+                                    reason: match reason {
+                                        lifecycle_service::StopReason::Lagged => {
+                                            methods::LifecycleStopReason::Lagged
+                                        }
+                                        lifecycle_service::StopReason::ChainRemoved => {
+                                            methods::LifecycleStopReason::ChainRemoved
+                                        }
+                                    },
+                                }
+                            }
+                        };
+                        let notification =
+                            methods::ServerToClient::lifecycle_unstable_followEvent {
+                                subscription: Cow::Borrowed(&subscription_id),
+                                result,
+                            }
+                            .to_json_request_object_parameters(None);
+                        let _ = me.responses_tx.send(notification).await;
+
+                        // Re-arm the pump for the next event.
+                        me.background_tasks.push(Box::pin(async move {
+                            let next = events_rx.recv().await.ok();
+                            Event::LifecycleFollowEvent {
+                                subscription_id,
+                                event: next,
+                                events_rx,
+                            }
+                        }));
+                    }
+                    None => {
+                        // Broadcaster gone. Emit a synthetic terminal `Stopped` event so the
+                        // client can distinguish "still subscribed" from "silently dropped",
+                        // then remove the subscription entry.
+                        let notification =
+                            methods::ServerToClient::lifecycle_unstable_followEvent {
+                                subscription: Cow::Borrowed(&subscription_id),
+                                result: methods::LifecycleEvent::Stopped {
+                                    reason: methods::LifecycleStopReason::ChainRemoved,
+                                },
+                            }
+                            .to_json_request_object_parameters(None);
+                        let _ = me.responses_tx.send(notification).await;
+                        me.lifecycle_subscriptions.remove(&subscription_id);
                     }
                 }
             }

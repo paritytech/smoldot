@@ -50,6 +50,20 @@ mod substrate_compat;
 
 pub use network_service::Role;
 
+/// Bootstrap mode picked by the sync service after startup.
+///
+/// See [`SyncService::bootstrap_mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapMode {
+    /// GrandPa warp sync: jump forward via authority-set proofs to a recent finalized
+    /// block, skipping historical block verification.
+    WarpSync,
+    /// All-forks catch-up: verify every block from the checkpoint upward. Chosen when
+    /// warp sync is unavailable (no GRANDPA, no warp-eligible peer) or when the sync
+    /// service is a parachain (parachains never warp-sync).
+    AllForks,
+}
+
 /// Configuration for a [`SyncService`].
 pub struct Config<TPlat: PlatformRef> {
     /// Name of the chain, for logging purposes.
@@ -235,6 +249,48 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 buffer_size,
                 runtime_interest,
             })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Returns the bootstrap mode chosen by the sync service.
+    ///
+    /// For [`ConfigChainType::SubstrateCompatible`] chains, the sync service picks
+    /// between [`BootstrapMode::WarpSync`] and [`BootstrapMode::AllForks`] shortly
+    /// after startup based on peer availability, chain finality engine, and a
+    /// timeout. This call blocks until that decision has been committed. For
+    /// [`ConfigChainType::Parachain`] chains, the mode is always
+    /// [`BootstrapMode::AllForks`] and the call returns immediately.
+    pub async fn bootstrap_mode(&self) -> BootstrapMode {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .send(ToBackground::BootstrapMode { send_back })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Returns the block number that warp syncing has verified so far, if a warp
+    /// sync is currently in progress.
+    ///
+    /// Returns `Some(finalized_block_number)` while the underlying state machine is
+    /// downloading GRANDPA warp-sync fragments or building the chain information from
+    /// them. The value corresponds to the highest block that the fragments verified so
+    /// far prove to be finalized, and is monotonically non-decreasing while a single
+    /// warp sync is in progress.
+    ///
+    /// Returns `None` in all other cases: before any warp sync has been engaged, once
+    /// warp sync has finished, when the mode is [`BootstrapMode::AllForks`], and for
+    /// [`ConfigChainType::Parachain`] chains (which never warp-sync).
+    pub async fn warp_sync_position(&self) -> Option<u64> {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .send(ToBackground::WarpSyncPosition { send_back })
             .await
             .unwrap();
 
@@ -1425,5 +1481,13 @@ enum ToBackground {
     /// See [`SyncService::serialize_chain_information`].
     SerializeChainInformation {
         send_back: oneshot::Sender<Option<chain::chain_information::ValidChainInformation>>,
+    },
+    /// See [`SyncService::bootstrap_mode`].
+    BootstrapMode {
+        send_back: oneshot::Sender<BootstrapMode>,
+    },
+    /// See [`SyncService::warp_sync_position`].
+    WarpSyncPosition {
+        send_back: oneshot::Sender<Option<u64>>,
     },
 }
