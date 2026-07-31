@@ -30,14 +30,18 @@ use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap, vec::Vec};
 use core::{
     fmt,
     marker::PhantomData,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
 };
 use smoldot::json_rpc::methods;
 use strum::IntoEnumIterator;
 
+// 32-bit atomics so that the metrics also compile on targets without 64-bit
+// atomics (e.g. `thumbv7m-none-eabi`); durations are tracked in milliseconds
+// to make the range acceptable.
+
 /// Monotonically increasing counter.
 #[derive(Debug, Default)]
-pub struct Counter(AtomicU64);
+pub struct Counter(AtomicU32);
 
 impl Counter {
     pub fn inc(&self) {
@@ -45,21 +49,23 @@ impl Counter {
     }
 
     pub fn add(&self, n: u64) {
-        self.0.fetch_add(n, Ordering::Relaxed);
+        self.0
+            .fetch_add(u32::try_from(n).unwrap_or(u32::MAX), Ordering::Relaxed);
     }
 
     pub fn get(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
+        u64::from(self.0.load(Ordering::Relaxed))
     }
 }
 
 /// Value that can go up and down.
 #[derive(Debug, Default)]
-pub struct Gauge(AtomicU64);
+pub struct Gauge(AtomicU32);
 
 impl Gauge {
     pub fn set(&self, value: u64) {
-        self.0.store(value, Ordering::Relaxed);
+        self.0
+            .store(u32::try_from(value).unwrap_or(u32::MAX), Ordering::Relaxed);
     }
 
     pub fn inc(&self) {
@@ -75,7 +81,7 @@ impl Gauge {
     }
 
     pub fn get(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
+        u64::from(self.0.load(Ordering::Relaxed))
     }
 }
 
@@ -84,7 +90,7 @@ impl Gauge {
 pub struct RequestMetrics {
     pub success: Counter,
     pub failure: Counter,
-    pub duration_us: Counter,
+    pub duration_ms: Counter,
 }
 
 impl RequestMetrics {
@@ -94,8 +100,8 @@ impl RequestMetrics {
         } else {
             self.failure.inc();
         }
-        self.duration_us
-            .add(u64::try_from(duration.as_micros()).unwrap_or(u64::MAX));
+        self.duration_ms
+            .add(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
     }
 }
 
@@ -173,7 +179,7 @@ pub struct ChainMetrics {
 
     pub runtime_compilations: Counter,
     pub runtime_compilation_errors: Counter,
-    pub runtime_compilation_time_us: Counter,
+    pub runtime_compilation_time_ms: Counter,
     pub runtime_cache_hits: Counter,
 
     pub transactions_dropped: LabeledCounter<DropReasonKind>,
@@ -186,8 +192,8 @@ impl ChainMetrics {
         if !is_success {
             self.runtime_compilation_errors.inc();
         }
-        self.runtime_compilation_time_us
-            .add(u64::try_from(duration.as_micros()).unwrap_or(u64::MAX));
+        self.runtime_compilation_time_ms
+            .add(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
     }
 }
 
@@ -275,7 +281,7 @@ pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::Metr
         .into_iter()
         .map(|(protocol, metrics)| methods::MetricEntry {
             labels: labels(&[("protocol", protocol)]),
-            value: metrics.duration_us.get() as f64 / 1_000_000.0,
+            value: metrics.duration_ms.get() as f64 / 1_000.0,
         })
         .collect::<Vec<_>>();
 
@@ -361,7 +367,7 @@ pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::Metr
             ty: methods::MetricType::Counter,
             entries: alloc::vec![methods::MetricEntry {
                 labels: BTreeMap::new(),
-                value: chain.runtime_compilation_time_us.get() as f64 / 1_000_000.0,
+                value: chain.runtime_compilation_time_ms.get() as f64 / 1_000.0,
             }],
         },
         counter("runtimeCacheHitsTotal", chain.runtime_cache_hits.get()),
