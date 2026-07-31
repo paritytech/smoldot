@@ -338,6 +338,8 @@ pub enum BanSeverity {
 
 /// Reason for banning a peer. Printed in the logs and used as the `reason` label
 /// of the `networkPeerBansTotal` metric.
+// Strum derives are explained on [`crate::metrics::MetricLabel`]; `Display`
+// additionally prints the same string in log messages.
 #[derive(
     Debug, Copy, Clone, PartialEq, Eq, strum::Display, strum::EnumIter, strum::IntoStaticStr,
 )]
@@ -926,7 +928,10 @@ impl ChildStorageProofRequestError {
     }
 }
 
-/// Why an address obtained through discovery was discarded.
+/// Why an address obtained through discovery was discarded. The `reason` label of
+/// the `networkDiscoveryAddressesDroppedTotal` metric.
+// Strum derives are explained on [`crate::metrics::MetricLabel`]; `Display`
+// additionally prints the same string in log messages.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::EnumIter, strum::IntoStaticStr,
 )]

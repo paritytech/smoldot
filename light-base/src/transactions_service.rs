@@ -324,15 +324,9 @@ pub enum TransactionStatus {
 }
 
 /// See [`TransactionStatus::Dropped`].
-// This enum provides the `reason` label of the `transactionsDroppedTotal` metric
-// (see [`crate::metrics::MetricLabel`]):
-// - `EnumDiscriminants` generates `DropReasonKind`, a copy of this enum without
-//   payloads, since label values must be plain strings;
-// - `EnumIter` lets the metrics code enumerate all label values, so the snapshot
-//   reports every reason including zero counts;
-// - `IntoStaticStr` turns each variant name into its label string;
-// - `serialize_all = "kebab-case"` sets the casing of those strings;
-// - variants marked `strum(disabled)` are excluded from the metric.
+// The generated `DropReasonKind` is the `reason` label of the
+// `transactionsDroppedTotal` metric; the strum derives are explained on
+// [`crate::metrics::MetricLabel`].
 #[derive(Debug, Clone, strum::EnumDiscriminants)]
 #[strum_discriminants(name(DropReasonKind))]
 #[strum_discriminants(derive(strum::EnumIter, strum::IntoStaticStr))]

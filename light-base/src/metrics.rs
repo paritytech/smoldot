@@ -105,9 +105,17 @@ impl RequestMetrics {
     }
 }
 
-/// Metric label: a fieldless enum deriving `strum::EnumIter` and `strum::IntoStaticStr`.
-/// For enums with payloads, use the `strum::EnumDiscriminants` enum instead. Variants
-/// marked `#[strum(disabled)]` are not counted.
+/// Metric label: a fieldless enum whose variants are the label values.
+///
+/// Implemented through strum derives:
+/// - `EnumIter` enumerates all label values, so a snapshot reports every one of them,
+///   including zero counts;
+/// - `IntoStaticStr` turns each variant name into its label string;
+/// - `#[strum(serialize_all = "kebab-case")]` sets the casing of those strings;
+/// - for enums with payloads, derive `strum::EnumDiscriminants` and use the generated
+///   payload-free enum as the label, since label values must be plain strings;
+/// - variants marked `#[strum(disabled)]` are excluded from the metric:
+///   [`LabeledCounter::inc`] silently ignores them.
 pub trait MetricLabel: IntoEnumIterator + Into<&'static str> + PartialEq {}
 impl<T: IntoEnumIterator + Into<&'static str> + PartialEq> MetricLabel for T {}
 
