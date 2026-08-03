@@ -1313,27 +1313,22 @@ fn start_services<TPlat: platform::PlatformRef>(
     // out-of-band watchdog for `Stalled`) and emit into the broadcaster.
     let lifecycle_service = lifecycle_service::LifecycleService::new();
 
-    // `Connecting` is emitted synchronously via a fire-and-forget task so it lands
-    // before any other lifecycle event.
-    platform.spawn_task("lifecycle-connecting".into(), {
+    // `Connecting` then `FirstPeer` — both driven by a single task so the emit
+    // order is guaranteed (`Connecting` before `FirstPeer`) without relying on
+    // scheduler order between two separate spawn_task calls. Drops the
+    // `NetworkServiceChain` Arc as soon as the subscription is created so the
+    // task holds only the `Receiver` — otherwise the captured Arc keeps the
+    // per-chain network background task alive after `remove_chain`, which in
+    // turn keeps the subscriber `Sender` alive so `recv()` never returns
+    // `Err`, leaking the whole chain's state.
+    platform.spawn_task("lifecycle-connecting-first-peer".into(), {
+        let network_service_chain = network_service_chain.clone();
         let lifecycle_service = lifecycle_service.clone();
         async move {
             lifecycle_service
                 .emit(lifecycle_service::LifecycleEvent::Connecting)
                 .await;
-        }
-    });
 
-    // `FirstPeer` on the initial `Connected`. Drop the `NetworkServiceChain` Arc
-    // as soon as the subscription is created so the task holds only the
-    // `Receiver` — otherwise the captured Arc keeps the per-chain network
-    // background task alive after `remove_chain`, which in turn keeps the
-    // subscriber `Sender` alive so `recv()` never returns `Err`, leaking the
-    // whole chain's state.
-    platform.spawn_task("lifecycle-first-peer".into(), {
-        let network_service_chain = network_service_chain.clone();
-        let lifecycle_service = lifecycle_service.clone();
-        async move {
             let events = network_service_chain.subscribe().await;
             drop(network_service_chain);
             while let Ok(event) = events.recv().await {
@@ -1515,10 +1510,17 @@ fn start_services<TPlat: platform::PlatformRef>(
             // the connect-timeout order of magnitude. BootstrapTimeout trips
             // if the sync service has not looked near-head 60s after chain-add.
             // SyncNoProgress uses the same 60s window post-bootstrap.
+            // WarpNoProgress trips if `warp_sync_position()` returns the same
+            // value for 45s while warp is still engaged (i.e. before
+            // BootstrapComplete). 45s is between the 30s NoPeers cutoff (so a
+            // stuck-warp signal isn't muddied by peer loss) and the 60s
+            // BootstrapTimeout ceiling (so the warp-specific reason fires
+            // first when applicable).
             const POLL_INTERVAL: Duration = Duration::from_secs(5);
             const NO_PEERS_TIMEOUT: Duration = Duration::from_secs(30);
             const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
             const SYNC_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
+            const WARP_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(45);
 
             // Subscribe to network events for live peer-count tracking. Drop
             // the per-chain Arc immediately so this task holds only the
@@ -1548,6 +1550,13 @@ fn start_services<TPlat: platform::PlatformRef>(
             // block in 60s" tolerates brief dips, but a sustained flip to
             // false past the window is treated as `SyncNoProgress`.
             let mut last_near_head_seen = started.clone();
+            // Most recent warp position observed, and the moment we last saw
+            // it advance. Used only while warp is still engaged (i.e. before
+            // `bootstrap_complete`). `None` position means warp isn't
+            // running — the poller returns `None` in `AllForks` mode and
+            // after warp completes.
+            let mut last_warp_position: Option<u64> = None;
+            let mut last_warp_advance_seen = started.clone();
             // The reason latched by the most recent unmatched `Stalled`
             // emission, `None` if we're currently in a healthy state. Used
             // to gate emissions to at most one per transition and to fill in
@@ -1575,34 +1584,63 @@ fn start_services<TPlat: platform::PlatformRef>(
                     last_peer_seen = platform.now();
                 }
 
-                // Poll the sync-service head heuristic. Exiting on a dropped
-                // sync_service keeps this loop from outliving the chain.
+                // Poll the sync-service head heuristic AND the warp position.
+                // Both come from the same service, so we upgrade once and
+                // sample both to avoid a second oneshot round-trip.
                 {
                     let Some(sync_service_arc) = sync_service.upgrade() else {
                         return;
                     };
                     let near_head = sync_service_arc.is_near_head_of_chain_heuristic().await;
+                    let warp_position = sync_service_arc.warp_sync_position().await;
                     drop(sync_service_arc);
                     if near_head {
                         last_near_head_seen = platform.now();
                         bootstrap_complete = true;
                     }
+                    // Track whether warp fragment position has advanced.
+                    // Only meaningful while warp is engaged; once
+                    // `warp_position` goes to `None` we clear the tracker so
+                    // subsequent warp phases (rare, only on post-bootstrap
+                    // re-warp) start fresh.
+                    match (warp_position, last_warp_position) {
+                        (Some(new), Some(prev)) if new > prev => {
+                            last_warp_position = Some(new);
+                            last_warp_advance_seen = platform.now();
+                        }
+                        (Some(new), None) => {
+                            last_warp_position = Some(new);
+                            last_warp_advance_seen = platform.now();
+                        }
+                        (None, Some(_)) => {
+                            last_warp_position = None;
+                        }
+                        _ => {}
+                    }
                 }
 
                 // Decide which single stall condition (if any) is currently
-                // tripping. NoPeers wins over BootstrapTimeout wins over
-                // SyncNoProgress so a chain that's disconnected doesn't
-                // silently switch categories mid-outage.
+                // tripping. Priority: NoPeers > BootstrapTimeout >
+                // WarpNoProgress > SyncNoProgress. NoPeers wins because a
+                // disconnected chain shouldn't silently switch to a warp or
+                // sync stall category; BootstrapTimeout is the hard 60s
+                // ceiling; WarpNoProgress is a warp-specific finer-grained
+                // signal that fires earlier at 45s.
                 let now = platform.now();
                 let no_peers = now.clone() - last_peer_seen.clone() >= NO_PEERS_TIMEOUT;
                 let bootstrap_stuck =
                     !bootstrap_complete && now.clone() - started.clone() >= BOOTSTRAP_TIMEOUT;
+                let warp_stuck = !bootstrap_complete
+                    && last_warp_position.is_some()
+                    && now.clone() - last_warp_advance_seen.clone() >= WARP_NO_PROGRESS_TIMEOUT;
                 let sync_stuck = bootstrap_complete
                     && now.clone() - last_near_head_seen.clone() >= SYNC_NO_PROGRESS_TIMEOUT;
                 let active = if no_peers {
                     Some(lifecycle_service::StallReason::NoPeers)
                 } else if bootstrap_stuck {
                     Some(lifecycle_service::StallReason::BootstrapTimeout)
+                } else if warp_stuck {
+                    Some(lifecycle_service::StallReason::WarpNoProgress)
                 } else if sync_stuck {
                     Some(lifecycle_service::StallReason::SyncNoProgress)
                 } else {
@@ -1628,11 +1666,25 @@ fn start_services<TPlat: platform::PlatformRef>(
                             .await;
                         last_stall_reason = None;
                     }
+                    (Some(prev), Some(new)) if prev != new => {
+                        // Stall reason changed without an intervening healthy
+                        // period. Emit `Recovered { previously: prev }` then
+                        // `Stalled { reason: new }` so consumers see an
+                        // explicit close-then-open pair rather than a silent
+                        // category shift.
+                        let Some(lifecycle_service_arc) = lifecycle_service.upgrade() else {
+                            return;
+                        };
+                        lifecycle_service_arc
+                            .emit(lifecycle_service::LifecycleEvent::Recovered { previously: prev })
+                            .await;
+                        lifecycle_service_arc
+                            .emit(lifecycle_service::LifecycleEvent::Stalled { reason: new })
+                            .await;
+                        last_stall_reason = Some(new);
+                    }
                     // Same state as last iteration (either still healthy or
-                    // still stalled for the same reason): no emission. A
-                    // shift from one stall reason directly to another is
-                    // treated as a continuing stall rather than a rapid
-                    // Recovered+Stalled pair; the follow-up is welcome.
+                    // still stalled for the same reason): no emission.
                     _ => {}
                 }
 
