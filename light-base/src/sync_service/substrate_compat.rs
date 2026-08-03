@@ -1681,7 +1681,7 @@ struct Task<TPlat: PlatformRef> {
     /// `WarpSyncFinished` promotes us to [`ModeState::Ready`], and to
     /// [`BootstrapMode::AllForks`] when [`commit_all_forks_only`] fires (including the
     /// `CaughtUpViaFinality` path, where warp was pre-empted by finality catching up).
-    /// Exposed via [`SyncService::bootstrap_mode`].
+    /// Exposed via `SyncService::bootstrap_mode`.
     chosen_bootstrap_mode: Option<BootstrapMode>,
 
     /// [`ToBackground::BootstrapMode`] requests received before
@@ -1912,15 +1912,30 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
 }
 
 /// Records the bootstrap mode chosen at commit time and responds to any callers of
-/// [`SyncService::bootstrap_mode`] that queued while the decision was pending.
+/// `SyncService::bootstrap_mode` that queued while the decision was pending.
 /// Idempotent: subsequent calls (e.g. from a post-bootstrap re-warp completion) are
 /// ignored so that the reported mode always reflects the initial bootstrap.
 fn commit_bootstrap_mode<TPlat: PlatformRef>(task: &mut Task<TPlat>, mode: BootstrapMode) {
-    if task.chosen_bootstrap_mode.is_some() {
+    commit_bootstrap_mode_inner(
+        &mut task.chosen_bootstrap_mode,
+        &mut task.pending_bootstrap_mode_requests,
+        mode,
+    );
+}
+
+/// Pure-logic portion of [`commit_bootstrap_mode`], factored out so it can be
+/// unit-tested without a full [`Task`] fixture (which would require a live
+/// `NetworkServiceChain`).
+fn commit_bootstrap_mode_inner(
+    chosen: &mut Option<BootstrapMode>,
+    pending: &mut Vec<oneshot::Sender<BootstrapMode>>,
+    mode: BootstrapMode,
+) {
+    if chosen.is_some() {
         return;
     }
-    task.chosen_bootstrap_mode = Some(mode);
-    for send_back in task.pending_bootstrap_mode_requests.drain(..) {
+    *chosen = Some(mode);
+    for send_back in pending.drain(..) {
         let _ = send_back.send(mode);
     }
 }
@@ -2116,5 +2131,69 @@ mod tests {
             neighbor_packet_outcome(&ModeState::Deciding, &sync, MODE_DECISION_MIN_PACKETS - 1,),
             NeighborPacketOutcome::CommitAllForksOnly,
         );
+    }
+
+    // The two tests below exercise `commit_bootstrap_mode` via its extracted
+    // pure helper `commit_bootstrap_mode_inner`, because building a full
+    // `Task<TPlat>` fixture requires a live `NetworkServiceChain` and is out of
+    // scope for a unit test.
+
+    #[test]
+    fn commit_bootstrap_mode_drains_pending() {
+        let mut chosen: Option<BootstrapMode> = None;
+        let mut pending: Vec<oneshot::Sender<BootstrapMode>> = Vec::new();
+        let mut receivers = Vec::new();
+        for _ in 0..3 {
+            let (tx, rx) = oneshot::channel();
+            pending.push(tx);
+            receivers.push(rx);
+        }
+
+        commit_bootstrap_mode_inner(&mut chosen, &mut pending, BootstrapMode::WarpSync);
+
+        assert_eq!(chosen, Some(BootstrapMode::WarpSync));
+        assert!(pending.is_empty());
+        for mut rx in receivers {
+            assert_eq!(rx.try_recv(), Ok(Some(BootstrapMode::WarpSync)));
+        }
+    }
+
+    #[test]
+    fn commit_bootstrap_mode_is_idempotent() {
+        let mut chosen: Option<BootstrapMode> = None;
+        let mut pending: Vec<oneshot::Sender<BootstrapMode>> = Vec::new();
+
+        // Initial pending receivers are drained by the first commit with WarpSync.
+        let mut initial_receivers = Vec::new();
+        for _ in 0..2 {
+            let (tx, rx) = oneshot::channel();
+            pending.push(tx);
+            initial_receivers.push(rx);
+        }
+        commit_bootstrap_mode_inner(&mut chosen, &mut pending, BootstrapMode::WarpSync);
+        assert_eq!(chosen, Some(BootstrapMode::WarpSync));
+        assert!(pending.is_empty());
+        for mut rx in initial_receivers {
+            assert_eq!(rx.try_recv(), Ok(Some(BootstrapMode::WarpSync)));
+        }
+
+        // Queue two more receivers, then call again with a different mode.
+        // Because chosen is already Some(_), the second call is a no-op:
+        // stored mode stays WarpSync and pending is not drained. In the real
+        // Task, requests arriving after commit are answered directly by the
+        // main loop's `BootstrapMode` handler with the stored (first) mode.
+        let mut later_receivers = Vec::new();
+        for _ in 0..2 {
+            let (tx, rx) = oneshot::channel();
+            pending.push(tx);
+            later_receivers.push(rx);
+        }
+        commit_bootstrap_mode_inner(&mut chosen, &mut pending, BootstrapMode::AllForks);
+
+        assert_eq!(chosen, Some(BootstrapMode::WarpSync));
+        assert_eq!(pending.len(), 2);
+        for mut rx in later_receivers {
+            assert_eq!(rx.try_recv(), Ok(None));
+        }
     }
 }

@@ -78,7 +78,7 @@ pub enum LifecycleEvent {
     /// before `WarpSyncProgress` (if applicable) or `BootstrapComplete`.
     ///
     /// The reported `mode` is the mode the sync service actually committed to
-    /// (see [`crate::sync_service::SyncService::bootstrap_mode`]): a relay chain
+    /// (see `SyncService::bootstrap_mode`): a relay chain
     /// starts in [`SyncMode::WarpSync`] if it commits to warp before the
     /// deadline and [`SyncMode::AllForks`] otherwise; parachains are always
     /// [`SyncMode::AllForks`].
@@ -89,7 +89,7 @@ pub enum LifecycleEvent {
     ///
     /// `at` is the height of the highest block whose finality has been proven
     /// by the warp-sync fragments verified so far (from
-    /// [`crate::sync_service::SyncService::warp_sync_position`]). `target` is
+    /// `SyncService::warp_sync_position`). `target` is
     /// the highest best-block height advertised by any currently-connected
     /// peer (not necessarily a GRANDPA-finalized value). Values are polled at
     /// ~500 ms cadence and only re-emitted when `(at, target)` changes; both
@@ -254,5 +254,167 @@ impl LifecycleService {
     pub async fn bug_report_trace(&self) -> Vec<LifecycleEvent> {
         let inner = self.inner.lock().await;
         inner.history.iter().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_lite::future::block_on;
+
+    /// Builds a distinguishable `LifecycleEvent` carrying an integer tag `i`, so
+    /// the tests can verify emission order without pattern-matching every arm.
+    fn make_event(i: u64) -> LifecycleEvent {
+        LifecycleEvent::WarpSyncProgress { at: i, target: i }
+    }
+
+    fn tag_of(ev: &LifecycleEvent) -> u64 {
+        match ev {
+            LifecycleEvent::WarpSyncProgress { at, .. } => *at,
+            other => panic!("unexpected event variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn replay_within_capacity() {
+        block_on(async {
+            let svc = LifecycleService::new();
+            let n: u64 = 10;
+            assert!((n as usize) < HISTORY_CAPACITY);
+            for i in 0..n {
+                svc.emit(make_event(i)).await;
+            }
+
+            let rx = svc.subscribe().await;
+            let mut received = Vec::new();
+            for _ in 0..n {
+                received.push(rx.recv().await.unwrap());
+            }
+
+            assert_eq!(received.len(), n as usize);
+            for (idx, ev) in received.iter().enumerate() {
+                assert_eq!(tag_of(ev), idx as u64);
+            }
+        });
+    }
+
+    #[test]
+    fn ring_buffer_eviction() {
+        block_on(async {
+            let svc = LifecycleService::new();
+            let total = HISTORY_CAPACITY + 10;
+            for i in 0..total {
+                svc.emit(make_event(i as u64)).await;
+            }
+
+            let rx = svc.subscribe().await;
+            let mut received = Vec::new();
+            for _ in 0..HISTORY_CAPACITY {
+                received.push(rx.recv().await.unwrap());
+            }
+
+            assert_eq!(received.len(), HISTORY_CAPACITY);
+            // The first 10 events (tags 0..10) were evicted; the retained
+            // window is tags 10..HISTORY_CAPACITY+10, in emission order.
+            for (idx, ev) in received.iter().enumerate() {
+                assert_eq!(tag_of(ev), (idx + 10) as u64);
+            }
+            // No further events on the channel until a live emit occurs.
+            assert!(rx.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn replay_at_capacity_boundary() {
+        block_on(async {
+            let svc = LifecycleService::new();
+            for i in 0..HISTORY_CAPACITY {
+                svc.emit(make_event(i as u64)).await;
+            }
+
+            let rx = svc.subscribe().await;
+            // One live event emitted after subscribe: it must arrive in
+            // addition to the full replay burst.
+            svc.emit(make_event(HISTORY_CAPACITY as u64)).await;
+
+            let expected = HISTORY_CAPACITY + 1;
+            let mut received = Vec::new();
+            for _ in 0..expected {
+                received.push(rx.recv().await.unwrap());
+            }
+            assert_eq!(received.len(), expected);
+            for (idx, ev) in received.iter().enumerate() {
+                assert_eq!(tag_of(ev), idx as u64);
+            }
+        });
+    }
+
+    #[test]
+    fn slow_subscriber_isolation() {
+        block_on(async {
+            let svc = LifecycleService::new();
+            let healthy = svc.subscribe().await;
+            let slow = svc.subscribe().await;
+
+            let total = SUBSCRIBER_CHANNEL_CAPACITY + 1;
+            let mut healthy_received = Vec::new();
+            for i in 0..total {
+                svc.emit(make_event(i as u64)).await;
+                // Drain healthy after each emit so its channel never fills.
+                while let Ok(ev) = healthy.try_recv() {
+                    healthy_received.push(ev);
+                }
+            }
+            // Sweep any events that arrived in the final batch.
+            while let Ok(ev) = healthy.try_recv() {
+                healthy_received.push(ev);
+            }
+
+            // Healthy subscriber saw every event, in order.
+            assert_eq!(healthy_received.len(), total);
+            for (idx, ev) in healthy_received.iter().enumerate() {
+                assert_eq!(tag_of(ev), idx as u64);
+            }
+
+            // Slow subscriber's channel filled at SUBSCRIBER_CHANNEL_CAPACITY,
+            // then it was silently reaped on the next emit. Its Receiver
+            // still holds the buffered events, but no more.
+            let mut slow_count = 0;
+            while let Ok(_) = slow.try_recv() {
+                slow_count += 1;
+            }
+            assert_eq!(slow_count, SUBSCRIBER_CHANNEL_CAPACITY);
+        });
+    }
+
+    #[test]
+    fn bug_report_trace_returns_history() {
+        block_on(async {
+            let svc = LifecycleService::new();
+            let n: u64 = 5;
+            for i in 0..n {
+                svc.emit(make_event(i)).await;
+            }
+
+            let trace = svc.bug_report_trace().await;
+            assert_eq!(trace.len(), n as usize);
+            for (idx, ev) in trace.iter().enumerate() {
+                assert_eq!(tag_of(ev), idx as u64);
+            }
+
+            // Bug-report trace is subject to the HISTORY_CAPACITY cap.
+            let extra = HISTORY_CAPACITY as u64 + 5;
+            for i in n..(n + extra) {
+                svc.emit(make_event(i)).await;
+            }
+            let trace2 = svc.bug_report_trace().await;
+            assert_eq!(trace2.len(), HISTORY_CAPACITY);
+            // The tail must be the most recent HISTORY_CAPACITY tags.
+            let last_tag = n + extra - 1;
+            let first_tag = last_tag - (HISTORY_CAPACITY as u64 - 1);
+            for (idx, ev) in trace2.iter().enumerate() {
+                assert_eq!(tag_of(ev), first_tag + idx as u64);
+            }
+        });
     }
 }
