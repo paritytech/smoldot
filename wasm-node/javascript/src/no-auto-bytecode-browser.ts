@@ -527,6 +527,14 @@ function connect(config: ConnectionConfig): Connection {
 
             send: (data: Array<Uint8Array>, streamId: number): void => {
                 const channel = state.dataChannels.get(streamId)!;
+                // The channel can leave the `open` state before its `close` event has been
+                // dispatched. Until that event runs (and reports the reset through
+                // `onStreamReset`), the coordinator still believes the stream is writable and
+                // can legitimately try to send. Calling `send` in that state would throw an
+                // `InvalidStateError`. Dropping the data is fine, as the stream is about to be
+                // reset anyway. See <https://github.com/paritytech/smoldot/issues/3322>.
+                if (channel.channel.readyState !== "open")
+                    return;
                 for (const buffer of data) {
                     channel.bufferedBytes += buffer.length;
                 }
