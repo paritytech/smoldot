@@ -1138,7 +1138,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 }
 
                 (WakeUpReason::ForegroundMessage(ToBackground::BootstrapMode { send_back }), _) => {
-                    // Parachains never warp-sync; the mode is fixed at AllForks.
+                    // Parachains never warp-sync.
                     let _ = send_back.send(BootstrapMode::AllForks);
                 }
 
@@ -1146,8 +1146,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     WakeUpReason::ForegroundMessage(ToBackground::WarpSyncPosition { send_back }),
                     _,
                 ) => {
-                    // Parachains never warp-sync, so there is never a warp-fragment
-                    // position to report.
+                    // Parachains never warp-sync.
                     let _ = send_back.send(None);
                 }
 

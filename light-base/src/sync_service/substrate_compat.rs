@@ -1142,8 +1142,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::BootstrapMode { send_back }) => {
-                // Frontend is querying the committed bootstrap mode. Answer immediately
-                // once it's known; otherwise queue until the mode is committed.
+                // Answer immediately if the mode is committed, otherwise queue.
                 if let Some(mode) = task.chosen_bootstrap_mode {
                     let _ = send_back.send(mode);
                 } else {
@@ -1152,11 +1151,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::WarpSyncPosition { send_back }) => {
-                // Frontend is polling for warp-sync fragment progress. `Status::Sync`
-                // means warp is not (or no longer) engaged, so answer `None`. Both
-                // `WarpSyncFragments` and `WarpSyncChainInformation` expose the height
-                // of the highest block proven finalized by the fragments verified so
-                // far; that is the "current warp position" the lifecycle poller wants.
+                // `Status::Sync` means warp is not (or no longer) engaged. The two warp
+                // statuses expose the height proven finalized by the fragments so far.
                 let position = match task
                     .sync
                     .as_ref()
@@ -1676,16 +1672,15 @@ struct Task<TPlat: PlatformRef> {
     /// Once `true`, warp may re-engage and any later completion is allowed to fire a `Stop`.
     bootstrap_complete: bool,
 
-    /// The mode chosen at bootstrap-commit time. `None` while [`ModeState::Deciding`] or
-    /// [`ModeState::AwaitingWarp`]; set to [`BootstrapMode::WarpSync`] when
-    /// `WarpSyncFinished` promotes us to [`ModeState::Ready`], and to
-    /// [`BootstrapMode::AllForks`] when [`commit_all_forks_only`] fires (including the
-    /// `CaughtUpViaFinality` path, where warp was pre-empted by finality catching up).
-    /// Exposed via `SyncService::bootstrap_mode`.
+    /// Mode chosen at bootstrap-commit time. `None` during [`ModeState::Deciding`] and
+    /// [`ModeState::AwaitingWarp`]. Set to [`BootstrapMode::WarpSync`] when
+    /// `WarpSyncFinished` promotes us to [`ModeState::Ready`], or to
+    /// [`BootstrapMode::AllForks`] when [`commit_all_forks_only`] fires. Exposed via
+    /// `SyncService::bootstrap_mode`.
     chosen_bootstrap_mode: Option<BootstrapMode>,
 
-    /// [`ToBackground::BootstrapMode`] requests received before
-    /// [`Task::chosen_bootstrap_mode`] was set. Drained at commit time.
+    /// [`ToBackground::BootstrapMode`] requests received before the mode was chosen.
+    /// Drained at commit time.
     pending_bootstrap_mode_requests: Vec<oneshot::Sender<BootstrapMode>>,
 
     /// Below-gap packets observed while [`ModeState::Deciding`]; gates AllForksOnly commit.
@@ -1911,10 +1906,9 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
         .set_warp_completion_suppressed(false);
 }
 
-/// Records the bootstrap mode chosen at commit time and responds to any callers of
-/// `SyncService::bootstrap_mode` that queued while the decision was pending.
-/// Idempotent: subsequent calls (e.g. from a post-bootstrap re-warp completion) are
-/// ignored so that the reported mode always reflects the initial bootstrap.
+/// Records the chosen bootstrap mode and answers any queued
+/// `SyncService::bootstrap_mode` callers. Idempotent: only the first call takes effect
+/// so the reported mode always reflects the initial bootstrap.
 fn commit_bootstrap_mode<TPlat: PlatformRef>(task: &mut Task<TPlat>, mode: BootstrapMode) {
     commit_bootstrap_mode_inner(
         &mut task.chosen_bootstrap_mode,
@@ -1923,9 +1917,8 @@ fn commit_bootstrap_mode<TPlat: PlatformRef>(task: &mut Task<TPlat>, mode: Boots
     );
 }
 
-/// Pure-logic portion of [`commit_bootstrap_mode`], factored out so it can be
-/// unit-tested without a full [`Task`] fixture (which would require a live
-/// `NetworkServiceChain`).
+/// Pure-logic portion of [`commit_bootstrap_mode`], extracted so it can be unit-tested
+/// without a full [`Task`] fixture.
 fn commit_bootstrap_mode_inner(
     chosen: &mut Option<BootstrapMode>,
     pending: &mut Vec<oneshot::Sender<BootstrapMode>>,
@@ -2133,10 +2126,9 @@ mod tests {
         );
     }
 
-    // The two tests below exercise `commit_bootstrap_mode` via its extracted
-    // pure helper `commit_bootstrap_mode_inner`, because building a full
-    // `Task<TPlat>` fixture requires a live `NetworkServiceChain` and is out of
-    // scope for a unit test.
+    // The two tests below exercise `commit_bootstrap_mode` through its extracted
+    // pure helper, since a full `Task<TPlat>` fixture would require a live
+    // `NetworkServiceChain`.
 
     #[test]
     fn commit_bootstrap_mode_drains_pending() {
@@ -2177,11 +2169,10 @@ mod tests {
             assert_eq!(rx.try_recv(), Ok(Some(BootstrapMode::WarpSync)));
         }
 
-        // Queue two more receivers, then call again with a different mode.
-        // Because chosen is already Some(_), the second call is a no-op:
-        // stored mode stays WarpSync and pending is not drained. In the real
-        // Task, requests arriving after commit are answered directly by the
-        // main loop's `BootstrapMode` handler with the stored (first) mode.
+        // Queue two more, then call with a different mode. `chosen` is already
+        // set, so the second call is a no-op: stored mode stays `WarpSync` and
+        // `pending` is not drained. In the real `Task`, requests arriving after
+        // commit are answered directly by the `BootstrapMode` handler.
         let mut later_receivers = Vec::new();
         for _ in 0..2 {
             let (tx, rx) = oneshot::channel();

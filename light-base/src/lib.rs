@@ -1308,19 +1308,16 @@ fn start_services<TPlat: platform::PlatformRef>(
         },
     ));
 
-    // Lifecycle events are a typed projection of what the sync and network services
-    // already publish. Small projection tasks watch those streams (plus an
-    // out-of-band watchdog for `Stalled`) and emit into the broadcaster.
+    // Lifecycle events are a typed projection of what the sync and network
+    // services already publish. Small tasks watch those streams and emit into
+    // the broadcaster. A separate watchdog tracks stall heuristics.
     let lifecycle_service = lifecycle_service::LifecycleService::new();
 
-    // `Connecting` then `FirstPeer` — both driven by a single task so the emit
-    // order is guaranteed (`Connecting` before `FirstPeer`) without relying on
-    // scheduler order between two separate spawn_task calls. Drops the
-    // `NetworkServiceChain` Arc as soon as the subscription is created so the
-    // task holds only the `Receiver` — otherwise the captured Arc keeps the
-    // per-chain network background task alive after `remove_chain`, which in
-    // turn keeps the subscriber `Sender` alive so `recv()` never returns
-    // `Err`, leaking the whole chain's state.
+    // Emits `Connecting`, then `FirstPeer` on the first `Connected` network
+    // event. Both are emitted from the same task so their order is guaranteed
+    // without relying on inter-task scheduling. The `NetworkServiceChain` Arc
+    // is dropped as soon as the subscription is created so this task doesn't
+    // keep the per-chain network background alive after `remove_chain`.
     platform.spawn_task("lifecycle-connecting-first-peer".into(), {
         let network_service_chain = network_service_chain.clone();
         let lifecycle_service = lifecycle_service.clone();
@@ -1342,22 +1339,20 @@ fn start_services<TPlat: platform::PlatformRef>(
         }
     });
 
-    // Single bootstrap sequence — the emissions inside it are strictly ordered:
-    //   ModeDecision → (WarpSyncProgress*)* → WarpSyncFinished → BootstrapComplete
-    // The warp-progress poller is spawned FROM inside this task, after
-    // `ModeDecision`, so it can't race ahead. The task exits (dropping its
-    // spawned poller's completion flag) once BootstrapComplete has been emitted.
+    // Bootstrap sequence. Emissions are strictly ordered:
+    //   ModeDecision -> (WarpSyncProgress*)* -> WarpSyncFinished ->
+    //     BootstrapComplete
+    // The warp-progress poller is spawned from inside this task after
+    // `ModeDecision`, so it cannot race ahead. `warp_done` gates the poller
+    // so no stray `WarpSyncProgress` lands after `WarpSyncFinished`.
     platform.spawn_task("lifecycle-bootstrap".into(), {
         let lifecycle_service = lifecycle_service.clone();
         let sync_service = sync_service.clone();
         let platform = platform.clone();
         async move {
-            // `subscribe_all` blocks until the sync service commits its bootstrap
-            // mode, so its return marks the ModeDecision boundary.
+            // `subscribe_all` returns after the sync service commits its
+            // bootstrap mode, so `bootstrap_mode()` answers immediately here.
             let subscription = sync_service.subscribe_all(16, false).await;
-            // The sync service commits the mode at the same point that unblocks
-            // `subscribe_all`, so `bootstrap_mode()` is guaranteed to answer
-            // immediately here without introducing a new wait.
             let mode = match sync_service.bootstrap_mode().await {
                 sync_service::BootstrapMode::WarpSync => lifecycle_service::SyncMode::WarpSync,
                 sync_service::BootstrapMode::AllForks => lifecycle_service::SyncMode::AllForks,
@@ -1366,28 +1361,24 @@ fn start_services<TPlat: platform::PlatformRef>(
                 .emit(lifecycle_service::LifecycleEvent::ModeDecision { mode })
                 .await;
 
-            // Warp progress polling starts here — strictly after ModeDecision.
-            // A shared flag lets us stop the poller as soon as we reach
-            // WarpSyncFinished (below), so no stray progress event lands after.
             let warp_done = Arc::new(async_lock::RwLock::new(false));
             if matches!(mode, lifecycle_service::SyncMode::WarpSync) {
-                // Hold `Weak` clones of `lifecycle_service` and `sync_service` so
-                // that after `remove_chain` this poller doesn't keep the chain
-                // alive for the remainder of its 60s window. Upgrade on each
-                // iteration; if the chain has been dropped, exit early.
+                // The poller holds `Weak` clones so that after `remove_chain`
+                // it does not keep the chain alive for the remainder of its
+                // 60 s window. Upgrade on each iteration and exit if either
+                // service has been dropped.
                 platform.spawn_task("lifecycle-warp-progress".into(), {
                     let lifecycle_service = Arc::downgrade(&lifecycle_service);
                     let sync_service = Arc::downgrade(&sync_service);
                     let platform = platform.clone();
                     let warp_done = warp_done.clone();
                     async move {
-                        // `at` comes from the sync service's warp-sync state machine
-                        // and is the height of the highest block whose finality has
-                        // been proven by the fragments verified so far. `target` is
-                        // the highest best-block height advertised by any connected
-                        // peer (the sync service doesn't publish the warp target
-                        // separately) and is clamped to a running max so it never
-                        // regresses when a high-best peer drops out.
+                        // `at` is the fragment position reported by the sync
+                        // service (the highest block proven finalized by
+                        // fragments verified so far). `target` is the highest
+                        // best-block height advertised by any connected peer,
+                        // clamped to a running max so a departing peer never
+                        // regresses it.
                         let mut last_reported: Option<(u64, u64)> = None;
                         let mut max_target: u64 = 0;
                         for _ in 0..120 {
@@ -1401,11 +1392,10 @@ fn start_services<TPlat: platform::PlatformRef>(
                             let at = match sync_service_arc.warp_sync_position().await {
                                 Some(at) => at,
                                 None => {
-                                    // Warp is no longer engaged (the state machine
-                                    // has already transitioned to `Sync`). The
-                                    // outer task will emit `WarpSyncFinished` when
-                                    // the first block streams in; we just stop
-                                    // polling.
+                                    // The state machine has already left warp;
+                                    // the outer task will emit
+                                    // `WarpSyncFinished` when the first block
+                                    // streams in.
                                     drop(sync_service_arc);
                                     return;
                                 }
@@ -1420,9 +1410,8 @@ fn start_services<TPlat: platform::PlatformRef>(
                             if peer_best > max_target {
                                 max_target = peer_best;
                             }
-                            // Defensive clamp: keep `target >= at` even if the
-                            // best-peer sample lags behind the fragments we've
-                            // already verified.
+                            // Keep `target >= at` even if the best-peer sample
+                            // lags the fragments we have already verified.
                             if at > max_target {
                                 max_target = at;
                             }
@@ -1445,22 +1434,20 @@ fn start_services<TPlat: platform::PlatformRef>(
                 });
             }
 
-            // Drop the outer `sync_service` Arc now that the warp-progress
-            // task (if any) has taken its own clone. The `new_blocks`
-            // `Receiver` below doesn't need `sync_service` — dropping here
-            // prevents this task from holding the chain alive after
-            // `remove_chain`.
+            // The poller has its own clone of `sync_service`. Drop the outer
+            // one so this task no longer contributes to keeping the chain
+            // alive.
             drop(sync_service);
 
             // The first item on `new_blocks` (either `Block` or `Finalized`)
-            // means live-block streaming has started; the client is ready to
-            // serve queries. Waiting only for `Finalized` would push this out
-            // by the GRANDPA round cadence for no additional signal.
+            // means live-block streaming has started. Waiting only for
+            // `Finalized` would push this out by the GRANDPA round cadence
+            // for no additional signal.
             let new_blocks = subscription.new_blocks;
             if new_blocks.recv().await.is_ok() {
                 if matches!(mode, lifecycle_service::SyncMode::WarpSync) {
-                    // Stop the progress poller before the finished event so we
-                    // can't emit `WarpSyncProgress` after `WarpSyncFinished`.
+                    // Stop the poller before the finished event so no
+                    // `WarpSyncProgress` can land after `WarpSyncFinished`.
                     *warp_done.write().await = true;
                     let header = subscription.finalized_block_scale_encoded_header;
                     let finalized_height = header::decode(&header, block_number_bytes)
@@ -1479,53 +1466,45 @@ fn start_services<TPlat: platform::PlatformRef>(
         }
     });
 
-    // Log-line projection sink deliberately omitted. The RPC path in
-    // `json_rpc_service::background` already logs every emitted event under
-    // the `json-rpc-<chain>` debug target as part of the standard
-    // `json-rpc-response-yielded` line, so log-scraping tooling already sees
-    // the full stream from any active `lifecycle_unstable_follow` subscriber.
-    // Adding a parallel projection task here created an Arc cycle - the task
-    // clone of the service kept it alive while its subscriber Sender was
-    // retained inside `LifecycleService::subscribers`, so the state stayed
-    // resident forever after chain removal. See paritytech/smoldot#3301: the
-    // "logs as projection" bullet is a follow-up sweep that migrates the
-    // existing sync/network debug lines onto the event-derived path, not an
-    // additional parallel source.
+    // No log-line projection sink here. The JSON-RPC background already logs
+    // every emitted event under the `json-rpc-<chain>` debug target, so a
+    // subscriber to `lifecycle_unstable_follow` produces the full log stream
+    // for free. Adding a parallel projection task would create an Arc cycle
+    // (the task keeps the service alive via its own clone, while its
+    // subscriber `Sender` is retained inside `LifecycleService::subscribers`),
+    // leaving state resident after chain removal. Migrating the existing
+    // sync/network debug lines onto the event-derived path is a follow-up
+    // sweep tracked in paritytech/smoldot#3301.
 
-    // Stall watchdog. A single polling loop tracks three heuristics and
+    // Stall watchdog. A single polling loop tracks the stall heuristics and
     // re-arms after each trip so a chain that recovers gets a matching
-    // `Recovered` event. Heuristics are approximate on purpose - the goal is
-    // a signal for a UI to nudge the user, not a proof of failure.
+    // `Recovered` event. The heuristics are approximate: the goal is a signal
+    // for a UI or a metrics exporter, not a proof of failure.
     platform.spawn_task("lifecycle-watchdog".into(), {
-        // Hold `Weak` clones so that after `remove_chain` the watchdog does
-        // not keep the chain alive for the remainder of its 60s window.
-        // Each iteration upgrades the `Weak`s; if any has been dropped, the
-        // task exits.
+        // Held as `Weak` so the watchdog does not keep the chain alive after
+        // `remove_chain`. Each iteration upgrades and exits early if any of
+        // them has been dropped.
         let lifecycle_service = Arc::downgrade(&lifecycle_service);
         let sync_service = Arc::downgrade(&sync_service);
         let network_service_chain = Arc::downgrade(&network_service_chain);
         let platform = platform.clone();
         async move {
-            // Windows: NoPeers trips after 30s without a live peer, matching
-            // the connect-timeout order of magnitude. BootstrapTimeout trips
-            // if the sync service has not looked near-head 60s after chain-add.
-            // SyncNoProgress uses the same 60s window post-bootstrap.
-            // WarpNoProgress trips if `warp_sync_position()` returns the same
-            // value for 45s while warp is still engaged (i.e. before
-            // BootstrapComplete). 45s is between the 30s NoPeers cutoff (so a
-            // stuck-warp signal isn't muddied by peer loss) and the 60s
-            // BootstrapTimeout ceiling (so the warp-specific reason fires
-            // first when applicable).
+            // `NoPeers` trips after 30 s without a live peer, matching the
+            // connect-timeout order of magnitude. `BootstrapTimeout` is the
+            // hard 60 s ceiling from chain-add. `SyncNoProgress` uses the
+            // same 60 s window post-bootstrap. `WarpNoProgress` trips at 45 s
+            // of unchanged `warp_sync_position()` while warp is engaged, so
+            // it fires before `BootstrapTimeout` when the finer-grained
+            // signal is available.
             const POLL_INTERVAL: Duration = Duration::from_secs(5);
             const NO_PEERS_TIMEOUT: Duration = Duration::from_secs(30);
             const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
             const SYNC_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
             const WARP_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(45);
 
-            // Subscribe to network events for live peer-count tracking. Drop
-            // the per-chain Arc immediately so this task holds only the
-            // Receiver — otherwise the captured Arc keeps the per-chain
-            // network background task alive after `remove_chain`.
+            // Subscribe to network events for live peer-count tracking, then
+            // drop the `NetworkServiceChain` Arc so this task holds only the
+            // receiver.
             let events = {
                 let Some(network_service_chain_arc) = network_service_chain.upgrade() else {
                     return;
@@ -1534,39 +1513,27 @@ fn start_services<TPlat: platform::PlatformRef>(
             };
 
             let started = platform.now();
-            // Most recent moment we observed at least one live peer. Seeded
-            // to `started` so the "no peer in the last 30s" test only trips
-            // once the window has actually elapsed.
+            // Most recent moment we observed a live peer. Seeded to
+            // `started` so `NoPeers` can only trip after the window elapses.
             let mut last_peer_seen = started.clone();
-            // Live peer count derived from Connected/Disconnected events.
             let mut peer_count: usize = 0;
             // Set the first time `is_near_head_of_chain_heuristic()` returns
-            // true. Marks the BootstrapComplete boundary for the two
-            // post-bootstrap heuristics.
+            // true. Gates the two post-bootstrap heuristics.
             let mut bootstrap_complete = false;
-            // Most recent moment we observed `is_near_head_of_chain_heuristic()`
-            // == true. Only consulted after `bootstrap_complete`. The
-            // "polling `is_near_head` continuously" approximation of "no new
-            // block in 60s" tolerates brief dips, but a sustained flip to
-            // false past the window is treated as `SyncNoProgress`.
+            // Most recent moment `is_near_head_of_chain_heuristic()` was
+            // true. Only consulted after `bootstrap_complete`.
             let mut last_near_head_seen = started.clone();
-            // Most recent warp position observed, and the moment we last saw
-            // it advance. Used only while warp is still engaged (i.e. before
-            // `bootstrap_complete`). `None` position means warp isn't
-            // running — the poller returns `None` in `AllForks` mode and
-            // after warp completes.
+            // Most recent warp position observed and the moment we last saw
+            // it advance. `None` once warp is no longer engaged.
             let mut last_warp_position: Option<u64> = None;
             let mut last_warp_advance_seen = started.clone();
-            // The reason latched by the most recent unmatched `Stalled`
-            // emission, `None` if we're currently in a healthy state. Used
-            // to gate emissions to at most one per transition and to fill in
-            // the `previously` field of `Recovered`.
+            // Reason latched by the most recent unmatched `Stalled`
+            // emission, or `None` if currently healthy.
             let mut last_stall_reason: Option<lifecycle_service::StallReason> = None;
 
             loop {
                 // Drain pending network events non-blockingly. A closed
-                // sender means the per-chain network task is gone (which
-                // implies the chain is being torn down); exit the watchdog.
+                // sender means the per-chain network task is gone. Exit.
                 loop {
                     match events.try_recv() {
                         Ok(network_service::Event::Connected { .. }) => {
@@ -1584,9 +1551,8 @@ fn start_services<TPlat: platform::PlatformRef>(
                     last_peer_seen = platform.now();
                 }
 
-                // Poll the sync-service head heuristic AND the warp position.
-                // Both come from the same service, so we upgrade once and
-                // sample both to avoid a second oneshot round-trip.
+                // Sample the near-head heuristic and warp position together
+                // to avoid a second round-trip through the sync service.
                 {
                     let Some(sync_service_arc) = sync_service.upgrade() else {
                         return;
@@ -1598,11 +1564,9 @@ fn start_services<TPlat: platform::PlatformRef>(
                         last_near_head_seen = platform.now();
                         bootstrap_complete = true;
                     }
-                    // Track whether warp fragment position has advanced.
-                    // Only meaningful while warp is engaged; once
-                    // `warp_position` goes to `None` we clear the tracker so
-                    // subsequent warp phases (rare, only on post-bootstrap
-                    // re-warp) start fresh.
+                    // Track warp fragment advances. When `warp_position` goes
+                    // back to `None` we clear the tracker so any subsequent
+                    // warp phase starts fresh.
                     match (warp_position, last_warp_position) {
                         (Some(new), Some(prev)) if new > prev => {
                             last_warp_position = Some(new);
@@ -1619,13 +1583,11 @@ fn start_services<TPlat: platform::PlatformRef>(
                     }
                 }
 
-                // Decide which single stall condition (if any) is currently
-                // tripping. Priority: NoPeers > BootstrapTimeout >
-                // WarpNoProgress > SyncNoProgress. NoPeers wins because a
-                // disconnected chain shouldn't silently switch to a warp or
-                // sync stall category; BootstrapTimeout is the hard 60s
-                // ceiling; WarpNoProgress is a warp-specific finer-grained
-                // signal that fires earlier at 45s.
+                // Priority: `NoPeers` > `BootstrapTimeout` > `WarpNoProgress`
+                // > `SyncNoProgress`. `NoPeers` wins so a disconnected chain
+                // does not silently switch categories. `WarpNoProgress` is
+                // reported instead of `BootstrapTimeout` when a finer signal
+                // is available.
                 let now = platform.now();
                 let no_peers = now.clone() - last_peer_seen.clone() >= NO_PEERS_TIMEOUT;
                 let bootstrap_stuck =
@@ -1667,11 +1629,10 @@ fn start_services<TPlat: platform::PlatformRef>(
                         last_stall_reason = None;
                     }
                     (Some(prev), Some(new)) if prev != new => {
-                        // Stall reason changed without an intervening healthy
-                        // period. Emit `Recovered { previously: prev }` then
-                        // `Stalled { reason: new }` so consumers see an
-                        // explicit close-then-open pair rather than a silent
-                        // category shift.
+                        // Reason changed without an intervening healthy
+                        // interval. Emit a `Recovered` for the previous
+                        // reason and a fresh `Stalled` so consumers see an
+                        // explicit close-then-open pair.
                         let Some(lifecycle_service_arc) = lifecycle_service.upgrade() else {
                             return;
                         };
@@ -1683,8 +1644,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                             .await;
                         last_stall_reason = Some(new);
                     }
-                    // Same state as last iteration (either still healthy or
-                    // still stalled for the same reason): no emission.
+                    // Still healthy, or still stalled for the same reason.
                     _ => {}
                 }
 

@@ -636,14 +636,12 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::BootstrapMode { send_back }) => {
-                // Parachains never warp-sync; the mode is fixed at AllForks and can
-                // be answered immediately.
+                // Parachains never warp-sync.
                 let _ = send_back.send(BootstrapMode::AllForks);
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::WarpSyncPosition { send_back }) => {
-                // Parachains never warp-sync, so there is never a warp-fragment
-                // position to report.
+                // Parachains never warp-sync.
                 let _ = send_back.send(None);
             }
 

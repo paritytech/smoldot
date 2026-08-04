@@ -533,16 +533,16 @@ enum Event<TPlat: PlatformRef> {
         event: Option<(String, bitswap_service::BlockResult)>,
         events_rx: async_channel::Receiver<(String, bitswap_service::BlockResult)>,
     },
-    /// Result of [`lifecycle_service::LifecycleService::subscribe`] (which holds an inner
-    /// `Mutex`). Resolving this off the main dispatch loop keeps `lifecycle_unstable_follow`
-    /// non-blocking.
+    /// Result of [`lifecycle_service::LifecycleService::subscribe`], resolved off the
+    /// main dispatch loop so `lifecycle_unstable_follow` never blocks on the broadcaster
+    /// `Mutex`.
     LifecycleFollowReady {
         request_id_json: String,
         events_rx: async_channel::Receiver<lifecycle_service::LifecycleEvent>,
     },
-    /// One event from a `lifecycle_unstable_follow` subscription. `event` is `None`
-    /// when the broadcaster channel closes (in practice never during normal operation). The
-    /// receiver rides along so the main loop can re-arm the next pump iteration.
+    /// One iteration of the `lifecycle_unstable_follow` events pump. `event` is `None`
+    /// when the broadcaster channel closes. The receiver is shipped along so the main
+    /// loop can re-arm the next iteration.
     LifecycleFollowEvent {
         subscription_id: String,
         event: Option<lifecycle_service::LifecycleEvent>,
@@ -3094,10 +3094,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::lifecycle_unstable_follow {} => {
-                        // `LifecycleService::subscribe` holds an inner `Mutex` for the whole
-                        // call. Running it inline would stall the dispatch loop, so resolve
-                        // it off-loop and finish setup in the
-                        // `Event::LifecycleFollowReady` handler.
+                        // `LifecycleService::subscribe` takes an inner `Mutex` for the
+                        // duration of the call. Resolve it off-loop and finish setup in
+                        // the `LifecycleFollowReady` handler.
                         me.background_tasks.push({
                             let lifecycle_service = me.lifecycle_service.clone();
                             let request_id_json = request_id_json.to_owned();
@@ -3112,10 +3111,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::lifecycle_unstable_unfollow { subscription } => {
-                        // Removing the entry orphans the ongoing background task: when it
-                        // next yields an event, the wake-up handler will observe the missing
-                        // subscription and drop the event without re-arming. Per spec, the
-                        // call succeeds regardless of whether the id was known.
+                        // Removing the entry orphans the pump task: on its next event the
+                        // wake-up handler sees the missing subscription and drops the event
+                        // without re-arming. The call succeeds whether the id was known.
                         me.lifecycle_subscriptions.remove(&*subscription);
                         let _ = me
                             .responses_tx
@@ -6202,9 +6200,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 request_id_json,
                 events_rx,
             }) => {
-                // Subscription setup resolved off the dispatch loop; finish it now:
-                // allocate the id, record the entry, acknowledge the caller, and arm
-                // the first pump iteration.
+                // Off-loop setup resolved. Assign an id, record the subscription,
+                // acknowledge the caller, and arm the first pump iteration.
                 let subscription_id = {
                     let mut bytes = [0u8; 32];
                     me.randomness.fill_bytes(&mut bytes);
@@ -6241,8 +6238,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 event,
                 events_rx,
             }) => {
-                // If the caller has already unfollowed (or the id was never issued), drop
-                // the event without emitting a notification and without re-arming the pump.
+                // Caller already unfollowed (or the id was never issued): drop the
+                // event and stop the pump.
                 if !me.lifecycle_subscriptions.contains_key(&subscription_id) {
                     continue;
                 }
@@ -6345,9 +6342,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         }));
                     }
                     None => {
-                        // Broadcaster gone. Emit a synthetic terminal `Stopped` event so the
-                        // client can distinguish "still subscribed" from "silently dropped",
-                        // then remove the subscription entry.
+                        // Broadcaster gone. Emit a terminal `Stopped { ChainRemoved }`
+                        // so the client sees a clean shutdown rather than a silent drop,
+                        // then remove the subscription.
                         let notification =
                             methods::ServerToClient::lifecycle_unstable_followEvent {
                                 subscription: Cow::Borrowed(&subscription_id),

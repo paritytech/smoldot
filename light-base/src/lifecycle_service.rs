@@ -19,15 +19,12 @@
 //!
 //! Exposes a typed stream of lifecycle events (peer discovery, warp sync progress,
 //! bootstrap completion, stall detection) so consumers can drive UI or health
-//! monitoring without matching debug log text. See issue #3301.
+//! monitoring without parsing debug log text. See issue #3301.
 //!
-//! # Semantics
-//!
-//! The last N events are retained in a ring buffer so late subscribers receive a
-//! snapshot before live events. Slow subscribers whose bounded channel is full are
-//! dropped; there is no lag marker yet - a dropped subscriber simply stops
-//! receiving events. This mirrors the "slow consumers must never block syncing"
-//! requirement.
+//! The last `HISTORY_CAPACITY` events are retained in a ring buffer so that late
+//! subscribers receive a snapshot before starting to receive live events. A
+//! subscriber whose bounded channel is full is dropped on the next
+//! [`LifecycleService::emit`]. Syncing is never blocked on a slow consumer.
 //!
 //! The event schema is unstable and versioned.
 
@@ -63,124 +60,104 @@ pub enum StallReason {
 
 /// A single lifecycle transition of a chain.
 ///
-/// The schema is unstable and versioned. New variants may be added; consumers that
-/// don't recognise a variant should treat it as a no-op.
+/// The schema is unstable and versioned.
 #[derive(Debug, Clone)]
 pub enum LifecycleEvent {
-    /// The chain has been added and is starting up. Emitted exactly once, first.
+    /// The chain has been added and is starting up. Emitted exactly once, and
+    /// before every other event.
     Connecting,
 
-    /// The chain has observed at least one peer for the first time.
-    /// Emitted at most once per instance.
+    /// The chain has observed at least one peer. Emitted at most once.
     FirstPeer,
 
-    /// The client has decided on a bootstrap mode for the chain. Emitted once,
+    /// The sync service has committed to a bootstrap mode. Emitted once,
     /// before `WarpSyncProgress` (if applicable) or `BootstrapComplete`.
     ///
-    /// The reported `mode` is the mode the sync service actually committed to
-    /// (see `SyncService::bootstrap_mode`): a relay chain
-    /// starts in [`SyncMode::WarpSync`] if it commits to warp before the
-    /// deadline and [`SyncMode::AllForks`] otherwise; parachains are always
-    /// [`SyncMode::AllForks`].
+    /// A relay chain reports [`SyncMode::WarpSync`] if it commits to warp
+    /// before the mode-decision deadline, [`SyncMode::AllForks`] otherwise.
+    /// Parachains always report [`SyncMode::AllForks`].
     ModeDecision { mode: SyncMode },
 
-    /// Warp sync progress update. Not emitted when the mode is
-    /// [`SyncMode::AllForks`].
+    /// Warp sync progress update. Only emitted when the mode is
+    /// [`SyncMode::WarpSync`].
     ///
     /// `at` is the height of the highest block whose finality has been proven
-    /// by the warp-sync fragments verified so far (from
-    /// `SyncService::warp_sync_position`). `target` is
-    /// the highest best-block height advertised by any currently-connected
-    /// peer (not necessarily a GRANDPA-finalized value). Values are polled at
-    /// ~500 ms cadence and only re-emitted when `(at, target)` changes; both
-    /// are monotonically non-decreasing while warp is in progress, and
-    /// `target` is clamped so it is never below `at`.
+    /// by the warp-sync fragments verified so far. `target` is the highest
+    /// best-block height advertised by any currently-connected peer (not
+    /// necessarily a GRANDPA-finalized value). Values are polled at ~500 ms
+    /// cadence and only re-emitted when `(at, target)` changes. Both are
+    /// monotonically non-decreasing while warp is in progress. `target` is
+    /// additionally clamped upward to `at`.
     WarpSyncProgress { at: u64, target: u64 },
 
-    /// Warp sync has finished. `finalized` is the block height decoded from
-    /// the sync service's initial finalized-block header snapshot, or `0` if
-    /// that decode fails. Not emitted when the mode is [`SyncMode::AllForks`].
+    /// Warp sync has finished. Only emitted when the mode is
+    /// [`SyncMode::WarpSync`]. `finalized` is the block height decoded from
+    /// the sync service's initial finalized-block header, or `0` if that
+    /// decode fails.
     WarpSyncFinished { finalized: u64 },
 
-    /// Initial bootstrap has completed and the client considers the chain ready
-    /// to serve queries. Emitted at most once per instance, after warp (if any)
-    /// and once the sync service starts streaming new blocks.
+    /// Initial bootstrap has completed and the client is ready to serve
+    /// queries. Emitted at most once, after warp (if any) and once the sync
+    /// service starts streaming new blocks.
     BootstrapComplete,
 
-    /// The client's health watchdog considers the chain stalled.
+    /// The client's health watchdog considers the chain stalled. See
+    /// [`StallReason`] for the individual conditions.
     ///
-    /// Emitted by a periodic watchdog task that tracks [`StallReason::NoPeers`]
-    /// (no live peer for the watchdog window), [`StallReason::BootstrapTimeout`]
-    /// (bootstrap has not completed within the watchdog window from chain-add),
-    /// and [`StallReason::SyncNoProgress`] (after `BootstrapComplete`, the sync
-    /// service has not looked near-head for the watchdog window).
-    /// [`StallReason::WarpNoProgress`] is reserved by the schema but not
-    /// emitted yet. The watchdog re-arms after emitting: once the tripping
-    /// condition clears, a matching [`LifecycleEvent::Recovered`] is emitted.
+    /// The watchdog re-arms after emitting: once the tripping condition
+    /// clears, a matching [`LifecycleEvent::Recovered`] is emitted. If the
+    /// stall reason changes without an intervening healthy interval, a
+    /// `Recovered` for the previous reason is emitted immediately before the
+    /// new `Stalled`.
     Stalled { reason: StallReason },
 
-    /// The condition that produced the most recent [`LifecycleEvent::Stalled`]
-    /// has cleared. `previously` echoes the reason from the paired `Stalled`
-    /// event so consumers can correlate the two without holding state.
-    ///
-    /// Not emitted spontaneously — always follows a matching `Stalled` event.
+    /// The most recent [`LifecycleEvent::Stalled`] condition has cleared.
+    /// `previously` echoes its reason so consumers can correlate the two
+    /// without holding state.
     Recovered { previously: StallReason },
 
     /// Terminal event: no further lifecycle events will be delivered on this
-    /// subscription. Lets clients distinguish "still subscribed, chain is idle"
-    /// from "silently dropped by the broadcaster".
-    ///
-    /// After emitting this event the pump tears down the subscription entry.
-    /// See [`StopReason`] for the distinction between the two cases.
+    /// subscription. Lets clients distinguish "still subscribed" from
+    /// "silently dropped".
     Stopped { reason: StopReason },
 }
 
 /// Reason a subscription was terminated with [`LifecycleEvent::Stopped`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-    /// The subscriber's bounded channel filled up and the broadcaster reaped
-    /// the [`async_channel::Sender`] on a subsequent [`LifecycleService::emit`].
+    /// The subscriber's bounded channel filled up and the broadcaster dropped
+    /// its [`async_channel::Sender`] on a subsequent [`LifecycleService::emit`].
     ///
-    /// Note: because [`Vec::retain`] drops the reaped Sender before we can send
-    /// through it, this variant is only observable if a slow subscriber later
-    /// wakes up its receiver enough to see the channel closed and the pump
-    /// synthesises the marker on the client side. For the MVP the pump only
-    /// emits [`StopReason::ChainRemoved`] via the None branch on the receiver;
-    /// this variant is reserved for future use once the broadcaster gains a
-    /// way to signal reaping without a live Sender.
+    /// Reserved by the schema. Not currently emitted, because `Vec::retain`
+    /// in `emit` drops the sender before a terminal event can be pushed
+    /// through it. A future revision may add a sideband to deliver this.
     Lagged,
-    /// The broadcaster (`LifecycleService`) itself has been dropped, typically
-    /// because the chain was removed from the client. All subscribers observe
-    /// their receiver closing.
+    /// The broadcaster has been dropped, typically because the chain was
+    /// removed from the client. All subscribers observe their receiver
+    /// closing.
     ChainRemoved,
 }
 
 /// Broadcaster of lifecycle events for a single chain.
 ///
-/// Cheap to clone via `Arc`. Stored in `ChainServices` and shared between the
-/// projection tasks that emit into it (peer watcher, sync mode watcher, warp
-/// progress poller, watchdog).
+/// Cheap to clone via `Arc`. Stored in `ChainServices` and shared with the
+/// projection tasks that emit into it.
 pub struct LifecycleService {
     inner: Mutex<Inner>,
 }
 
-/// Maximum number of past events retained for snapshot-on-subscribe replay and
-/// for `bug_report_trace()`. Sized to comfortably hold a full lifecycle plus a
-/// long tail of Stalled/recovery events.
+/// Number of past events retained for snapshot-on-subscribe replay and for
+/// [`LifecycleService::bug_report_trace`].
 const HISTORY_CAPACITY: usize = 128;
 
 /// Per-subscriber channel capacity. Must be `>= HISTORY_CAPACITY` so that the
-/// replay burst in [`LifecycleService::subscribe`] cannot fill the channel
-/// before the subscriber's Sender is registered for live delivery. If the
-/// channel filled during replay, `subscribe` would return with the Sender
-/// dropped and the client would silently receive a truncated snapshot with no
-/// live events.
+/// replay in [`LifecycleService::subscribe`] cannot fill the channel before
+/// the subscriber's `Sender` is registered for live delivery.
 const SUBSCRIBER_CHANNEL_CAPACITY: usize = HISTORY_CAPACITY + 64;
 
 struct Inner {
-    /// Bounded ring buffer of past events. Late subscribers get this replayed
-    /// before the live stream begins; bug-report tooling can dump it via
-    /// [`LifecycleService::bug_report_trace`].
+    /// Bounded ring buffer of past events, replayed to late subscribers and
+    /// returned by [`LifecycleService::bug_report_trace`].
     history: VecDeque<LifecycleEvent>,
     /// Active subscribers. A `try_send` failure marks a subscriber as dropped.
     subscribers: Vec<async_channel::Sender<LifecycleEvent>>,
@@ -197,18 +174,8 @@ impl LifecycleService {
         })
     }
 
-    /// Emits an event to every active subscriber and appends it to the history
-    /// ring buffer for future subscribers. Subscribers whose channel is full
-    /// are removed.
-    ///
-    /// Note on [`LifecycleEvent::Stopped`] with [`StopReason::Lagged`]: when
-    /// [`Vec::retain`] drops a full-channel Sender we no longer have a handle
-    /// to deliver a synthetic terminal event through it, so `Lagged` is only
-    /// observable if a slow subscriber later wakes up its receiver enough to
-    /// notice the channel closed. For the MVP that terminal signal is emitted
-    /// by the JSON-RPC pump on the None branch as
-    /// [`StopReason::ChainRemoved`]; the broadcaster itself does not currently
-    /// emit `Lagged`.
+    /// Emits an event to every active subscriber and appends it to the
+    /// history. Subscribers whose channel is full are dropped.
     pub async fn emit(&self, event: LifecycleEvent) {
         let mut inner = self.inner.lock().await;
         if inner.history.len() == HISTORY_CAPACITY {
@@ -220,24 +187,18 @@ impl LifecycleService {
             .retain(|tx| tx.try_send(event.clone()).is_ok());
     }
 
-    /// Subscribes to lifecycle events. The returned receiver first yields a
-    /// replay of the retained history (in emission order) and then receives
-    /// live events. The channel buffer is bounded; if a subscriber falls too
-    /// far behind on the live tail it is silently dropped by the next
-    /// [`LifecycleService::emit`] call.
-    ///
-    /// The channel is sized so the replay burst cannot exhaust it: with
-    /// `SUBSCRIBER_CHANNEL_CAPACITY >= HISTORY_CAPACITY` and the outer Mutex
-    /// held for the whole call (so no concurrent `emit` can run), every
-    /// replay `try_send` is guaranteed to succeed.
+    /// Subscribes to lifecycle events. The returned receiver first yields the
+    /// retained history in emission order, then live events. If a subscriber
+    /// falls behind on the live tail it is silently dropped by the next
+    /// [`LifecycleService::emit`].
     pub async fn subscribe(&self) -> async_channel::Receiver<LifecycleEvent> {
         debug_assert!(SUBSCRIBER_CHANNEL_CAPACITY >= HISTORY_CAPACITY);
         let (tx, rx) = async_channel::bounded(SUBSCRIBER_CHANNEL_CAPACITY);
         let mut inner = self.inner.lock().await;
+        // The capacity invariant plus the outer `Mutex` held here guarantees
+        // that every `try_send` in this loop succeeds. If a future edit
+        // breaks the invariant, drop the subscription rather than blocking.
         for event in &inner.history {
-            // Under the capacity invariant above, this cannot fail. If it
-            // does (invariant violated by a future edit), silently drop the
-            // subscription rather than block sync.
             if tx.try_send(event.clone()).is_err() {
                 debug_assert!(false, "subscribe replay try_send failed under invariant");
                 return rx;
@@ -247,10 +208,9 @@ impl LifecycleService {
         rx
     }
 
-    /// Returns a snapshot of the retained event history without subscribing to
-    /// live events. Intended for bug-report tooling: dump the last N events at
-    /// the moment of failure so a support engineer can reconstruct the timeline
-    /// without needing megabytes of debug logs.
+    /// Returns a snapshot of the retained event history, without subscribing
+    /// to live events. Intended for bug-report traces at the moment of
+    /// failure.
     pub async fn bug_report_trace(&self) -> Vec<LifecycleEvent> {
         let inner = self.inner.lock().await;
         inner.history.iter().cloned().collect()
@@ -262,8 +222,8 @@ mod tests {
     use super::*;
     use futures_lite::future::block_on;
 
-    /// Builds a distinguishable `LifecycleEvent` carrying an integer tag `i`, so
-    /// the tests can verify emission order without pattern-matching every arm.
+    /// Builds a `LifecycleEvent` carrying an integer tag `i` so tests can
+    /// assert emission order without pattern-matching every variant.
     fn make_event(i: u64) -> LifecycleEvent {
         LifecycleEvent::WarpSyncProgress { at: i, target: i }
     }
@@ -314,12 +274,11 @@ mod tests {
             }
 
             assert_eq!(received.len(), HISTORY_CAPACITY);
-            // The first 10 events (tags 0..10) were evicted; the retained
-            // window is tags 10..HISTORY_CAPACITY+10, in emission order.
+            // Tags 0..10 were evicted. The retained window is
+            // 10..HISTORY_CAPACITY+10, in emission order.
             for (idx, ev) in received.iter().enumerate() {
                 assert_eq!(tag_of(ev), (idx + 10) as u64);
             }
-            // No further events on the channel until a live emit occurs.
             assert!(rx.try_recv().is_err());
         });
     }
@@ -333,8 +292,8 @@ mod tests {
             }
 
             let rx = svc.subscribe().await;
-            // One live event emitted after subscribe: it must arrive in
-            // addition to the full replay burst.
+            // A live emit after subscribe must arrive on top of the full
+            // replay.
             svc.emit(make_event(HISTORY_CAPACITY as u64)).await;
 
             let expected = HISTORY_CAPACITY + 1;
@@ -360,25 +319,25 @@ mod tests {
             let mut healthy_received = Vec::new();
             for i in 0..total {
                 svc.emit(make_event(i as u64)).await;
-                // Drain healthy after each emit so its channel never fills.
+                // Drain the healthy subscriber after each emit so its channel
+                // never fills.
                 while let Ok(ev) = healthy.try_recv() {
                     healthy_received.push(ev);
                 }
             }
-            // Sweep any events that arrived in the final batch.
             while let Ok(ev) = healthy.try_recv() {
                 healthy_received.push(ev);
             }
 
-            // Healthy subscriber saw every event, in order.
             assert_eq!(healthy_received.len(), total);
             for (idx, ev) in healthy_received.iter().enumerate() {
                 assert_eq!(tag_of(ev), idx as u64);
             }
 
-            // Slow subscriber's channel filled at SUBSCRIBER_CHANNEL_CAPACITY,
-            // then it was silently reaped on the next emit. Its Receiver
-            // still holds the buffered events, but no more.
+            // The slow subscriber's channel fills at
+            // `SUBSCRIBER_CHANNEL_CAPACITY` and its sender is dropped on the
+            // next emit. The receiver still holds the buffered events but
+            // sees no more.
             let mut slow_count = 0;
             while let Ok(_) = slow.try_recv() {
                 slow_count += 1;
@@ -402,14 +361,14 @@ mod tests {
                 assert_eq!(tag_of(ev), idx as u64);
             }
 
-            // Bug-report trace is subject to the HISTORY_CAPACITY cap.
+            // The trace is capped at `HISTORY_CAPACITY`. The tail must be the
+            // most recent `HISTORY_CAPACITY` tags in emission order.
             let extra = HISTORY_CAPACITY as u64 + 5;
             for i in n..(n + extra) {
                 svc.emit(make_event(i)).await;
             }
             let trace2 = svc.bug_report_trace().await;
             assert_eq!(trace2.len(), HISTORY_CAPACITY);
-            // The tail must be the most recent HISTORY_CAPACITY tags.
             let last_tag = n + extra - 1;
             let first_tag = last_tag - (HISTORY_CAPACITY as u64 - 1);
             for (idx, ev) in trace2.iter().enumerate() {

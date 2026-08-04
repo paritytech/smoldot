@@ -55,12 +55,10 @@ pub use network_service::Role;
 /// See [`SyncService::bootstrap_mode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapMode {
-    /// GrandPa warp sync: jump forward via authority-set proofs to a recent finalized
-    /// block, skipping historical block verification.
+    /// Skip forward via GRANDPA authority-set proofs to a recent finalized block.
     WarpSync,
-    /// All-forks catch-up: verify every block from the checkpoint upward. Chosen when
-    /// warp sync is unavailable (no GRANDPA, no warp-eligible peer) or when the sync
-    /// service is a parachain (parachains never warp-sync).
+    /// Verify every block from the checkpoint upward. Chosen when warp sync is
+    /// unavailable (no GRANDPA, no warp-eligible peer) or for parachains.
     AllForks,
 }
 
@@ -257,12 +255,10 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
 
     /// Returns the bootstrap mode chosen by the sync service.
     ///
-    /// For [`ConfigChainType::SubstrateCompatible`] chains, the sync service picks
-    /// between [`BootstrapMode::WarpSync`] and [`BootstrapMode::AllForks`] shortly
-    /// after startup based on peer availability, chain finality engine, and a
-    /// timeout. This call blocks until that decision has been committed. For
-    /// [`ConfigChainType::Parachain`] chains, the mode is always
-    /// [`BootstrapMode::AllForks`] and the call returns immediately.
+    /// For [`ConfigChainType::SubstrateCompatible`] chains, blocks until the mode has
+    /// been committed shortly after startup based on peer availability, finality
+    /// engine, and a timeout. For [`ConfigChainType::Parachain`] chains, returns
+    /// [`BootstrapMode::AllForks`] immediately.
     pub async fn bootstrap_mode(&self) -> BootstrapMode {
         let (send_back, rx) = oneshot::channel();
 
@@ -274,18 +270,14 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         rx.await.unwrap()
     }
 
-    /// Returns the block number that warp syncing has verified so far, if a warp
-    /// sync is currently in progress.
-    ///
-    /// Returns `Some(finalized_block_number)` while the underlying state machine is
-    /// downloading GRANDPA warp-sync fragments or building the chain information from
-    /// them. The value corresponds to the highest block that the fragments verified so
-    /// far prove to be finalized, and is monotonically non-decreasing while a single
+    /// Height proven finalized by the warp-sync fragments verified so far, while a
     /// warp sync is in progress.
     ///
-    /// Returns `None` in all other cases: before any warp sync has been engaged, once
-    /// warp sync has finished, when the mode is [`BootstrapMode::AllForks`], and for
-    /// [`ConfigChainType::Parachain`] chains (which never warp-sync).
+    /// Returns `Some(height)` while the state machine is downloading GRANDPA warp
+    /// fragments or building chain information from them. Monotonically non-decreasing
+    /// during a single warp sync. Returns `None` otherwise: before warp starts, once it
+    /// has finished, when the mode is [`BootstrapMode::AllForks`], and for
+    /// [`ConfigChainType::Parachain`] chains.
     pub async fn warp_sync_position(&self) -> Option<u64> {
         let (send_back, rx) = oneshot::channel();
 
