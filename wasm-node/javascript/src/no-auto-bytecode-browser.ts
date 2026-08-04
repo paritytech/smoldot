@@ -514,7 +514,11 @@ function connect(config: ConnectionConfig): Connection {
                     killAllJs();
 
                 } else {
-                    const channel = state.dataChannels.get(streamId)!;
+                    // The stream might have already been reset from the JS side, with the
+                    // notification still on its way to smoldot.
+                    const channel = state.dataChannels.get(streamId);
+                    if (channel === undefined)
+                        return;
                     channel.channel.onopen = null;
                     channel.channel.onerror = null;
                     channel.channel.onclose = null;
@@ -526,12 +530,13 @@ function connect(config: ConnectionConfig): Connection {
             },
 
             send: (data: Array<Uint8Array>, streamId: number): void => {
-                const channel = state.dataChannels.get(streamId)!;
-                // The channel can leave the `open` state before its `close` event (which
-                // reports the reset) is dispatched; sending would then throw. Dropping the
-                // data is fine, as the stream is about to be reset anyway.
+                // The stream might have already been reset from the JS side (entry removed),
+                // or the channel might have left the `open` state before its `close` event
+                // (which reports the reset) is dispatched; sending would then throw. Dropping
+                // the data is fine, as the stream is reset or about to be.
                 // See <https://github.com/paritytech/smoldot/issues/3322>.
-                if (channel.channel.readyState !== "open")
+                const channel = state.dataChannels.get(streamId);
+                if (channel === undefined || channel.channel.readyState !== "open")
                     return;
                 for (const buffer of data) {
                     channel.bufferedBytes += buffer.length;
