@@ -793,14 +793,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 let Some(rx) = &me.statement_events_rx else {
                     return WakeUpReason::MustSubscribeStatementEvents;
                 };
-                let Ok(network_service::StatementEvent::StatementsNotification {
-                    statements, ..
-                }) = rx.recv().await
-                else {
-                    me.statement_events_rx = None;
-                    return WakeUpReason::MustSubscribeStatementEvents;
-                };
-                WakeUpReason::NetworkStatementsReceived(statements)
+                match rx.recv().await {
+                    Ok(network_service::StatementEvent::StatementsNotification {
+                        statements,
+                        ..
+                    }) => WakeUpReason::NetworkStatementsReceived(statements),
+                    Err(_) => {
+                        me.statement_events_rx = None;
+                        WakeUpReason::MustSubscribeStatementEvents
+                    }
+                }
             })
             .await
         };
