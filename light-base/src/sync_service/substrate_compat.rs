@@ -2132,6 +2132,7 @@ mod tests {
 
     #[test]
     fn commit_bootstrap_mode_drains_pending() {
+        // Given
         let mut chosen: Option<BootstrapMode> = None;
         let mut pending: Vec<oneshot::Sender<BootstrapMode>> = Vec::new();
         let mut receivers = Vec::new();
@@ -2141,8 +2142,10 @@ mod tests {
             receivers.push(rx);
         }
 
+        // When
         commit_bootstrap_mode_inner(&mut chosen, &mut pending, BootstrapMode::WarpSync);
 
+        // Then
         assert_eq!(chosen, Some(BootstrapMode::WarpSync));
         assert!(pending.is_empty());
         for mut rx in receivers {
@@ -2152,10 +2155,9 @@ mod tests {
 
     #[test]
     fn commit_bootstrap_mode_is_idempotent() {
+        // Given
         let mut chosen: Option<BootstrapMode> = None;
         let mut pending: Vec<oneshot::Sender<BootstrapMode>> = Vec::new();
-
-        // Initial pending receivers are drained by the first commit with WarpSync.
         let mut initial_receivers = Vec::new();
         for _ in 0..2 {
             let (tx, rx) = oneshot::channel();
@@ -2168,19 +2170,17 @@ mod tests {
         for mut rx in initial_receivers {
             assert_eq!(rx.try_recv(), Ok(Some(BootstrapMode::WarpSync)));
         }
-
-        // Queue two more, then call with a different mode. `chosen` is already
-        // set, so the second call is a no-op: stored mode stays `WarpSync` and
-        // `pending` is not drained. In the real `Task`, requests arriving after
-        // commit are answered directly by the `BootstrapMode` handler.
         let mut later_receivers = Vec::new();
         for _ in 0..2 {
             let (tx, rx) = oneshot::channel();
             pending.push(tx);
             later_receivers.push(rx);
         }
+
+        // When
         commit_bootstrap_mode_inner(&mut chosen, &mut pending, BootstrapMode::AllForks);
 
+        // Then
         assert_eq!(chosen, Some(BootstrapMode::WarpSync));
         assert_eq!(pending.len(), 2);
         for mut rx in later_receivers {
