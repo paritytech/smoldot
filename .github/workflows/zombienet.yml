@@ -102,6 +102,9 @@ jobs:
           # - job-name: "zombienet-smoldot-0014-webrtc_double_open"
           #   test: "webrtc_double_open"
           #   runner-type: "default"
+          # - job-name: "zombienet-smoldot-0015-webrtc_send_after_close"
+          #   test: "webrtc_send_after_close"
+          #   runner-type: "default"
 
     steps:
       - uses: actions/checkout@v6

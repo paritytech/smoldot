@@ -253,8 +253,8 @@ struct Background<TPlat: PlatformRef> {
     next_statement_affinity_update: Option<Pin<Box<TPlat::Delay>>>,
     last_statement_affinity_update: Option<TPlat::Instant>,
 
-    /// Receiver for network events (statements from peers).
-    network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
+    /// Receiver for statement notifications from peers.
+    statement_events_rx: Option<async_channel::Receiver<network_service::StatementEvent>>,
 }
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -674,7 +674,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
         statement_affinity_stale: false,
         next_statement_affinity_update: None,
         last_statement_affinity_update: None,
-        network_events_rx: None,
+        statement_events_rx: None,
         platform: config.platform,
     };
 
@@ -709,7 +709,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
             NetworkStatementsReceived(Vec<([u8; 32], codec::Statement)>),
-            MustSubscribeNetworkEvents,
+            MustSubscribeStatementEvents,
             StatementAffinityUpdate,
         }
 
@@ -812,19 +812,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 WakeUpReason::StatementAffinityUpdate
             })
             .or(async {
-                let Some(rx) = &me.network_events_rx else {
-                    return WakeUpReason::MustSubscribeNetworkEvents;
+                if me.statement_protocol_config.is_none() {
+                    future::pending::<()>().await;
+                }
+                let Some(rx) = &me.statement_events_rx else {
+                    return WakeUpReason::MustSubscribeStatementEvents;
                 };
-                loop {
-                    let Ok(event) = rx.recv().await else {
-                        me.network_events_rx = None;
-                        return WakeUpReason::MustSubscribeNetworkEvents;
-                    };
-                    match event {
-                        network_service::Event::StatementsNotification { statements, .. } => {
-                            return WakeUpReason::NetworkStatementsReceived(statements);
-                        }
-                        _ => {}
+                match rx.recv().await {
+                    Ok(network_service::StatementEvent::StatementsNotification {
+                        statements,
+                        ..
+                    }) => WakeUpReason::NetworkStatementsReceived(statements),
+                    Err(_) => {
+                        me.statement_events_rx = None;
+                        WakeUpReason::MustSubscribeStatementEvents
                     }
                 }
             })
@@ -869,9 +870,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     .await;
             }
 
-            WakeUpReason::MustSubscribeNetworkEvents => {
-                debug_assert!(me.network_events_rx.is_none());
-                me.network_events_rx = Some(me.network_service.subscribe().await);
+            WakeUpReason::MustSubscribeStatementEvents => {
+                debug_assert!(me.statement_events_rx.is_none());
+                me.statement_events_rx = Some(me.network_service.subscribe_statements().await);
             }
 
             WakeUpReason::NetworkStatementsReceived(statements) => {
