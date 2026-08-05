@@ -774,8 +774,11 @@ where
             _ => panic!(),
         };
 
-        // TODO: can panic if pending event hasn't been processed
-        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+        // The substream might have been reset by the remote (and thus removed from the state
+        // machine) at the same time as the coordinator decided to reject it. See issue #3304.
+        let Some(inner_substream_id) = self.out_in_substreams_map.get(&substream_id) else {
+            return;
+        };
 
         self.in_substreams
             .get_mut(inner_substream_id)
