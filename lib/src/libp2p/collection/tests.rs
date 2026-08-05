@@ -288,7 +288,7 @@ fn reject_in_notifications_double_send_after_remote_reset() {
     );
 
     // Bob opens an outbound notifications substream. Its open handshake times out after 1s.
-    let _bob_sub = harness.bob.network.open_out_notifications(
+    let bob_sub = harness.bob.network.open_out_notifications(
         harness.bob.conn_id,
         "/test-notif/1.0.0".to_string(),
         Duration::from_secs(1),
@@ -340,10 +340,27 @@ fn reject_in_notifications_double_send_after_remote_reset() {
     // NotificationsInOpenCancel. Crucially, Alice's coordinator->connection messages (the held-back
     // reject #1) are NOT delivered during this phase.
     harness.pass_time(Duration::from_millis(1500));
-    harness.pump(false, true);
+    let events_reset = harness.pump(false, true);
+
+    // Bob observes the failure of the substream he opened, since he reset it on timeout.
+    assert!(events_reset.iter().any(|(side, ev)| *side == Side::Bob
+        && matches!(
+            ev,
+            Event::NotificationsOutResult { substream_id, result: Err(_) }
+                if *substream_id == bob_sub
+        )));
 
     // Steps 5-7: now deliver Alice's coordinator messages in order: reject #1 consumes the single
     // ack entry, then the re-sent reject #2 hits the already-removed substream.
     // Without the fix, this panics in `reject_in_notifications_substream` via yamux index_mut.
-    harness.pump(true, true);
+    let events_final = harness.pump(true, true);
+
+    // The duplicate reject must be a silent no-op: the connection survives the crossing on both
+    // sides rather than being torn down.
+    assert!(
+        !events_reset
+            .iter()
+            .chain(&events_final)
+            .any(|(_, ev)| { matches!(ev, Event::StartShutdown { .. } | Event::Shutdown { .. }) })
+    );
 }
