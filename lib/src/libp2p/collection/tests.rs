@@ -18,11 +18,11 @@
 #![cfg(test)]
 
 use super::{
-    Config, ConnectionId, Event, InboundTy, Network, SingleStreamConnectionTask,
-    SingleStreamHandshakeKind, SubstreamId,
+    Config, ConnectionId, Event, InboundTy, MultiStreamConnectionTask, MultiStreamHandshakeKind,
+    Network, SingleStreamConnectionTask, SingleStreamHandshakeKind, SubstreamFate, SubstreamId,
 };
 use crate::libp2p::{connection::noise::NoiseKey, read_write::ReadWrite};
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::{cmp, mem, time::Duration};
 
 /// Maximum size of the byte pipe between the two connection tasks.
@@ -353,6 +353,474 @@ fn reject_in_notifications_double_send_after_remote_reset() {
     // Steps 5-7: now deliver Alice's coordinator messages in order: reject #1 consumes the single
     // ack entry, then the re-sent reject #2 hits the already-removed substream.
     // Without the fix, this panics in `reject_in_notifications_substream` via yamux index_mut.
+    let events_final = harness.pump(true, true);
+
+    // The duplicate reject must be a silent no-op: the connection survives the crossing on both
+    // sides rather than being torn down.
+    assert!(
+        !events_reset
+            .iter()
+            .chain(&events_final)
+            .any(|(_, ev)| { matches!(ev, Event::StartShutdown { .. } | Event::Shutdown { .. }) })
+    );
+}
+
+/// A single node of the multi-stream (WebRTC-like) harness: a coordinator plus its one
+/// multi-stream connection task.
+struct MultiNode {
+    network: Network<(), Duration>,
+    task: Option<MultiStreamConnectionTask<Duration, u32>>,
+    conn_id: ConnectionId,
+}
+
+/// A simulated WebRTC data channel: one byte buffer per direction, plus whether each side's
+/// endpoint is still alive.
+struct MultiChannel {
+    /// Bytes written by Alice on this channel, waiting to be read by Bob.
+    a2b: Vec<u8>,
+    /// Bytes written by Bob on this channel, waiting to be read by Alice.
+    b2a: Vec<u8>,
+    alice_open: bool,
+    bob_open: bool,
+}
+
+/// Two nodes connected by simulated WebRTC data channels. Contrary to the single-stream
+/// [`Harness`], there is no single byte pipe: each substream is its own pair of byte buffers, and
+/// the harness plays the role of the platform (opening channels on demand and propagating
+/// resets).
+struct MultiHarness {
+    alice: MultiNode,
+    bob: MultiNode,
+    channels: BTreeMap<u32, MultiChannel>,
+    next_channel_id: u32,
+    now: Duration,
+    wake_a: Option<Duration>,
+    wake_b: Option<Duration>,
+}
+
+fn make_multi_node(
+    is_initiator: bool,
+    noise_key: &NoiseKey,
+    seed: [u8; 32],
+    local_tls_certificate_multihash: Vec<u8>,
+    remote_tls_certificate_multihash: Vec<u8>,
+) -> MultiNode {
+    let mut network = Network::<(), Duration>::new(Config {
+        randomness_seed: seed,
+        capacity: 1,
+        max_inbound_substreams: 64,
+        max_protocol_name_len: 256,
+        handshake_timeout: Duration::from_secs(10),
+        ping_protocol: "/ping/1.0.0".to_string(),
+    });
+
+    let (conn_id, task) = network.insert_multi_stream(
+        Duration::ZERO,
+        MultiStreamHandshakeKind::WebRtc {
+            is_initiator,
+            noise_key,
+            local_tls_certificate_multihash,
+            remote_tls_certificate_multihash,
+        },
+        16,
+        (),
+    );
+
+    MultiNode {
+        network,
+        task: Some(task),
+        conn_id,
+    }
+}
+
+impl MultiHarness {
+    fn new() -> Self {
+        let alice_key = NoiseKey::new(&[1; 32], &[2; 32]);
+        let bob_key = NoiseKey::new(&[3; 32], &[4; 32]);
+        // The TLS certificate fingerprints only feed the Noise prologue; any value works as long
+        // as both sides agree on the pair. SHA-256 multihash format (0x12 0x20 + 32 bytes).
+        let fp_alice = [&[0x12u8, 0x20][..], &[0xaa; 32][..]].concat();
+        let fp_bob = [&[0x12u8, 0x20][..], &[0xbb; 32][..]].concat();
+
+        let mut harness = MultiHarness {
+            alice: make_multi_node(true, &alice_key, [7; 32], fp_alice.clone(), fp_bob.clone()),
+            bob: make_multi_node(false, &bob_key, [9; 32], fp_bob, fp_alice),
+            channels: BTreeMap::new(),
+            next_channel_id: 0,
+            now: Duration::ZERO,
+            wake_a: None,
+            wake_b: None,
+        };
+
+        // The Noise handshake runs over the substream that a side has itself opened (see
+        // `opened_substream` in `collection/multi_stream.rs`). For the two state machines to talk
+        // to each other, the harness registers one shared channel as locally-opened on both
+        // sides, mimicking the negotiated handshake data channel of a real WebRTC connection.
+        let id = harness.alloc_channel();
+        harness.alice.task.as_mut().unwrap().add_substream(id, true);
+        harness.bob.task.as_mut().unwrap().add_substream(id, true);
+
+        harness
+    }
+
+    fn alloc_channel(&mut self) -> u32 {
+        let id = self.next_channel_id;
+        self.next_channel_id += 1;
+        self.channels.insert(
+            id,
+            MultiChannel {
+                a2b: Vec::new(),
+                b2a: Vec::new(),
+                alice_open: true,
+                bob_open: true,
+            },
+        );
+        id
+    }
+
+    /// Simulates the abrupt death of a data channel, e.g. the remote closing the
+    /// `RTCDataChannel`: the platform on both sides observes the closure and notifies its state
+    /// machine.
+    fn kill_channel(&mut self, chan_id: u32) {
+        assert!(self.channels.remove(&chan_id).is_some());
+        if let Some(task) = self.alice.task.as_mut() {
+            task.reset_substream(&chan_id);
+        }
+        if let Some(task) = self.bob.task.as_mut() {
+            task.reset_substream(&chan_id);
+        }
+    }
+
+    /// Delivers all pending coordinator->connection messages for the given side.
+    fn deliver_coord_to_conn(&mut self, side: Side) -> bool {
+        let mut progress = false;
+        loop {
+            let node = match side {
+                Side::Alice => &mut self.alice,
+                Side::Bob => &mut self.bob,
+            };
+            let Some((_cid, msg)) = node.network.pull_message_to_connection() else {
+                break;
+            };
+            if let Some(task) = node.task.as_mut() {
+                task.inject_coordinator_message(&self.now, msg);
+            }
+            progress = true;
+        }
+        progress
+    }
+
+    /// Pulls all connection->coordinator messages for the given side and injects them into its
+    /// coordinator. Does not call `next_event`.
+    fn drain_conn_to_coord(&mut self, side: Side) -> bool {
+        let mut progress = false;
+        loop {
+            let node = match side {
+                Side::Alice => &mut self.alice,
+                Side::Bob => &mut self.bob,
+            };
+            let Some(task) = node.task.take() else {
+                break;
+            };
+            let (task_back, msg) = task.pull_message_to_coordinator();
+            node.task = task_back;
+            match msg {
+                Some(m) => {
+                    node.network.inject_connection_message(node.conn_id, m);
+                    progress = true;
+                }
+                None => break,
+            }
+            if node.task.is_none() {
+                break;
+            }
+        }
+        progress
+    }
+
+    /// Opens new channels for every outbound substream that either state machine desires,
+    /// mirroring the platform opening WebRTC data channels on demand.
+    fn open_desired_substreams(&mut self) -> bool {
+        let mut progress = false;
+        for side in [Side::Alice, Side::Bob] {
+            loop {
+                let (node, peer) = match side {
+                    Side::Alice => (&mut self.alice, &mut self.bob),
+                    Side::Bob => (&mut self.bob, &mut self.alice),
+                };
+                let (Some(task), Some(peer_task)) = (node.task.as_mut(), peer.task.as_mut()) else {
+                    break;
+                };
+                if task.desired_outbound_substreams() == 0 {
+                    break;
+                }
+                let id = self.next_channel_id;
+                self.next_channel_id += 1;
+                task.add_substream(id, true);
+                peer_task.add_substream(id, false);
+                self.channels.insert(
+                    id,
+                    MultiChannel {
+                        a2b: Vec::new(),
+                        b2a: Vec::new(),
+                        alice_open: true,
+                        bob_open: true,
+                    },
+                );
+                progress = true;
+            }
+        }
+        progress
+    }
+
+    /// Reads/writes one side's endpoint of one channel.
+    fn channel_read_write(&mut self, side: Side, chan_id: u32) -> bool {
+        let (node, wake) = match side {
+            Side::Alice => (&mut self.alice, &mut self.wake_a),
+            Side::Bob => (&mut self.bob, &mut self.wake_b),
+        };
+        let Some(task) = node.task.as_mut() else {
+            return false;
+        };
+        let Some(chan) = self.channels.get_mut(&chan_id) else {
+            return false;
+        };
+        let (open, incoming_buf, outgoing_buf) = match side {
+            Side::Alice => (&mut chan.alice_open, &mut chan.b2a, &mut chan.a2b),
+            Side::Bob => (&mut chan.bob_open, &mut chan.a2b, &mut chan.b2a),
+        };
+        if !*open {
+            return false;
+        }
+
+        let out_len_before = outgoing_buf.len();
+        let mut rw = ReadWrite {
+            now: self.now,
+            incoming_buffer: mem::take(incoming_buf),
+            expected_incoming_bytes: Some(0),
+            read_bytes: 0,
+            write_bytes_queued: outgoing_buf.len(),
+            write_bytes_queueable: Some(BUF - outgoing_buf.len()),
+            write_buffers: vec![mem::take(outgoing_buf)],
+            wake_up_after: *wake,
+        };
+        let fate = task.substream_read_write(&chan_id, &mut rw);
+        let read = rw.read_bytes;
+        *wake = rw.wake_up_after;
+        *incoming_buf = rw.incoming_buffer;
+        *outgoing_buf = rw.write_buffers.drain(..).flatten().collect();
+
+        let mut progress = read != 0 || outgoing_buf.len() != out_len_before;
+        if matches!(fate, SubstreamFate::Reset) {
+            *open = false;
+            progress = true;
+        }
+        progress
+    }
+
+    /// Propagates channel resets to the surviving side, mimicking the remote observing the death
+    /// of a WebRTC data channel. The reset is only delivered once the survivor has consumed all
+    /// the bytes that were in flight (e.g. the final Noise handshake message).
+    fn propagate_resets(&mut self) -> bool {
+        let mut progress = false;
+        let mut to_remove = Vec::new();
+        for (&id, chan) in self.channels.iter_mut() {
+            match (chan.alice_open, chan.bob_open) {
+                (false, false) => to_remove.push(id),
+                (false, true) if chan.a2b.is_empty() => {
+                    if let Some(task) = self.bob.task.as_mut() {
+                        task.reset_substream(&id);
+                    }
+                    chan.bob_open = false;
+                    to_remove.push(id);
+                    progress = true;
+                }
+                (true, false) if chan.b2a.is_empty() => {
+                    if let Some(task) = self.alice.task.as_mut() {
+                        task.reset_substream(&id);
+                    }
+                    chan.alice_open = false;
+                    to_remove.push(id);
+                    progress = true;
+                }
+                _ => {}
+            }
+        }
+        for id in to_remove {
+            self.channels.remove(&id);
+        }
+        progress
+    }
+
+    /// Same as [`Harness::pump`], for the multi-stream harness.
+    fn pump(&mut self, deliver_alice: bool, deliver_bob: bool) -> Vec<(Side, Event<()>)> {
+        let mut events = Vec::new();
+        let ceiling = self.now + Duration::from_millis(100);
+        let mut idle_advances = 0u32;
+        loop {
+            let mut progress = false;
+            if deliver_alice {
+                progress |= self.deliver_coord_to_conn(Side::Alice);
+            }
+            if deliver_bob {
+                progress |= self.deliver_coord_to_conn(Side::Bob);
+            }
+            progress |= self.open_desired_substreams();
+            let chan_ids: Vec<u32> = self.channels.keys().copied().collect();
+            for id in chan_ids {
+                progress |= self.channel_read_write(Side::Alice, id);
+                progress |= self.channel_read_write(Side::Bob, id);
+            }
+            progress |= self.propagate_resets();
+            progress |= self.drain_conn_to_coord(Side::Alice);
+            progress |= self.drain_conn_to_coord(Side::Bob);
+            while let Some(e) = self.alice.network.next_event() {
+                events.push((Side::Alice, e));
+                progress = true;
+            }
+            while let Some(e) = self.bob.network.next_event() {
+                events.push((Side::Bob, e));
+                progress = true;
+            }
+            if progress {
+                idle_advances = 0;
+                continue;
+            }
+
+            let next_wake = [self.wake_a, self.wake_b].into_iter().flatten().min();
+            match next_wake {
+                Some(w)
+                    if idle_advances < 100
+                        && cmp::max(self.now, w) + Duration::from_nanos(1) <= ceiling =>
+                {
+                    self.now = cmp::max(self.now, w) + Duration::from_nanos(1);
+                    idle_advances += 1;
+                }
+                _ => break,
+            }
+        }
+        events
+    }
+}
+
+/// Contrary to yamux connections, multi-stream connections open their ping substream eagerly,
+/// and the inbound side surfaces its negotiation to the API like any other protocol.
+fn accept_ping_inbounds(harness: &mut MultiHarness, events: &[(Side, Event<()>)]) {
+    for (side, ev) in events {
+        if let Event::InboundNegotiated {
+            substream_id,
+            protocol_name,
+            ..
+        } = ev
+        {
+            if protocol_name == "/ping/1.0.0" {
+                let node = match side {
+                    Side::Alice => &mut harness.alice,
+                    Side::Bob => &mut harness.bob,
+                };
+                node.network.accept_inbound(*substream_id, InboundTy::Ping);
+            }
+        }
+    }
+}
+
+/// Multi-stream (WebRTC) variant of
+/// [`reject_in_notifications_double_send_after_remote_reset`]: the same coordinator crossing, but
+/// the duplicate reject must hit `established::MultiStream::reject_in_notifications_substream`
+/// after the substream has been removed from its maps by the reset.
+///
+/// Contrary to yamux, a remote-initiated substream death is not carried by the connection's byte
+/// stream: it materializes as the platform observing the closure of the data channel and calling
+/// `reset_substream` (a graceful `FIN` would not trigger the crossing, since an unaccepted
+/// notifications substream back-pressures its channel and never reads the `FIN`).
+#[test]
+fn multi_stream_reject_in_notifications_double_send_after_remote_reset() {
+    let mut harness = MultiHarness::new();
+
+    // Complete the connection handshake on both sides.
+    let events = harness.pump(true, true);
+    assert!(
+        events
+            .iter()
+            .any(|(s, e)| *s == Side::Alice && matches!(e, Event::HandshakeFinished { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|(s, e)| *s == Side::Bob && matches!(e, Event::HandshakeFinished { .. }))
+    );
+    accept_ping_inbounds(&mut harness, &events);
+
+    // Bob opens an outbound notifications substream. The data channel that will carry it is the
+    // next one that the harness allocates.
+    let notif_channel = harness.next_channel_id;
+    let bob_sub = harness.bob.network.open_out_notifications(
+        harness.bob.conn_id,
+        "/test-notif/1.0.0".to_string(),
+        Duration::from_secs(10),
+        b"hello".to_vec(),
+        1024,
+    );
+
+    // Alice negotiates the inbound substream and must accept the protocol name.
+    let events = harness.pump(true, true);
+    assert_eq!(harness.next_channel_id, notif_channel + 1);
+    accept_ping_inbounds(&mut harness, &events);
+    let alice_inbound = events
+        .iter()
+        .find_map(|(side, ev)| match ev {
+            Event::InboundNegotiated {
+                substream_id,
+                protocol_name,
+                ..
+            } if *side == Side::Alice && protocol_name == "/test-notif/1.0.0" => {
+                Some(*substream_id)
+            }
+            _ => None,
+        })
+        .expect("Alice should report InboundNegotiated");
+    harness.alice.network.accept_inbound(
+        alice_inbound,
+        InboundTy::Notifications {
+            max_handshake_size: 1024,
+        },
+    );
+
+    // Alice reads Bob's handshake and reports the substream as open-in-wait.
+    let events = harness.pump(true, true);
+    accept_ping_inbounds(&mut harness, &events);
+    let s: SubstreamId = events
+        .iter()
+        .find_map(|(side, ev)| match ev {
+            Event::NotificationsInOpen { substream_id, .. } if *side == Side::Alice => {
+                Some(*substream_id)
+            }
+            _ => None,
+        })
+        .expect("Alice should report NotificationsInOpen");
+
+    // Alice rejects the substream. The reject message is now queued in Alice's coordinator but is
+    // deliberately NOT delivered to Alice's connection task yet.
+    harness.alice.network.reject_in_notifications(s);
+
+    // The data channel carrying the substream abruptly dies (in the real world: the remote closes
+    // or resets the `RTCDataChannel`). Alice's state machine removes the substream from its maps
+    // and produces the outgoing NotificationsInOpenCancel. The held-back reject #1 is NOT
+    // delivered during this phase.
+    harness.kill_channel(notif_channel);
+    let events_reset = harness.pump(false, true);
+
+    // Bob observes the failure of the substream he opened, since its channel was killed.
+    assert!(events_reset.iter().any(|(side, ev)| *side == Side::Bob
+        && matches!(
+            ev,
+            Event::NotificationsOutResult { substream_id, result: Err(_) }
+                if *substream_id == bob_sub
+        )));
+
+    // Deliver Alice's coordinator messages in order: reject #1 consumes the single ack entry,
+    // then the re-sent reject #2 hits the already-removed substream. Without the fix, this panics
+    // in `MultiStream::reject_in_notifications_substream` when unwrapping the map lookup.
     let events_final = harness.pump(true, true);
 
     // The duplicate reject must be a silent no-op: the connection survives the crossing on both
