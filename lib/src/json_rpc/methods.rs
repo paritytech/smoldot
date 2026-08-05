@@ -1286,6 +1286,12 @@ impl TopicFilter {
     pub fn match_all(
         topics: Vec<crate::network::codec::Topic>,
     ) -> Result<Self, alloc::string::String> {
+        // The RPC API specification restricts `matchAll` to between 1 and 4 topics.
+        if topics.is_empty() {
+            return Err(alloc::string::String::from(
+                "Too few topics for MatchAll: got 0, min 1",
+            ));
+        }
         if topics.len() > crate::network::codec::MAX_TOPICS {
             return Err(alloc::format!(
                 "Too many topics for MatchAll: got {}, max {}",
@@ -1319,6 +1325,9 @@ impl TopicFilter {
                 statement_topics.iter().any(|t| filter_topics.contains(t))
             }
             TopicFilter::MatchAll(filter_topics) => {
+                if filter_topics.is_empty() {
+                    return false;
+                }
                 filter_topics.iter().all(|t| statement_topics.contains(t))
             }
         }
@@ -1815,10 +1824,26 @@ mod tests {
     }
 
     #[test]
-    fn topic_filter_match_all_empty_matches_everything() {
-        let filter = super::TopicFilter::match_all(Vec::new()).unwrap();
-        assert!(filter.matches(&[]));
-        assert!(filter.matches(&[[1u8; 32]]));
+    fn topic_filter_match_all_rejects_no_topic() {
+        assert!(super::TopicFilter::match_all(Vec::new()).is_err());
+    }
+
+    #[test]
+    fn topic_filter_match_all_empty_never_matches() {
+        // Same as an empty `MatchAny`: a filter requesting no topic matches no statement.
+        let filter = super::TopicFilter::MatchAll(Vec::new());
+        assert!(!filter.matches(&[]));
+        assert!(!filter.matches(&[[1u8; 32]]));
+    }
+
+    #[test]
+    fn statement_subscribe_parse_rejects_empty_match_all() {
+        assert!(matches!(
+            super::parse_jsonrpc_client_to_server(
+                r#"{"jsonrpc":"2.0","id":2,"method":"statement_subscribeStatement","params":[{"matchAll":[]}]}"#,
+            ),
+            Err(super::ParseClientToServerError::Method { .. })
+        ));
     }
 
     #[test]

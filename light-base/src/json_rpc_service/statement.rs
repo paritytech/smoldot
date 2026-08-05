@@ -428,8 +428,6 @@ impl StatementSubscriptions {
 fn indexed_topics(topic_filter: &TopicFilter) -> Option<Vec<codec::Topic>> {
     match topic_filter {
         TopicFilter::Any => None,
-        // An empty `MatchAll` filter matches every statement.
-        TopicFilter::MatchAll(topics) if topics.is_empty() => None,
         TopicFilter::MatchAll(topics) | TopicFilter::MatchAny(topics) => Some(topics.clone()),
     }
 }
@@ -802,23 +800,14 @@ mod tests {
 
     #[test]
     fn matching_wildcard_filters_match_every_statement() {
-        // `Any` and an empty `MatchAll` both match every statement, with or without topics.
-        let mut subs = make_subscriptions(vec![
-            ("any", TopicFilter::Any, None),
-            ("all", TopicFilter::match_all(vec![]).unwrap(), None),
-        ]);
+        // `Any` matches every statement, with or without topics.
+        let mut subs = make_subscriptions(vec![("any", TopicFilter::Any, None)]);
 
         let matches = subs.matching(&[batch_entry(0x01, vec![[7u8; 32]])]);
-        assert_eq!(
-            matched_ids(&matches),
-            vec!["all".to_string(), "any".to_string()]
-        );
+        assert_eq!(matched_ids(&matches), vec!["any".to_string()]);
 
         let matches = subs.matching(&[batch_entry(0x02, vec![])]);
-        assert_eq!(
-            matched_ids(&matches),
-            vec!["all".to_string(), "any".to_string()]
-        );
+        assert_eq!(matched_ids(&matches), vec!["any".to_string()]);
     }
 
     #[test]
