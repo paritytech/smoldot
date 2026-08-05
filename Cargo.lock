@@ -2687,6 +2687,7 @@ dependencies = [
 name = "smoldot"
 version = "2.1.1"
 dependencies = [
+ "ark-bls12-381",
  "ark-ec",
  "ark-ed-on-bls12-381-bandersnatch",
  "ark-ff",

@@ -155,6 +155,10 @@ host_functions! {
     ext_host_calls_bls12_381_mul_g2_version_1,
     ext_host_calls_ed_on_bls12_381_bandersnatch_msm_version_1,
     ext_host_calls_ed_on_bls12_381_bandersnatch_mul_version_1,
+    ext_host_calls_pallas_msm_version_1,
+    ext_host_calls_pallas_mul_version_1,
+    ext_host_calls_vesta_msm_version_1,
+    ext_host_calls_vesta_mul_version_1,
     ext_misc_print_num_version_1,
     ext_misc_print_utf8_version_1,
     ext_misc_print_hex_version_1,
@@ -449,7 +453,11 @@ impl HostFunction {
             | HostFunction::ext_host_calls_bls12_381_mul_g1_version_1
             | HostFunction::ext_host_calls_bls12_381_mul_g2_version_1
             | HostFunction::ext_host_calls_ed_on_bls12_381_bandersnatch_msm_version_1
-            | HostFunction::ext_host_calls_ed_on_bls12_381_bandersnatch_mul_version_1 => {
+            | HostFunction::ext_host_calls_ed_on_bls12_381_bandersnatch_mul_version_1
+            | HostFunction::ext_host_calls_pallas_msm_version_1
+            | HostFunction::ext_host_calls_pallas_mul_version_1
+            | HostFunction::ext_host_calls_vesta_msm_version_1
+            | HostFunction::ext_host_calls_vesta_mul_version_1 => {
                 crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I32)
             }
             HostFunction::ext_misc_print_num_version_1 => {

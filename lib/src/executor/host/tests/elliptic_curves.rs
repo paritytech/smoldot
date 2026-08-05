@@ -22,87 +22,139 @@ use super::super::{
 use super::with_core_version_custom_sections;
 
 // The test vectors below were generated with a standalone native program that
-// replicates `utils::mul_te::<EdwardsConfig>` of `sp-crypto-ec-utils` from
-// polkadot-sdk, using the `ark-scale` crate (usage: not-validated,
-// not-compressed) for the encoding, `ark-ed-on-bls12-381-bandersnatch 0.5.0`
-// for the math. They were NOT produced by the implementation under test.
+// replicates the `utils.rs` helpers of `sp-crypto-ec-utils` from polkadot-sdk,
+// using the `ark-scale` crate (usage: not-validated, not-compressed) for the
+// encoding and arkworks 0.5.0 for the math. They were NOT produced by the
+// implementation under test. The generator asserts its own outputs against
+// independent computations (e.g. the msm results against direct scalar
+// multiplications, and the miller-loop + final-exponentiation pipeline
+// against `Bls12_381::pairing`).
 
-/// Prime-order generator point, encoded.
-const VEC1_BASE: &str = "18ae52a26618e7e1658499ad22c0792bf342be7b77113774c5340b2ccc32c129664197ccb667315e6064e4ee81ad8c3586d5dcba508b7d150f3e12da9e666c2a";
+/// Bandersnatch prime-order generator point, encoded.
+const TE_MUL_BASE: &str = "18ae52a26618e7e1658499ad22c0792bf342be7b77113774c5340b2ccc32c129664197ccb667315e6064e4ee81ad8c3586d5dcba508b7d150f3e12da9e666c2a";
 /// The 4-limb scalar 0x0102030405060708_0f0e0d0c0b0a0908_fedcba9876543210_123456789abcdef0, encoded.
-const VEC1_SCALAR: &str =
+const LIMBS_SCALAR: &str =
     "0400000000000000f0debc9a785634121032547698badcfe08090a0b0c0d0e0f0807060504030201";
-const VEC1_OUT: &str = "3135c94c10e168a08136dd6bf7090566a58f482e7d8dc627b5630b14828eaa4dda0af0d2d0be41293262c83e4189d4d297fc439df1f05a0b7e5c84dc55e2306c";
+const TE_MUL_OUT: &str = "3135c94c10e168a08136dd6bf7090566a58f482e7d8dc627b5630b14828eaa4dda0af0d2d0be41293262c83e4189d4d297fc439df1f05a0b7e5c84dc55e2306c";
 
-/// On-curve point with `y = 2` that is NOT in the prime-order subgroup, encoded.
-const VEC2_BASE: &str = "5a1312770e4fb8da87cba77deca5a68f40a43669d174e7c49f8a95084a0a19270200000000000000000000000000000000000000000000000000000000000000";
+/// On-curve bandersnatch point with `y = 2` that is NOT in the prime-order
+/// subgroup, encoded.
+const TE_NON_SUBGROUP_BASE: &str = "5a1312770e4fb8da87cba77deca5a68f40a43669d174e7c49f8a95084a0a19270200000000000000000000000000000000000000000000000000000000000000";
 /// The 1-limb scalar 7, encoded.
-const VEC2_SCALAR: &str = "01000000000000000700000000000000";
-const VEC2_OUT: &str = "d500fbbec1be3b9f86e58a52761e6f880e1ee7e6514ce22f1016d027d0ee9c2407169fcb265420615ccc18f7ca02aad28f30c6a5b876da03214bbcbd7e1f1d60";
+const TE_SMALL_SCALAR: &str = "01000000000000000700000000000000";
+const TE_NON_SUBGROUP_OUT: &str = "d500fbbec1be3b9f86e58a52761e6f880e1ee7e6514ce22f1016d027d0ee9c2407169fcb265420615ccc18f7ca02aad28f30c6a5b876da03214bbcbd7e1f1d60";
 
 /// `Fr::MODULUS` as 4 limbs, encoded. Multiplying the `y = 2` non-subgroup
 /// point by it drives the projective result to `z = 0` (same construction as
 /// the degenerate-point test in `sp-crypto-ec-utils`).
-const VEC3_SCALAR: &str =
+const TE_MODULUS_SCALAR: &str =
     "0400000000000000e1e77628b506fd747104197400878fff007668020276ce0c525f67cad469fb1c";
 
-#[test]
-fn mul_matches_upstream_vector() {
-    let out = elliptic_curves::ed_on_bls12_381_bandersnatch_mul(
-        &hex::decode(VEC1_BASE).unwrap(),
-        &hex::decode(VEC1_SCALAR).unwrap(),
-        64,
-    )
-    .unwrap();
-    assert_eq!(out, hex::decode(VEC1_OUT).unwrap());
+/// Bandersnatch `[generator, 3 * generator]`, encoded.
+const TE_MSM_BASES: &str = "020000000000000018ae52a26618e7e1658499ad22c0792bf342be7b77113774c5340b2ccc32c129664197ccb667315e6064e4ee81ad8c3586d5dcba508b7d150f3e12da9e666c2a66341a6278225d65deaebcd1ca41e91f7759080531924b3044620a87b0997a2a80400095febb65372c96a52e238934b57b140a702495d484cfa757c18be56326";
+/// Bandersnatch scalar field elements `[5, 11]`, encoded.
+const TE_MSM_SCALARS: &str = "020000000000000005000000000000000000000000000000000000000000000000000000000000000b00000000000000000000000000000000000000000000000000000000000000";
+/// `38 * generator`, encoded.
+const TE_MSM_OUT: &str = "2249b14249ac27169670ea1b845321590e6d96ca6c0c6065066e745336660216b3c30343b3017a76f7b5778695d2397dc11415fb8742894ca0eccf1106c0e439";
+
+/// The HWCD exceptional pair from the `sp-crypto-ec-utils` test suite: two
+/// valid on-curve points whose addition produces an all-zero projective
+/// point. `msm(pair, [2, 1])` internally computes their sum.
+const TE_MSM_DEGEN_BASES: &str = "0200000000000000e7fc6cc1a8091e8abc296c7c1872165322b5d3675c71b46914d117d7d2e7e11b276ba895632568ceafcaa1a02cc8854690d0bd1da9964890c3a8d31565c811130ffba9d9bec99ce24ce356f6f742e819660ec2c9a7f94a284ff427f5e3489d0b106734fcae75dc61df5200006251b0c0af510fafac7c4638a8d0b8fc4f93b936";
+/// Bandersnatch scalar field elements `[2, 1]`, encoded.
+const TE_MSM_DEGEN_SCALARS: &str = "020000000000000002000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000";
+
+/// BLS12-381 G1 generator, encoded (96 bytes).
+const G1_GEN: &str = "17f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1";
+const MUL_G1_OUT: &str = "0220a64f914943f46d0d852614a0822df8e6b4bcde3f310995f2ceb4cebae06679790b773feed8b6307e9c18e67cd11b009340d4fbd0ee3a666b3ae3ebffe4febd1d95dba186723e9470f9476c13c514a14c331faac17ac7121ef60cd8f8686a";
+
+/// BLS12-381 G2 generator, encoded (192 bytes).
+const G2_GEN: &str = "13e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb80606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be0ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801";
+const MUL_G2_OUT: &str = "17d68756ae539e25ded75886590fb250d086383344214583292e63e40b3e9e563ebd7d0082bdf1a51597ec7a25469f1d15eacb3dea42c3fd4ec7a386924cc6bafeed61a11726334866bc323d713c689f177938cc2574bc427c5dbc21da0eaaad157758f242872fee3049c1e2c821d7b8a26f53f247f9e51a227c309e27a5ff7b99f4e9c7cd524c887fe644c81a65af9507050b55518dc12eb7e1574413d9bc4fa0d432fb4c692059e21cd9991a8808554082fd3bfc87cb56a7df7971b51d6def";
+
+/// BLS12-381 `[G1 generator, 5 * G1 generator]`, encoded.
+const MSM_G1_BASES: &str = "020000000000000017f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e110e7791fb972fe014159aa33a98622da3cdc98ff707965e536d8636b5fcc5ac7a91a8c46e59a00dca575af0f18fb13dc16ba437edcc6551e30c10512367494bfb6b01cc6681e8a4c3cd2501832ab5c4abc40b4578b85cbaffbf0bcd70d67c6e2";
+/// BLS12-381 scalar field elements `[3, 4]`, encoded.
+const MSM_SCALARS: &str = "020000000000000003000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000";
+/// `23 * G1 generator`, encoded.
+const MSM_G1_OUT: &str = "0c8b694b04d98a749a0763c72fc020ef61b2bb3f63ebb182cb2e568f6a8b9ca3ae013ae78317599e7e7ba2a528ec754a0951b70c206350e1edc2aefdfaa95318368c151e01e468b9fb1cf7c3c6575e4f06c135715cc5e51e1b492d19adf9bee0";
+
+/// BLS12-381 `[G2 generator, 5 * G2 generator]`, encoded.
+const MSM_G2_BASES: &str = "020000000000000013e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb80606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be0ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b8280100fb837804dba8213329db46608b6c121d973363c1234a86dd183baff112709cf97096c5e9a1a770ee9d7dc641a894d60411a5de6730ffece671a9f21d65028cc0f1102378de124562cb1ff49db6f004fcd14d683024b0548eff3d1468df2688093567b4228be17ee62d11a254edd041ee4b953bffb8b8c7f925bd6662b4298bac2822b446f5b5de3b893e1be5aa498619b5e8f5d4a72f2b75811ac084a7f814317360bac52f6aab15eed416b4ef9938e0bdc4865cc2c4d0fd947e7c6925fd14";
+/// `23 * G2 generator`, encoded.
+const MSM_G2_OUT: &str = "101e147f8bd7682b47b3a6cc0c552c26ce90b9ce0daef21f7f634b3360483afa14a11e6745e7de01a35c65b396a1a127131747485cce9a5c32837a964b8c0689ff70cb4702c6520f2220ab95192d73ae9508c5b998ffb0be40520926846ce3f1028207394adcbf30250ac21a8f1db6283580bc5e39159930552e5edb25e6215c66b6450296edc80dbc3a2acd125dab16090ca61ed16c4c1e80acfef736eea2db0d7425d9110cb53e6c4a2aa3f8a59ee6c60bdce8df5825011066d44bef84d296";
+
+/// Miller loop of the two pairs above (`MSM_G1_BASES` × `MSM_G2_BASES`),
+/// encoded target field element (576 bytes).
+const MML_OUT: &str = "f82cf3ce93f0f7becd26052eba541948d87e72cdf1acb4280e75760fe4025d64d22ee3d547f71d8d751ad2a767f88a047d9f4b20e2d28784911ef2f22188127570c66a84cca12f14c4d273eba89573edf8ecb2a81cdda26420c5978982c25d167da99a6b5bf44a33d3cb7b5ab1e007f4074c9b53ea19f27c084a6c271805bb6904627a51bde43b2efc93d2ca893c9e16728dd6e46f4dc1a3a46967954f70557434f6978689d3a53dd56d02561f2ca9e480260a310df56760fd912d1b84be411550a602db8d059257be3925f132076edeb306587dfec055e20ba864902417ef60529b4da25ef1ea24b174272ed4740502725c6bc6e28ef8eecea5768a2c4c87c87745c533a93c06dfb85a473d0894e32a2a859145c93ed1b82338174dd26e1f0be248940b4f646e74e3875a39d96369c1afdced46b16051896c33c11c1130136c99c7a6042ae9332c011ea287011846003e073d17c2e067a8b2dbca1dab9fdab1e56cbaa0149370e2e3048f559ca521d5ae236144bc6964b8014bf523d63cc209759c02fa4dc0f6211cf1d93a6792f8fbf716434d9b52168553c7b334490dc6afa19de2f6f836979416701ea2f69be1141697093a4472d67d7315e2f87149a1a90686b36c3cba574d23a7cc1e6c8a0e5192ca7f63dd994176332368a10928a00ecd23079813a570a8740571405f0eba9a42327c99e8c83ba5b1ec68f835aa033243557094d41d611373b47a3dee3a28148a0fe651ad72ce50ad731ef3b89f7c85b8b7f464c8e88ea208b64b37f3c2420fccada5bd16e0c911c93caf9747eacc05";
+/// Final exponentiation of `MML_OUT`; equals the product of the two
+/// pairings, verified in the generator against `Bls12_381::pairing`.
+const FEXP_OUT: &str = "d653b9632f23411f07c22f1d1d2f3e6729ff99610e8662287632ce60bc2f9d73171070ceda18481a1caa58aea6c64017e00911d737fac34a6e5fa86f8c2da1887bb043fbe687866cb429a2754f6fe3e4688af40e131d331ef4cb81306f140b074ca8fab926bdbc706f7b011cbea3427ff718e51dcfe23c9606c43afb61e8b99c31d74155f471387a7918a1b2675686007aaee58c75cb88a781fb5d6b7506171be600efe7419861e63dc463db03b9d8383922f026d71e9a8c9e4558102f42be0a7787c1cb0367a925fc46442b455c22c7a4c3565302c8b995ac924a000e912d3a783b6ea2d17d82cc188797e52d769e15d47ffb55f266951247b6196428e97ba56e3898d9b099a0c144ae5c34c39585a7da5b4cc43afd11bd3506ca32302d0d1872fbfe222f006985708fa3280b0153f1ce39b43f42e62ab59ca1d31fa0a0080684818ccdabcad0b041bdabd48e440417161a7212925d09ea6d89cb55ce66b5417ab2a7d2a40b2bdaddf4c137027a6c077bb9dc08e1baca9791dd3f5ccd369208331fc65efe3288c7718029d8fc718bb3bd7090071df22d43360e4373c3943e47b0a070dff2823a1486d46c2f1437a4109908eaa0cbf978e1b51444dee055051944a8fce4fe831227bf27a825c701a3f31c695e4734a47fa93eb53f5dd0e23909ee461693dada453b4a039d0ea37b408c697373876dc822a5363581c346dce740e77768863ac7da7a2ed360b7ff818d19a8ebcd6a4d38cdfbc07fc96a8b13533a69630b1bc70a6feb17749b6899a687fb4eff62bd356df64a7722198b707cf611";
+
+type HostCallFn = fn(&[u8], &[u8], usize) -> Result<Vec<u8>, u32>;
+
+fn assert_vector(function: HostCallFn, a: &str, b: &str, out_len: usize, expected: &str) {
+    let out = function(&hex::decode(a).unwrap(), &hex::decode(b).unwrap(), out_len).unwrap();
+    assert_eq!(out, hex::decode(expected).unwrap());
 }
 
 #[test]
-fn mul_accepts_non_subgroup_base() {
-    let out = elliptic_curves::ed_on_bls12_381_bandersnatch_mul(
-        &hex::decode(VEC2_BASE).unwrap(),
-        &hex::decode(VEC2_SCALAR).unwrap(),
+fn te_mul_matches_upstream_vector() {
+    assert_vector(
+        elliptic_curves::ed_on_bls12_381_bandersnatch_mul,
+        TE_MUL_BASE,
+        LIMBS_SCALAR,
         64,
-    )
-    .unwrap();
-    assert_eq!(out, hex::decode(VEC2_OUT).unwrap());
+        TE_MUL_OUT,
+    );
 }
 
 #[test]
-fn mul_degenerate_point_returns_error() {
+fn te_mul_accepts_non_subgroup_base() {
+    assert_vector(
+        elliptic_curves::ed_on_bls12_381_bandersnatch_mul,
+        TE_NON_SUBGROUP_BASE,
+        TE_SMALL_SCALAR,
+        64,
+        TE_NON_SUBGROUP_OUT,
+    );
+}
+
+#[test]
+fn te_mul_degenerate_point_returns_error() {
     let result = elliptic_curves::ed_on_bls12_381_bandersnatch_mul(
-        &hex::decode(VEC2_BASE).unwrap(),
-        &hex::decode(VEC3_SCALAR).unwrap(),
+        &hex::decode(TE_NON_SUBGROUP_BASE).unwrap(),
+        &hex::decode(TE_MODULUS_SCALAR).unwrap(),
         64,
     );
     assert_eq!(result, Err(elliptic_curves::ERROR_DEGENERATE_POINT));
 }
 
 #[test]
-fn mul_output_buffer_too_small() {
+fn te_mul_output_buffer_too_small() {
     let result = elliptic_curves::ed_on_bls12_381_bandersnatch_mul(
-        &hex::decode(VEC1_BASE).unwrap(),
-        &hex::decode(VEC1_SCALAR).unwrap(),
+        &hex::decode(TE_MUL_BASE).unwrap(),
+        &hex::decode(LIMBS_SCALAR).unwrap(),
         63,
     );
     assert_eq!(result, Err(elliptic_curves::ERROR_ENCODE));
 }
 
 #[test]
-fn mul_output_buffer_larger_than_needed() {
-    let out = elliptic_curves::ed_on_bls12_381_bandersnatch_mul(
-        &hex::decode(VEC1_BASE).unwrap(),
-        &hex::decode(VEC1_SCALAR).unwrap(),
+fn te_mul_output_buffer_larger_than_needed() {
+    assert_vector(
+        elliptic_curves::ed_on_bls12_381_bandersnatch_mul,
+        TE_MUL_BASE,
+        LIMBS_SCALAR,
         128,
-    )
-    .unwrap();
-    assert_eq!(out, hex::decode(VEC1_OUT).unwrap());
+        TE_MUL_OUT,
+    );
 }
 
 #[test]
-fn mul_malformed_inputs() {
-    let base = hex::decode(VEC1_BASE).unwrap();
-    let scalar = hex::decode(VEC1_SCALAR).unwrap();
+fn te_mul_malformed_inputs() {
+    let base = hex::decode(TE_MUL_BASE).unwrap();
+    let scalar = hex::decode(LIMBS_SCALAR).unwrap();
     assert_eq!(
         elliptic_curves::ed_on_bls12_381_bandersnatch_mul(&base[..63], &scalar, 64),
         Err(elliptic_curves::ERROR_DECODE)
@@ -113,45 +165,186 @@ fn mul_malformed_inputs() {
     );
 }
 
-const BASE_PTR: u64 = 1048576;
-const SCALAR_PTR: u64 = 1048704;
-const OUT_PTR: u64 = 1048832;
-const OUT_LEN: u64 = 64;
+#[test]
+fn te_msm_matches_upstream_vector() {
+    assert_vector(
+        elliptic_curves::ed_on_bls12_381_bandersnatch_msm,
+        TE_MSM_BASES,
+        TE_MSM_SCALARS,
+        64,
+        TE_MSM_OUT,
+    );
+}
+
+#[test]
+fn te_msm_degenerate_point_returns_error() {
+    let result = elliptic_curves::ed_on_bls12_381_bandersnatch_msm(
+        &hex::decode(TE_MSM_DEGEN_BASES).unwrap(),
+        &hex::decode(TE_MSM_DEGEN_SCALARS).unwrap(),
+        64,
+    );
+    assert_eq!(result, Err(elliptic_curves::ERROR_DEGENERATE_POINT));
+}
+
+#[test]
+fn msm_length_mismatch_returns_error() {
+    // Two bandersnatch bases with a single scalar.
+    let one_scalar = &hex::decode(TE_MSM_SCALARS).unwrap()[..40];
+    let mut one_scalar = one_scalar.to_vec();
+    one_scalar[0] = 1;
+    assert_eq!(
+        elliptic_curves::ed_on_bls12_381_bandersnatch_msm(
+            &hex::decode(TE_MSM_BASES).unwrap(),
+            &one_scalar,
+            64
+        ),
+        Err(elliptic_curves::ERROR_LENGTH_MISMATCH)
+    );
+    // Two G1 bases with a single scalar.
+    let one_scalar = &hex::decode(MSM_SCALARS).unwrap()[..40];
+    let mut one_scalar = one_scalar.to_vec();
+    one_scalar[0] = 1;
+    assert_eq!(
+        elliptic_curves::bls12_381_msm_g1(&hex::decode(MSM_G1_BASES).unwrap(), &one_scalar, 96),
+        Err(elliptic_curves::ERROR_LENGTH_MISMATCH)
+    );
+}
+
+#[test]
+fn bls_mul_g1_matches_upstream_vector() {
+    assert_vector(
+        elliptic_curves::bls12_381_mul_g1,
+        G1_GEN,
+        LIMBS_SCALAR,
+        96,
+        MUL_G1_OUT,
+    );
+}
+
+#[test]
+fn bls_mul_g2_matches_upstream_vector() {
+    assert_vector(
+        elliptic_curves::bls12_381_mul_g2,
+        G2_GEN,
+        LIMBS_SCALAR,
+        192,
+        MUL_G2_OUT,
+    );
+}
+
+#[test]
+fn bls_msm_g1_matches_upstream_vector() {
+    assert_vector(
+        elliptic_curves::bls12_381_msm_g1,
+        MSM_G1_BASES,
+        MSM_SCALARS,
+        96,
+        MSM_G1_OUT,
+    );
+}
+
+#[test]
+fn bls_msm_g2_matches_upstream_vector() {
+    assert_vector(
+        elliptic_curves::bls12_381_msm_g2,
+        MSM_G2_BASES,
+        MSM_SCALARS,
+        192,
+        MSM_G2_OUT,
+    );
+}
+
+#[test]
+fn bls_multi_miller_loop_matches_upstream_vector() {
+    assert_vector(
+        elliptic_curves::bls12_381_multi_miller_loop,
+        MSM_G1_BASES,
+        MSM_G2_BASES,
+        576,
+        MML_OUT,
+    );
+}
+
+#[test]
+fn bls_final_exponentiation_matches_upstream_vector() {
+    let out =
+        elliptic_curves::bls12_381_final_exponentiation(&hex::decode(MML_OUT).unwrap()).unwrap();
+    assert_eq!(out, hex::decode(FEXP_OUT).unwrap());
+}
+
+#[test]
+fn bls_final_exponentiation_of_zero_returns_unknown() {
+    let result = elliptic_curves::bls12_381_final_exponentiation(&[0; 576]);
+    assert_eq!(result, Err(elliptic_curves::ERROR_UNKNOWN));
+}
+
+const A_PTR: u64 = 1048576;
+const B_PTR: u64 = 1049600;
+const OUT_PTR: u64 = 1050624;
 
 fn wat_escape(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("\\{b:02x}")).collect()
 }
 
-/// Builds a module whose `test` function calls the mul host function with the
-/// given inputs, traps unless the returned code equals `expected_code`, and
+/// Builds a module whose `test` function calls the given three-parameter
+/// host function, traps unless the returned code equals `expected_code`, and
 /// returns the output buffer as the runtime call result.
-fn module_calling_mul(base: &[u8], scalar: &[u8], expected_code: u32) -> Vec<u8> {
+fn module_calling_3_params(
+    import_name: &str,
+    a: &[u8],
+    b: &[u8],
+    out_len: u64,
+    expected_code: u32,
+) -> Vec<u8> {
     let module = format!(
         r#"
         (module
-            (import "env" "ext_host_calls_ed_on_bls12_381_bandersnatch_mul_version_1"
-                (func $mul (param i64 i64 i64) (result i32)))
+            (import "env" "{import_name}"
+                (func $f (param i64 i64 i64) (result i32)))
             (memory (export "memory") 17)
-            (global (export "__heap_base") i32 (i32.const 1049600))
-            (data (i32.const {BASE_PTR}) "{base_data}")
-            (data (i32.const {SCALAR_PTR}) "{scalar_data}")
+            (global (export "__heap_base") i32 (i32.const 1051648))
+            (data (i32.const {A_PTR}) "{a_data}")
+            (data (i32.const {B_PTR}) "{b_data}")
             (func (export "test") (param i32 i32) (result i64)
                 (if (i32.ne
-                        (call $mul
-                            (i64.const {base_ptrsz})
-                            (i64.const {scalar_ptrsz})
+                        (call $f
+                            (i64.const {a_ptrsz})
+                            (i64.const {b_ptrsz})
                             (i64.const {out_ptrsz}))
                         (i32.const {expected_code}))
                     (then unreachable))
-                (i64.const {ret_ptrsz}))
+                (i64.const {out_ptrsz}))
         )
         "#,
-        base_data = wat_escape(base),
-        scalar_data = wat_escape(scalar),
-        base_ptrsz = (base.len() as u64) << 32 | BASE_PTR,
-        scalar_ptrsz = (scalar.len() as u64) << 32 | SCALAR_PTR,
-        out_ptrsz = OUT_LEN << 32 | OUT_PTR,
-        ret_ptrsz = OUT_LEN << 32 | OUT_PTR,
+        a_data = wat_escape(a),
+        b_data = wat_escape(b),
+        a_ptrsz = (a.len() as u64) << 32 | A_PTR,
+        b_ptrsz = (b.len() as u64) << 32 | B_PTR,
+        out_ptrsz = out_len << 32 | OUT_PTR,
+    );
+    with_core_version_custom_sections(wat::parse_str(module).unwrap())
+}
+
+/// Same but for `final_exponentiation`, which takes a single in-out buffer.
+fn module_calling_final_exponentiation(in_out: &[u8], expected_code: u32) -> Vec<u8> {
+    let module = format!(
+        r#"
+        (module
+            (import "env" "ext_host_calls_bls12_381_final_exponentiation_version_1"
+                (func $f (param i64) (result i32)))
+            (memory (export "memory") 17)
+            (global (export "__heap_base") i32 (i32.const 1051648))
+            (data (i32.const {A_PTR}) "{data}")
+            (func (export "test") (param i32 i32) (result i64)
+                (if (i32.ne
+                        (call $f (i64.const {ptrsz}))
+                        (i32.const {expected_code}))
+                    (then unreachable))
+                (i64.const {ptrsz}))
+        )
+        "#,
+        data = wat_escape(in_out),
+        ptrsz = (in_out.len() as u64) << 32 | A_PTR,
     );
     with_core_version_custom_sections(wat::parse_str(module).unwrap())
 }
@@ -187,23 +380,27 @@ fn run_test_call(module_bytes: &[u8], exec_hint: ExecHint) -> Vec<u8> {
 }
 
 #[test]
-fn runtime_call_computes_mul() {
-    let module_bytes = module_calling_mul(
-        &hex::decode(VEC1_BASE).unwrap(),
-        &hex::decode(VEC1_SCALAR).unwrap(),
+fn runtime_call_computes_te_mul() {
+    let module_bytes = module_calling_3_params(
+        "ext_host_calls_ed_on_bls12_381_bandersnatch_mul_version_1",
+        &hex::decode(TE_MUL_BASE).unwrap(),
+        &hex::decode(LIMBS_SCALAR).unwrap(),
+        64,
         0,
     );
     for exec_hint in ExecHint::available_engines() {
         let out = run_test_call(&module_bytes, exec_hint);
-        assert_eq!(out, hex::decode(VEC1_OUT).unwrap());
+        assert_eq!(out, hex::decode(TE_MUL_OUT).unwrap());
     }
 }
 
 #[test]
-fn runtime_call_degenerate_point_returns_code_4() {
-    let module_bytes = module_calling_mul(
-        &hex::decode(VEC2_BASE).unwrap(),
-        &hex::decode(VEC3_SCALAR).unwrap(),
+fn runtime_call_te_mul_degenerate_point_returns_code_4() {
+    let module_bytes = module_calling_3_params(
+        "ext_host_calls_ed_on_bls12_381_bandersnatch_mul_version_1",
+        &hex::decode(TE_NON_SUBGROUP_BASE).unwrap(),
+        &hex::decode(TE_MODULUS_SCALAR).unwrap(),
+        64,
         elliptic_curves::ERROR_DEGENERATE_POINT,
     );
     for exec_hint in ExecHint::available_engines() {
@@ -211,6 +408,30 @@ fn runtime_call_degenerate_point_returns_code_4() {
         // in the module passed, and nothing was written on the error path.
         let out = run_test_call(&module_bytes, exec_hint);
         assert_eq!(out, [0; 64]);
+    }
+}
+
+#[test]
+fn runtime_call_computes_mul_g1() {
+    let module_bytes = module_calling_3_params(
+        "ext_host_calls_bls12_381_mul_g1_version_1",
+        &hex::decode(G1_GEN).unwrap(),
+        &hex::decode(LIMBS_SCALAR).unwrap(),
+        96,
+        0,
+    );
+    for exec_hint in ExecHint::available_engines() {
+        let out = run_test_call(&module_bytes, exec_hint);
+        assert_eq!(out, hex::decode(MUL_G1_OUT).unwrap());
+    }
+}
+
+#[test]
+fn runtime_call_computes_final_exponentiation() {
+    let module_bytes = module_calling_final_exponentiation(&hex::decode(MML_OUT).unwrap(), 0);
+    for exec_hint in ExecHint::available_engines() {
+        let out = run_test_call(&module_bytes, exec_hint);
+        assert_eq!(out, hex::decode(FEXP_OUT).unwrap());
     }
 }
 
@@ -235,6 +456,14 @@ fn all_ec_host_functions_resolve_with_strict_imports() {
                 (import "env" "ext_host_calls_ed_on_bls12_381_bandersnatch_msm_version_1"
                     (func (param i64 i64 i64) (result i32)))
                 (import "env" "ext_host_calls_ed_on_bls12_381_bandersnatch_mul_version_1"
+                    (func (param i64 i64 i64) (result i32)))
+                (import "env" "ext_host_calls_pallas_msm_version_1"
+                    (func (param i64 i64 i64) (result i32)))
+                (import "env" "ext_host_calls_pallas_mul_version_1"
+                    (func (param i64 i64 i64) (result i32)))
+                (import "env" "ext_host_calls_vesta_msm_version_1"
+                    (func (param i64 i64 i64) (result i32)))
+                (import "env" "ext_host_calls_vesta_mul_version_1"
                     (func (param i64 i64 i64) (result i32)))
                 (import "env" "memory" (memory 0))
                 (global (export "__heap_base") i32 (i32.const 0))
