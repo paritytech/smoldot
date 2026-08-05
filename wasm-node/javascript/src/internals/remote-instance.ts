@@ -131,7 +131,7 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
                 if (!state.connections.has(message.connectionId))
                     return;
                 // The stream might have been reset locally in the past.
-                if (message.streamId && !state.connections.get(message.connectionId)!.has(message.streamId))
+                if (message.streamId !== undefined && !state.connections.get(message.connectionId)!.has(message.streamId))
                     return;
                 break;
             }
@@ -140,7 +140,7 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
                 if (!state.connections.has(message.connectionId))
                     return;
                 // The stream might have been reset locally in the past.
-                if (message.streamId && !state.connections.get(message.connectionId)!.has(message.streamId))
+                if (message.streamId !== undefined && !state.connections.get(message.connectionId)!.has(message.streamId))
                     return;
                 break;
             }
