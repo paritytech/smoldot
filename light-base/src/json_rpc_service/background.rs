@@ -6247,6 +6247,21 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                 match event {
                     Some(ev) => {
+                        let stall_reason_to_wire =
+                            |r: lifecycle_service::StallReason| match r {
+                                lifecycle_service::StallReason::NoPeers => {
+                                    methods::LifecycleStallReason::NoPeers
+                                }
+                                lifecycle_service::StallReason::WarpNoProgress => {
+                                    methods::LifecycleStallReason::WarpNoProgress
+                                }
+                                lifecycle_service::StallReason::SyncNoProgress => {
+                                    methods::LifecycleStallReason::SyncNoProgress
+                                }
+                                lifecycle_service::StallReason::BootstrapTimeout => {
+                                    methods::LifecycleStallReason::BootstrapTimeout
+                                }
+                            };
                         let result = match ev {
                             lifecycle_service::LifecycleEvent::Connecting => {
                                 methods::LifecycleEvent::Connecting
@@ -6277,38 +6292,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             }
                             lifecycle_service::LifecycleEvent::Stalled { reason } => {
                                 methods::LifecycleEvent::Stalled {
-                                    reason: match reason {
-                                        lifecycle_service::StallReason::NoPeers => {
-                                            methods::LifecycleStallReason::NoPeers
-                                        }
-                                        lifecycle_service::StallReason::WarpNoProgress => {
-                                            methods::LifecycleStallReason::WarpNoProgress
-                                        }
-                                        lifecycle_service::StallReason::SyncNoProgress => {
-                                            methods::LifecycleStallReason::SyncNoProgress
-                                        }
-                                        lifecycle_service::StallReason::BootstrapTimeout => {
-                                            methods::LifecycleStallReason::BootstrapTimeout
-                                        }
-                                    },
+                                    reason: stall_reason_to_wire(reason),
                                 }
                             }
                             lifecycle_service::LifecycleEvent::Recovered { previously } => {
                                 methods::LifecycleEvent::Recovered {
-                                    previously: match previously {
-                                        lifecycle_service::StallReason::NoPeers => {
-                                            methods::LifecycleStallReason::NoPeers
-                                        }
-                                        lifecycle_service::StallReason::WarpNoProgress => {
-                                            methods::LifecycleStallReason::WarpNoProgress
-                                        }
-                                        lifecycle_service::StallReason::SyncNoProgress => {
-                                            methods::LifecycleStallReason::SyncNoProgress
-                                        }
-                                        lifecycle_service::StallReason::BootstrapTimeout => {
-                                            methods::LifecycleStallReason::BootstrapTimeout
-                                        }
-                                    },
+                                    previously: stall_reason_to_wire(previously),
                                 }
                             }
                             lifecycle_service::LifecycleEvent::Stopped { reason } => {
