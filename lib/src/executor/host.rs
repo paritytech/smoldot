@@ -213,6 +213,8 @@ pub use trie::TrieEntryVersion;
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
+#[cfg(feature = "ec-host-functions")]
+mod elliptic_curves;
 mod functions;
 mod tests;
 mod zstd;
@@ -2139,6 +2141,47 @@ impl ReadyToRun {
             }
             HostFunction::ext_trie_keccak_256_verify_proof_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_trie_keccak_256_verify_proof_version_2 => host_fn_not_implemented!(),
+            HostFunction::ext_host_calls_ed_on_bls12_381_bandersnatch_mul_version_1 => {
+                #[cfg(not(feature = "ec-host-functions"))]
+                host_fn_not_implemented!();
+                #[cfg(feature = "ec-host-functions")]
+                {
+                    let base = expect_pointer_size!(0).as_ref().to_vec();
+                    let scalar = expect_pointer_size!(1).as_ref().to_vec();
+                    let (out_ptr, out_len) = expect_pointer_size_raw!(2);
+
+                    let code = match elliptic_curves::ed_on_bls12_381_bandersnatch_mul(
+                        &base,
+                        &scalar,
+                        usize::try_from(out_len).unwrap_or_else(|_| unreachable!()),
+                    ) {
+                        Ok(encoded) => {
+                            self.inner
+                                .vm
+                                .write_memory(out_ptr, &encoded)
+                                .unwrap_or_else(|_| unreachable!());
+                            0
+                        }
+                        Err(code) => code,
+                    };
+
+                    HostVm::ReadyToRun(ReadyToRun {
+                        resume_value: Some(vm::WasmValue::I32(i32::from_ne_bytes(
+                            code.to_ne_bytes(),
+                        ))),
+                        inner: self.inner,
+                    })
+                }
+            }
+            HostFunction::ext_host_calls_bls12_381_multi_miller_loop_version_1
+            | HostFunction::ext_host_calls_bls12_381_final_exponentiation_version_1
+            | HostFunction::ext_host_calls_bls12_381_msm_g1_version_1
+            | HostFunction::ext_host_calls_bls12_381_msm_g2_version_1
+            | HostFunction::ext_host_calls_bls12_381_mul_g1_version_1
+            | HostFunction::ext_host_calls_bls12_381_mul_g2_version_1
+            | HostFunction::ext_host_calls_ed_on_bls12_381_bandersnatch_msm_version_1 => {
+                host_fn_not_implemented!()
+            }
             HostFunction::ext_misc_print_num_version_1 => {
                 let num = match params[0] {
                     vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),

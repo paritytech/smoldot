@@ -147,6 +147,14 @@ host_functions! {
     ext_trie_blake2_256_verify_proof_version_2,
     ext_trie_keccak_256_verify_proof_version_1,
     ext_trie_keccak_256_verify_proof_version_2,
+    ext_host_calls_bls12_381_multi_miller_loop_version_1,
+    ext_host_calls_bls12_381_final_exponentiation_version_1,
+    ext_host_calls_bls12_381_msm_g1_version_1,
+    ext_host_calls_bls12_381_msm_g2_version_1,
+    ext_host_calls_bls12_381_mul_g1_version_1,
+    ext_host_calls_bls12_381_mul_g2_version_1,
+    ext_host_calls_ed_on_bls12_381_bandersnatch_msm_version_1,
+    ext_host_calls_ed_on_bls12_381_bandersnatch_mul_version_1,
     ext_misc_print_num_version_1,
     ext_misc_print_utf8_version_1,
     ext_misc_print_hex_version_1,
@@ -431,6 +439,18 @@ impl HostFunction {
             }
             HostFunction::ext_trie_keccak_256_verify_proof_version_2 => {
                 crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
+            }
+            HostFunction::ext_host_calls_bls12_381_final_exponentiation_version_1 => {
+                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
+            }
+            HostFunction::ext_host_calls_bls12_381_multi_miller_loop_version_1
+            | HostFunction::ext_host_calls_bls12_381_msm_g1_version_1
+            | HostFunction::ext_host_calls_bls12_381_msm_g2_version_1
+            | HostFunction::ext_host_calls_bls12_381_mul_g1_version_1
+            | HostFunction::ext_host_calls_bls12_381_mul_g2_version_1
+            | HostFunction::ext_host_calls_ed_on_bls12_381_bandersnatch_msm_version_1
+            | HostFunction::ext_host_calls_ed_on_bls12_381_bandersnatch_mul_version_1 => {
+                crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I32)
             }
             HostFunction::ext_misc_print_num_version_1 => {
                 crate::signature!((vm::ValueType::I64) => ())

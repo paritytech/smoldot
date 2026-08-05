@@ -19,6 +19,8 @@
 
 use super::{Config, HeapPages, HostVm, HostVmPrototype, StorageProofSizeBehavior, vm::ExecHint};
 
+#[cfg(feature = "ec-host-functions")]
+mod elliptic_curves;
 mod hash_algorithms;
 mod initialization;
 mod run;

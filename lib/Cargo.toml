@@ -12,6 +12,12 @@ include.workspace = true
 
 [features]
 default = ["database-sqlite", "std", "wasmtime"]
+ec-host-functions = [
+    "dep:ark-ec",
+    "dep:ark-ed-on-bls12-381-bandersnatch",
+    "dep:ark-ff",
+    "dep:ark-serialize",
+]
 database-sqlite = [
     "dep:parking_lot",
     "dep:rusqlite",
@@ -35,6 +41,10 @@ wasmtime = [
 # Before adding a crate here, please make sure that it is `no_std`-compatible. If a crate should
 # theoretically be `no_std`-compatible (i.e. doesn't need the help of the operating system) but is
 # not, or if things are sketchy, please leave a comment next to it.
+ark-ec = { version = "0.5.0", optional = true, default-features = false }
+ark-ed-on-bls12-381-bandersnatch = { version = "0.5.0", optional = true, default-features = false }
+ark-ff = { version = "0.5.0", optional = true, default-features = false }
+ark-serialize = { version = "0.5.0", optional = true, default-features = false }
 arrayvec = { version = "0.7.6", default-features = false }
 async-lock = { version = "3.0.0", default-features = false }
 atomic-take = { version = "1.1.0" }
