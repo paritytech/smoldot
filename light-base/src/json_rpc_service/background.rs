@@ -6247,21 +6247,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                 match event {
                     Some(ev) => {
-                        let stall_reason_to_wire =
-                            |r: lifecycle_service::StallReason| match r {
-                                lifecycle_service::StallReason::NoPeers => {
-                                    methods::LifecycleStallReason::NoPeers
-                                }
-                                lifecycle_service::StallReason::WarpNoProgress => {
-                                    methods::LifecycleStallReason::WarpNoProgress
-                                }
-                                lifecycle_service::StallReason::SyncNoProgress => {
-                                    methods::LifecycleStallReason::SyncNoProgress
-                                }
-                                lifecycle_service::StallReason::BootstrapTimeout => {
-                                    methods::LifecycleStallReason::BootstrapTimeout
-                                }
-                            };
+                        let stall_reason_to_wire = |r: lifecycle_service::StallReason| match r {
+                            lifecycle_service::StallReason::NoPeers => {
+                                methods::LifecycleStallReason::NoPeers
+                            }
+                            lifecycle_service::StallReason::WarpNoProgress => {
+                                methods::LifecycleStallReason::WarpNoProgress
+                            }
+                            lifecycle_service::StallReason::SyncNoProgress => {
+                                methods::LifecycleStallReason::SyncNoProgress
+                            }
+                            lifecycle_service::StallReason::BootstrapTimeout => {
+                                methods::LifecycleStallReason::BootstrapTimeout
+                            }
+                        };
                         let result = match ev {
                             lifecycle_service::LifecycleEvent::Connecting => {
                                 methods::LifecycleEvent::Connecting
