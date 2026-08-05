@@ -464,12 +464,19 @@ define_methods! {
     /// Returns, as an opaque string, the version of the client serving these JSON-RPC requests.
     system_version() -> Cow<'a, str>,
 
+    // Legacy statement-store JSON RPC API
+
     /// Broadcast a new statement to peers (light node has no local statement-store).
     statement_submit(encoded: HexString) -> StatementSubmitResult,
     /// Subscribe to statements matching the given filter. Returns subscription ID.
     statement_subscribeStatement(filter: TopicFilter) -> Cow<'a, str>,
     /// Unsubscribe from statement notifications.
     statement_unsubscribeStatement(subscription: String) -> bool,
+
+    // Unstable statement-store JSON RPC API
+
+    /// Validate a SCALE-encoded statement and broadcast it to peers.
+    statement_unstable_submit(encoded: HexString) -> StatementSubmitOutcome,
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_v1_body(
@@ -1129,6 +1136,40 @@ pub enum InternalError {
     NoConnectedPeers,
 }
 
+/// Outcome of a [`MethodCall::statement_unstable_submit`].
+///
+/// A light client keeps no statement store, so the specification's store-dependent statuses are
+/// omitted: `known` and every `rejected` reason.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum StatementSubmitOutcome {
+    /// The statement was accepted and wasn't already present in the store.
+    New,
+    /// The statement failed validation.
+    Invalid(StatementSubmitInvalidReason),
+}
+
+/// Reason of a [`StatementSubmitOutcome::Invalid`].
+///
+/// The specification's `badProof` is omitted: statement signatures aren't verified.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "reason", rename_all = "camelCase")]
+pub enum StatementSubmitInvalidReason {
+    /// The statement has no authenticity proof.
+    NoProof,
+    /// The encoded statement exceeds the maximum allowed size.
+    EncodingTooLarge {
+        /// Size in bytes of the submitted encoding.
+        #[serde(rename = "submittedSize")]
+        submitted_size: usize,
+        /// Maximum allowed size in bytes.
+        #[serde(rename = "maxSize")]
+        max_size: usize,
+    },
+    /// The statement's expiry is in the past.
+    AlreadyExpired,
+}
+
 /// Notification event for statement subscriptions.
 ///
 /// JSON format is compatible with polkadot-sdk's `StatementEvent`.
@@ -1661,6 +1702,73 @@ mod tests {
             call,
             super::MethodCall::statement_unsubscribeStatement { .. }
         ));
+    }
+
+    #[test]
+    fn statement_unstable_submit_parse_valid() {
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":5,"method":"statement_unstable_submit","params":["0x1234"]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(id, "5");
+        assert!(matches!(
+            call,
+            super::MethodCall::statement_unstable_submit { .. }
+        ));
+    }
+
+    #[test]
+    fn statement_submit_outcome_serialization() {
+        assert_eq!(
+            serde_json::to_string(&super::StatementSubmitOutcome::New).unwrap(),
+            r#"{"status":"new"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&super::StatementSubmitOutcome::Invalid(
+                super::StatementSubmitInvalidReason::NoProof
+            ))
+            .unwrap(),
+            r#"{"status":"invalid","reason":"noProof"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&super::StatementSubmitOutcome::Invalid(
+                super::StatementSubmitInvalidReason::AlreadyExpired
+            ))
+            .unwrap(),
+            r#"{"status":"invalid","reason":"alreadyExpired"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&super::StatementSubmitOutcome::Invalid(
+                super::StatementSubmitInvalidReason::EncodingTooLarge {
+                    submitted_size: 2_000_000,
+                    max_size: 1_048_575,
+                }
+            ))
+            .unwrap(),
+            r#"{"status":"invalid","reason":"encodingTooLarge","submittedSize":2000000,"maxSize":1048575}"#
+        );
+    }
+
+    #[test]
+    fn statement_submit_outcome_deserialization_round_trip() {
+        for outcome in [
+            super::StatementSubmitOutcome::New,
+            super::StatementSubmitOutcome::Invalid(super::StatementSubmitInvalidReason::NoProof),
+            super::StatementSubmitOutcome::Invalid(
+                super::StatementSubmitInvalidReason::AlreadyExpired,
+            ),
+            super::StatementSubmitOutcome::Invalid(
+                super::StatementSubmitInvalidReason::EncodingTooLarge {
+                    submitted_size: 2_000_000,
+                    max_size: 1_048_575,
+                },
+            ),
+        ] {
+            let json = serde_json::to_string(&outcome).unwrap();
+            let decoded: super::StatementSubmitOutcome = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, outcome);
+        }
     }
 
     #[test]

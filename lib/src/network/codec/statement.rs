@@ -32,6 +32,12 @@ pub const MAX_ANY_TOPICS: usize = 128;
 /// Maximum number of statements allowed in a single notification.
 const MAX_STATEMENTS_PER_NOTIFICATION: usize = 10_000;
 
+/// Maximum size in bytes of a single SCALE-encoded statement.
+///
+/// One byte below the 1 MiB notification limit, leaving room for the vector length prefix so that
+/// a statement of this size still fits in a single-element batch.
+pub const MAX_STATEMENT_SIZE: usize = 1024 * 1024 - 1;
+
 const FIELD_PROOF: u8 = 0;
 const FIELD_DECRYPTION_KEY: u8 = 1;
 const FIELD_EXPIRY: u8 = 2;
