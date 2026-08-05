@@ -549,6 +549,13 @@ function connect(config: ConnectionConfig): Connection {
             openOutSubstream: () => {
                 // `openOutSubstream` can only be called after we have called `config.onOpen`,
                 // therefore `pc` is guaranteed to be non-null.
+                // The browser can however move the connection to `closed` before the
+                // `connectionstatechange` event (which reports the reset) is dispatched;
+                // `createDataChannel` would then throw. Doing nothing is fine, as the
+                // connection is about to be reset anyway.
+                // See <https://github.com/paritytech/smoldot/issues/3325>.
+                if (state.pc!.signalingState === "closed")
+                    return;
                 // Note that the label passed to `createDataChannel` is required to be empty as
                 // per the libp2p WebRTC specification.
                 // TODO: adjusting the options based on the first substream is a bit hacky
