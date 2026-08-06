@@ -473,15 +473,31 @@ define_methods! {
     /// Unsubscribe from statement notifications.
     statement_unsubscribeStatement(subscription: String) -> bool,
 
-    // Unstable statement-store JSON RPC API
+    // Unstable statement-store JSON RPC API, defined in
+    // https://github.com/paritytech/json-rpc-interface-spec/ and implemented in polkadot-sdk by
+    // https://github.com/paritytech/polkadot-sdk/pull/11989. Where a storeless light client cannot
+    // reproduce the reference behavior, the divergence is documented on the item concerned.
 
     /// Validate a SCALE-encoded statement and broadcast it to peers.
     statement_unstable_submit(encoded: HexString) -> StatementSubmitOutcome,
     /// Open a statement subscription. It starts with no filter attached, and therefore doesn't
     /// generate any notification until one is added.
+    ///
+    /// Never fails with `-32800`: the number of statement subscriptions per client isn't capped. The
+    /// specification requires accepting at least two and only permits erroring beyond that.
     statement_unstable_subscribe() -> Cow<'a, str>,
     /// Attach a filter to a `statement_unstable_subscribe` subscription. A light client keeps no
     /// statement store, so it replays no statement and emits `replayDone` right away.
+    ///
+    /// Two consequences of that emptiness, both diverging from what the specification assumes of a
+    /// full node:
+    ///
+    /// - `replayDone` doesn't mean the client holds what the server held. The statements matching the
+    ///   new filter arrive afterwards as `newStatements`, once peers learn about the updated topic
+    ///   affinity.
+    /// - Statements already delivered to this subscription are never re-announced under the new
+    ///   filter id, because re-reporting them is what the at-most-once guarantee forbids. Obtaining a
+    ///   full backlog for a filter requires a fresh subscription.
     statement_unstable_add_filter(
         subscription: Cow<'a, str>,
         #[rename = "topicFilter"] topic_filter: StatementTopicFilter
@@ -1157,11 +1173,12 @@ pub enum InternalError {
 /// Outcome of a [`MethodCall::statement_unstable_submit`].
 ///
 /// A light client keeps no statement store, so the specification's store-dependent statuses are
-/// omitted: `known` and every `rejected` reason.
+/// omitted: `known` and every `rejected` reason. `known` is in any case unreachable through local RPC
+/// submission in polkadot-sdk too, a locally-sourced statement always being resubmittable.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum StatementSubmitOutcome {
-    /// The statement was accepted and wasn't already present in the store.
+    /// The statement passed validation and was broadcast to at least one peer.
     New,
     /// The statement failed validation.
     Invalid(StatementSubmitInvalidReason),
@@ -1169,7 +1186,10 @@ pub enum StatementSubmitOutcome {
 
 /// Reason of a [`StatementSubmitOutcome::Invalid`].
 ///
-/// The specification's `badProof` is omitted: statement signatures aren't verified.
+/// The specification's `badProof` is omitted: telling a bad proof from a good one means verifying a
+/// signature, more CPU than a light client should spend on a submission, so only the presence of a
+/// proof is checked. The trade-off is that a statement carrying an invalid signature is relayed, and
+/// the peers that do verify it answer with a reputation penalty.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "reason", rename_all = "camelCase")]
 pub enum StatementSubmitInvalidReason {

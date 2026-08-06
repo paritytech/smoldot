@@ -112,6 +112,10 @@ pub enum StatementSubmitError {
 
 /// Validates a SCALE-encoded statement and broadcasts it, following the
 /// `statement_unstable_submit` semantics.
+///
+/// The checks run in the order polkadot-sdk's `Store::submit` applies them — expiry, then size, then
+/// proof — so that a client submitting a statement failing several of them is told the same reason a
+/// full node would give. Checks needing a local store or chain state are skipped.
 pub async fn validate_and_broadcast_statement_unstable<F, Fut>(
     encoded: &[u8],
     now_from_unix_epoch: Duration,
@@ -126,7 +130,8 @@ where
     };
 
     // The most significant 32 bits of `expiry` are the expiration timestamp in seconds since
-    // the UNIX epoch.
+    // the UNIX epoch. A statement expiring exactly now is already expired, the deadline being the
+    // first instant at which the statement no longer holds.
     if now_from_unix_epoch.as_secs() >= statement.expiry >> 32 {
         return Ok(StatementSubmitOutcome::Invalid(
             StatementSubmitInvalidReason::AlreadyExpired,
@@ -162,7 +167,8 @@ where
 /// Maximum number of filters attached to a single subscription.
 ///
 /// Keeps one subscription useful for multiplexing while bounding the per-statement list of matching
-/// filter ids. Same value as polkadot-sdk.
+/// filter ids. Matches the limit polkadot-sdk enforces, so that a client which stays within it is
+/// accepted by both.
 pub(super) const MAX_FILTERS_PER_SUBSCRIPTION: usize = 128;
 
 /// Identifies a filter within the subscription it is attached to.
@@ -322,7 +328,7 @@ pub(super) struct StatementSubscriptions {
     subscriptions: hashbrown::HashMap<String, StatementSubscription, fnv::FnvBuildHasher>,
 
     /// Reverse index: maps a topic to the IDs of all subscriptions whose filter references it.
-    /// Only populated for `MatchAny`/`MatchAll` filters with a non-empty topic list.
+    /// Only `MatchAny`/`MatchAll` filters contribute entries, one per topic they name.
     by_topic: hashbrown::HashMap<
         [u8; 32],
         hashbrown::HashSet<String, fnv::FnvBuildHasher>,
@@ -330,7 +336,7 @@ pub(super) struct StatementSubscriptions {
     >,
 
     /// IDs of subscriptions having a filter that matches every statement irrespective of its
-    /// topics: either `TopicFilter::Any`, or a `TopicFilter::MatchAll` whose topic list is empty.
+    /// topics, i.e. a `TopicFilter::Any`.
     wildcard: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
 }
 

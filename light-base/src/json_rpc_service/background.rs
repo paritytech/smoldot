@@ -3247,6 +3247,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         // filter runs over an empty snapshot and completes right away. The
                         // statements that peers send once they learn about the updated topic
                         // affinity are reported through `newStatements`.
+                        //
+                        // `replayDone` therefore precedes the statements matching the filter rather
+                        // than following them, by up to the affinity update interval. A client
+                        // reading it as "I now hold what the server holds" concludes too early.
                         if let Some(filter_id) = added {
                             let notification =
                                 methods::ServerToClient::statement_unstable_subscribeEvent {
