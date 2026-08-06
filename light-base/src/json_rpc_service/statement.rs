@@ -106,7 +106,7 @@ where
 pub enum StatementSubmitError {
     /// The submitted bytes don't decode into a statement.
     InvalidEncoding,
-    /// The statement is valid but there were no connected peers to broadcast it to.
+    /// The statement is valid but reached no peer.
     NoConnectedPeers,
 }
 
@@ -148,8 +148,11 @@ where
         ));
     }
 
+    // Counted on `sent` rather than `total`: a peer can be gossip-connected while its statement
+    // substream is absent or its notification queue full, in which case the statement reached
+    // nobody and reporting `new` would tell the client it was published when it wasn't.
     let broadcasted = broadcast(encoded.to_vec()).await;
-    if broadcasted.total == 0 {
+    if broadcasted.sent == 0 {
         return Err(StatementSubmitError::NoConnectedPeers);
     }
 
@@ -765,6 +768,19 @@ mod tests {
             &encoded,
             NOW,
             |_| async { BroadcastStatementResult { sent: 0, total: 0 } },
+        ));
+        assert_eq!(result, Err(StatementSubmitError::NoConnectedPeers));
+    }
+
+    #[test]
+    fn unstable_submit_reaching_no_peer_is_not_new() {
+        // Gossip-connected peers whose statement substream is missing or whose queue is full leave
+        // the statement unsent. Answering `new` would tell the client it was published.
+        let encoded = encoded_statement(true, FUTURE_EXPIRY, None);
+        let result = block_on(validate_and_broadcast_statement_unstable(
+            &encoded,
+            NOW,
+            |_| async { BroadcastStatementResult { sent: 0, total: 5 } },
         ));
         assert_eq!(result, Err(StatementSubmitError::NoConnectedPeers));
     }
