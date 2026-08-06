@@ -371,13 +371,30 @@ impl StatementSubscriptions {
             id.clone(),
             StatementSubscription::new(SubscriptionKind::Legacy, max_seen),
         );
-        self.add_filter(&id, topic_filter)
-            .expect("subscription was just inserted; qed");
+        self.add_filter_of_any_kind(&id, topic_filter)
+            .expect("subscription was just inserted and holds no filter yet; qed");
     }
 
-    /// Attaches a filter to an existing subscription and updates the reverse index. Returns the id
-    /// identifying the filter within that subscription.
+    /// Attaches a filter to an existing `statement_unstable_subscribe` subscription and updates the
+    /// reverse index. Returns the id identifying the filter within that subscription.
+    ///
+    /// A legacy subscription is reported as unknown. Both APIs share this registry and a single
+    /// subscription-id namespace, so without this check a `statement_subscribeStatement` id would be
+    /// accepted here, and its holder would start receiving events of an API it never called.
     pub(super) fn add_filter(
+        &mut self,
+        sub_id: &str,
+        topic_filter: TopicFilter,
+    ) -> Result<FilterId, AddFilterError> {
+        if self.subscriptions.get(sub_id).map(|sub| sub.kind) != Some(SubscriptionKind::Unstable) {
+            return Err(AddFilterError::UnknownSubscription);
+        }
+        self.add_filter_of_any_kind(sub_id, topic_filter)
+    }
+
+    /// [`StatementSubscriptions::add_filter`] without the subscription-kind check, so that a legacy
+    /// subscription can be given the single filter it is created with.
+    fn add_filter_of_any_kind(
         &mut self,
         sub_id: &str,
         topic_filter: TopicFilter,
@@ -413,12 +430,19 @@ impl StatementSubscriptions {
         Ok(filter_id)
     }
 
-    /// Detaches a filter from a subscription and updates the reverse index. Returns whether that
-    /// filter was attached to that subscription.
+    /// Detaches a filter from a `statement_unstable_subscribe` subscription and updates the reverse
+    /// index. Returns whether that filter was attached to that subscription.
+    ///
+    /// A legacy subscription answers `false`, for the reason given on
+    /// [`StatementSubscriptions::add_filter`]. Detaching its only filter would otherwise leave it
+    /// alive and matching nothing, with no way for its holder to tell.
     pub(super) fn remove_filter(&mut self, sub_id: &str, filter_id: FilterId) -> bool {
         let Some(sub) = self.subscriptions.get_mut(sub_id) else {
             return false;
         };
+        if !matches!(sub.kind, SubscriptionKind::Unstable) {
+            return false;
+        }
         let Some(removed) = sub.filters.remove(&filter_id) else {
             return false;
         };
@@ -453,8 +477,15 @@ impl StatementSubscriptions {
     }
 
     /// Removes a subscription together with all its filters, and cleans up the reverse index.
-    /// Returns whether it existed.
-    pub(super) fn remove(&mut self, id: &str) -> bool {
+    /// Returns whether a subscription of that kind existed under this id.
+    ///
+    /// `kind` guards against one API tearing down the other's subscription, for the reason given on
+    /// [`StatementSubscriptions::add_filter`]. Cancelling an unstable subscription through the legacy
+    /// method would otherwise drop it without ever sending the `stop` event its holder waits for.
+    pub(super) fn remove(&mut self, id: &str, kind: SubscriptionKind) -> bool {
+        if self.subscriptions.get(id).map(|sub| sub.kind) != Some(kind) {
+            return false;
+        }
         let Some(sub) = self.subscriptions.remove(id) else {
             return false;
         };
@@ -634,6 +665,21 @@ mod tests {
         let mut subs = StatementSubscriptions::with_capacity(entries.len());
         for (id, filter, max_seen) in entries {
             subs.insert(id.to_string(), filter, max_seen);
+        }
+        subs
+    }
+
+    /// Builds one `statement_unstable_subscribe` subscription holding `filters`. Unstable
+    /// subscriptions are the only ones that can hold more than one filter.
+    fn make_unstable_subscription(
+        id: &str,
+        filters: Vec<TopicFilter>,
+        max_seen: Option<NonZero<usize>>,
+    ) -> StatementSubscriptions {
+        let mut subs = StatementSubscriptions::with_capacity(1);
+        subs.insert_empty(id.to_string(), max_seen);
+        for filter in filters {
+            subs.add_filter(id, filter).unwrap();
         }
         subs
     }
@@ -1104,8 +1150,8 @@ mod tests {
         let mut subs =
             make_subscriptions(vec![("a", TopicFilter::match_any(vec![t1]).unwrap(), None)]);
 
-        assert!(subs.remove("a"));
-        assert!(!subs.remove("a"));
+        assert!(subs.remove("a", SubscriptionKind::Legacy));
+        assert!(!subs.remove("a", SubscriptionKind::Legacy));
         assert!(subs.is_empty());
         // The topic entry must have been cleaned up, so a matching statement finds nothing.
         let matches = subs.matching(&[batch_entry(0xaa, vec![t1])]);
@@ -1160,6 +1206,40 @@ mod tests {
             subs.add_filter("a", TopicFilter::Any),
             Err(AddFilterError::LimitReached)
         );
+    }
+
+    #[test]
+    fn the_unstable_api_cannot_reach_a_legacy_subscription() {
+        let t1 = [1u8; 32];
+        let mut subs =
+            make_subscriptions(vec![("a", TopicFilter::match_any(vec![t1]).unwrap(), None)]);
+
+        // Both APIs share one id namespace, so a legacy id must read as unknown here rather than
+        // let its holder be widened, stripped, or torn down through the other API.
+        assert_eq!(
+            subs.add_filter("a", TopicFilter::Any),
+            Err(AddFilterError::UnknownSubscription)
+        );
+        assert!(!subs.remove_filter("a", FilterId(0)));
+        assert!(!subs.remove("a", SubscriptionKind::Unstable));
+
+        // The subscription is untouched: still alive, still matching only its own topic.
+        let matches = subs.matching(&[batch_entry(0x01, vec![t1])]);
+        assert_eq!(matched_ids(&matches), vec!["a".to_string()]);
+        let matches = subs.matching(&[batch_entry(0x02, vec![[9u8; 32]])]);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn the_legacy_api_cannot_reach_an_unstable_subscription() {
+        let mut subs = make_unstable_subscription("a", vec![TopicFilter::Any], None);
+
+        // Cancelling it here would drop it without ever sending the `stop` event its holder waits
+        // for.
+        assert!(!subs.remove("a", SubscriptionKind::Legacy));
+        assert!(!subs.is_empty());
+        assert!(subs.remove("a", SubscriptionKind::Unstable));
+        assert!(subs.is_empty());
     }
 
     #[test]
@@ -1304,10 +1384,14 @@ mod tests {
     fn matching_accepts_a_statement_matched_by_any_filter() {
         let t1 = [1u8; 32];
         let t2 = [2u8; 32];
-        let mut subs =
-            make_subscriptions(vec![("a", TopicFilter::match_any(vec![t1]).unwrap(), None)]);
-        subs.add_filter("a", TopicFilter::match_any(vec![t2]).unwrap())
-            .unwrap();
+        let mut subs = make_unstable_subscription(
+            "a",
+            vec![
+                TopicFilter::match_any(vec![t1]).unwrap(),
+                TopicFilter::match_any(vec![t2]).unwrap(),
+            ],
+            None,
+        );
 
         // Each filter pulls in the statements of its own topic.
         let matches = subs.matching(&[batch_entry(0x01, vec![t1]), batch_entry(0x02, vec![t2])]);
@@ -1323,14 +1407,15 @@ mod tests {
     fn matching_reports_a_statement_once_per_subscription() {
         let t1 = [1u8; 32];
         let t2 = [2u8; 32];
-        let mut subs = make_subscriptions(vec![(
+        let mut subs = make_unstable_subscription(
             "a",
-            TopicFilter::match_any(vec![t1]).unwrap(),
+            vec![
+                TopicFilter::match_any(vec![t1]).unwrap(),
+                TopicFilter::match_any(vec![t2]).unwrap(),
+                TopicFilter::Any,
+            ],
             NonZero::new(8),
-        )]);
-        subs.add_filter("a", TopicFilter::match_any(vec![t2]).unwrap())
-            .unwrap();
-        subs.add_filter("a", TopicFilter::Any).unwrap();
+        );
 
         // All three filters match, yet the statement is reported a single time.
         let matches = subs.matching(&[batch_entry(0xaa, vec![t1, t2])]);
@@ -1359,13 +1444,17 @@ mod tests {
     fn remove_cleans_up_every_filter() {
         let t1 = [1u8; 32];
         let t2 = [2u8; 32];
-        let mut subs =
-            make_subscriptions(vec![("a", TopicFilter::match_any(vec![t1]).unwrap(), None)]);
-        subs.add_filter("a", TopicFilter::match_any(vec![t2]).unwrap())
-            .unwrap();
-        subs.add_filter("a", TopicFilter::Any).unwrap();
+        let mut subs = make_unstable_subscription(
+            "a",
+            vec![
+                TopicFilter::match_any(vec![t1]).unwrap(),
+                TopicFilter::match_any(vec![t2]).unwrap(),
+                TopicFilter::Any,
+            ],
+            None,
+        );
 
-        assert!(subs.remove("a"));
+        assert!(subs.remove("a", SubscriptionKind::Unstable));
         assert!(subs.is_empty());
         // Neither the topic entries nor the wildcard entry may survive.
         let matches = subs.matching(&[batch_entry(0xaa, vec![t1]), batch_entry(0xbb, vec![t2])]);
@@ -1377,10 +1466,14 @@ mod tests {
         let config = test_config();
         let t1 = [1u8; 32];
         let t2 = [2u8; 32];
-        let mut subs =
-            make_subscriptions(vec![("a", TopicFilter::match_any(vec![t1]).unwrap(), None)]);
-        subs.add_filter("a", TopicFilter::match_any(vec![t2]).unwrap())
-            .unwrap();
+        let subs = make_unstable_subscription(
+            "a",
+            vec![
+                TopicFilter::match_any(vec![t1]).unwrap(),
+                TopicFilter::match_any(vec![t2]).unwrap(),
+            ],
+            None,
+        );
 
         let filter = subs.build_combined_affinity_filter(&config);
         assert!(filter.contains(&t1));
@@ -1391,9 +1484,11 @@ mod tests {
     fn affinity_matches_all_when_one_filter_is_any() {
         let config = test_config();
         let t1 = [1u8; 32];
-        let mut subs =
-            make_subscriptions(vec![("a", TopicFilter::match_any(vec![t1]).unwrap(), None)]);
-        subs.add_filter("a", TopicFilter::Any).unwrap();
+        let subs = make_unstable_subscription(
+            "a",
+            vec![TopicFilter::match_any(vec![t1]).unwrap(), TopicFilter::Any],
+            None,
+        );
 
         let filter = subs.build_combined_affinity_filter(&config);
         assert!(filter.contains(&[99u8; 32]));

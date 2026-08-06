@@ -939,7 +939,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
 
                 for sub_id in stopped_subscriptions {
-                    me.statement_subscriptions.remove(&sub_id);
+                    // Only an unstable subscription ever reports `must_stop`; a legacy one has no
+                    // way of reporting that it can no longer deduplicate and keeps evicting.
+                    me.statement_subscriptions
+                        .remove(&sub_id, super::statement::SubscriptionKind::Unstable);
                     me.schedule_statement_affinity_update();
                 }
             }
@@ -3123,7 +3126,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::statement_unsubscribeStatement { subscription } => {
-                        let existed = me.statement_subscriptions.remove(&subscription);
+                        let existed = me
+                            .statement_subscriptions
+                            .remove(&subscription, super::statement::SubscriptionKind::Legacy);
 
                         if existed {
                             me.schedule_statement_affinity_update();
@@ -3277,7 +3282,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::statement_unstable_unsubscribe { subscription } => {
-                        if me.statement_subscriptions.remove(&subscription) {
+                        if me
+                            .statement_subscriptions
+                            .remove(&subscription, super::statement::SubscriptionKind::Unstable)
+                        {
                             me.schedule_statement_affinity_update();
                         }
 
