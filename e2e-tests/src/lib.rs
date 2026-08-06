@@ -70,8 +70,9 @@ pub async fn run_shared_test(
         // The reason is a blocking fix needed upstream.
         // Waiting until it is fixed.
         // When re-enabling, also uncomment the browser-only
-        // `zombienet-smoldot-0014-webrtc_double_open` and
-        // `zombienet-smoldot-0015-webrtc_send_after_close` entries in
+        // `zombienet-smoldot-0014-webrtc_double_open`,
+        // `zombienet-smoldot-0015-webrtc_send_after_close` and
+        // `zombienet-smoldot-0016-webrtc_open_after_pc_close` entries in
         // `.github/workflows/zombienet.yml`.
         // Host::Browser => "hosts/browser/run.js",
         _ => return Ok(()),
