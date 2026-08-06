@@ -720,7 +720,7 @@ mod tests {
 
     fn encoded_statement(with_proof: bool, expiry: u64, data: Option<Vec<u8>>) -> Vec<u8> {
         codec::encode_statement(&codec::Statement {
-            proof: with_proof.then(|| codec::Proof::Sr25519 {
+            proof: with_proof.then_some(codec::Proof::Sr25519 {
                 signature: [0; 64],
                 signer: [0; 32],
             }),
@@ -1129,7 +1129,7 @@ mod tests {
         )]);
 
         let entry = batch_entry(0xaa, vec![t1]);
-        let matches = subs.matching(&[entry.clone()]);
+        let matches = subs.matching(core::slice::from_ref(&entry));
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].1.statements.len(), 1);
 
