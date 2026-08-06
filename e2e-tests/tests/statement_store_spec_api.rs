@@ -71,11 +71,13 @@ async fn serves_the_unstable_statement_api() -> Result<(), anyhow::Error> {
     // Statements *and topics* need to be distinct per host, otherwise they
     // persist in the collators' store and get pushed to the next host during
     // the initial sync.
-    for (idx, host) in [Host::Node].into_iter().enumerate() {
+    for (idx, host) in [Host::Node /* Host::Browser */].into_iter().enumerate() {
         let mut topic_a = [0xaau8; 32];
         let mut topic_b = [0xbbu8; 32];
+        let mut topic_c = [0xccu8; 32];
         topic_a[31] = idx as u8;
         topic_b[31] = idx as u8;
+        topic_c[31] = idx as u8;
         let stmt_a_hex = create_test_statement(
             &seed,
             &topic_a,
@@ -85,6 +87,13 @@ async fn serves_the_unstable_statement_api() -> Result<(), anyhow::Error> {
             &seed,
             &topic_b,
             format!("spec-api-test-B-{host:?}").as_bytes(),
+        );
+        // Submitted by smoldot rather than by a collator, on a topic the subscription's filter
+        // doesn't cover, so it can't be confused with the statements counted on the JS side.
+        let stmt_c_hex = create_test_statement(
+            &seed,
+            &topic_c,
+            format!("spec-api-test-C-{host:?}").as_bytes(),
         );
 
         submit_statement(alice, &stmt_a_hex, "stmt_A").await?;
@@ -102,6 +111,7 @@ async fn serves_the_unstable_statement_api() -> Result<(), anyhow::Error> {
         let para_spec_str = para_spec_path.to_str().unwrap().to_string();
         let stmt_a_hex_js = stmt_a_hex.clone();
         let stmt_b_hex_js = stmt_b_hex.clone();
+        let stmt_c_hex_js = stmt_c_hex.clone();
         let topic_a_hex_js = topic_a_hex.clone();
 
         info!("Spawning test statement_store_spec_api within host {host:?} (topicA={topic_a_hex})");
@@ -115,6 +125,7 @@ async fn serves_the_unstable_statement_api() -> Result<(), anyhow::Error> {
                     ("TOPIC_A", topic_a_hex_js.as_str()),
                     ("STATEMENT_A_HEX", stmt_a_hex_js.as_str()),
                     ("STATEMENT_B_HEX", stmt_b_hex_js.as_str()),
+                    ("STATEMENT_C_HEX", stmt_c_hex_js.as_str()),
                     ("SYNC_PATH", sync_path_str.as_str()),
                 ],
             )
@@ -132,6 +143,15 @@ async fn serves_the_unstable_statement_api() -> Result<(), anyhow::Error> {
 
         let js_result = js_handle.await.expect("JS task panicked");
         js_result.map_err(|e| anyhow::anyhow!("JS test failed: {e}"))?;
+
+        // `statement_unstable_submit` answered `new`, which only says smoldot handed the statement
+        // to at least one peer. Seeing it arrive on bob is what proves it reached the network.
+        let received = receive_statements(1, &mut bob_sub, 120).await?;
+        assert!(
+            received.contains(&stmt_c_hex),
+            "stmt_C submitted through smoldot never reached bob"
+        );
+        info!("stmt_C submitted by smoldot confirmed on bob");
 
         info!("Unstable statement API test passed on host {host:?}");
     }

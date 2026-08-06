@@ -19,12 +19,19 @@
 // ctx abstraction. Walks the whole subscription lifecycle: subscribe, turn down
 // the filters the specification doesn't define, attach a `matchAll` filter,
 // collect its `replayDone`, assert that only matching statements arrive and that
-// they carry the filter id, then detach the filter and close the subscription.
+// they carry the filter id, submit a statement of our own, then detach the filter
+// and close the subscription.
 
 import { createRpc } from "./rpc.js";
 
 export const fileInputs = ["RELAY_CHAIN_SPEC", "PARA_CHAIN_SPEC"];
-export const envInputs = ["TOPIC_A", "STATEMENT_A_HEX", "STATEMENT_B_HEX", "LISTEN_MS"];
+export const envInputs = [
+  "TOPIC_A",
+  "STATEMENT_A_HEX",
+  "STATEMENT_B_HEX",
+  "STATEMENT_C_HEX",
+  "LISTEN_MS",
+];
 
 /// Sends `method` and resolves with the whole response object, error included.
 async function sendAndTakeResponse(rpc, chain, method, params) {
@@ -45,11 +52,20 @@ export default async function statementStoreSpecApi(ctx) {
   const topicAHex = env.TOPIC_A;
   const stmtAHex = env.STATEMENT_A_HEX;
   const stmtBHex = env.STATEMENT_B_HEX;
+  const stmtCHex = env.STATEMENT_C_HEX;
   const listenMs = Number.parseInt(env.LISTEN_MS || "10000", 10);
 
-  if (!files.RELAY_CHAIN_SPEC || !files.PARA_CHAIN_SPEC || !topicAHex || !stmtAHex || !stmtBHex) {
+  if (
+    !files.RELAY_CHAIN_SPEC ||
+    !files.PARA_CHAIN_SPEC ||
+    !topicAHex ||
+    !stmtAHex ||
+    !stmtBHex ||
+    !stmtCHex
+  ) {
     throw new Error(
-      "Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, TOPIC_A, STATEMENT_A_HEX, STATEMENT_B_HEX",
+      "Required env vars: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, TOPIC_A, STATEMENT_A_HEX, " +
+        "STATEMENT_B_HEX, STATEMENT_C_HEX",
     );
   }
 
@@ -75,6 +91,15 @@ export default async function statementStoreSpecApi(ctx) {
 
   // Rejections first: a filter is attached afterwards, and every read discards
   // the messages it doesn't match, so this must happen before statements flow.
+  const badEncoding = await sendAndTakeResponse(rpc, para, "statement_unstable_submit", ["0xffff"]);
+  const badEncodingOk = badEncoding.error?.code === -32602;
+  report(
+    "submit rejects bytes that don't decode into a statement",
+    badEncodingOk,
+    JSON.stringify(badEncoding.error ?? badEncoding.result),
+  );
+  if (!badEncodingOk) throw new Error("expected error -32602 for an undecodable statement");
+
   const unknownSub = await sendAndTakeResponse(rpc, para, "statement_unstable_add_filter", [
     "0000000000000000000000000000000000000000000000000000000000000000",
     "any",
@@ -189,6 +214,15 @@ export default async function statementStoreSpecApi(ctx) {
   report("newStatements: stmt_A once with its filter id, stmt_B never", ok, detail);
   if (!ok) throw new Error(`newStatements assertion failed: ${detail}`);
 
+  // Submitted only now that the counting window is closed, and on a topic the
+  // attached filter doesn't cover, so a statement gossiped back to us can't be
+  // mistaken for one of the statements counted above. Rust then checks that bob
+  // received it, which is what proves the broadcast left smoldot.
+  const submit = await sendAndTakeResponse(rpc, para, "statement_unstable_submit", [stmtCHex]);
+  const submitOk = !submit.error && submit.result?.status === "new";
+  report("submit broadcasts a valid statement", submitOk, JSON.stringify(submit.error ?? submit.result));
+  if (!submitOk) throw new Error(`unexpected submit response: ${JSON.stringify(submit)}`);
+
   const removeFilter = await sendAndTakeResponse(rpc, para, "statement_unstable_remove_filter", [
     subId,
     filterId,
@@ -197,7 +231,7 @@ export default async function statementStoreSpecApi(ctx) {
   report("statement_unstable_remove_filter answers null", removeOk);
   if (!removeOk) throw new Error(`unexpected remove_filter response: ${JSON.stringify(removeFilter)}`);
 
-  // Removing a filter twice, and removing an unknown one, are both no-ops.
+  // Removing a filter that is no longer attached is a no-op, not an error.
   const removeAgain = await sendAndTakeResponse(rpc, para, "statement_unstable_remove_filter", [
     subId,
     filterId,
