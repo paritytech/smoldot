@@ -435,6 +435,7 @@ impl ClientMainTask {
                 | methods::MethodCall::system_removeReservedPeer { .. }
                 | methods::MethodCall::system_version { .. }
                 | methods::MethodCall::statement_submit { .. }
+                | methods::MethodCall::statement_unstable_submit { .. }
                 | methods::MethodCall::chainSpec_v1_chainName { .. }
                 | methods::MethodCall::chainSpec_v1_genesisHash { .. }
                 | methods::MethodCall::chainSpec_v1_properties { .. }

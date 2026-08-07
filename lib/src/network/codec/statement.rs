@@ -32,6 +32,17 @@ pub const MAX_ANY_TOPICS: usize = 128;
 /// Maximum number of statements allowed in a single notification.
 const MAX_STATEMENTS_PER_NOTIFICATION: usize = 10_000;
 
+/// Maximum size in bytes of a single SCALE-encoded statement.
+///
+/// Matches the limit polkadot-sdk enforces, and is reported to JSON-RPC clients as the `maxSize` of
+/// an `encodingTooLarge` submission, so the two must agree for a client to predict what a full node
+/// will accept.
+///
+/// Note that a statement of exactly this size does not fit in a V2 notification: that framing adds
+/// a message tag on top of the vector length prefix, putting a single-element batch one byte over
+/// the 1 MiB notification limit.
+pub const MAX_STATEMENT_SIZE: usize = 1024 * 1024 - 1;
+
 const FIELD_PROOF: u8 = 0;
 const FIELD_DECRYPTION_KEY: u8 = 1;
 const FIELD_EXPIRY: u8 = 2;
