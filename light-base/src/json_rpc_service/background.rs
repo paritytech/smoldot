@@ -856,50 +856,86 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // The reverse `topic` -> `subscription` index inside `statement_subscriptions`
                 // keeps this proportional to the number of subscriptions sharing a topic with the
                 // incoming statements, rather than the total number of subscriptions.
+                let mut stopped_subscriptions = Vec::new();
+
                 for (sub_id, matched) in me.statement_subscriptions.matching(&statements) {
-                    let notification = match matched.kind {
-                        super::statement::SubscriptionKind::Legacy => {
-                            methods::ServerToClient::statement_statement {
-                                subscription: Cow::Owned(sub_id),
-                                result: methods::StatementEvent::NewStatements {
-                                    statements: matched
-                                        .statements
-                                        .into_iter()
-                                        .map(|statement| statement.encoded)
-                                        .collect(),
-                                    remaining: None,
-                                },
+                    if !matched.statements.is_empty() {
+                        let notification = match matched.kind {
+                            super::statement::SubscriptionKind::Legacy => {
+                                methods::ServerToClient::statement_statement {
+                                    subscription: Cow::Borrowed(&sub_id),
+                                    result: methods::StatementEvent::NewStatements {
+                                        statements: matched
+                                            .statements
+                                            .into_iter()
+                                            .map(|statement| statement.encoded)
+                                            .collect(),
+                                        remaining: None,
+                                    },
+                                }
+                            }
+                            super::statement::SubscriptionKind::Unstable => {
+                                methods::ServerToClient::statement_unstable_subscribeEvent {
+                                    subscription: Cow::Borrowed(&sub_id),
+                                    result: methods::StatementSubscribeEvent::NewStatements {
+                                        statements: matched
+                                            .statements
+                                            .into_iter()
+                                            .map(|statement| methods::StatementSubscribeEventItem {
+                                                statement: statement.encoded,
+                                                filter_ids: statement
+                                                    .filter_ids
+                                                    .into_iter()
+                                                    .map(|id| Cow::Owned(id.to_string()))
+                                                    .collect(),
+                                            })
+                                            .collect(),
+                                    },
+                                }
                             }
                         }
-                        super::statement::SubscriptionKind::Unstable => {
-                            methods::ServerToClient::statement_unstable_subscribeEvent {
-                                subscription: Cow::Owned(sub_id),
-                                result: methods::StatementSubscribeEvent::NewStatements {
-                                    statements: matched
-                                        .statements
-                                        .into_iter()
-                                        .map(|statement| methods::StatementSubscribeEventItem {
-                                            statement: statement.encoded,
-                                            filter_ids: statement
-                                                .filter_ids
-                                                .into_iter()
-                                                .map(|id| Cow::Owned(id.to_string()))
-                                                .collect(),
-                                        })
-                                        .collect(),
-                                },
-                            }
+                        .to_json_request_object_parameters(None);
+                        if me.responses_tx.send(notification).await.is_err() {
+                            log!(
+                                &me.platform,
+                                Debug,
+                                &me.log_target,
+                                "Failed to send statement notification: response channel closed"
+                            );
                         }
                     }
-                    .to_json_request_object_parameters(None);
-                    if me.responses_tx.send(notification).await.is_err() {
+
+                    // The subscription can no longer deduplicate what it has already reported.
+                    // Rather than risk reporting a statement twice, it is killed.
+                    if matched.must_stop {
                         log!(
                             &me.platform,
                             Debug,
                             &me.log_target,
-                            "Failed to send statement notification: response channel closed"
+                            format!(
+                                "Stopping statement subscription {sub_id}: deduplication cache \
+                                full, deduplication can no longer be guaranteed"
+                            )
                         );
+
+                        let notification =
+                            methods::ServerToClient::statement_unstable_subscribeEvent {
+                                subscription: Cow::Borrowed(&sub_id),
+                                result: methods::StatementSubscribeEvent::Stop,
+                            }
+                            .to_json_request_object_parameters(None);
+                        let _ = me.responses_tx.send(notification).await;
+
+                        stopped_subscriptions.push(sub_id);
                     }
+                }
+
+                for sub_id in stopped_subscriptions {
+                    // Only an unstable subscription ever reports `must_stop`; a legacy one has no
+                    // way of reporting that it can no longer deduplicate and keeps evicting.
+                    me.statement_subscriptions
+                        .remove(&sub_id, super::statement::SubscriptionKind::Unstable);
+                    me.schedule_statement_affinity_update();
                 }
             }
 
