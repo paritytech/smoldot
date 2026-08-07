@@ -436,6 +436,8 @@ impl ClientMainTask {
                 | methods::MethodCall::system_version { .. }
                 | methods::MethodCall::statement_submit { .. }
                 | methods::MethodCall::statement_unstable_submit { .. }
+                | methods::MethodCall::statement_unstable_add_filter { .. }
+                | methods::MethodCall::statement_unstable_remove_filter { .. }
                 | methods::MethodCall::chainSpec_v1_chainName { .. }
                 | methods::MethodCall::chainSpec_v1_genesisHash { .. }
                 | methods::MethodCall::chainSpec_v1_properties { .. }
@@ -471,6 +473,7 @@ impl ClientMainTask {
                 | methods::MethodCall::state_subscribeRuntimeVersion { .. }
                 | methods::MethodCall::state_subscribeStorage { .. }
                 | methods::MethodCall::statement_subscribeStatement { .. }
+                | methods::MethodCall::statement_unstable_subscribe { .. }
                 | methods::MethodCall::transaction_v1_broadcast { .. }
                 | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. }
                 | methods::MethodCall::sudo_network_unstable_watch { .. }
@@ -551,6 +554,7 @@ impl ClientMainTask {
                 | methods::MethodCall::transactionWatch_v1_unwatch { subscription, .. }
                 | methods::MethodCall::sudo_network_unstable_unwatch { subscription, .. }
                 | methods::MethodCall::bitswap_unstable_unstream { subscription, .. }
+                | methods::MethodCall::statement_unstable_unsubscribe { subscription, .. }
                 | methods::MethodCall::chainHead_v1_unfollow {
                     follow_subscription: subscription,
                     ..
@@ -584,6 +588,9 @@ impl ClientMainTask {
                                     methods::MethodCall::bitswap_unstable_unstream { .. } => {
                                         methods::Response::bitswap_unstable_unstream(())
                                     }
+                                    methods::MethodCall::statement_unstable_unsubscribe {
+                                        ..
+                                    } => methods::Response::statement_unstable_unsubscribe(()),
                                     methods::MethodCall::chainHead_v1_unfollow { .. } => {
                                         methods::Response::chainHead_v1_unfollow(())
                                     }
@@ -612,6 +619,11 @@ impl ClientMainTask {
                                 methods::MethodCall::bitswap_unstable_unstream { .. } => {
                                     // Per spec: no error if subscription is unknown or already-completed.
                                     methods::Response::bitswap_unstable_unstream(())
+                                        .to_json_response(request_id)
+                                }
+                                methods::MethodCall::statement_unstable_unsubscribe { .. } => {
+                                    // Per spec: no error if subscription is unknown or already-completed.
+                                    methods::Response::statement_unstable_unsubscribe(())
                                         .to_json_response(request_id)
                                 }
                                 _ => parse::build_error_response(
@@ -1189,6 +1201,11 @@ impl SubscriptionStartProcess {
             }
             methods::MethodCall::statement_subscribeStatement { .. } => {
                 methods::Response::statement_subscribeStatement(Cow::Borrowed(
+                    &self.subscription_id,
+                ))
+            }
+            methods::MethodCall::statement_unstable_subscribe { .. } => {
+                methods::Response::statement_unstable_subscribe(Cow::Borrowed(
                     &self.subscription_id,
                 ))
             }
