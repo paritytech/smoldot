@@ -856,13 +856,40 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // The reverse `topic` -> `subscription` index inside `statement_subscriptions`
                 // keeps this proportional to the number of subscriptions sharing a topic with the
                 // incoming statements, rather than the total number of subscriptions.
-                for (sub_id, matching) in me.statement_subscriptions.matching(&statements) {
-                    let notification = methods::ServerToClient::statement_statement {
-                        subscription: Cow::Owned(sub_id),
-                        result: methods::StatementEvent::NewStatements {
-                            statements: matching,
-                            remaining: None,
-                        },
+                for (sub_id, matched) in me.statement_subscriptions.matching(&statements) {
+                    let notification = match matched.kind {
+                        super::statement::SubscriptionKind::Legacy => {
+                            methods::ServerToClient::statement_statement {
+                                subscription: Cow::Owned(sub_id),
+                                result: methods::StatementEvent::NewStatements {
+                                    statements: matched
+                                        .statements
+                                        .into_iter()
+                                        .map(|statement| statement.encoded)
+                                        .collect(),
+                                    remaining: None,
+                                },
+                            }
+                        }
+                        super::statement::SubscriptionKind::Unstable => {
+                            methods::ServerToClient::statement_unstable_subscribeEvent {
+                                subscription: Cow::Owned(sub_id),
+                                result: methods::StatementSubscribeEvent::NewStatements {
+                                    statements: matched
+                                        .statements
+                                        .into_iter()
+                                        .map(|statement| methods::StatementSubscribeEventItem {
+                                            statement: statement.encoded,
+                                            filter_ids: statement
+                                                .filter_ids
+                                                .into_iter()
+                                                .map(|id| Cow::Owned(id.to_string()))
+                                                .collect(),
+                                        })
+                                        .collect(),
+                                },
+                            }
+                        }
                     }
                     .to_json_request_object_parameters(None);
                     if me.responses_tx.send(notification).await.is_err() {
@@ -1003,6 +1030,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::rpc_methods { .. }
                     | methods::MethodCall::statement_unstable_submit { .. }
                     | methods::MethodCall::statement_unstable_subscribe { .. }
+                    | methods::MethodCall::statement_unstable_add_filter { .. }
+                    | methods::MethodCall::statement_unstable_remove_filter { .. }
                     | methods::MethodCall::statement_unstable_unsubscribe { .. }
                     | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
                     | methods::MethodCall::sudo_unstable_version { .. }
@@ -3053,7 +3082,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::statement_unsubscribeStatement { subscription } => {
-                        let existed = me.statement_subscriptions.remove(&subscription);
+                        let existed = me
+                            .statement_subscriptions
+                            .remove(&subscription, super::statement::SubscriptionKind::Legacy);
 
                         if existed {
                             me.schedule_statement_affinity_update();
@@ -3128,8 +3159,93 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
+                    methods::MethodCall::statement_unstable_add_filter {
+                        subscription,
+                        topic_filter,
+                    } => {
+                        let mut added = None;
+
+                        let response = match me
+                            .statement_subscriptions
+                            .add_filter(&subscription, topic_filter.0)
+                        {
+                            Ok(filter_id) => {
+                                me.schedule_statement_affinity_update();
+                                added = Some(filter_id);
+                                methods::Response::statement_unstable_add_filter(
+                                    methods::StatementAddFilterResult::FilterId(Cow::Owned(
+                                        filter_id.to_string(),
+                                    )),
+                                )
+                                .to_json_response(request_id_json)
+                            }
+                            Err(super::statement::AddFilterError::LimitReached) => {
+                                methods::Response::statement_unstable_add_filter(
+                                    methods::StatementAddFilterResult::LimitReached,
+                                )
+                                .to_json_response(request_id_json)
+                            }
+                            Err(super::statement::AddFilterError::UnknownSubscription) => {
+                                parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::ApplicationDefined(
+                                        -32801,
+                                        "unknown subscription",
+                                    ),
+                                    None,
+                                )
+                            }
+                        };
+
+                        let _ = me.responses_tx.send(response).await;
+
+                        // A light client keeps no statement store, so the replay of a newly-added
+                        // filter runs over an empty snapshot and completes right away. The
+                        // statements that peers send once they learn about the updated topic
+                        // affinity are reported through `newStatements`.
+                        //
+                        // `replayDone` therefore precedes the statements matching the filter rather
+                        // than following them, by up to the affinity update interval. A client
+                        // reading it as "I now hold what the server holds" concludes too early.
+                        if let Some(filter_id) = added {
+                            let notification =
+                                methods::ServerToClient::statement_unstable_subscribeEvent {
+                                    subscription,
+                                    result: methods::StatementSubscribeEvent::ReplayDone {
+                                        filter_id: Cow::Owned(filter_id.to_string()),
+                                    },
+                                }
+                                .to_json_request_object_parameters(None);
+                            let _ = me.responses_tx.send(notification).await;
+                        }
+                    }
+
+                    methods::MethodCall::statement_unstable_remove_filter {
+                        subscription,
+                        filter_id,
+                    } => {
+                        if let Some(filter_id) = super::statement::FilterId::from_string(&filter_id)
+                            && me
+                                .statement_subscriptions
+                                .remove_filter(&subscription, filter_id)
+                        {
+                            me.schedule_statement_affinity_update();
+                        }
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_unstable_remove_filter(())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
                     methods::MethodCall::statement_unstable_unsubscribe { subscription } => {
-                        if me.statement_subscriptions.remove(&subscription) {
+                        if me
+                            .statement_subscriptions
+                            .remove(&subscription, super::statement::SubscriptionKind::Unstable)
+                        {
                             me.schedule_statement_affinity_update();
                         }
 

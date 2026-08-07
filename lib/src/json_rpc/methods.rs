@@ -486,6 +486,27 @@ define_methods! {
     /// Never fails with `-32800`: the number of statement subscriptions per client isn't capped. The
     /// specification requires accepting at least two and only permits erroring beyond that.
     statement_unstable_subscribe() -> Cow<'a, str>,
+    /// Attach a filter to a `statement_unstable_subscribe` subscription. A light client keeps no
+    /// statement store, so it replays no statement and emits `replayDone` right away.
+    ///
+    /// Two consequences of that emptiness, both diverging from what the specification assumes of a
+    /// full node:
+    ///
+    /// - `replayDone` doesn't mean the client holds what the server held. The statements matching the
+    ///   new filter arrive afterwards as `newStatements`, once peers learn about the updated topic
+    ///   affinity.
+    /// - Statements already delivered to this subscription are never re-announced under the new
+    ///   filter id, because re-reporting them is what the at-most-once guarantee forbids. Obtaining a
+    ///   full backlog for a filter requires a fresh subscription.
+    statement_unstable_add_filter(
+        subscription: Cow<'a, str>,
+        #[rename = "topicFilter"] topic_filter: StatementTopicFilter
+    ) -> StatementAddFilterResult<'a>,
+    /// Detach a filter from a `statement_unstable_subscribe` subscription.
+    statement_unstable_remove_filter(
+        subscription: Cow<'a, str>,
+        #[rename = "filterId"] filter_id: Cow<'a, str>
+    ) -> (),
     /// Stop a subscription started with `statement_unstable_subscribe`, together with all the
     /// filters attached to it.
     statement_unstable_unsubscribe(subscription: Cow<'a, str>) -> (),
@@ -585,6 +606,7 @@ define_methods! {
 
     // Statement notification sent when statements matching subscribed topics are received.
     statement_statement(subscription: Cow<'a, str>, result: StatementEvent) -> (),
+    statement_unstable_subscribeEvent(subscription: Cow<'a, str>, result: StatementSubscribeEvent<'a>) -> (),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1186,6 +1208,111 @@ pub enum StatementSubmitInvalidReason {
     AlreadyExpired,
 }
 
+/// Topic filter accepted by [`MethodCall::statement_unstable_add_filter`].
+///
+/// Only `"any"` and `{"matchAll": [...]}` are accepted, the specification defining no other
+/// variant. A `matchAll` must carry between 1 and 4 topics.
+#[derive(Debug, Clone)]
+pub struct StatementTopicFilter(pub TopicFilter);
+
+impl serde::Serialize for StatementTopicFilter {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StatementTopicFilter {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        // `TopicFilter` already rejects unknown variants, non-32-byte topics, and a `matchAll`
+        // of more than 4 topics. `matchAny`, which the specification doesn't define, and an
+        // empty `matchAll`, which it forbids, both remain accepted by the legacy API and are
+        // therefore only turned down here.
+        match TopicFilter::deserialize(deserializer)? {
+            TopicFilter::MatchAny(_) => Err(D::Error::custom(
+                r#"unknown filter key: matchAny, expected "matchAll""#,
+            )),
+            TopicFilter::MatchAll(topics) if topics.is_empty() => Err(D::Error::custom(
+                "Too few topics for MatchAll: got 0, min 1",
+            )),
+            filter => Ok(StatementTopicFilter(filter)),
+        }
+    }
+}
+
+/// Return value of [`MethodCall::statement_unstable_add_filter`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatementAddFilterResult<'a> {
+    /// The filter was attached. Contains the opaque string identifying it within the subscription.
+    FilterId(Cow<'a, str>),
+    /// The subscription can't accept another filter. No filter was attached.
+    LimitReached,
+}
+
+impl<'a> serde::Serialize for StatementAddFilterResult<'a> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        match self {
+            StatementAddFilterResult::FilterId(filter_id) => serializer.serialize_str(filter_id),
+            StatementAddFilterResult::LimitReached => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("result", "limitReached")?;
+                map.end()
+            }
+        }
+    }
+}
+
+/// Notification event of a [`MethodCall::statement_unstable_subscribe`] subscription.
+///
+/// A light client keeps no statement store, so `replayStatements` is never emitted: every statement
+/// it learns about is reported through `newStatements`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event", rename_all = "camelCase")]
+pub enum StatementSubscribeEvent<'a> {
+    /// Statements that were already in the store when a filter was attached.
+    ReplayStatements {
+        /// Filter that produced this batch.
+        #[serde(rename = "filterId")]
+        filter_id: Cow<'a, str>,
+        /// Never empty.
+        statements: Vec<HexString>,
+    },
+    /// The replay caused by attaching a filter is complete.
+    ReplayDone {
+        /// Filter whose replay completed.
+        #[serde(rename = "filterId")]
+        filter_id: Cow<'a, str>,
+    },
+    /// Statements that newly entered the store.
+    NewStatements {
+        /// Never empty.
+        statements: Vec<StatementSubscribeEventItem<'a>>,
+    },
+    /// The server can no longer maintain the guarantees of the subscription, which is now dead.
+    Stop,
+}
+
+/// Entry of a [`StatementSubscribeEvent::NewStatements`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StatementSubscribeEventItem<'a> {
+    pub statement: HexString,
+    /// Filters of the subscription matching this statement. Never empty, free of duplicates.
+    #[serde(rename = "filterIds")]
+    pub filter_ids: Vec<Cow<'a, str>>,
+}
+
 /// Notification event for statement subscriptions.
 ///
 /// JSON format is compatible with polkadot-sdk's `StatementEvent`.
@@ -1760,6 +1887,110 @@ mod tests {
             call,
             super::MethodCall::statement_unstable_unsubscribe { .. }
         ));
+    }
+
+    #[test]
+    fn statement_unstable_add_filter_parse_any() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":8,"method":"statement_unstable_add_filter","params":["sub1","any"]}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            call,
+            super::MethodCall::statement_unstable_add_filter {
+                topic_filter: super::StatementTopicFilter(super::TopicFilter::Any),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn statement_unstable_add_filter_parse_match_all() {
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":8,"method":"statement_unstable_add_filter","params":["sub1",{"matchAll":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            call,
+            super::MethodCall::statement_unstable_add_filter {
+                topic_filter: super::StatementTopicFilter(super::TopicFilter::MatchAll(_)),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn statement_unstable_add_filter_rejects_unspecified_filters() {
+        // `matchAny` isn't part of the specification, and `matchAll` must carry 1 to 4 topics.
+        for params in [
+            r#"["sub1",{"matchAny":["0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]}]"#,
+            r#"["sub1",{"matchAll":[]}]"#,
+            r#"["sub1","all"]"#,
+            r#"["sub1",{"matchAll":["0x12"]}]"#,
+        ] {
+            let request = alloc::format!(
+                r#"{{"jsonrpc":"2.0","id":8,"method":"statement_unstable_add_filter","params":{params}}}"#
+            );
+            assert!(
+                matches!(
+                    super::parse_jsonrpc_client_to_server(&request),
+                    Err(super::ParseClientToServerError::Method { .. })
+                ),
+                "expected {params} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn statement_add_filter_result_serialization() {
+        assert_eq!(
+            serde_json::to_string(&super::StatementAddFilterResult::FilterId(
+                alloc::borrow::Cow::Borrowed("7")
+            ))
+            .unwrap(),
+            r#""7""#
+        );
+        assert_eq!(
+            serde_json::to_string(&super::StatementAddFilterResult::LimitReached).unwrap(),
+            r#"{"result":"limitReached"}"#
+        );
+    }
+
+    #[test]
+    fn statement_subscribe_event_serialization() {
+        use alloc::borrow::Cow;
+
+        assert_eq!(
+            serde_json::to_string(&super::StatementSubscribeEvent::ReplayStatements {
+                filter_id: Cow::Borrowed("3"),
+                statements: vec![super::HexString(vec![0x12, 0x34])],
+            })
+            .unwrap(),
+            r#"{"event":"replayStatements","filterId":"3","statements":["0x1234"]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&super::StatementSubscribeEvent::ReplayDone {
+                filter_id: Cow::Borrowed("3"),
+            })
+            .unwrap(),
+            r#"{"event":"replayDone","filterId":"3"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&super::StatementSubscribeEvent::NewStatements {
+                statements: vec![super::StatementSubscribeEventItem {
+                    statement: super::HexString(vec![0xab]),
+                    filter_ids: vec![Cow::Borrowed("1"), Cow::Borrowed("2")],
+                }],
+            })
+            .unwrap(),
+            r#"{"event":"newStatements","statements":[{"statement":"0xab","filterIds":["1","2"]}]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&super::StatementSubscribeEvent::Stop).unwrap(),
+            r#"{"event":"stop"}"#
+        );
     }
 
     #[test]
