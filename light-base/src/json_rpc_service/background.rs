@@ -835,8 +835,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.statement_affinity_stale = false;
                 me.last_statement_affinity_update = Some(me.platform.now());
 
-                // This wake-up only ever fires from `schedule_statement_affinity_update`, which
-                // returns without scheduling anything when the config is absent.
                 let combined_filter = me.statement_subscriptions.build_combined_affinity_filter(
                     me.statement_protocol_config
                         .as_ref()
