@@ -149,8 +149,8 @@ pub(super) fn bls12_381_msm_g2(
 
 /// `ext_host_calls_bls12_381_multi_miller_loop_version_1`.
 ///
-/// Miller loop over encoded `Vec<G1Affine>` and `Vec<G2Affine>` of equal
-/// lengths, producing an encoded target field element.
+/// Miller loop over encoded `Vec<G1Affine>` and `Vec<G2Affine>`, producing
+/// an encoded target field element.
 pub(super) fn bls12_381_multi_miller_loop(
     g1: &[u8],
     g2: &[u8],
@@ -158,9 +158,6 @@ pub(super) fn bls12_381_multi_miller_loop(
 ) -> Result<Vec<u8>, u32> {
     let g1 = decode::<Vec<ark_bls12_381::G1Affine>>(g1)?;
     let g2 = decode::<Vec<ark_bls12_381::G2Affine>>(g2)?;
-    if g1.len() != g2.len() {
-        return Err(ERROR_LENGTH_MISMATCH);
-    }
     let result = Bls12_381::multi_miller_loop(g1, g2);
     encode(&result.0, out_len)
 }
