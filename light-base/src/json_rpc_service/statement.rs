@@ -219,6 +219,21 @@ pub(super) enum SubscriptionKind {
 pub(super) struct MatchedSubscription {
     pub(super) kind: SubscriptionKind,
     pub(super) statements: Vec<MatchedStatement>,
+
+    /// `true` if the subscription can no longer guarantee that a statement is reported at most
+    /// once, and must therefore be stopped after the statements above have been reported.
+    pub(super) must_stop: bool,
+}
+
+/// Outcome of offering a statement to a subscription.
+enum Acceptance {
+    /// The subscription hasn't been given this statement yet.
+    New,
+    /// The subscription has already been given this statement.
+    Duplicate,
+    /// The deduplication cache is full. Remembering one more statement would evict the oldest
+    /// entry, after which that statement could be reported a second time.
+    CacheFull,
 }
 
 /// One statement subscription: a set of topic filters sharing one deduplication cache.
@@ -278,13 +293,27 @@ impl StatementSubscription {
         (topics, wildcard)
     }
 
-    /// Records the statement of the given hash as delivered to this subscription. Returns `false`
-    /// if it was already delivered.
-    fn accept(&mut self, hash: &[u8; 32]) -> bool {
-        match &mut self.seen {
-            Some(seen) => seen.put(*hash, ()).is_none(),
-            None => true,
+    /// Records the statement of the given hash as delivered to this subscription.
+    ///
+    /// A legacy subscription has no way of reporting that it can no longer deduplicate, and
+    /// therefore keeps evicting its oldest entry rather than ever returning
+    /// [`Acceptance::CacheFull`].
+    fn accept(&mut self, hash: &[u8; 32]) -> Acceptance {
+        let Some(seen) = &mut self.seen else {
+            return Acceptance::New;
+        };
+
+        // `get` refreshes the entry, keeping the statements seen most recently in the cache.
+        if seen.get(hash).is_some() {
+            return Acceptance::Duplicate;
         }
+
+        if matches!(self.kind, SubscriptionKind::Unstable) && seen.len() >= seen.cap().get() {
+            return Acceptance::CacheFull;
+        }
+
+        seen.put(*hash, ());
+        Acceptance::New
     }
 }
 
@@ -538,23 +567,40 @@ impl StatementSubscriptions {
                     .get_mut(*id)
                     .expect("`candidates` is a subset of `subscriptions`; qed");
                 let filter_ids = sub.matching_filters(&statement.topics);
-                if !filter_ids.is_empty() && sub.accept(hash) {
-                    let encoded = encoded.get_or_insert_with(|| {
-                        HexString(
-                            codec::encode_statement(statement)
-                                .expect("re-encoding a decoded statement always succeeds; qed"),
-                        )
-                    });
-                    out.entry(*id)
-                        .or_insert_with(|| MatchedSubscription {
-                            kind: sub.kind,
-                            statements: Vec::new(),
-                        })
-                        .statements
-                        .push(MatchedStatement {
-                            encoded: encoded.clone(),
-                            filter_ids,
+                if filter_ids.is_empty() {
+                    continue;
+                }
+
+                match sub.accept(hash) {
+                    Acceptance::Duplicate => {}
+                    Acceptance::New => {
+                        let encoded = encoded.get_or_insert_with(|| {
+                            HexString(
+                                codec::encode_statement(statement)
+                                    .expect("re-encoding a decoded statement always succeeds; qed"),
+                            )
                         });
+                        out.entry(*id)
+                            .or_insert_with(|| MatchedSubscription {
+                                kind: sub.kind,
+                                statements: Vec::new(),
+                                must_stop: false,
+                            })
+                            .statements
+                            .push(MatchedStatement {
+                                encoded: encoded.clone(),
+                                filter_ids,
+                            });
+                    }
+                    Acceptance::CacheFull => {
+                        out.entry(*id)
+                            .or_insert_with(|| MatchedSubscription {
+                                kind: sub.kind,
+                                statements: Vec::new(),
+                                must_stop: false,
+                            })
+                            .must_stop = true;
+                    }
                 }
             }
         }
@@ -888,30 +934,55 @@ mod tests {
     #[test]
     fn accept_fresh_statement_passes() {
         let mut sub = StatementSubscription::new(SubscriptionKind::Unstable, NonZero::new(8));
-        assert!(sub.accept(&[0xbb; 32]));
+        assert!(matches!(sub.accept(&[0xbb; 32]), Acceptance::New));
     }
 
     #[test]
-    fn accept_duplicate_returns_false() {
+    fn accept_reports_duplicates() {
         let mut sub = StatementSubscription::new(SubscriptionKind::Unstable, NonZero::new(8));
         let hash = [0xcc; 32];
-        assert!(sub.accept(&hash));
-        assert!(!sub.accept(&hash));
+        assert!(matches!(sub.accept(&hash), Acceptance::New));
+        assert!(matches!(sub.accept(&hash), Acceptance::Duplicate));
     }
 
     #[test]
-    fn accept_lru_eviction_allows_resubmit() {
+    fn accept_reports_a_full_cache_on_an_unstable_subscription() {
         let mut sub = StatementSubscription::new(SubscriptionKind::Unstable, NonZero::new(2));
         let h_a = [0xa; 32];
         let h_b = [0xb; 32];
         let h_c = [0xc; 32];
 
-        assert!(sub.accept(&h_a));
-        assert!(sub.accept(&h_b));
-        // Inserting a third eviction-capacity 2 item evicts h_a (oldest).
-        assert!(sub.accept(&h_c));
-        // h_a was evicted: it is accepted again as if fresh.
-        assert!(sub.accept(&h_a));
+        assert!(matches!(sub.accept(&h_a), Acceptance::New));
+        assert!(matches!(sub.accept(&h_b), Acceptance::New));
+        // Remembering a third statement would evict `h_a`, after which `h_a` could be reported a
+        // second time. The subscription reports that it can't deduplicate any further instead.
+        assert!(matches!(sub.accept(&h_c), Acceptance::CacheFull));
+        // The statements already remembered are still recognised as duplicates.
+        assert!(matches!(sub.accept(&h_a), Acceptance::Duplicate));
+    }
+
+    #[test]
+    fn accept_keeps_evicting_on_a_legacy_subscription() {
+        // The legacy API has no way of reporting that deduplication stopped, so its subscriptions
+        // keep evicting their oldest entry.
+        let mut sub = StatementSubscription::new(SubscriptionKind::Legacy, NonZero::new(2));
+        let h_a = [0xa; 32];
+        let h_b = [0xb; 32];
+        let h_c = [0xc; 32];
+
+        assert!(matches!(sub.accept(&h_a), Acceptance::New));
+        assert!(matches!(sub.accept(&h_b), Acceptance::New));
+        assert!(matches!(sub.accept(&h_c), Acceptance::New));
+        // `h_a` was evicted: it is accepted again as if fresh.
+        assert!(matches!(sub.accept(&h_a), Acceptance::New));
+    }
+
+    #[test]
+    fn accept_without_a_cache_never_deduplicates() {
+        let mut sub = StatementSubscription::new(SubscriptionKind::Unstable, None);
+        let hash = [0xdd; 32];
+        assert!(matches!(sub.accept(&hash), Acceptance::New));
+        assert!(matches!(sub.accept(&hash), Acceptance::New));
     }
 
     #[test]
@@ -920,10 +991,10 @@ mod tests {
         let mut sub_b = StatementSubscription::new(SubscriptionKind::Unstable, NonZero::new(8));
         let hash = [0xee; 32];
 
-        assert!(sub_a.accept(&hash));
-        assert!(!sub_a.accept(&hash));
+        assert!(matches!(sub_a.accept(&hash), Acceptance::New));
+        assert!(matches!(sub_a.accept(&hash), Acceptance::Duplicate));
         // Same hash on a different subscription is still fresh: caches are independent.
-        assert!(sub_b.accept(&hash));
+        assert!(matches!(sub_b.accept(&hash), Acceptance::New));
     }
 
     #[test]
@@ -1264,6 +1335,55 @@ mod tests {
                 other => panic!("unexpected subscription {other}"),
             }
         }
+    }
+
+    #[test]
+    fn matching_reports_a_subscription_that_must_stop() {
+        let mut subs = StatementSubscriptions::with_capacity(1);
+        subs.insert_empty("a".to_string(), NonZero::new(2));
+        subs.add_filter("a", TopicFilter::Any).unwrap();
+
+        // Fills the deduplication cache exactly.
+        let matches = subs.matching(&[batch_entry(0x01, vec![]), batch_entry(0x02, vec![])]);
+        assert_eq!(matches[0].1.statements.len(), 2);
+        assert!(!matches[0].1.must_stop);
+
+        // A third statement can't be remembered, so the subscription must be stopped instead of
+        // risking a second report of one of the first two.
+        let matches = subs.matching(&[batch_entry(0x03, vec![])]);
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].1.statements.is_empty());
+        assert!(matches[0].1.must_stop);
+    }
+
+    #[test]
+    fn matching_delivers_what_precedes_a_full_cache() {
+        let mut subs = StatementSubscriptions::with_capacity(1);
+        subs.insert_empty("a".to_string(), NonZero::new(2));
+        subs.add_filter("a", TopicFilter::Any).unwrap();
+
+        // The batch fills the cache and then overflows within the same call: the statements that
+        // fit are reported, and the subscription is flagged for stopping.
+        let matches = subs.matching(&[
+            batch_entry(0x01, vec![]),
+            batch_entry(0x02, vec![]),
+            batch_entry(0x03, vec![]),
+        ]);
+        assert_eq!(matches[0].1.statements.len(), 2);
+        assert!(matches[0].1.must_stop);
+    }
+
+    #[test]
+    fn matching_never_stops_a_legacy_subscription() {
+        let mut subs = make_subscriptions(vec![("a", TopicFilter::Any, NonZero::new(2))]);
+
+        let matches = subs.matching(&[
+            batch_entry(0x01, vec![]),
+            batch_entry(0x02, vec![]),
+            batch_entry(0x03, vec![]),
+        ]);
+        assert_eq!(matches[0].1.statements.len(), 3);
+        assert!(!matches[0].1.must_stop);
     }
 
     #[test]
