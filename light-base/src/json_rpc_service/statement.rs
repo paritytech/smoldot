@@ -269,6 +269,13 @@ impl StatementSubscriptions {
         self.subscriptions.is_empty()
     }
 
+    /// Inserts a new subscription with no filter attached. Until a filter is added, it matches no
+    /// statement.
+    pub(super) fn insert_empty(&mut self, id: String, max_seen: Option<NonZero<usize>>) {
+        self.subscriptions
+            .insert(id, StatementSubscription::new(max_seen));
+    }
+
     /// Inserts a new subscription holding `topic_filter` as its only filter.
     pub(super) fn insert(
         &mut self,
@@ -920,6 +927,33 @@ mod tests {
         // The topic entry must have been cleaned up, so a matching statement finds nothing.
         let matches = subs.matching(&[batch_entry(0xaa, vec![t1])]);
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn insert_empty_matches_nothing_until_a_filter_is_added() {
+        let t1 = [1u8; 32];
+        let mut subs = StatementSubscriptions::with_capacity(1);
+        subs.insert_empty("a".to_string(), None);
+
+        assert!(!subs.is_empty());
+        // No filter attached yet, so no statement can match.
+        let matches = subs.matching(&[batch_entry(0x01, vec![t1]), batch_entry(0x02, vec![])]);
+        assert!(matches.is_empty());
+
+        subs.add_filter("a", TopicFilter::match_any(vec![t1]).unwrap())
+            .unwrap();
+        let matches = subs.matching(&[batch_entry(0x03, vec![t1])]);
+        assert_eq!(matched_ids(&matches), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn insert_empty_contributes_no_topic_affinity() {
+        let config = test_config();
+        let mut subs = StatementSubscriptions::with_capacity(1);
+        subs.insert_empty("a".to_string(), None);
+
+        let filter = subs.build_combined_affinity_filter(&config);
+        assert!(!filter.contains(&[1u8; 32]));
     }
 
     #[test]

@@ -480,6 +480,15 @@ define_methods! {
 
     /// Validate a SCALE-encoded statement and broadcast it to peers.
     statement_unstable_submit(encoded: HexString) -> StatementSubmitOutcome,
+    /// Open a statement subscription. It starts with no filter attached, and therefore doesn't
+    /// generate any notification until one is added.
+    ///
+    /// Never fails with `-32800`: the number of statement subscriptions per client isn't capped. The
+    /// specification requires accepting at least two and only permits erroring beyond that.
+    statement_unstable_subscribe() -> Cow<'a, str>,
+    /// Stop a subscription started with `statement_unstable_subscribe`, together with all the
+    /// filters attached to it.
+    statement_unstable_unsubscribe(subscription: Cow<'a, str>) -> (),
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_v1_body(
@@ -1723,6 +1732,42 @@ mod tests {
             call,
             super::MethodCall::statement_unstable_submit { .. }
         ));
+    }
+
+    #[test]
+    fn statement_unstable_subscribe_parse_valid() {
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":6,"method":"statement_unstable_subscribe","params":[]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(id, "6");
+        assert!(matches!(
+            call,
+            super::MethodCall::statement_unstable_subscribe {}
+        ));
+    }
+
+    #[test]
+    fn statement_unstable_unsubscribe_parse_valid() {
+        let (id, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":7,"method":"statement_unstable_unsubscribe","params":["sub1"]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(id, "7");
+        assert!(matches!(
+            call,
+            super::MethodCall::statement_unstable_unsubscribe { .. }
+        ));
+    }
+
+    #[test]
+    fn statement_unstable_unsubscribe_response_is_null() {
+        assert_eq!(
+            super::Response::statement_unstable_unsubscribe(()).to_json_response("1"),
+            r#"{"jsonrpc":"2.0","id":1,"result":null}"#
+        );
     }
 
     #[test]

@@ -1002,6 +1002,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::chainSpec_v1_properties { .. }
                     | methods::MethodCall::rpc_methods { .. }
                     | methods::MethodCall::statement_unstable_submit { .. }
+                    | methods::MethodCall::statement_unstable_subscribe { .. }
+                    | methods::MethodCall::statement_unstable_unsubscribe { .. }
                     | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
                     | methods::MethodCall::sudo_unstable_version { .. }
                     | methods::MethodCall::transaction_v1_broadcast { .. }
@@ -3097,6 +3099,47 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         };
 
                         let _ = me.responses_tx.send(response).await;
+                    }
+
+                    methods::MethodCall::statement_unstable_subscribe {} => {
+                        let subscription_id: String = {
+                            let mut id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut id);
+                            hex::encode(id)
+                        };
+
+                        // The subscription starts with no filter attached. It therefore matches no
+                        // statement, and the topic affinity advertised to peers is unchanged.
+                        me.statement_subscriptions.insert_empty(
+                            subscription_id.clone(),
+                            me.statement_protocol_config
+                                .as_ref()
+                                .map(|c| c.max_seen_statements()),
+                        );
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_unstable_subscribe(Cow::Owned(
+                                    subscription_id,
+                                ))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::statement_unstable_unsubscribe { subscription } => {
+                        if me.statement_subscriptions.remove(&subscription) {
+                            me.schedule_statement_affinity_update();
+                        }
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_unstable_unsubscribe(())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
 
                     _method @ (methods::MethodCall::account_nextIndex { .. }
