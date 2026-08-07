@@ -35,6 +35,11 @@ wasmtime = [
 # Before adding a crate here, please make sure that it is `no_std`-compatible. If a crate should
 # theoretically be `no_std`-compatible (i.e. doesn't need the help of the operating system) but is
 # not, or if things are sketchy, please leave a comment next to it.
+ark-bls12-381 = { version = "0.5.0", default-features = false, features = ["curve"] }
+ark-ec = { version = "0.5.0", default-features = false }
+ark-ed-on-bls12-381-bandersnatch = { version = "0.5.0", default-features = false }
+ark-ff = { version = "0.5.0", default-features = false }
+ark-serialize = { version = "0.5.0", default-features = false }
 arrayvec = { version = "0.7.6", default-features = false }
 async-lock = { version = "3.0.0", default-features = false }
 atomic-take = { version = "1.1.0" }
@@ -97,7 +102,7 @@ soketto = { version = "0.8.0", optional = true }
 [target.'cfg(any(all(target_arch = "x86_64", any(target_os = "windows", all(target_os = "linux", target_env = "gnu"), target_os = "macos")), all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"), all(target_arch = "s390x", target_os = "linux", target_env = "gnu")))'.dependencies]
 # `wasmtime` feature
 # Note that we have to enable more features than needed just in order to disable them, as wasmtime does trickeries such as <https://github.com/bytecodealliance/wasmtime/blob/9fd00a0aaf157c98a1c588e55c844ea27a81a3cf/crates/wasmtime/src/config.rs#L259-L264>
-wasmtime = { version = "36.0.8", default-features = false, features = ["async", "cranelift", "gc", "gc-null", "component-model", "threads"], optional = true }
+wasmtime = { version = "36.0.13", default-features = false, features = ["async", "cranelift", "gc", "gc-null", "component-model", "threads"], optional = true }
 
 [dev-dependencies]
 criterion = "0.5.1"

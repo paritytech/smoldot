@@ -213,6 +213,7 @@ pub use trie::TrieEntryVersion;
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
+mod elliptic_curves;
 mod functions;
 mod tests;
 mod zstd;
@@ -2139,6 +2140,93 @@ impl ReadyToRun {
             }
             HostFunction::ext_trie_keccak_256_verify_proof_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_trie_keccak_256_verify_proof_version_2 => host_fn_not_implemented!(),
+            HostFunction::ext_host_calls_bls12_381_multi_miller_loop_version_1
+            | HostFunction::ext_host_calls_bls12_381_msm_g1_version_1
+            | HostFunction::ext_host_calls_bls12_381_msm_g2_version_1
+            | HostFunction::ext_host_calls_bls12_381_mul_g1_version_1
+            | HostFunction::ext_host_calls_bls12_381_mul_g2_version_1
+            | HostFunction::ext_host_calls_ed_on_bls12_381_bandersnatch_msm_version_1
+            | HostFunction::ext_host_calls_ed_on_bls12_381_bandersnatch_mul_version_1 => {
+                let function: fn(&[u8], &[u8], usize) -> Result<alloc::vec::Vec<u8>, u32> =
+                    match host_fn {
+                        HostFunction::ext_host_calls_bls12_381_multi_miller_loop_version_1 => {
+                            elliptic_curves::bls12_381_multi_miller_loop
+                        }
+                        HostFunction::ext_host_calls_bls12_381_msm_g1_version_1 => {
+                            elliptic_curves::bls12_381_msm_g1
+                        }
+                        HostFunction::ext_host_calls_bls12_381_msm_g2_version_1 => {
+                            elliptic_curves::bls12_381_msm_g2
+                        }
+                        HostFunction::ext_host_calls_bls12_381_mul_g1_version_1 => {
+                            elliptic_curves::bls12_381_mul_g1
+                        }
+                        HostFunction::ext_host_calls_bls12_381_mul_g2_version_1 => {
+                            elliptic_curves::bls12_381_mul_g2
+                        }
+                        HostFunction::ext_host_calls_ed_on_bls12_381_bandersnatch_msm_version_1 => {
+                            elliptic_curves::ed_on_bls12_381_bandersnatch_msm
+                        }
+                        HostFunction::ext_host_calls_ed_on_bls12_381_bandersnatch_mul_version_1 => {
+                            elliptic_curves::ed_on_bls12_381_bandersnatch_mul
+                        }
+                        _ => unreachable!(),
+                    };
+
+                let input_a = expect_pointer_size!(0).as_ref().to_vec();
+                let input_b = expect_pointer_size!(1).as_ref().to_vec();
+                let (out_ptr, out_len) = expect_pointer_size_raw!(2);
+
+                let code = match function(
+                    &input_a,
+                    &input_b,
+                    usize::try_from(out_len).unwrap_or_else(|_| unreachable!()),
+                ) {
+                    Ok(encoded) => {
+                        self.inner
+                            .vm
+                            .write_memory(out_ptr, &encoded)
+                            .unwrap_or_else(|_| unreachable!());
+                        0
+                    }
+                    Err(code) => code,
+                };
+
+                HostVm::ReadyToRun(ReadyToRun {
+                    resume_value: Some(vm::WasmValue::I32(i32::from_ne_bytes(code.to_ne_bytes()))),
+                    inner: self.inner,
+                })
+            }
+            HostFunction::ext_host_calls_pallas_msm_version_1
+            | HostFunction::ext_host_calls_pallas_mul_version_1
+            | HostFunction::ext_host_calls_vesta_msm_version_1
+            | HostFunction::ext_host_calls_vesta_mul_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_host_calls_bls12_381_final_exponentiation_version_1 => {
+                let (in_out_ptr, in_out_len) = expect_pointer_size_raw!(0);
+                let input = self
+                    .inner
+                    .vm
+                    .read_memory(in_out_ptr, in_out_len)
+                    .unwrap_or_else(|_| unreachable!())
+                    .as_ref()
+                    .to_vec();
+
+                let code = match elliptic_curves::bls12_381_final_exponentiation(&input) {
+                    Ok(encoded) => {
+                        self.inner
+                            .vm
+                            .write_memory(in_out_ptr, &encoded)
+                            .unwrap_or_else(|_| unreachable!());
+                        0
+                    }
+                    Err(code) => code,
+                };
+
+                HostVm::ReadyToRun(ReadyToRun {
+                    resume_value: Some(vm::WasmValue::I32(i32::from_ne_bytes(code.to_ne_bytes()))),
+                    inner: self.inner,
+                })
+            }
             HostFunction::ext_misc_print_num_version_1 => {
                 let num = match params[0] {
                     vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
