@@ -365,6 +365,134 @@ fn reject_in_notifications_double_send_after_remote_reset() {
     );
 }
 
+/// Same crossing as [`reject_in_notifications_double_send_after_remote_reset`], but with the
+/// accept + close pair of messages instead of a duplicate reject.
+///
+/// Sequence:
+///  1. Bob opens an outbound notifications substream to Alice.
+///  2. Alice negotiates it and reports `NotificationsInOpen` (substream in `NotificationsInWait`).
+///  3. Alice's API accepts the substream, then immediately requests its closing. Both the
+///     `AcceptInNotifications` and `CloseInNotifications` messages are queued in Alice's
+///     coordinator but *not yet* delivered to Alice's task.
+///  4. Bob's open handshake times out, so Bob resets the substream. Alice processes the reset,
+///     removes the substream from its yamux, and reports `NotificationsInOpenCancel` (pushing one
+///     ack entry into `notifications_in_close_acknowledgments`).
+///  5. The coordinator reinterprets the cancel as `NotificationsInClose` (state was
+///     `RequestedClosing`) and sends no further message: two messages are in flight for a single
+///     ack entry.
+///  6. The held-back accept (msg #1) is delivered and consumes that single ack entry.
+///  7. The held-back close (msg #2) finds the ack queue empty and calls
+///     `close_in_notifications_substream` on a substream that no longer exists in yamux -> panic.
+#[test]
+fn close_in_notifications_crossing_remote_reset() {
+    let mut harness = Harness::new();
+
+    // Complete the connection handshake on both sides.
+    let events = harness.pump(true, true);
+    assert!(
+        events
+            .iter()
+            .any(|(s, e)| *s == Side::Alice && matches!(e, Event::HandshakeFinished { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|(s, e)| *s == Side::Bob && matches!(e, Event::HandshakeFinished { .. }))
+    );
+
+    // Bob opens an outbound notifications substream. Its open handshake times out after 1s.
+    let bob_sub = harness.bob.network.open_out_notifications(
+        harness.bob.conn_id,
+        "/test-notif/1.0.0".to_string(),
+        Duration::from_secs(1),
+        b"hello".to_vec(),
+        1024,
+    );
+
+    // Alice negotiates the inbound substream and must accept the protocol name.
+    let events = harness.pump(true, true);
+    let alice_inbound = events
+        .iter()
+        .find_map(|(side, ev)| match ev {
+            Event::InboundNegotiated {
+                substream_id,
+                protocol_name,
+                ..
+            } if *side == Side::Alice => {
+                assert_eq!(protocol_name, "/test-notif/1.0.0");
+                Some(*substream_id)
+            }
+            _ => None,
+        })
+        .expect("Alice should report InboundNegotiated");
+    harness.alice.network.accept_inbound(
+        alice_inbound,
+        InboundTy::Notifications {
+            max_handshake_size: 1024,
+        },
+    );
+
+    // Alice reads Bob's handshake and reports the substream as open-in-wait.
+    let events = harness.pump(true, true);
+    let s: SubstreamId = events
+        .iter()
+        .find_map(|(side, ev)| match ev {
+            Event::NotificationsInOpen { substream_id, .. } if *side == Side::Alice => {
+                Some(*substream_id)
+            }
+            _ => None,
+        })
+        .expect("Alice should report NotificationsInOpen");
+
+    // Step 3: Alice accepts the substream and immediately requests its closing. Both messages are
+    // now queued in Alice's coordinator but deliberately NOT delivered to Alice's task yet.
+    harness
+        .alice
+        .network
+        .accept_in_notifications(s, b"hi".to_vec(), 1024);
+    harness
+        .alice
+        .network
+        .start_close_in_notifications(s, Duration::from_secs(5));
+
+    // Step 4: advance past Bob's 1s open-handshake timeout (but before the hardcoded first ping at
+    // 2s) and let Bob reset the substream. Alice processes the reset and produces the outgoing
+    // NotificationsInOpenCancel. Crucially, Alice's coordinator->connection messages (the held-back
+    // accept and close) are NOT delivered during this phase.
+    harness.pass_time(Duration::from_millis(1500));
+    let events_reset = harness.pump(false, true);
+
+    // Bob observes the failure of the substream he opened, since he reset it on timeout.
+    assert!(events_reset.iter().any(|(side, ev)| *side == Side::Bob
+        && matches!(
+            ev,
+            Event::NotificationsOutResult { substream_id, result: Err(_) }
+                if *substream_id == bob_sub
+        )));
+
+    // Step 5: the coordinator reinterprets the cancel as a NotificationsInClose event, since the
+    // substream was already accepted.
+    assert!(events_reset.iter().any(|(side, ev)| *side == Side::Alice
+        && matches!(
+            ev,
+            Event::NotificationsInClose { substream_id, .. } if *substream_id == s
+        )));
+
+    // Steps 6-7: now deliver Alice's coordinator messages in order: the accept consumes the single
+    // ack entry, then the close hits the already-removed substream.
+    // Without a guard, this panics in `close_in_notifications_substream`.
+    let events_final = harness.pump(true, true);
+
+    // The stale close must be a silent no-op: the connection survives the crossing on both sides
+    // rather than being torn down.
+    assert!(
+        !events_reset
+            .iter()
+            .chain(&events_final)
+            .any(|(_, ev)| { matches!(ev, Event::StartShutdown { .. } | Event::Shutdown { .. }) })
+    );
+}
+
 /// A single node of the multi-stream (WebRTC-like) harness: a coordinator plus its one
 /// multi-stream connection task.
 struct MultiNode {
@@ -825,6 +953,124 @@ fn multi_stream_reject_in_notifications_double_send_after_remote_reset() {
 
     // The duplicate reject must be a silent no-op: the connection survives the crossing on both
     // sides rather than being torn down.
+    assert!(
+        !events_reset
+            .iter()
+            .chain(&events_final)
+            .any(|(_, ev)| { matches!(ev, Event::StartShutdown { .. } | Event::Shutdown { .. }) })
+    );
+}
+
+/// Same crossing as [`close_in_notifications_crossing_remote_reset`], on a multi-stream
+/// connection: the accept + close pair of messages is in flight while the remote resets the
+/// substream, so the single ack entry is consumed by the accept and the close hits a substream
+/// that no longer exists in the state machine.
+#[test]
+fn multi_stream_close_in_notifications_crossing_remote_reset() {
+    let mut harness = MultiHarness::new();
+
+    // Complete the connection handshake on both sides.
+    let events = harness.pump(true, true);
+    assert!(
+        events
+            .iter()
+            .any(|(s, e)| *s == Side::Alice && matches!(e, Event::HandshakeFinished { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|(s, e)| *s == Side::Bob && matches!(e, Event::HandshakeFinished { .. }))
+    );
+    accept_ping_inbounds(&mut harness, &events);
+
+    // Bob opens an outbound notifications substream. The data channel that will carry it is the
+    // next one that the harness allocates.
+    let notif_channel = harness.next_channel_id;
+    let bob_sub = harness.bob.network.open_out_notifications(
+        harness.bob.conn_id,
+        "/test-notif/1.0.0".to_string(),
+        Duration::from_secs(10),
+        b"hello".to_vec(),
+        1024,
+    );
+
+    // Alice negotiates the inbound substream and must accept the protocol name.
+    let events = harness.pump(true, true);
+    assert_eq!(harness.next_channel_id, notif_channel + 1);
+    accept_ping_inbounds(&mut harness, &events);
+    let alice_inbound = events
+        .iter()
+        .find_map(|(side, ev)| match ev {
+            Event::InboundNegotiated {
+                substream_id,
+                protocol_name,
+                ..
+            } if *side == Side::Alice && protocol_name == "/test-notif/1.0.0" => {
+                Some(*substream_id)
+            }
+            _ => None,
+        })
+        .expect("Alice should report InboundNegotiated");
+    harness.alice.network.accept_inbound(
+        alice_inbound,
+        InboundTy::Notifications {
+            max_handshake_size: 1024,
+        },
+    );
+
+    // Alice reads Bob's handshake and reports the substream as open-in-wait.
+    let events = harness.pump(true, true);
+    accept_ping_inbounds(&mut harness, &events);
+    let s: SubstreamId = events
+        .iter()
+        .find_map(|(side, ev)| match ev {
+            Event::NotificationsInOpen { substream_id, .. } if *side == Side::Alice => {
+                Some(*substream_id)
+            }
+            _ => None,
+        })
+        .expect("Alice should report NotificationsInOpen");
+
+    // Alice accepts the substream and immediately requests its closing. Both messages are now
+    // queued in Alice's coordinator but deliberately NOT delivered to Alice's task yet.
+    harness
+        .alice
+        .network
+        .accept_in_notifications(s, b"hi".to_vec(), 1024);
+    harness
+        .alice
+        .network
+        .start_close_in_notifications(s, Duration::from_secs(5));
+
+    // The data channel carrying the substream abruptly dies. Alice's state machine removes the
+    // substream from its maps and produces the outgoing NotificationsInOpenCancel. The held-back
+    // accept and close are NOT delivered during this phase.
+    harness.kill_channel(notif_channel);
+    let events_reset = harness.pump(false, true);
+
+    // Bob observes the failure of the substream he opened, since its channel was killed.
+    assert!(events_reset.iter().any(|(side, ev)| *side == Side::Bob
+        && matches!(
+            ev,
+            Event::NotificationsOutResult { substream_id, result: Err(_) }
+                if *substream_id == bob_sub
+        )));
+
+    // The coordinator reinterprets the cancel as a NotificationsInClose event, since the substream
+    // was already accepted.
+    assert!(events_reset.iter().any(|(side, ev)| *side == Side::Alice
+        && matches!(
+            ev,
+            Event::NotificationsInClose { substream_id, .. } if *substream_id == s
+        )));
+
+    // Deliver Alice's coordinator messages in order: the accept consumes the single ack entry,
+    // then the close hits the already-removed substream. Without a guard, this panics in
+    // `MultiStream::close_in_notifications_substream` when unwrapping the map lookup.
+    let events_final = harness.pump(true, true);
+
+    // The stale close must be a silent no-op: the connection survives the crossing on both sides
+    // rather than being torn down.
     assert!(
         !events_reset
             .iter()
