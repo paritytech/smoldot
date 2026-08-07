@@ -78,6 +78,9 @@ pub use single_stream::SingleStreamConnectionTask;
 mod multi_stream;
 mod single_stream;
 
+#[cfg(test)]
+mod tests;
+
 /// What kind of handshake to perform on the newly-added connection.
 pub enum SingleStreamHandshakeKind<'a> {
     /// Use the multistream-select protocol to negotiate the Noise encryption, then use the
