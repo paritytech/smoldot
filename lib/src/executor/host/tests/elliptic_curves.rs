@@ -266,6 +266,22 @@ fn bls_multi_miller_loop_matches_upstream_vector() {
 }
 
 #[test]
+fn bls_multi_miller_loop_length_mismatch_returns_error() {
+    // Two G1 points with a single G2 point.
+    let one_g2 = &hex::decode(MSM_G2_BASES).unwrap()[..200];
+    let mut one_g2 = one_g2.to_vec();
+    one_g2[0] = 1;
+    assert_eq!(
+        elliptic_curves::bls12_381_multi_miller_loop(
+            &hex::decode(MSM_G1_BASES).unwrap(),
+            &one_g2,
+            576
+        ),
+        Err(elliptic_curves::ERROR_LENGTH_MISMATCH)
+    );
+}
+
+#[test]
 fn bls_final_exponentiation_matches_upstream_vector() {
     let out =
         elliptic_curves::bls12_381_final_exponentiation(&hex::decode(MML_OUT).unwrap()).unwrap();
