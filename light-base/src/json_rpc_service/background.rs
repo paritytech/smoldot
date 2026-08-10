@@ -1003,6 +1003,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::chainSpec_v1_genesisHash { .. }
                     | methods::MethodCall::chainSpec_v1_properties { .. }
                     | methods::MethodCall::rpc_methods { .. }
+                    | methods::MethodCall::statement_unstable_submit { .. }
                     | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
                     | methods::MethodCall::sudo_unstable_version { .. }
                     | methods::MethodCall::transaction_v1_broadcast { .. }
@@ -3065,6 +3066,39 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .to_json_response(request_id_json),
                             )
                             .await;
+                    }
+
+                    methods::MethodCall::statement_unstable_submit { encoded } => {
+                        let network = me.network_service.clone();
+                        let result = super::statement::validate_and_broadcast_statement_unstable(
+                            &encoded.0,
+                            me.platform.now_from_unix_epoch(),
+                            |bytes| async move { network.broadcast_statement(bytes).await },
+                        )
+                        .await;
+
+                        let response = match result {
+                            Ok(outcome) => methods::Response::statement_unstable_submit(outcome)
+                                .to_json_response(request_id_json),
+                            Err(super::statement::StatementSubmitError::InvalidEncoding) => {
+                                parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::InvalidParams(Some(
+                                        "The `encoded` parameter doesn't decode into a statement",
+                                    )),
+                                    None,
+                                )
+                            }
+                            Err(super::statement::StatementSubmitError::NoConnectedPeers) => {
+                                parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::InternalError,
+                                    Some(r#""No connected peers to broadcast the statement to""#),
+                                )
+                            }
+                        };
+
+                        let _ = me.responses_tx.send(response).await;
                     }
 
                     _method @ (methods::MethodCall::account_nextIndex { .. }
