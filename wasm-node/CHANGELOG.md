@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 3.4.0 - 2026-08-07
+
+### Added
+
+- Implement the [RFC-0163](https://github.com/polkadot-fellows/RFCs/blob/main/text/0163-ec-host-functions.md) elliptic curve host functions: scalar multiplication and multi-scalar multiplication on bandersnatch (`ed_on_bls12_381_bandersnatch`), and scalar multiplication, multi-scalar multiplication, multi Miller loop and final exponentiation on BLS12-381. This lets smoldot execute runtimes that verify bandersnatch ring-VRF proofs (proof-of-personhood chains). The remaining RFC-0163 functions (Pallas, Vesta) are registered but unimplemented. ([#3331](https://github.com/paritytech/smoldot/pull/3331); fixes [#3328](https://github.com/paritytech/smoldot/issues/3328))
+
+### Fixed
+
+- Fix a panic (`assertion failed: task.event_pending_send.is_none()` in debug builds) or a silently lost connection event (release builds, later causing a sync service panic on an unmatched `Disconnected`) when a peer ban raced with a network event that was still being delivered to subscribers. ([#3314](https://github.com/paritytech/smoldot/pull/3314); fixes [#3312](https://github.com/paritytech/smoldot/issues/3312))
+- No longer crash with an uncaught `InvalidStateError` when sending on an `RTCDataChannel` that left the `open` state before its `close` event was delivered; the send is skipped, since the pending `close` event resets the stream anyway. ([#3324](https://github.com/paritytech/smoldot/pull/3324); fixes [#3322](https://github.com/paritytech/smoldot/issues/3322))
+- In remote-instance mode, no longer crash with an uncaught `TypeError` when a message addressed to the first substream of a WebRTC connection (stream id 0) raced with that substream's reset: stream id 0 was accidentally exempt from the stale-message check. ([#3326](https://github.com/paritytech/smoldot/pull/3326); related to [#3322](https://github.com/paritytech/smoldot/issues/3322))
+- No longer crash with an uncaught `InvalidStateError` when opening a substream on an `RTCPeerConnection` that moved to `closed` before its `connectionstatechange` event was delivered. ([#3327](https://github.com/paritytech/smoldot/pull/3327); fixes [#3325](https://github.com/paritytech/smoldot/issues/3325))
+- Fix a panic in the connection task when the remote resets an inbound notifications substream while a message about that substream is still in flight (a duplicate reject, or a close right after an accept). ([#3329](https://github.com/paritytech/smoldot/pull/3329); fixes [#3304](https://github.com/paritytech/smoldot/issues/3304))
+
 ## 3.3.2 - 2026-07-24
 
 ### Changed
