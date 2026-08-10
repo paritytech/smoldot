@@ -474,9 +474,7 @@ define_methods! {
     statement_unsubscribeStatement(subscription: String) -> bool,
 
     // Unstable statement-store JSON RPC API, defined in
-    // https://github.com/paritytech/json-rpc-interface-spec/ and implemented in polkadot-sdk by
-    // https://github.com/paritytech/polkadot-sdk/pull/11989. Where a storeless light client cannot
-    // reproduce the reference behavior, the divergence is documented on the item concerned.
+    // https://github.com/paritytech/json-rpc-interface-spec/
 
     /// Validate a SCALE-encoded statement and broadcast it to peers.
     statement_unstable_submit(encoded: HexString) -> StatementSubmitOutcome,
@@ -1141,9 +1139,8 @@ pub enum InternalError {
 
 /// Outcome of a [`MethodCall::statement_unstable_submit`].
 ///
-/// A light client keeps no statement store, so the specification's store-dependent statuses are
-/// omitted: `known` and every `rejected` reason. `known` is in any case unreachable through local RPC
-/// submission in polkadot-sdk too, a locally-sourced statement always being resubmittable.
+/// A light client keeps no local store, so the specification's store-dependent statuses are
+/// omitted: `known` and every `rejected` reason.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum StatementSubmitOutcome {
@@ -1155,10 +1152,7 @@ pub enum StatementSubmitOutcome {
 
 /// Reason of a [`StatementSubmitOutcome::Invalid`].
 ///
-/// The specification's `badProof` is omitted: telling a bad proof from a good one means verifying a
-/// signature, more CPU than a light client should spend on a submission, so only the presence of a
-/// proof is checked. The trade-off is that a statement carrying an invalid signature is relayed, and
-/// the peers that do verify it answer with a reputation penalty.
+/// The specification's `badProof` is omitted: signature verification is too heavy for light nodes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "reason", rename_all = "camelCase")]
 pub enum StatementSubmitInvalidReason {
