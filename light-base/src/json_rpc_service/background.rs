@@ -254,16 +254,18 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     /// If no update was ever sent, or the last update was more than the configured
     /// affinity update interval ago, the update fires immediately.
     /// Otherwise, it fires after the remaining interval.
+    ///
+    /// Does nothing when the chain runs without the statement protocol. Subscriptions can still be
+    /// created in that case, so this is reachable, and there is no affinity to advertise.
     fn schedule_statement_affinity_update(&mut self) {
         if self.statement_affinity_stale {
             return;
         }
+        let Some(config) = self.statement_protocol_config.as_ref() else {
+            return;
+        };
         self.statement_affinity_stale = true;
-        let interval = self
-            .statement_protocol_config
-            .as_ref()
-            .expect("affinity updates require statement protocol; qed")
-            .affinity_update_interval();
+        let interval = config.affinity_update_interval();
         let delay = match &self.last_statement_affinity_update {
             Some(last) => {
                 let elapsed = self.platform.now() - last.clone();
