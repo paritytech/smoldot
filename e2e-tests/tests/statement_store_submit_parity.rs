@@ -73,7 +73,6 @@ const NO_STORE: &str =
 ///
 /// - `rejected_no_allowance` and `rejected_data_too_large` need the account's `StatementAllowance`,
 ///   which lives in chain state and so can be read under a storage proof.
-/// - `decode_failure` needs the statement-store error code rather than `invalid params`.
 ///
 /// Three `SubmitResult` variants have no case here. `Known` and `KnownExpired` cannot come back
 /// from this method at all: `Store::submit` returns them only when `source.can_be_resubmitted()` is
@@ -266,8 +265,8 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
             name: "decode_failure",
             hex: "0xffff".to_owned(),
             prelude: Vec::new(),
-            // A choice of error code, nothing more: smoldot answers `-32602` today and has no
-            // reason it could not answer polkadot-sdk's statement-store code instead.
+            // Both answer polkadot-sdk's statement-store error code. It is the only code that side
+            // uses for a submission it couldn't process, so a client needs no second one.
             expected: Expected::Same(SubmitAnswer::Rejected(7001)),
         },
     ];

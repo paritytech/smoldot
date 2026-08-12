@@ -69,8 +69,15 @@ impl StatementProtocolConfig {
     }
 }
 
-/// Failure of a `statement_submit` request, reported as a JSON-RPC error rather than a
-/// [`StatementSubmitResult`].
+/// JSON-RPC error code answering a submission the statement store couldn't process.
+///
+/// polkadot-sdk answers every such failure with this one code, its statement-store base (7000) plus
+/// one, and distinguishes them by message alone. Reusing it keeps a client written against a full
+/// node working against smoldot without a second code to special-case.
+pub const STATEMENT_STORE_ERROR_CODE: i64 = 7001;
+
+/// Failure of a `statement_submit` request, reported as a JSON-RPC error carrying
+/// [`STATEMENT_STORE_ERROR_CODE`] rather than a [`StatementSubmitResult`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatementSubmitError {
     /// The submitted bytes don't decode into a statement.

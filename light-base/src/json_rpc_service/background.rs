@@ -3019,17 +3019,22 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             Err(super::statement::StatementSubmitError::InvalidEncoding) => {
                                 parse::build_error_response(
                                     request_id_json,
-                                    parse::ErrorResponse::InvalidParams(Some(
-                                        "The `encoded` parameter doesn't decode into a statement",
-                                    )),
+                                    parse::ErrorResponse::ApplicationDefined(
+                                        super::statement::STATEMENT_STORE_ERROR_CODE,
+                                        "Statement store error: Error decoding statement",
+                                    ),
                                     None,
                                 )
                             }
                             Err(super::statement::StatementSubmitError::NoConnectedPeers) => {
                                 parse::build_error_response(
                                     request_id_json,
-                                    parse::ErrorResponse::InternalError,
-                                    Some(r#""No connected peers to broadcast the statement to""#),
+                                    parse::ErrorResponse::ApplicationDefined(
+                                        super::statement::STATEMENT_STORE_ERROR_CODE,
+                                        "Statement store error: No connected peers to broadcast \
+                                         the statement to",
+                                    ),
+                                    None,
                                 )
                             }
                         };
