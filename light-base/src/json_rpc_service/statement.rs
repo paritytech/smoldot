@@ -186,30 +186,69 @@ where
     SubmitOutcome::New
 }
 
+/// Identifies a filter within the subscription it is attached to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) struct FilterId(u64);
+
+/// One statement subscription: a set of topic filters sharing one deduplication cache.
 pub(super) struct StatementSubscription {
-    topic_filter: TopicFilter,
+    filters: hashbrown::HashMap<FilterId, TopicFilter, fnv::FnvBuildHasher>,
+
+    /// Id given to the next filter attached to this subscription. Ids are never reused, so that a
+    /// removed filter can't be confused with a later one.
+    next_filter_id: u64,
+
     seen: Option<lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>>,
 }
 
 impl StatementSubscription {
-    pub(super) fn new(topic_filter: TopicFilter, max_seen: Option<NonZero<usize>>) -> Self {
+    fn new(max_seen: Option<NonZero<usize>>) -> Self {
         Self {
-            topic_filter,
+            filters: hashbrown::HashMap::with_hasher(Default::default()),
+            next_filter_id: 0,
             seen: max_seen
                 .map(|cap| lru::LruCache::with_hasher(cap, fnv::FnvBuildHasher::default())),
         }
     }
 
-    pub(super) fn accept(&mut self, hash: &[u8; 32], statement: &codec::Statement) -> bool {
-        if !self.topic_filter.matches(&statement.topics) {
-            return false;
-        }
-        if let Some(seen) = &mut self.seen {
-            if seen.put(*hash, ()).is_some() {
-                return false;
+    /// Attaches `topic_filter` to this subscription and returns the id identifying it.
+    fn add_filter(&mut self, topic_filter: TopicFilter) -> FilterId {
+        let filter_id = FilterId(self.next_filter_id);
+        self.next_filter_id += 1;
+        self.filters.insert(filter_id, topic_filter);
+        filter_id
+    }
+
+    /// Returns whether at least one filter of this subscription matches `topics`.
+    fn matches(&self, topics: &[codec::Topic]) -> bool {
+        self.filters
+            .values()
+            .any(|topic_filter| topic_filter.matches(topics))
+    }
+
+    /// Returns the topics that at least one filter of this subscription references, and whether one
+    /// of them matches every statement irrespective of its topics.
+    fn indexed_topics(&self) -> (Vec<codec::Topic>, bool) {
+        let mut topics = Vec::new();
+        let mut wildcard = false;
+
+        for topic_filter in self.filters.values() {
+            match indexed_topics(topic_filter) {
+                None => wildcard = true,
+                Some(filter_topics) => topics.extend(filter_topics),
             }
         }
-        true
+
+        (topics, wildcard)
+    }
+
+    /// Records the statement of the given hash as delivered to this subscription. Returns `false`
+    /// if it was already delivered.
+    fn accept(&mut self, hash: &[u8; 32]) -> bool {
+        match &mut self.seen {
+            Some(seen) => seen.put(*hash, ()).is_none(),
+            None => true,
+        }
     }
 }
 
@@ -223,15 +262,16 @@ pub(super) struct StatementSubscriptions {
     subscriptions: hashbrown::HashMap<String, StatementSubscription, fnv::FnvBuildHasher>,
 
     /// Reverse index: maps a topic to the IDs of all subscriptions whose filter references it.
-    /// Only populated for `MatchAny`/`MatchAll` filters with a non-empty topic list.
+    /// Only `MatchAny`/`MatchAll` filters contribute entries, one per topic they name.
     by_topic: hashbrown::HashMap<
         [u8; 32],
         hashbrown::HashSet<String, fnv::FnvBuildHasher>,
         fnv::FnvBuildHasher,
     >,
 
-    /// IDs of subscriptions that match every statement irrespective of its topics: either
-    /// `TopicFilter::Any`, or a `TopicFilter::MatchAll` whose topic list is empty.
+    /// IDs of subscriptions having a filter that matches every statement irrespective of its
+    /// topics: either `TopicFilter::Any`, or a `TopicFilter::MatchAll` whose topic list is
+    /// empty.
     wildcard: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
 }
 
@@ -251,56 +291,66 @@ impl StatementSubscriptions {
         self.subscriptions.is_empty()
     }
 
-    /// Inserts a new subscription and updates the reverse index.
+    /// Inserts a new subscription holding `topic_filter` as its only filter.
     pub(super) fn insert(
         &mut self,
         id: String,
         topic_filter: TopicFilter,
         max_seen: Option<NonZero<usize>>,
     ) {
-        match &topic_filter {
-            TopicFilter::Any => {
-                self.wildcard.insert(id.clone());
+        self.subscriptions
+            .insert(id.clone(), StatementSubscription::new(max_seen));
+        self.add_filter(&id, topic_filter)
+            .expect("subscription was just inserted; qed");
+    }
+
+    /// Attaches a filter to an existing subscription and updates the reverse index. Returns the id
+    /// identifying the filter within that subscription, or `None` if the subscription is unknown.
+    pub(super) fn add_filter(
+        &mut self,
+        sub_id: &str,
+        topic_filter: TopicFilter,
+    ) -> Option<FilterId> {
+        // Determined before handing the filter over to the subscription, which then owns it.
+        let indexed_topics = indexed_topics(&topic_filter);
+
+        let filter_id = self.subscriptions.get_mut(sub_id)?.add_filter(topic_filter);
+
+        match indexed_topics {
+            None => {
+                self.wildcard.insert(String::from(sub_id));
             }
-            // An empty `MatchAll` filter matches every statement.
-            TopicFilter::MatchAll(topics) if topics.is_empty() => {
-                self.wildcard.insert(id.clone());
-            }
-            TopicFilter::MatchAll(topics) | TopicFilter::MatchAny(topics) => {
+            Some(topics) => {
                 for topic in topics {
                     self.by_topic
-                        .entry(*topic)
+                        .entry(topic)
                         .or_insert_with(|| hashbrown::HashSet::with_hasher(Default::default()))
-                        .insert(id.clone());
+                        .insert(String::from(sub_id));
                 }
             }
         }
 
-        self.subscriptions
-            .insert(id, StatementSubscription::new(topic_filter, max_seen));
+        Some(filter_id)
     }
 
-    /// Removes a subscription and cleans up the reverse index. Returns whether it existed.
+    /// Removes a subscription together with all its filters, and cleans up the reverse index.
+    /// Returns whether it existed.
     pub(super) fn remove(&mut self, id: &str) -> bool {
         let Some(sub) = self.subscriptions.remove(id) else {
             return false;
         };
 
-        match &sub.topic_filter {
-            TopicFilter::Any => {
-                self.wildcard.remove(id);
-            }
-            TopicFilter::MatchAll(topics) if topics.is_empty() => {
-                self.wildcard.remove(id);
-            }
-            TopicFilter::MatchAll(topics) | TopicFilter::MatchAny(topics) => {
-                for topic in topics {
-                    if let Some(ids) = self.by_topic.get_mut(topic) {
-                        ids.remove(id);
-                        if ids.is_empty() {
-                            self.by_topic.remove(topic);
-                        }
-                    }
+        let (topics, wildcard) = sub.indexed_topics();
+
+        if wildcard {
+            self.wildcard.remove(id);
+        }
+
+        for topic in topics {
+            if let Some(ids) = self.by_topic.get_mut(&topic) {
+                ids.remove(id);
+                if ids.is_empty() {
+                    self.by_topic.remove(&topic);
                 }
             }
         }
@@ -310,8 +360,11 @@ impl StatementSubscriptions {
 
     pub(super) fn shrink_to_fit(&mut self) {
         self.subscriptions.shrink_to_fit();
-        for ids in self.by_topic.values_mut() {
-            ids.shrink_to_fit();
+        for sub in self.subscriptions.values_mut() {
+            sub.filters.shrink_to_fit();
+        }
+        for entries in self.by_topic.values_mut() {
+            entries.shrink_to_fit();
         }
         self.by_topic.shrink_to_fit();
         self.wildcard.shrink_to_fit();
@@ -321,8 +374,9 @@ impl StatementSubscriptions {
     ///
     /// Returns, for every subscription that accepts at least one statement, the list of re-encoded
     /// matching statements. Uses the reverse index to only consider subscriptions that either match
-    /// everything or share a topic with the statement; the precise per-subscription filter and
-    /// deduplication is then applied via [`StatementSubscription::accept`].
+    /// everything or share a topic with the statement; the precise per-filter check and the
+    /// deduplication are then applied to each candidate. A statement matched by several filters of
+    /// the same subscription is reported once.
     pub(super) fn matching(
         &mut self,
         statements: &[([u8; 32], codec::Statement)],
@@ -356,7 +410,7 @@ impl StatementSubscriptions {
                 let sub = subscriptions
                     .get_mut(*id)
                     .expect("`candidates` is a subset of `subscriptions`; qed");
-                if sub.accept(hash, statement) {
+                if sub.matches(&statement.topics) && sub.accept(hash) {
                     let encoded = encoded.get_or_insert_with(|| {
                         HexString(
                             codec::encode_statement(statement)
@@ -380,12 +434,14 @@ impl StatementSubscriptions {
         let mut all_topics: Vec<&[u8; 32]> = Vec::new();
 
         for sub in self.subscriptions.values() {
-            match &sub.topic_filter {
-                TopicFilter::Any => {
-                    return network_service::AffinityFilter::match_all(config.bloom_seed());
-                }
-                TopicFilter::MatchAll(topics) | TopicFilter::MatchAny(topics) => {
-                    all_topics.extend(topics.iter());
+            for topic_filter in sub.filters.values() {
+                match topic_filter {
+                    TopicFilter::Any => {
+                        return network_service::AffinityFilter::match_all(config.bloom_seed());
+                    }
+                    TopicFilter::MatchAll(topics) | TopicFilter::MatchAny(topics) => {
+                        all_topics.extend(topics.iter());
+                    }
                 }
             }
         }
@@ -395,6 +451,17 @@ impl StatementSubscriptions {
             config.bloom_seed(),
             config.false_positive_rate(),
         )
+    }
+}
+
+/// Returns the topics under which a filter is indexed, or `None` if it matches every statement
+/// irrespective of its topics.
+fn indexed_topics(topic_filter: &TopicFilter) -> Option<Vec<codec::Topic>> {
+    match topic_filter {
+        TopicFilter::Any => None,
+        // An empty `MatchAll` filter matches every statement.
+        TopicFilter::MatchAll(topics) if topics.is_empty() => None,
+        TopicFilter::MatchAll(topics) | TopicFilter::MatchAny(topics) => Some(topics.clone()),
     }
 }
 
@@ -643,49 +710,83 @@ mod tests {
 
     #[test]
     fn accept_fresh_statement_passes() {
-        let t1 = [1u8; 32];
-        let mut sub =
-            StatementSubscription::new(TopicFilter::match_any(vec![t1]).unwrap(), NonZero::new(8));
-        let stmt = statement_with_topics(vec![t1]);
-        assert!(sub.accept(&[0xbb; 32], &stmt));
+        let mut sub = StatementSubscription::new(NonZero::new(8));
+        assert!(sub.accept(&[0xbb; 32]));
     }
 
     #[test]
     fn accept_duplicate_returns_false() {
-        let mut sub = StatementSubscription::new(TopicFilter::Any, NonZero::new(8));
-        let stmt = statement_with_topics(vec![]);
+        let mut sub = StatementSubscription::new(NonZero::new(8));
         let hash = [0xcc; 32];
-        assert!(sub.accept(&hash, &stmt));
-        assert!(!sub.accept(&hash, &stmt));
+        assert!(sub.accept(&hash));
+        assert!(!sub.accept(&hash));
     }
 
     #[test]
     fn accept_lru_eviction_allows_resubmit() {
-        let mut sub = StatementSubscription::new(TopicFilter::Any, NonZero::new(2));
-        let stmt = statement_with_topics(vec![]);
+        let mut sub = StatementSubscription::new(NonZero::new(2));
         let h_a = [0xa; 32];
         let h_b = [0xb; 32];
         let h_c = [0xc; 32];
 
-        assert!(sub.accept(&h_a, &stmt));
-        assert!(sub.accept(&h_b, &stmt));
+        assert!(sub.accept(&h_a));
+        assert!(sub.accept(&h_b));
         // Inserting a third eviction-capacity 2 item evicts h_a (oldest).
-        assert!(sub.accept(&h_c, &stmt));
+        assert!(sub.accept(&h_c));
         // h_a was evicted: it is accepted again as if fresh.
-        assert!(sub.accept(&h_a, &stmt));
+        assert!(sub.accept(&h_a));
     }
 
     #[test]
     fn dedup_is_per_subscription() {
-        let mut sub_a = StatementSubscription::new(TopicFilter::Any, NonZero::new(8));
-        let mut sub_b = StatementSubscription::new(TopicFilter::Any, NonZero::new(8));
-        let stmt = statement_with_topics(vec![]);
+        let mut sub_a = StatementSubscription::new(NonZero::new(8));
+        let mut sub_b = StatementSubscription::new(NonZero::new(8));
         let hash = [0xee; 32];
 
-        assert!(sub_a.accept(&hash, &stmt));
-        assert!(!sub_a.accept(&hash, &stmt));
+        assert!(sub_a.accept(&hash));
+        assert!(!sub_a.accept(&hash));
         // Same hash on a different subscription is still fresh: caches are independent.
-        assert!(sub_b.accept(&hash, &stmt));
+        assert!(sub_b.accept(&hash));
+    }
+
+    #[test]
+    fn matches_when_any_filter_does() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let mut sub = StatementSubscription::new(None);
+        sub.add_filter(TopicFilter::match_any(vec![t1]).unwrap());
+        sub.add_filter(TopicFilter::match_any(vec![t2]).unwrap());
+
+        assert!(sub.matches(&[t1]));
+        assert!(sub.matches(&[t2]));
+        assert!(!sub.matches(&[[9u8; 32]]));
+    }
+
+    #[test]
+    fn indexed_topics_gathers_every_filter() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let mut sub = StatementSubscription::new(None);
+        sub.add_filter(TopicFilter::match_any(vec![t1]).unwrap());
+        sub.add_filter(TopicFilter::match_all(vec![t2]).unwrap());
+
+        let (mut topics, wildcard) = sub.indexed_topics();
+        topics.sort_unstable();
+        assert_eq!(topics, vec![t1, t2]);
+        assert!(!wildcard);
+
+        // A single wildcard filter is enough to flag the whole subscription.
+        sub.add_filter(TopicFilter::Any);
+        assert!(sub.indexed_topics().1);
+    }
+
+    #[test]
+    fn filter_ids_are_never_reused() {
+        let mut sub = StatementSubscription::new(None);
+        let first = sub.add_filter(TopicFilter::Any);
+        sub.filters.remove(&first);
+        let second = sub.add_filter(TopicFilter::Any);
+        assert_ne!(first, second);
     }
 
     /// Builds a `(hash, statement)` batch entry from a list of topics.
@@ -783,7 +884,7 @@ mod tests {
         )]);
 
         let entry = batch_entry(0xaa, vec![t1]);
-        let matches = subs.matching(&[entry.clone()]);
+        let matches = subs.matching(core::slice::from_ref(&entry));
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].1.len(), 1);
 
@@ -816,5 +917,110 @@ mod tests {
         // The topic entry must have been cleaned up, so a matching statement finds nothing.
         let matches = subs.matching(&[batch_entry(0xaa, vec![t1])]);
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn add_filter_on_unknown_subscription_returns_none() {
+        let mut subs = make_subscriptions(vec![]);
+        assert!(subs.add_filter("nope", TopicFilter::Any).is_none());
+    }
+
+    #[test]
+    fn matching_accepts_a_statement_matched_by_any_filter() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let mut subs =
+            make_subscriptions(vec![("a", TopicFilter::match_any(vec![t1]).unwrap(), None)]);
+        subs.add_filter("a", TopicFilter::match_any(vec![t2]).unwrap())
+            .unwrap();
+
+        // Each filter pulls in the statements of its own topic.
+        let matches = subs.matching(&[batch_entry(0x01, vec![t1]), batch_entry(0x02, vec![t2])]);
+        assert_eq!(matched_ids(&matches), vec!["a".to_string()]);
+        assert_eq!(matches[0].1.len(), 2);
+
+        // A statement matching none of the filters is not accepted.
+        let matches = subs.matching(&[batch_entry(0x03, vec![[9u8; 32]])]);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn matching_reports_a_statement_once_per_subscription() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let mut subs = make_subscriptions(vec![(
+            "a",
+            TopicFilter::match_any(vec![t1]).unwrap(),
+            NonZero::new(8),
+        )]);
+        subs.add_filter("a", TopicFilter::match_any(vec![t2]).unwrap())
+            .unwrap();
+        subs.add_filter("a", TopicFilter::Any).unwrap();
+
+        // All three filters match, yet the statement is reported a single time.
+        let matches = subs.matching(&[batch_entry(0xaa, vec![t1, t2])]);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].1.len(), 1);
+    }
+
+    #[test]
+    fn matching_dedups_a_filter_indexed_under_several_topics() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        // Without a deduplication cache, a filter indexed under both topics would otherwise report
+        // the statement once per topic it shares with it.
+        let mut subs = make_subscriptions(vec![(
+            "a",
+            TopicFilter::match_any(vec![t1, t2]).unwrap(),
+            None,
+        )]);
+
+        let matches = subs.matching(&[batch_entry(0xaa, vec![t1, t2])]);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].1.len(), 1);
+    }
+
+    #[test]
+    fn remove_cleans_up_every_filter() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let mut subs =
+            make_subscriptions(vec![("a", TopicFilter::match_any(vec![t1]).unwrap(), None)]);
+        subs.add_filter("a", TopicFilter::match_any(vec![t2]).unwrap())
+            .unwrap();
+        subs.add_filter("a", TopicFilter::Any).unwrap();
+
+        assert!(subs.remove("a"));
+        assert!(subs.is_empty());
+        // Neither the topic entries nor the wildcard entry may survive.
+        let matches = subs.matching(&[batch_entry(0xaa, vec![t1]), batch_entry(0xbb, vec![t2])]);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn affinity_covers_every_filter_of_a_subscription() {
+        let config = test_config();
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let mut subs =
+            make_subscriptions(vec![("a", TopicFilter::match_any(vec![t1]).unwrap(), None)]);
+        subs.add_filter("a", TopicFilter::match_any(vec![t2]).unwrap())
+            .unwrap();
+
+        let filter = subs.build_combined_affinity_filter(&config);
+        assert!(filter.contains(&t1));
+        assert!(filter.contains(&t2));
+    }
+
+    #[test]
+    fn affinity_matches_all_when_one_filter_is_any() {
+        let config = test_config();
+        let t1 = [1u8; 32];
+        let mut subs =
+            make_subscriptions(vec![("a", TopicFilter::match_any(vec![t1]).unwrap(), None)]);
+        subs.add_filter("a", TopicFilter::Any).unwrap();
+
+        let filter = subs.build_combined_affinity_filter(&config);
+        assert!(filter.contains(&[99u8; 32]));
     }
 }
