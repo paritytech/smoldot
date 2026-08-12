@@ -72,18 +72,15 @@ impl StatementProtocolConfig {
 
 /// JSON-RPC error code answering a submission the statement store couldn't process.
 ///
-/// polkadot-sdk answers every such failure with this one code, its statement-store base (7000) plus
-/// one, and distinguishes them by message alone. Reusing it keeps a client written against a full
-/// node working against smoldot without a second code to special-case.
+/// Matches polkadot-sdk.
 pub const STATEMENT_STORE_ERROR_CODE: i64 = 7001;
 
-/// Failure of a `statement_submit` request, reported as a JSON-RPC error carrying
-/// [`STATEMENT_STORE_ERROR_CODE`] rather than a [`StatementSubmitResult`].
+/// Submission failure reported as a JSON-RPC error
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatementSubmitError {
     /// The submitted bytes don't decode into a statement.
     InvalidEncoding,
-    /// The statement is valid but reached none of the `connected` gossip-connected peers. A light
+    /// The statement is valid but reached none of the gossip-connected peers. A light
     /// client keeps no store, so a statement nobody received is nowhere at all.
     NotSent { connected: usize },
 }
@@ -139,9 +136,6 @@ where
         return Err(StatementSubmitError::InvalidEncoding);
     };
 
-    // polkadot-sdk's store counts a statement as expired once the current second reaches the
-    // expiration timestamp, not after it. A `>` here would accept, for one second, statements
-    // every full node rejects.
     if now_from_unix_epoch.as_secs() >= statement.expiry >> 32 {
         return Ok(StatementSubmitResult::Invalid(
             InvalidReason::AlreadyExpired,
@@ -161,9 +155,6 @@ where
         return Ok(StatementSubmitResult::Invalid(InvalidReason::NoProof));
     }
 
-    // Counted on `sent` rather than `total`: a peer can be gossip-connected while its statement
-    // substream is absent or its notification queue full, in which case the statement reached
-    // nobody and reporting `new` would tell the client it was published when it wasn't.
     let broadcasted = broadcast(encoded.to_vec()).await;
     if broadcasted.sent == 0 {
         return Err(StatementSubmitError::NotSent {
