@@ -1135,10 +1135,12 @@ pub enum SystemPeerRole {
 ///
 /// A failure that leaves no outcome to report at all — a payload that doesn't decode, or a
 /// statement that reached no peer — is answered with a JSON-RPC error carrying polkadot-sdk's
-/// statement-store error code, as polkadot-sdk does.
+/// statement-store error code. Only the decode failure has a counterpart there; the other borrows
+/// the code.
 ///
-/// `e2e-tests/tests/statement_store_submit_parity.rs` submits the same statements to both clients
-/// and asserts each of these, so the account above stays honest.
+/// The `statement_store_submit_parity` test submits the same statements to both clients and asserts
+/// every answer above a light client can reach, so this account stays honest. `knownExpired`,
+/// `storeFull` and `internalError` get no case; that test explains why.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum StatementSubmitResult {
@@ -1162,7 +1164,7 @@ pub enum InvalidReason {
         /// Maximum allowed size in bytes.
         max_size: usize,
     },
-    /// The statement's expiry is in the past.
+    /// The statement's expiry is not in the future.
     AlreadyExpired,
 }
 

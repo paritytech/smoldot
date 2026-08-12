@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::network_service::{self, BroadcastStatementResult};
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use core::{num::NonZero, time::Duration};
 use smoldot::json_rpc::methods::{HexString, InvalidReason, StatementSubmitResult, TopicFilter};
 use smoldot::json_rpc::parse;
@@ -83,9 +83,9 @@ pub const STATEMENT_STORE_ERROR_CODE: i64 = 7001;
 pub enum StatementSubmitError {
     /// The submitted bytes don't decode into a statement.
     InvalidEncoding,
-    /// The statement is valid but reached no peer. A light client keeps no store, so a statement
-    /// nobody received is nowhere at all.
-    NoConnectedPeers,
+    /// The statement is valid but reached none of the `connected` gossip-connected peers. A light
+    /// client keeps no store, so a statement nobody received is nowhere at all.
+    NotSent { connected: usize },
 }
 
 impl StatementSubmitError {
@@ -95,20 +95,25 @@ impl StatementSubmitError {
     ///
     /// Panics if `request_id_json` isn't valid JSON.
     pub fn to_json_rpc_error(&self, request_id_json: &str) -> String {
-        // Both messages carry polkadot-sdk's prefix, which is the only thing telling its two
-        // failures apart: it answers each with the same code.
+        // Both messages carry polkadot-sdk's prefix. It answers every statement-store failure with
+        // the same code, so the message is all that tells these two apart.
         let message = match self {
             StatementSubmitError::InvalidEncoding => {
-                "Statement store error: Error decoding statement"
+                String::from("Statement store error: Error decoding statement")
             }
-            StatementSubmitError::NoConnectedPeers => {
-                "Statement store error: No connected peers to broadcast the statement to"
-            }
+            StatementSubmitError::NotSent { connected: 0 } => String::from(
+                "Statement store error: No connected peers to broadcast the statement to",
+            ),
+            // Connected peers can still decline to queue, so the count separates the two.
+            StatementSubmitError::NotSent { connected } => format!(
+                "Statement store error: none of the {connected} connected peers accepted the \
+                 statement"
+            ),
         };
 
         parse::build_error_response(
             request_id_json,
-            parse::ErrorResponse::ApplicationDefined(STATEMENT_STORE_ERROR_CODE, message),
+            parse::ErrorResponse::ApplicationDefined(STATEMENT_STORE_ERROR_CODE, &message),
             None,
         )
     }
@@ -134,9 +139,9 @@ where
         return Err(StatementSubmitError::InvalidEncoding);
     };
 
-    // The most significant 32 bits of `expiry` are the expiration timestamp in seconds since
-    // the UNIX epoch. A statement expiring exactly now is already expired, the deadline being the
-    // first instant at which the statement no longer holds.
+    // polkadot-sdk's store counts a statement as expired once the current second reaches the
+    // expiration timestamp, not after it. A `>` here would accept, for one second, statements
+    // every full node rejects.
     if now_from_unix_epoch.as_secs() >= statement.expiry >> 32 {
         return Ok(StatementSubmitResult::Invalid(
             InvalidReason::AlreadyExpired,
@@ -161,7 +166,9 @@ where
     // nobody and reporting `new` would tell the client it was published when it wasn't.
     let broadcasted = broadcast(encoded.to_vec()).await;
     if broadcasted.sent == 0 {
-        return Err(StatementSubmitError::NoConnectedPeers);
+        return Err(StatementSubmitError::NotSent {
+            connected: broadcasted.total,
+        });
     }
 
     Ok(StatementSubmitResult::New)
@@ -515,7 +522,7 @@ mod tests {
         let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
             BroadcastStatementResult { sent: 0, total: 0 }
         }));
-        assert_eq!(result, Err(StatementSubmitError::NoConnectedPeers));
+        assert_eq!(result, Err(StatementSubmitError::NotSent { connected: 0 }));
     }
 
     #[test]
@@ -527,8 +534,13 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":7,"error":{"code":7001,"message":"Statement store error: Error decoding statement"}}"#
         );
         assert_eq!(
-            StatementSubmitError::NoConnectedPeers.to_json_rpc_error("7"),
+            StatementSubmitError::NotSent { connected: 0 }.to_json_rpc_error("7"),
             r#"{"jsonrpc":"2.0","id":7,"error":{"code":7001,"message":"Statement store error: No connected peers to broadcast the statement to"}}"#
+        );
+        // Connected peers that took nothing must not read as no peers.
+        assert_eq!(
+            StatementSubmitError::NotSent { connected: 5 }.to_json_rpc_error("7"),
+            r#"{"jsonrpc":"2.0","id":7,"error":{"code":7001,"message":"Statement store error: none of the 5 connected peers accepted the statement"}}"#
         );
     }
 
@@ -540,7 +552,7 @@ mod tests {
         let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
             BroadcastStatementResult { sent: 0, total: 5 }
         }));
-        assert_eq!(result, Err(StatementSubmitError::NoConnectedPeers));
+        assert_eq!(result, Err(StatementSubmitError::NotSent { connected: 5 }));
     }
 
     #[test]

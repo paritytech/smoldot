@@ -343,8 +343,8 @@ pub fn create_test_statement(seed: &[u8; 32], topic: &[u8; 32], data: &[u8]) -> 
 
 /// How a test statement deviates from one a statement store accepts.
 ///
-/// Each variant trips exactly one of the checks `Store::submit` runs, so a client can be probed
-/// one rejection reason at a time.
+/// Each variant provokes one rejection reason, by tripping the first check that reason belongs to.
+/// Some carry a second flaw deliberately, to pin the order the checks run in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatementFlaw {
     /// No deviation: signed, far-future expiry, well under the size limit.
@@ -357,7 +357,10 @@ pub enum StatementFlaw {
     ExpiredAndUnsigned,
     /// No authenticity proof.
     NoProof,
-    /// Encoding above the maximum statement size, but otherwise valid.
+    /// Encoding above the maximum statement size, and no proof either.
+    ///
+    /// Carries two flaws for the same reason [`StatementFlaw::ExpiredAndUnsigned`] does: it pins
+    /// the size check ahead of the proof check.
     TooLarge,
     /// A data field larger than an account's statement allowance, while the encoding as a whole
     /// stays under the maximum statement size.
@@ -442,18 +445,18 @@ fn build_statement(
     let unsigned_bytes = encode_statement(&unsigned).expect("valid statement");
 
     let proof = match flaw {
-        StatementFlaw::ExpiredAndUnsigned | StatementFlaw::NoProof => None,
+        StatementFlaw::ExpiredAndUnsigned | StatementFlaw::NoProof | StatementFlaw::TooLarge => {
+            None
+        }
         // Signing unrelated bytes yields a structurally valid proof that fails verification.
         StatementFlaw::BadProof => Some(Proof::Ed25519 {
             signature: signing_key.sign(b"not this statement").to_bytes(),
             signer: pubkey,
         }),
-        StatementFlaw::None | StatementFlaw::TooLarge | StatementFlaw::DataOverAllowance => {
-            Some(Proof::Ed25519 {
-                signature: signing_key.sign(&unsigned_bytes[1..]).to_bytes(),
-                signer: pubkey,
-            })
-        }
+        StatementFlaw::None | StatementFlaw::DataOverAllowance => Some(Proof::Ed25519 {
+            signature: signing_key.sign(&unsigned_bytes[1..]).to_bytes(),
+            signer: pubkey,
+        }),
     };
 
     let encoded = encode_statement(&Statement { proof, ..unsigned }).expect("valid statement");

@@ -85,7 +85,7 @@ const BAD_PROOF_COSTS_CPU: &str =
 /// declines and why; a divergence closing or a new one opening fails here rather than drifting away
 /// from that doc.
 ///
-/// Two `SubmitResult` variants get no case. `StoreFull` would mean pushing the global 2 GiB
+/// Three answers get no case. `StoreFull` would mean pushing the global 2 GiB
 /// `DEFAULT_MAX_TOTAL_SIZE` through the collator, which no chain spec can shrink, and it is another
 /// store-side rejection, so `rejected_account_full` already covers what it would say about smoldot.
 /// `InternalError` reports a database failure, which a submission cannot provoke. `KnownExpired`
@@ -255,7 +255,8 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
             hex: too_large,
             prelude: Vec::new(),
             // The only rejection both clients share that carries a payload, so it is also what
-            // pins the `snake_case` field names this method uses.
+            // pins the `snake_case` field names this method uses. Carries no proof either, so it
+            // pins the order too: size is checked before the proof.
             expected: Expected::Same(resolved(json!({
                 "status": "invalid",
                 "reason": "encodingTooLarge",

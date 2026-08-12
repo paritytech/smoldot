@@ -15,10 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// Submits each case in PARITY_CASES to smoldot and checks its answer against the one a
-// full node already gave for the same statement. Rust submits to the full node first and
-// passes the answers in, so nothing has to travel back from here — the PASS/FAIL of each
-// case is the whole result.
+// Submits each case in PARITY_CASES to smoldot and checks its answer against `expected`, which
+// Rust has already reconciled with the one a full node gave for the same statement. Nothing has
+// to travel back from here — the PASS/FAIL of each case is the whole result.
 //
 // Answers are shaped `{"result": <value>}` or `{"errorCode": <number>}` on both sides.
 // A rejection keeps only its code: the messages are free-form and differ between
@@ -58,13 +57,17 @@ async function submitOnce(rpc, para, hex) {
 }
 
 export default async function statementStoreSubmitParity(ctx) {
-  const { report, env, files } = ctx;
+  const { report, files } = ctx;
   const rpc = createRpc(ctx.client);
 
   if (!files.RELAY_CHAIN_SPEC || !files.PARA_CHAIN_SPEC || !files.PARITY_CASES) {
     throw new Error("Required inputs: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, PARITY_CASES");
   }
   const cases = JSON.parse(files.PARITY_CASES);
+  // An empty list reports nothing and exits green, which reads as parity.
+  if (!Array.isArray(cases) || cases.length === 0) {
+    throw new Error("PARITY_CASES holds no case to compare");
+  }
 
   const relay = await rpc.addChain({ chainSpec: files.RELAY_CHAIN_SPEC });
   const para = await rpc.addChain({
@@ -89,7 +92,10 @@ export default async function statementStoreSubmitParity(ctx) {
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       actual = await submitOnce(rpc, para, testCase.hex);
       if (!retry || actual.result?.status === "new") break;
-      if (attempt === MAX_RETRIES - 1) peersSettling = false;
+      if (attempt === MAX_RETRIES - 1) {
+        peersSettling = false;
+        break;
+      }
       ctx.log(
         `${testCase.name}: got ${JSON.stringify(actual)}, retrying in ${RETRY_DELAY_MS}ms...`,
       );
