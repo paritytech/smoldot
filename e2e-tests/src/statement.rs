@@ -27,7 +27,7 @@ use std::{
 use zombienet_sdk::{
     subxt::{
         backend::rpc::RpcClient,
-        ext::subxt_rpcs::{client::RpcSubscription, rpc_params},
+        ext::subxt_rpcs::{client::RpcSubscription, rpc_params, Error as RpcsError},
     },
     Arg, LocalFileSystem, Network, NetworkConfigBuilder, NetworkNode,
 };
@@ -58,6 +58,15 @@ pub fn statement_allowance_key(account_id: impl AsRef<[u8]>) -> Vec<u8> {
 const PEOPLE_WESTEND_LOCAL_SPEC: &str =
     include_str!("../chain-specs/people-westend-local-spec.json");
 
+/// Statements one account may keep in a store, as granted by the chain spec.
+///
+/// Small enough that a test can fill an account in a handful of submissions, and still above what
+/// any single statement-store test puts on one account.
+pub const ALLOWANCE_MAX_COUNT: u32 = 5;
+
+/// Total data bytes one account may keep in a store, as granted by the chain spec.
+pub const ALLOWANCE_MAX_SIZE: u32 = 1_000_000;
+
 /// Creates a parachain chain spec with a statement allowance for each given public key.
 pub fn create_para_chain_spec_with_allowances(
     pubkeys: &[[u8; 32]],
@@ -73,12 +82,10 @@ pub fn create_para_chain_spec_with_allowances(
         .and_then(|t| t.as_object_mut())
         .ok_or_else(|| anyhow!("Failed to access genesis.raw.top in chain spec"))?;
 
-    // Storage value: SCALE-encoded StatementAllowance { max_count: 100u32, max_size: 1_000_000u32 }
-    let max_count = 100u32;
-    let max_size = 1_000_000u32;
+    // Storage value: SCALE-encoded StatementAllowance { max_count, max_size }
     let mut allowance_bytes = Vec::with_capacity(8);
-    allowance_bytes.extend_from_slice(&max_count.to_le_bytes());
-    allowance_bytes.extend_from_slice(&max_size.to_le_bytes());
+    allowance_bytes.extend_from_slice(&ALLOWANCE_MAX_COUNT.to_le_bytes());
+    allowance_bytes.extend_from_slice(&ALLOWANCE_MAX_SIZE.to_le_bytes());
     let storage_value = format!("0x{}", hex::encode(&allowance_bytes));
 
     for pubkey in pubkeys {
@@ -193,7 +200,15 @@ pub async fn spawn_network(
 
 /// Returns a deterministic Ed25519 keypair (seed, public key) for testing.
 pub fn test_keypair() -> ([u8; 32], [u8; 32]) {
-    let seed = [1u8; 32];
+    keypair_from_byte(1)
+}
+
+/// Returns a deterministic Ed25519 keypair (seed, public key) whose seed is `byte` repeated.
+///
+/// Lets a test hold several accounts apart — one granted an allowance, one deliberately without,
+/// one whose store limits it is about to exhaust.
+pub fn keypair_from_byte(byte: u8) -> ([u8; 32], [u8; 32]) {
+    let seed = [byte; 32];
     let signing_key = SigningKey::from_bytes(&seed);
     let pubkey = signing_key.verifying_key().to_bytes();
     (seed, pubkey)
@@ -316,11 +331,112 @@ pub async fn receive_statements(
 
 /// Creates a signed Ed25519 statement and returns its hex-encoded form.
 pub fn create_test_statement(seed: &[u8; 32], topic: &[u8; 32], data: &[u8]) -> String {
+    create_flawed_statement(seed, topic, data, StatementFlaw::None)
+}
+
+/// How a test statement deviates from one a statement store accepts.
+///
+/// Each variant trips exactly one of the checks `Store::submit` runs, so a client can be probed
+/// one rejection reason at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatementFlaw {
+    /// No deviation: signed, far-future expiry, well under the size limit.
+    None,
+    /// Expiry in the past, and no proof either.
+    ///
+    /// Carrying two flaws at once is deliberate: it pins the order of the checks. A client
+    /// applying them as `Store::submit` does reports `alreadyExpired`; one checking the proof
+    /// first reports `noProof`.
+    ExpiredAndUnsigned,
+    /// No authenticity proof.
+    NoProof,
+    /// Encoding above the maximum statement size, but otherwise valid.
+    TooLarge,
+    /// A data field larger than an account's statement allowance, while the encoding as a whole
+    /// stays under the maximum statement size.
+    ///
+    /// The two limits are checked at different stages and against different measurements — the
+    /// encoded size against a global constant, the data length against the account's allowance —
+    /// so this trips the allowance without tripping [`StatementFlaw::TooLarge`].
+    DataOverAllowance,
+    /// A well-formed proof whose signature covers different bytes.
+    BadProof,
+}
+
+/// Never-expiring statement expiry: the timestamp occupies the upper 32 bits.
+pub const FAR_FUTURE_EXPIRY: u64 = (u32::MAX as u64) << 32;
+
+/// One second of expiry below [`FAR_FUTURE_EXPIRY`], for the cases that need a statement a store
+/// will treat as lower priority than one it already holds.
+pub const LOWER_PRIORITY_EXPIRY: u64 = ((u32::MAX - 1) as u64) << 32;
+
+/// Creates a hex-encoded statement carrying `flaw`.
+pub fn create_flawed_statement(
+    seed: &[u8; 32],
+    topic: &[u8; 32],
+    data: &[u8],
+    flaw: StatementFlaw,
+) -> String {
+    // Expiry: upper 32 bits = the expiration timestamp in seconds since the UNIX epoch, lower 32
+    // bits = seq. `u32::MAX` never expires; `1` expired in 1970.
+    let expiry = match flaw {
+        StatementFlaw::ExpiredAndUnsigned => 1 << 32,
+        _ => FAR_FUTURE_EXPIRY,
+    };
+
+    let payload = match flaw {
+        // Clears `MAX_STATEMENT_SIZE` (1 MiB - 1) on its own, whatever the rest encodes to.
+        StatementFlaw::TooLarge => vec![0u8; 1024 * 1024],
+        // Above `ALLOWANCE_MAX_SIZE`, yet small enough that the surrounding encoding still leaves
+        // the whole statement under `MAX_STATEMENT_SIZE`.
+        StatementFlaw::DataOverAllowance => vec![0u8; ALLOWANCE_MAX_SIZE as usize + 10_000],
+        _ => data.to_vec(),
+    };
+
+    build_statement(seed, topic, &payload, expiry, None, flaw)
+}
+
+/// Creates a signed hex-encoded statement bound to `channel`, at the given `expiry`.
+///
+/// A store keeps one statement per (account, channel) pair, so two of these on one channel let a
+/// test drive its priority comparison.
+pub fn create_channel_statement(
+    seed: &[u8; 32],
+    topic: &[u8; 32],
+    data: &[u8],
+    channel: &[u8; 32],
+    expiry: u64,
+) -> String {
+    build_statement(
+        seed,
+        topic,
+        data,
+        expiry,
+        Some(*channel),
+        StatementFlaw::None,
+    )
+}
+
+/// Creates a signed hex-encoded statement at the given `expiry`.
+pub fn create_statement_with_expiry(
+    seed: &[u8; 32],
+    topic: &[u8; 32],
+    data: &[u8],
+    expiry: u64,
+) -> String {
+    build_statement(seed, topic, data, expiry, None, StatementFlaw::None)
+}
+
+fn build_statement(
+    seed: &[u8; 32],
+    topic: &[u8; 32],
+    data: &[u8],
+    expiry: u64,
+    channel: Option<[u8; 32]>,
+    flaw: StatementFlaw,
+) -> String {
     let signing_key = SigningKey::from_bytes(seed);
     let pubkey = signing_key.verifying_key().to_bytes();
-
-    // Expiry: upper 32 bits = u32::MAX (never expires), lower 32 bits = 0 (seq)
-    let expiry: u64 = (u32::MAX as u64) << 32;
 
     // The signature covers the statement encoded without its proof field and without the
     // leading SCALE compact field-count prefix (first byte of `encode_statement`).
@@ -328,21 +444,81 @@ pub fn create_test_statement(seed: &[u8; 32], topic: &[u8; 32], data: &[u8]) -> 
         proof: None,
         decryption_key: None,
         expiry,
-        channel: None,
+        channel,
         topics: vec![*topic],
         data: Some(data.to_vec()),
     };
     let unsigned_bytes = encode_statement(&unsigned).expect("valid statement");
-    let signature = signing_key.sign(&unsigned_bytes[1..]);
 
-    let signed = Statement {
-        proof: Some(Proof::Ed25519 {
-            signature: signature.to_bytes(),
+    let proof = match flaw {
+        StatementFlaw::ExpiredAndUnsigned | StatementFlaw::NoProof => None,
+        // Signing unrelated bytes yields a structurally valid proof that fails verification.
+        StatementFlaw::BadProof => Some(Proof::Ed25519 {
+            signature: signing_key.sign(b"not this statement").to_bytes(),
             signer: pubkey,
         }),
-        ..unsigned
+        StatementFlaw::None | StatementFlaw::TooLarge | StatementFlaw::DataOverAllowance => {
+            Some(Proof::Ed25519 {
+                signature: signing_key.sign(&unsigned_bytes[1..]).to_bytes(),
+                signer: pubkey,
+            })
+        }
     };
-    let encoded = encode_statement(&signed).expect("valid statement");
+
+    let encoded = encode_statement(&Statement { proof, ..unsigned }).expect("valid statement");
 
     format!("0x{}", hex::encode(&encoded))
+}
+
+/// A `statement_submit` answer, normalized so a full node's and smoldot's can be compared.
+///
+/// Errors keep only the code: the messages are free-form and differ between implementations
+/// without saying anything about the outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitAnswer {
+    /// The request resolved, carrying this `result`.
+    Resolved(Value),
+    /// The request was rejected with this JSON-RPC error code.
+    Rejected(i32),
+}
+
+impl std::fmt::Display for SubmitAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubmitAnswer::Resolved(value) => write!(f, "{value}"),
+            SubmitAnswer::Rejected(code) => write!(f, "error {code}"),
+        }
+    }
+}
+
+impl SubmitAnswer {
+    /// Renders this answer the way a shared test body renders smoldot's, so the two can be
+    /// compared inside the body.
+    ///
+    /// Shape: `{"result": <value>}` or `{"errorCode": <number>}`.
+    pub fn to_json(&self) -> Value {
+        match self {
+            SubmitAnswer::Resolved(value) => serde_json::json!({ "result": value }),
+            SubmitAnswer::Rejected(code) => serde_json::json!({ "errorCode": code }),
+        }
+    }
+}
+
+/// Submits a hex-encoded statement to a full node, normalizing the answer.
+///
+/// Unlike [`submit_statement`], a JSON-RPC error is an outcome rather than a failure: the whole
+/// point is to compare the rejections too.
+pub async fn submit_statement_answer(rpc: &RpcClient, stmt_hex: &str) -> SubmitAnswer {
+    match rpc
+        .request::<Value>("statement_submit", rpc_params![&stmt_hex])
+        .await
+    {
+        Ok(value) => SubmitAnswer::Resolved(value),
+        Err(RpcsError::User(user_error)) => SubmitAnswer::Rejected(user_error.code),
+        // A transport or deserialization failure says nothing about the statement, so it must not
+        // be silently folded into a comparable answer.
+        Err(other) => {
+            panic!("statement_submit on the full node failed at transport level: {other}")
+        }
+    }
 }
