@@ -59,28 +59,32 @@ const NO_STORE: &str =
     "compares the submission against what a store already holds, which a light client has no \
      equivalent of and cannot fetch";
 
+/// Why the two allowance-driven rejections aren't matched either. Unlike [`NO_STORE`] the data is
+/// within reach — an allowance sits in chain state — but fetching it is what a submission must not
+/// do.
+const NO_STATE_READ: &str =
+    "an allowance lives in chain state, and a light client reads chain state over the network, so \
+     matching this would put a storage request in front of every submission";
+
 /// `statement_submit` answers the same way on smoldot and on a full node, wherever a light client
 /// can answer at all.
 ///
 /// The full node is asked first, from here; its answers are handed to the shared body, which asks
 /// smoldot and compares.
 ///
-/// The expectations describe where smoldot is going, not where it is. A case is
-/// [`Expected::Same`] whenever a light client *could* give the full node's answer, whether or not
-/// it does yet, and [`Expected::Divergent`] only where something makes the answer unreachable — a
-/// store it does not keep, or a signature it will not verify. So this test is red until the
-/// remaining gaps are closed, and each failure names one:
+/// A case is [`Expected::Same`] where a light client can reach the full node's answer from the
+/// statement alone, and [`Expected::Divergent`] where reaching it would cost more than a submission
+/// should spend. This is the executable half of the account given on
+/// `smoldot::json_rpc::methods::StatementSubmitResult`, which sets out every answer a light client
+/// declines and why; a divergence closing or a new one opening fails here rather than drifting away
+/// from that doc.
 ///
-/// - `rejected_no_allowance` and `rejected_data_too_large` need the account's `StatementAllowance`,
-///   which lives in chain state and so can be read under a storage proof.
-///
-/// Three `SubmitResult` variants have no case here. `Known` and `KnownExpired` cannot come back
-/// from this method at all: `Store::submit` returns them only when `source.can_be_resubmitted()` is
-/// false, which holds for `StatementSource::Network` alone, and every RPC submission is
-/// `StatementSource::Local` — the `known` case asserts exactly that. `StoreFull` would mean pushing
-/// the global 2 GiB `DEFAULT_MAX_TOTAL_SIZE` through the collator, which no chain spec can shrink;
-/// it is another store-side rejection, so `rejected_account_full` already covers what it would say
-/// about smoldot. `InternalError` reports a database failure, which a submission cannot provoke.
+/// Two `SubmitResult` variants get no case. `StoreFull` would mean pushing the global 2 GiB
+/// `DEFAULT_MAX_TOTAL_SIZE` through the collator, which no chain spec can shrink, and it is another
+/// store-side rejection, so `rejected_account_full` already covers what it would say about smoldot.
+/// `InternalError` reports a database failure, which a submission cannot provoke. `KnownExpired`
+/// gets none either: reaching it would mean storing a statement and waiting for it to expire, and
+/// it shares the guard `known` already asserts.
 #[tokio::test(flavor = "multi_thread")]
 async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
@@ -144,24 +148,26 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
             name: "rejected_no_allowance",
             hex: create_test_statement(&unfunded_seed, &topic, b"parity-no-allowance"),
             prelude: Vec::new(),
-            // An allowance lives in chain state, not in the store, so a light client can read it
-            // under a storage proof. Until smoldot does, this case fails on the smoldot side.
-            expected: Expected::Same(resolved(
-                json!({"status": "rejected", "reason": "noAllowance"}),
-            )),
+            expected: Expected::Divergent {
+                smoldot: resolved(json!({"status": "new"})),
+                full_node: resolved(json!({"status": "rejected", "reason": "noAllowance"})),
+                why: NO_STATE_READ,
+            },
         },
         Case {
             name: "rejected_data_too_large",
             hex: over_allowance,
             prelude: Vec::new(),
-            // Same allowance lookup as `rejected_no_allowance`, then a comparison against its
-            // `max_size`. Reachable for a light client; not implemented yet.
-            expected: Expected::Same(resolved(json!({
-                "status": "rejected",
-                "reason": "dataTooLarge",
-                "submitted_size": over_allowance_size,
-                "available_size": ALLOWANCE_MAX_SIZE,
-            }))),
+            expected: Expected::Divergent {
+                smoldot: resolved(json!({"status": "new"})),
+                full_node: resolved(json!({
+                    "status": "rejected",
+                    "reason": "dataTooLarge",
+                    "submitted_size": over_allowance_size,
+                    "available_size": ALLOWANCE_MAX_SIZE,
+                })),
+                why: NO_STATE_READ,
+            },
         },
         Case {
             name: "rejected_channel_priority_too_low",

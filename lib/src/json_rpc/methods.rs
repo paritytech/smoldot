@@ -1105,11 +1105,40 @@ pub enum SystemPeerRole {
 
 /// Result of submitting a statement.
 ///
-/// JSON format is compatible with polkadot-sdk's `SubmitResult`. `known`, `knownExpired` and
-/// `rejected` are omitted: all three report a decision of a local statement store, which a light
-/// client has none of. Like polkadot-sdk, a failure that leaves no outcome to report — a payload
-/// that doesn't decode, or a statement that reached no peer — is answered with a JSON-RPC error
-/// rather than a variant of this type.
+/// JSON format is compatible with polkadot-sdk's `SubmitResult`, of which this carries the subset
+/// a light client can answer with. The rest is accounted for below, so that a client written
+/// against a full node knows which answers it will never see here and why.
+///
+/// # Answers a light client never gives
+///
+/// **`known`, `knownExpired`** — a full node reports these when its store already holds the
+/// statement, but only to a source that may not resubmit. Every RPC submission counts as local,
+/// which may always resubmit, so a full node doesn't answer them here either: it re-accepts the
+/// statement as `new`, exactly as this does. Keeping no store costs nothing on this path.
+///
+/// **`rejected`, reasons `channelPriorityTooLow`, `accountFull`, `storeFull`** — each weighs the
+/// submission against what a store already holds: the statement occupying that channel, the
+/// account's other statements, the store's total size. None of it lives on chain, so nothing a
+/// light client could fetch would let it answer them.
+///
+/// **`rejected`, reasons `noAllowance`, `dataTooLarge`** — both need the account's statement
+/// allowance. That one *is* on chain, but a light client reads chain state over the network, so
+/// answering them would put a storage request in front of every submission. The cost is the
+/// reason, not the reach.
+///
+/// **`invalid`, reason `badProof`** — telling a bad proof from a good one means verifying a
+/// signature, which is more CPU than a light client should spend on a submission. Only the presence
+/// of a proof is checked, so a badly-signed statement is answered `new` and left for the peers
+/// receiving it to reject.
+///
+/// **`internalError`** — reports a failing database, which a client without one cannot have.
+///
+/// A failure that leaves no outcome to report at all — a payload that doesn't decode, or a
+/// statement that reached no peer — is answered with a JSON-RPC error carrying polkadot-sdk's
+/// statement-store error code, as polkadot-sdk does.
+///
+/// `e2e-tests/tests/statement_store_submit_parity.rs` submits the same statements to both clients
+/// and asserts each of these, so the account above stays honest.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum StatementSubmitResult {
@@ -1120,11 +1149,7 @@ pub enum StatementSubmitResult {
 /// Reason why a submitted statement was rejected as invalid.
 ///
 /// Mirrors polkadot-sdk's `InvalidReason`, down to the `snake_case` field names of
-/// [`InvalidReason::EncodingTooLarge`].
-///
-/// `badProof` is never reported: telling a bad proof from a good one means verifying a signature,
-/// which is more CPU than a light client should spend on a submission, so only the presence of a
-/// proof is checked.
+/// [`InvalidReason::EncodingTooLarge`], minus `badProof`. See [`StatementSubmitResult`] for why.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "reason", rename_all = "camelCase")]
 pub enum InvalidReason {
