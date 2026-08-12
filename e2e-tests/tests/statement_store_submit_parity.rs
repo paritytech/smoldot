@@ -21,30 +21,22 @@ use smoldot::network::codec::MAX_STATEMENT_SIZE;
 use smoldot_e2e_tests::statement::*;
 use smoldot_e2e_tests::*;
 
-/// Answers the two clients are expected to give for one submitted statement.
+/// Expected answers of light and full nodes
 enum Expected {
-    /// Both answer the same thing. Smoldot reaching parity with the full node is the point of
-    /// these cases.
+    /// Both answer are same
     Same(SubmitAnswer),
-    /// The two answer differently, on purpose. Pinned rather than skipped so that closing a gap,
-    /// or opening a new one, fails here and gets decided deliberately.
+    /// The two answers are different on purpose
     Divergent {
-        smoldot: SubmitAnswer,
+        light_node: SubmitAnswer,
         full_node: SubmitAnswer,
         why: &'static str,
     },
 }
 
-/// One statement submitted to both clients.
+/// One statement submitted to both clients
 struct Case {
-    /// Names the `SubmitResult` variant this case provokes on a full node.
     name: &'static str,
-    /// The statement whose answer is compared. Both clients are given the same bytes: the full
-    /// node is asked for every case before smoldot is started, so nothing smoldot broadcasts can
-    /// reach a collator in time to change an answer already recorded.
     hex: String,
-    /// Statements the full node must accept first for `hex` to provoke the intended answer. Not
-    /// given to smoldot, which has no store for them to land in.
     prelude: Vec<String>,
     expected: Expected,
 }
@@ -53,21 +45,14 @@ fn resolved(value: Value) -> SubmitAnswer {
     SubmitAnswer::Resolved(value)
 }
 
-/// Why a rejection that weighs the submission against a store's existing contents can never be
-/// matched: none of what it compares against lives on chain, so nothing a light client can fetch
-/// would answer it.
 const NO_STORE: &str =
     "compares the submission against what a store already holds, which a light client has no \
      equivalent of and cannot fetch";
 
-/// Why the two allowance-driven rejections aren't matched either. Unlike [`NO_STORE`] the data is
-/// within reach — an allowance sits in chain state — but fetching it is what a submission must not
-/// do.
 const NO_STATE_READ: &str =
     "an allowance lives in chain state, and a light client reads chain state over the network, so \
      matching this would put a storage request in front of every submission";
 
-/// Why a badly-signed statement is answered `new` rather than rejected.
 const BAD_PROOF_COSTS_CPU: &str =
     "telling a bad proof from a good one means verifying a signature, and a light client runs \
      where CPU is the scarce resource, so only the presence of a proof is checked";
@@ -78,28 +63,20 @@ const BAD_PROOF_COSTS_CPU: &str =
 /// The full node is asked first, from here; its answers are handed to the shared body, which asks
 /// smoldot and compares.
 ///
-/// A case is [`Expected::Same`] where a light client can reach the full node's answer from the
-/// statement alone, and [`Expected::Divergent`] where reaching it would cost more than a submission
-/// should spend. This is the executable half of the account given on
-/// `smoldot::json_rpc::methods::StatementSubmitResult`, which sets out every answer a light client
-/// declines and why; a divergence closing or a new one opening fails here rather than drifting away
-/// from that doc.
+/// Three answers get no case:
 ///
-/// Three answers get no case. `StoreFull` would mean pushing the global 2 GiB
-/// `DEFAULT_MAX_TOTAL_SIZE` through the collator, which no chain spec can shrink, and it is another
-/// store-side rejection, so `rejected_account_full` already covers what it would say about smoldot.
-/// `InternalError` reports a database failure, which a submission cannot provoke. `KnownExpired`
-/// gets none either: reaching it would mean storing a statement and waiting for it to expire, and
-/// it shares the guard `known` already asserts.
+/// - `StoreFull` would mean pushing the global 2 GiB `DEFAULT_MAX_TOTAL_SIZE` through the
+///   collator, which no chain spec can shrink, and it is another store-side rejection, so
+///   `rejected_account_full` already covers what it would say about smoldot.
+/// - `InternalError` reports a database failure, which a submission cannot provoke.
+/// - `KnownExpired` would mean storing a statement and waiting for it to expire, and it shares
+///   the guard `known` already asserts.
 #[tokio::test(flavor = "multi_thread")]
 async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     );
 
-    // Three accounts: `allowed` for the cases a store accepts or rejects on the statement's own
-    // merits, `unfunded` deliberately left out of the chain spec, and `fillable` kept apart so
-    // that filling it to the allowance's limit stays independent of what the other cases store.
     let (allowed_seed, allowed_key) = test_keypair();
     let (unfunded_seed, _) = keypair_from_byte(2);
     let (fillable_seed, fillable_key) = keypair_from_byte(3);
@@ -154,7 +131,7 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
             hex: create_test_statement(&unfunded_seed, &topic, b"parity-no-allowance"),
             prelude: Vec::new(),
             expected: Expected::Divergent {
-                smoldot: resolved(json!({"status": "new"})),
+                light_node: resolved(json!({"status": "new"})),
                 full_node: resolved(json!({"status": "rejected", "reason": "noAllowance"})),
                 why: NO_STATE_READ,
             },
@@ -164,7 +141,7 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
             hex: over_allowance,
             prelude: Vec::new(),
             expected: Expected::Divergent {
-                smoldot: resolved(json!({"status": "new"})),
+                light_node: resolved(json!({"status": "new"})),
                 full_node: resolved(json!({
                     "status": "rejected",
                     "reason": "dataTooLarge",
@@ -191,7 +168,7 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
                 Some(channel),
             )],
             expected: Expected::Divergent {
-                smoldot: resolved(json!({"status": "new"})),
+                light_node: resolved(json!({"status": "new"})),
                 full_node: resolved(json!({
                     "status": "rejected",
                     "reason": "channelPriorityTooLow",
@@ -224,7 +201,7 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
                 })
                 .collect(),
             expected: Expected::Divergent {
-                smoldot: resolved(json!({"status": "new"})),
+                light_node: resolved(json!({"status": "new"})),
                 full_node: resolved(json!({
                     "status": "rejected",
                     "reason": "accountFull",
@@ -245,7 +222,7 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
             hex: flawed("parity-bad-proof", StatementFlaw::BadProof),
             prelude: Vec::new(),
             expected: Expected::Divergent {
-                smoldot: resolved(json!({"status": "new"})),
+                light_node: resolved(json!({"status": "new"})),
                 full_node: resolved(json!({"status": "invalid", "reason": "badProof"})),
                 why: BAD_PROOF_COSTS_CPU,
             },
@@ -254,9 +231,7 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
             name: "invalid_encoding_too_large",
             hex: too_large,
             prelude: Vec::new(),
-            // The only rejection both clients share that carries a payload, so it is also what
-            // pins the `snake_case` field names this method uses. Carries no proof either, so it
-            // pins the order too: size is checked before the proof.
+            // Carries no proof either, so it pins the order: size is checked before the proof.
             expected: Expected::Same(resolved(json!({
                 "status": "invalid",
                 "reason": "encodingTooLarge",
@@ -302,13 +277,13 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
 
         let full_node = submit_statement_answer(&alice_rpc, &case.hex).await;
 
-        let (want_smoldot, want_full_node, why) = match &case.expected {
+        let (want_light_node, want_full_node, why) = match &case.expected {
             Expected::Same(answer) => (answer, answer, None),
             Expected::Divergent {
-                smoldot,
+                light_node,
                 full_node,
                 why,
-            } => (smoldot, full_node, Some(*why)),
+            } => (light_node, full_node, Some(*why)),
         };
 
         info!("{:<35} full node answered {full_node}", case.name);
@@ -325,7 +300,7 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
             "name": case.name,
             "hex": case.hex,
             "fullNode": full_node.to_json(),
-            "expected": want_smoldot.to_json(),
+            "expected": want_light_node.to_json(),
             "why": why,
         }));
     }
