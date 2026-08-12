@@ -19,7 +19,7 @@ use anyhow::anyhow;
 use ed25519_dalek::{Signer, SigningKey};
 use log::info;
 use serde_json::Value;
-use smoldot::network::codec::{encode_statement, Proof, Statement};
+use smoldot::network::codec::{encode_statement, Proof, Statement, MAX_STATEMENT_SIZE};
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -60,12 +60,19 @@ const PEOPLE_WESTEND_LOCAL_SPEC: &str =
 
 /// Statements one account may keep in a store, as granted by the chain spec.
 ///
-/// Small enough that a test can fill an account in a handful of submissions, and still above what
-/// any single statement-store test puts on one account.
-pub const ALLOWANCE_MAX_COUNT: u32 = 5;
+/// Low enough that a test can fill an account in a handful of submissions, with room to spare above
+/// the most any statement-store test puts on one account.
+pub const ALLOWANCE_MAX_COUNT: u32 = 10;
 
 /// Total data bytes one account may keep in a store, as granted by the chain spec.
 pub const ALLOWANCE_MAX_SIZE: u32 = 1_000_000;
+
+/// Data length of a [`StatementFlaw::DataOverAllowance`] statement.
+///
+/// Over [`ALLOWANCE_MAX_SIZE`], so a store rejects it against the account's allowance, yet far
+/// enough under [`MAX_STATEMENT_SIZE`] that the surrounding encoding cannot push it over and trip
+/// the size check first.
+pub const DATA_OVER_ALLOWANCE_LEN: usize = ALLOWANCE_MAX_SIZE as usize + 10_000;
 
 /// Creates a parachain chain spec with a statement allowance for each given public key.
 pub fn create_para_chain_spec_with_allowances(
@@ -384,47 +391,31 @@ pub fn create_flawed_statement(
         _ => FAR_FUTURE_EXPIRY,
     };
 
-    let payload = match flaw {
-        // Clears `MAX_STATEMENT_SIZE` (1 MiB - 1) on its own, whatever the rest encodes to.
-        StatementFlaw::TooLarge => vec![0u8; 1024 * 1024],
-        // Above `ALLOWANCE_MAX_SIZE`, yet small enough that the surrounding encoding still leaves
-        // the whole statement under `MAX_STATEMENT_SIZE`.
-        StatementFlaw::DataOverAllowance => vec![0u8; ALLOWANCE_MAX_SIZE as usize + 10_000],
-        _ => data.to_vec(),
-    };
+    // The size-driven flaws keep `data` as their prefix and pad to the length they need, so the
+    // caller's bytes still distinguish one statement from another.
+    let mut payload = data.to_vec();
+    match flaw {
+        // Clears `MAX_STATEMENT_SIZE` on its own, whatever the rest encodes to.
+        StatementFlaw::TooLarge => payload.resize(MAX_STATEMENT_SIZE + 1, 0),
+        StatementFlaw::DataOverAllowance => payload.resize(DATA_OVER_ALLOWANCE_LEN, 0),
+        _ => {}
+    }
 
     build_statement(seed, topic, &payload, expiry, None, flaw)
 }
 
-/// Creates a signed hex-encoded statement bound to `channel`, at the given `expiry`.
+/// Creates a signed hex-encoded statement at the given `expiry`, optionally bound to a channel.
 ///
-/// A store keeps one statement per (account, channel) pair, so two of these on one channel let a
-/// test drive its priority comparison.
-pub fn create_channel_statement(
-    seed: &[u8; 32],
-    topic: &[u8; 32],
-    data: &[u8],
-    channel: &[u8; 32],
-    expiry: u64,
-) -> String {
-    build_statement(
-        seed,
-        topic,
-        data,
-        expiry,
-        Some(*channel),
-        StatementFlaw::None,
-    )
-}
-
-/// Creates a signed hex-encoded statement at the given `expiry`.
+/// A store keeps one statement per (account, channel) pair and orders statements by expiry, so
+/// these two knobs are what a test needs to drive its priority comparisons.
 pub fn create_statement_with_expiry(
     seed: &[u8; 32],
     topic: &[u8; 32],
     data: &[u8],
     expiry: u64,
+    channel: Option<[u8; 32]>,
 ) -> String {
-    build_statement(seed, topic, data, expiry, None, StatementFlaw::None)
+    build_statement(seed, topic, data, expiry, channel, StatementFlaw::None)
 }
 
 fn build_statement(

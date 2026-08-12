@@ -19,6 +19,7 @@ use crate::network_service::{self, BroadcastStatementResult};
 use alloc::{string::String, vec::Vec};
 use core::{num::NonZero, time::Duration};
 use smoldot::json_rpc::methods::{HexString, InvalidReason, StatementSubmitResult, TopicFilter};
+use smoldot::json_rpc::parse;
 use smoldot::network::codec;
 
 /// Configuration for the Statement Store protocol.
@@ -85,6 +86,32 @@ pub enum StatementSubmitError {
     /// The statement is valid but reached no peer. A light client keeps no store, so a statement
     /// nobody received is nowhere at all.
     NoConnectedPeers,
+}
+
+impl StatementSubmitError {
+    /// Builds the JSON-RPC error response answering this failure.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `request_id_json` isn't valid JSON.
+    pub fn to_json_rpc_error(&self, request_id_json: &str) -> String {
+        // Both messages carry polkadot-sdk's prefix, which is the only thing telling its two
+        // failures apart: it answers each with the same code.
+        let message = match self {
+            StatementSubmitError::InvalidEncoding => {
+                "Statement store error: Error decoding statement"
+            }
+            StatementSubmitError::NoConnectedPeers => {
+                "Statement store error: No connected peers to broadcast the statement to"
+            }
+        };
+
+        parse::build_error_response(
+            request_id_json,
+            parse::ErrorResponse::ApplicationDefined(STATEMENT_STORE_ERROR_CODE, message),
+            None,
+        )
+    }
 }
 
 /// Validates a SCALE-encoded statement and broadcasts it to the network.
@@ -489,6 +516,20 @@ mod tests {
             BroadcastStatementResult { sent: 0, total: 0 }
         }));
         assert_eq!(result, Err(StatementSubmitError::NoConnectedPeers));
+    }
+
+    #[test]
+    fn submit_errors_carry_the_statement_store_code() {
+        // Both failures answer with polkadot-sdk's single statement-store code, telling themselves
+        // apart by message alone, exactly as it does.
+        assert_eq!(
+            StatementSubmitError::InvalidEncoding.to_json_rpc_error("7"),
+            r#"{"jsonrpc":"2.0","id":7,"error":{"code":7001,"message":"Statement store error: Error decoding statement"}}"#
+        );
+        assert_eq!(
+            StatementSubmitError::NoConnectedPeers.to_json_rpc_error("7"),
+            r#"{"jsonrpc":"2.0","id":7,"error":{"code":7001,"message":"Statement store error: No connected peers to broadcast the statement to"}}"#
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@
 
 use log::info;
 use serde_json::{json, Value};
+use smoldot::network::codec::MAX_STATEMENT_SIZE;
 use smoldot_e2e_tests::statement::*;
 use smoldot_e2e_tests::*;
 
@@ -65,6 +66,11 @@ const NO_STORE: &str =
 const NO_STATE_READ: &str =
     "an allowance lives in chain state, and a light client reads chain state over the network, so \
      matching this would put a storage request in front of every submission";
+
+/// Why a badly-signed statement is answered `new` rather than rejected.
+const BAD_PROOF_COSTS_CPU: &str =
+    "telling a bad proof from a good one means verifying a signature, and a light client runs \
+     where CPU is the scarce resource, so only the presence of a proof is checked";
 
 /// `statement_submit` answers the same way on smoldot and on a full node, wherever a light client
 /// can answer at all.
@@ -120,19 +126,14 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
     let too_large = flawed("parity-too-large", StatementFlaw::TooLarge);
     let over_allowance = flawed("parity-over-allowance", StatementFlaw::DataOverAllowance);
 
-    // `submitted_size` counts SCALE bytes, which is half the hex minus the `0x`; `data_len` counts
-    // the data field alone, which is what an allowance is measured against.
+    // `submitted_size` counts SCALE bytes, which is half the hex minus the `0x`. The allowance is
+    // measured against the data field alone, so that one is the payload length.
     let too_large_size = (too_large.len() - 2) / 2;
-    let over_allowance_size = ALLOWANCE_MAX_SIZE as usize + 10_000;
-    let max_statement_size = 1024 * 1024 - 1;
 
-    let accepted = create_test_statement(&allowed_seed, &topic, b"parity-new");
-
-    let cases =
-        vec![
+    let cases = vec![
         Case {
             name: "new",
-            hex: accepted.clone(),
+            hex: create_test_statement(&allowed_seed, &topic, b"parity-new"),
             prelude: Vec::new(),
             expected: Expected::Same(resolved(json!({"status": "new"}))),
         },
@@ -141,7 +142,11 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
             // Resubmitting a statement the store already holds. `known` is never the answer: it is
             // reserved for a source that may not resubmit, and an RPC submission always may.
             hex: create_test_statement(&allowed_seed, &topic, b"parity-known"),
-            prelude: vec![create_test_statement(&allowed_seed, &topic, b"parity-known")],
+            prelude: vec![create_test_statement(
+                &allowed_seed,
+                &topic,
+                b"parity-known",
+            )],
             expected: Expected::Same(resolved(json!({"status": "new"}))),
         },
         Case {
@@ -163,7 +168,7 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
                 full_node: resolved(json!({
                     "status": "rejected",
                     "reason": "dataTooLarge",
-                    "submitted_size": over_allowance_size,
+                    "submitted_size": DATA_OVER_ALLOWANCE_LEN,
                     "available_size": ALLOWANCE_MAX_SIZE,
                 })),
                 why: NO_STATE_READ,
@@ -171,19 +176,19 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
         },
         Case {
             name: "rejected_channel_priority_too_low",
-            hex: create_channel_statement(
+            hex: create_statement_with_expiry(
                 &allowed_seed,
                 &topic,
                 b"parity-channel-low",
-                &channel,
                 LOWER_PRIORITY_EXPIRY,
+                Some(channel),
             ),
-            prelude: vec![create_channel_statement(
+            prelude: vec![create_statement_with_expiry(
                 &allowed_seed,
                 &topic,
                 b"parity-channel-high",
-                &channel,
                 FAR_FUTURE_EXPIRY,
+                Some(channel),
             )],
             expected: Expected::Divergent {
                 smoldot: resolved(json!({"status": "new"})),
@@ -203,6 +208,7 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
                 &topic,
                 b"parity-account-full",
                 LOWER_PRIORITY_EXPIRY,
+                None,
             ),
             // Every filler shares one expiry: `by_priority` is keyed `{ hash, expiry }` and so
             // iterates in hash order, leaving `min_expiry` undecided if they differed.
@@ -213,6 +219,7 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
                         &topic,
                         format!("parity-filler-{i}").as_bytes(),
                         FAR_FUTURE_EXPIRY,
+                        None,
                     )
                 })
                 .collect(),
@@ -240,9 +247,7 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
             expected: Expected::Divergent {
                 smoldot: resolved(json!({"status": "new"})),
                 full_node: resolved(json!({"status": "invalid", "reason": "badProof"})),
-                why: "telling a bad proof from a good one means verifying a signature, and a light \
-                      client runs where CPU is the scarce resource, so smoldot checks only that a \
-                      proof is present",
+                why: BAD_PROOF_COSTS_CPU,
             },
         },
         Case {
@@ -255,7 +260,7 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
                 "status": "invalid",
                 "reason": "encodingTooLarge",
                 "submitted_size": too_large_size,
-                "max_size": max_statement_size,
+                "max_size": MAX_STATEMENT_SIZE,
             }))),
         },
         Case {
@@ -313,19 +318,22 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
         );
 
         // The full node's answer is asserted above, in Rust, where a `u64` expiry keeps its
-        // precision. The copy handed to the body is only there for the match/diverge relation and
-        // for its log line: JSON numbers past 2^53 lose their tail once the body parses them.
+        // precision. The copy handed to the body is only there for its log line: JSON numbers past
+        // 2^53 lose their tail once the body parses them.
         payload.push(json!({
             "name": case.name,
             "hex": case.hex,
             "fullNode": full_node.to_json(),
             "expected": want_smoldot.to_json(),
-            "mustMatch": why.is_none(),
             "why": why,
-            // Only a case expected to succeed is worth waiting on for gossip peers.
-            "retry": matches!(want_smoldot, SubmitAnswer::Resolved(v) if v["status"] == "new"),
         }));
     }
+
+    let cases_file = tempfile::NamedTempFile::new()?;
+    std::fs::write(
+        cases_file.path(),
+        serde_json::to_vec(&Value::Array(payload))?,
+    )?;
 
     info!("Handing {} cases to smoldot", cases.len());
     run_shared_test(
@@ -342,7 +350,7 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
             ),
             (
                 "PARITY_CASES",
-                &serde_json::to_string(&Value::Array(payload))?,
+                cases_file.path().to_str().expect("UTF-8 path"),
             ),
         ],
     )

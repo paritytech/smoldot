@@ -26,8 +26,7 @@
 
 import { createRpc } from "./rpc.js";
 
-export const fileInputs = ["RELAY_CHAIN_SPEC", "PARA_CHAIN_SPEC"];
-export const envInputs = ["PARITY_CASES"];
+export const fileInputs = ["RELAY_CHAIN_SPEC", "PARA_CHAIN_SPEC", "PARITY_CASES"];
 
 // Statements are gossiped, not synced, so peers are all this needs.
 const PEER_SETTLE_MS = 10_000;
@@ -62,10 +61,10 @@ export default async function statementStoreSubmitParity(ctx) {
   const { report, env, files } = ctx;
   const rpc = createRpc(ctx.client);
 
-  const cases = JSON.parse(env.PARITY_CASES);
-  if (!files.RELAY_CHAIN_SPEC || !files.PARA_CHAIN_SPEC || !cases.length) {
+  if (!files.RELAY_CHAIN_SPEC || !files.PARA_CHAIN_SPEC || !files.PARITY_CASES) {
     throw new Error("Required inputs: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, PARITY_CASES");
   }
+  const cases = JSON.parse(files.PARITY_CASES);
 
   const relay = await rpc.addChain({ chainSpec: files.RELAY_CHAIN_SPEC });
   const para = await rpc.addChain({
@@ -77,26 +76,29 @@ export default async function statementStoreSubmitParity(ctx) {
 
   await new Promise((r) => setTimeout(r, PEER_SETTLE_MS));
 
-  for (const testCase of cases) {
-    let actual = await submitOnce(rpc, para, testCase.hex);
+  // Once one case has waited out the full retry budget without reaching a peer, the rest would
+  // only repeat that wait: peers are demonstrably not settling.
+  let peersSettling = true;
 
-    // A statement that reached no peer is answered with an error while gossip is still
-    // settling. Only cases expected to succeed are worth waiting on; for the rest the first
-    // answer is already the final one.
-    for (let attempt = 1; testCase.retry && attempt < MAX_RETRIES; attempt++) {
-      if (actual.result?.status === "new") break;
-      ctx.log(`${testCase.name}: got ${JSON.stringify(actual)}, retrying in 5s...`);
-      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+  for (const testCase of cases) {
+    // A statement that reached no peer is answered with an error while gossip is still settling,
+    // so only the cases expected to succeed are worth waiting on. For the rest the first answer is
+    // already the final one.
+    const retry = peersSettling && testCase.expected.result?.status === "new";
+    let actual;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       actual = await submitOnce(rpc, para, testCase.hex);
+      if (!retry || actual.result?.status === "new") break;
+      if (attempt === MAX_RETRIES - 1) peersSettling = false;
+      ctx.log(
+        `${testCase.name}: got ${JSON.stringify(actual)}, retrying in ${RETRY_DELAY_MS}ms...`,
+      );
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
     }
 
-    const matchesFullNode = canonical(actual) === canonical(testCase.fullNode);
-    const ok =
-      canonical(actual) === canonical(testCase.expected) &&
-      matchesFullNode === testCase.mustMatch;
-
+    const ok = canonical(actual) === canonical(testCase.expected);
     report(
-      `${testCase.name} (${testCase.mustMatch ? "must match full node" : testCase.why})`,
+      `${testCase.name} (${testCase.why ?? "must match full node"})`,
       ok,
       `smoldot=${JSON.stringify(actual)} fullNode=${JSON.stringify(testCase.fullNode)}` +
         (ok ? "" : ` expected smoldot=${JSON.stringify(testCase.expected)}`),

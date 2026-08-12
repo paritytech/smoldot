@@ -3016,27 +3016,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let response = match result {
                             Ok(result) => methods::Response::statement_submit(result)
                                 .to_json_response(request_id_json),
-                            Err(super::statement::StatementSubmitError::InvalidEncoding) => {
-                                parse::build_error_response(
-                                    request_id_json,
-                                    parse::ErrorResponse::ApplicationDefined(
-                                        super::statement::STATEMENT_STORE_ERROR_CODE,
-                                        "Statement store error: Error decoding statement",
-                                    ),
-                                    None,
-                                )
-                            }
-                            Err(super::statement::StatementSubmitError::NoConnectedPeers) => {
-                                parse::build_error_response(
-                                    request_id_json,
-                                    parse::ErrorResponse::ApplicationDefined(
-                                        super::statement::STATEMENT_STORE_ERROR_CODE,
-                                        "Statement store error: No connected peers to broadcast \
-                                         the statement to",
-                                    ),
-                                    None,
-                                )
-                            }
+                            Err(error) => error.to_json_rpc_error(request_id_json),
                         };
 
                         let _ = me.responses_tx.send(response).await;
