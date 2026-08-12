@@ -53,30 +53,30 @@ export default async function statementStoreSubmission(ctx) {
 
   await new Promise((r) => setTimeout(r, PEER_SETTLE_MS));
 
-  let ok = false;
-  let outcome;
+  let submitResult;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    // A statement reaching no peer is answered with a JSON-RPC error, which `sendRpcAndWait`
-    // throws. That is the expected answer while gossip peers are still settling, so it has to be
-    // retried like any other non-`new` one rather than aborting the test.
     try {
-      const submitResult = await rpc.sendRpcAndWait(para, "statement_submit", [statementHex]);
-      // Smoldot returns {"status":"new"} on success
-      ok = submitResult?.status === "new";
-      outcome = JSON.stringify(submitResult);
+      submitResult = await rpc.sendRpcAndWait(para, "statement_submit", [statementHex]);
     } catch (error) {
-      outcome = error.message;
+      // A statement that reached no peer is answered with a JSON-RPC error. While gossip peers are
+      // still settling that is an expected answer, so it retries like any other non-`new` one.
+      if (!error.rpcError) throw error;
+      submitResult = error.rpcError;
     }
 
-    if (ok) break;
+    // Smoldot returns {"status":"new"} on success
+    if (submitResult?.status === "new") break;
     if (attempt < MAX_RETRIES - 1) {
-      ctx.log(`statement_submit attempt ${attempt + 1} returned: ${outcome}, retrying in 5s...`);
+      ctx.log(
+        `statement_submit attempt ${attempt + 1} returned: ${JSON.stringify(submitResult)}, retrying in 5s...`,
+      );
       await new Promise((r) => setTimeout(r, 5000));
     }
   }
 
-  report("statement_submit accepted", ok, outcome);
+  const ok = submitResult?.status === "new";
+  report("statement_submit accepted", ok, JSON.stringify(submitResult));
   if (!ok) {
-    throw new Error(`statement_submit never returned status "new": ${outcome}`);
+    throw new Error(`statement_submit never returned status "new": ${JSON.stringify(submitResult)}`);
   }
 }
