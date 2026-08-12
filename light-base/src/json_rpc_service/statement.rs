@@ -18,10 +18,7 @@
 use crate::network_service::{self, BroadcastStatementResult};
 use alloc::{string::String, vec::Vec};
 use core::{num::NonZero, time::Duration};
-use smoldot::json_rpc::methods::{
-    HexString, InternalError, InvalidReason, StatementSubmitInvalidReason, StatementSubmitOutcome,
-    StatementSubmitResult, TopicFilter,
-};
+use smoldot::json_rpc::methods::{self, HexString, StatementSubmitInvalidReason, TopicFilter};
 use smoldot::network::codec;
 
 /// Configuration for the Statement Store protocol.
@@ -72,85 +69,110 @@ impl StatementProtocolConfig {
     }
 }
 
-/// Validates a SCALE-encoded statement and broadcasts it to the network.
-///
-/// Returns the appropriate [`StatementSubmitResult`] based on the decode and broadcast outcome.
-/// The `broadcast` closure is only called if the statement is valid.
-pub async fn validate_and_broadcast_statement<F, Fut>(
-    encoded: &[u8],
-    broadcast: F,
-) -> StatementSubmitResult
-where
-    F: FnOnce(Vec<u8>) -> Fut,
-    Fut: core::future::Future<Output = BroadcastStatementResult>,
-{
-    if codec::decode_statement(encoded).is_err() {
-        return StatementSubmitResult::Invalid {
-            reason: InvalidReason::Encoding,
-        };
+/// Reason why a submitted statement failed validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidReason {
+    /// The statement's expiry is in the past.
+    AlreadyExpired,
+    /// The encoded statement exceeds [`codec::MAX_STATEMENT_SIZE`].
+    EncodingTooLarge {
+        /// Size in bytes of the submitted encoding.
+        submitted_size: usize,
+        /// Maximum allowed size in bytes.
+        max_size: usize,
+    },
+    /// The statement carries no authenticity proof.
+    NoProof,
+}
+
+impl InvalidReason {
+    /// Renders this reason the way `statement_submit` reports it.
+    pub fn to_legacy(&self) -> methods::InvalidReason {
+        match self {
+            InvalidReason::AlreadyExpired => methods::InvalidReason::AlreadyExpired,
+            InvalidReason::EncodingTooLarge {
+                submitted_size,
+                max_size,
+            } => methods::InvalidReason::EncodingTooLarge {
+                submitted_size: *submitted_size,
+                max_size: *max_size,
+            },
+            InvalidReason::NoProof => methods::InvalidReason::NoProof,
+        }
     }
 
-    let broadcasted = broadcast(encoded.to_vec()).await;
-    if broadcasted.total == 0 {
-        StatementSubmitResult::InternalError {
-            error: InternalError::NoConnectedPeers,
+    /// Renders this reason the way `statement_unstable_submit` reports it.
+    pub fn to_unstable(&self) -> StatementSubmitInvalidReason {
+        match self {
+            InvalidReason::AlreadyExpired => StatementSubmitInvalidReason::AlreadyExpired,
+            InvalidReason::EncodingTooLarge {
+                submitted_size,
+                max_size,
+            } => StatementSubmitInvalidReason::EncodingTooLarge {
+                submitted_size: *submitted_size,
+                max_size: *max_size,
+            },
+            InvalidReason::NoProof => StatementSubmitInvalidReason::NoProof,
         }
-    } else {
-        StatementSubmitResult::New
     }
 }
 
-/// Failure of a `statement_unstable_submit` request, reported as a JSON-RPC error rather than a
-/// [`StatementSubmitOutcome`].
+/// Outcome of [`validate_and_broadcast_statement`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StatementSubmitError {
-    /// The submitted bytes don't decode into a statement.
+pub enum SubmitOutcome {
+    /// The statement passed validation and reached at least one peer.
+    New,
+    /// The submitted bytes don't decode into a statement. Kept apart from [`InvalidReason`]
+    /// because, like polkadot-sdk, both submission methods answer it with a JSON-RPC error rather
+    /// than an `invalid` outcome.
     InvalidEncoding,
-    /// The statement is valid but reached no peer.
+    /// The statement failed validation and was not broadcast.
+    Invalid(InvalidReason),
+    /// The statement is valid but reached no peer. Answered with a JSON-RPC error: a light client
+    /// keeps no store, so a statement nobody received is nowhere at all.
     NoConnectedPeers,
 }
 
-/// Validates a SCALE-encoded statement and broadcasts it, following the
-/// `statement_unstable_submit` semantics.
+/// Validates a SCALE-encoded statement and broadcasts it to the network.
+///
+/// Serves both `statement_submit` and `statement_unstable_submit`, which validate identically and
+/// differ only in how they render the outcome — mirroring polkadot-sdk, where both sit on the same
+/// `Store::submit`.
 ///
 /// The checks run in the order polkadot-sdk's `Store::submit` applies them — expiry, then size, then
 /// proof — so that a client submitting a statement failing several of them is told the same reason a
 /// full node would give. Checks needing a local store or chain state are skipped.
-pub async fn validate_and_broadcast_statement_unstable<F, Fut>(
+///
+/// The `broadcast` closure is only called if the statement is valid.
+pub async fn validate_and_broadcast_statement<F, Fut>(
     encoded: &[u8],
     now_from_unix_epoch: Duration,
     broadcast: F,
-) -> Result<StatementSubmitOutcome, StatementSubmitError>
+) -> SubmitOutcome
 where
     F: FnOnce(Vec<u8>) -> Fut,
     Fut: core::future::Future<Output = BroadcastStatementResult>,
 {
     let Ok(statement) = codec::decode_statement(encoded) else {
-        return Err(StatementSubmitError::InvalidEncoding);
+        return SubmitOutcome::InvalidEncoding;
     };
 
     // The most significant 32 bits of `expiry` are the expiration timestamp in seconds since
     // the UNIX epoch. A statement expiring exactly now is already expired, the deadline being the
     // first instant at which the statement no longer holds.
     if now_from_unix_epoch.as_secs() >= statement.expiry >> 32 {
-        return Ok(StatementSubmitOutcome::Invalid(
-            StatementSubmitInvalidReason::AlreadyExpired,
-        ));
+        return SubmitOutcome::Invalid(InvalidReason::AlreadyExpired);
     }
 
     if encoded.len() > codec::MAX_STATEMENT_SIZE {
-        return Ok(StatementSubmitOutcome::Invalid(
-            StatementSubmitInvalidReason::EncodingTooLarge {
-                submitted_size: encoded.len(),
-                max_size: codec::MAX_STATEMENT_SIZE,
-            },
-        ));
+        return SubmitOutcome::Invalid(InvalidReason::EncodingTooLarge {
+            submitted_size: encoded.len(),
+            max_size: codec::MAX_STATEMENT_SIZE,
+        });
     }
 
     if statement.proof.is_none() {
-        return Ok(StatementSubmitOutcome::Invalid(
-            StatementSubmitInvalidReason::NoProof,
-        ));
+        return SubmitOutcome::Invalid(InvalidReason::NoProof);
     }
 
     // Counted on `sent` rather than `total`: a peer can be gossip-connected while its statement
@@ -158,10 +180,10 @@ where
     // nobody and reporting `new` would tell the client it was published when it wasn't.
     let broadcasted = broadcast(encoded.to_vec()).await;
     if broadcasted.sent == 0 {
-        return Err(StatementSubmitError::NoConnectedPeers);
+        return SubmitOutcome::NoConnectedPeers;
     }
 
-    Ok(StatementSubmitOutcome::New)
+    SubmitOutcome::New
 }
 
 pub(super) struct StatementSubscription {
@@ -416,18 +438,6 @@ mod tests {
         }
     }
 
-    fn valid_statement() -> Vec<u8> {
-        codec::encode_statement(&codec::Statement {
-            proof: None,
-            decryption_key: None,
-            expiry: 42,
-            channel: None,
-            topics: Vec::new(),
-            data: None,
-        })
-        .unwrap()
-    }
-
     const NOW: Duration = Duration::from_secs(1_000);
 
     /// Expiration timestamp, in the most significant 32 bits, later than [`NOW`].
@@ -449,114 +459,91 @@ mod tests {
     }
 
     #[test]
-    fn unstable_submit_invalid_encoding() {
-        let result = block_on(validate_and_broadcast_statement_unstable(
+    fn submit_invalid_encoding() {
+        let result = block_on(validate_and_broadcast_statement(
             &[0xff, 0xff],
             NOW,
             |_| async { unreachable!() },
         ));
-        assert_eq!(result, Err(StatementSubmitError::InvalidEncoding));
+        assert_eq!(result, SubmitOutcome::InvalidEncoding);
     }
 
     #[test]
-    fn unstable_submit_already_expired() {
+    fn submit_already_expired() {
         // The statement also has no proof: the expiry check runs first.
         let encoded = encoded_statement(false, 500 << 32, None);
-        let result = block_on(validate_and_broadcast_statement_unstable(
-            &encoded,
-            NOW,
-            |_| async { unreachable!() },
-        ));
+        let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
+            unreachable!()
+        }));
         assert_eq!(
             result,
-            Ok(StatementSubmitOutcome::Invalid(
-                StatementSubmitInvalidReason::AlreadyExpired
-            ))
+            SubmitOutcome::Invalid(InvalidReason::AlreadyExpired)
         );
     }
 
     #[test]
-    fn unstable_submit_expiry_equal_to_now_is_expired() {
+    fn submit_expiry_equal_to_now_is_expired() {
         let encoded = encoded_statement(true, NOW.as_secs() << 32, None);
-        let result = block_on(validate_and_broadcast_statement_unstable(
-            &encoded,
-            NOW,
-            |_| async { unreachable!() },
-        ));
+        let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
+            unreachable!()
+        }));
         assert_eq!(
             result,
-            Ok(StatementSubmitOutcome::Invalid(
-                StatementSubmitInvalidReason::AlreadyExpired
-            ))
+            SubmitOutcome::Invalid(InvalidReason::AlreadyExpired)
         );
     }
 
     #[test]
-    fn unstable_submit_encoding_too_large() {
+    fn submit_encoding_too_large() {
         // The statement also has no proof: the size check runs before the proof check.
         let encoded = encoded_statement(false, FUTURE_EXPIRY, Some(vec![0; 1024 * 1024]));
         assert!(encoded.len() > codec::MAX_STATEMENT_SIZE);
-        let result = block_on(validate_and_broadcast_statement_unstable(
-            &encoded,
-            NOW,
-            |_| async { unreachable!() },
-        ));
+        let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
+            unreachable!()
+        }));
         assert_eq!(
             result,
-            Ok(StatementSubmitOutcome::Invalid(
-                StatementSubmitInvalidReason::EncodingTooLarge {
-                    submitted_size: encoded.len(),
-                    max_size: codec::MAX_STATEMENT_SIZE,
-                }
-            ))
+            SubmitOutcome::Invalid(InvalidReason::EncodingTooLarge {
+                submitted_size: encoded.len(),
+                max_size: codec::MAX_STATEMENT_SIZE,
+            })
         );
     }
 
     #[test]
-    fn unstable_submit_no_proof() {
+    fn submit_no_proof() {
         let encoded = encoded_statement(false, FUTURE_EXPIRY, None);
-        let result = block_on(validate_and_broadcast_statement_unstable(
-            &encoded,
-            NOW,
-            |_| async { unreachable!() },
-        ));
-        assert_eq!(
-            result,
-            Ok(StatementSubmitOutcome::Invalid(
-                StatementSubmitInvalidReason::NoProof
-            ))
-        );
+        let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
+            unreachable!()
+        }));
+        assert_eq!(result, SubmitOutcome::Invalid(InvalidReason::NoProof));
     }
 
     #[test]
-    fn unstable_submit_no_peers() {
+    fn submit_no_peers() {
         let encoded = encoded_statement(true, FUTURE_EXPIRY, None);
-        let result = block_on(validate_and_broadcast_statement_unstable(
-            &encoded,
-            NOW,
-            |_| async { BroadcastStatementResult { sent: 0, total: 0 } },
-        ));
-        assert_eq!(result, Err(StatementSubmitError::NoConnectedPeers));
+        let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
+            BroadcastStatementResult { sent: 0, total: 0 }
+        }));
+        assert_eq!(result, SubmitOutcome::NoConnectedPeers);
     }
 
     #[test]
-    fn unstable_submit_reaching_no_peer_is_not_new() {
+    fn submit_reaching_no_peer_is_not_new() {
         // Gossip-connected peers whose statement substream is missing or whose queue is full leave
         // the statement unsent. Answering `new` would tell the client it was published.
         let encoded = encoded_statement(true, FUTURE_EXPIRY, None);
-        let result = block_on(validate_and_broadcast_statement_unstable(
-            &encoded,
-            NOW,
-            |_| async { BroadcastStatementResult { sent: 0, total: 5 } },
-        ));
-        assert_eq!(result, Err(StatementSubmitError::NoConnectedPeers));
+        let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
+            BroadcastStatementResult { sent: 0, total: 5 }
+        }));
+        assert_eq!(result, SubmitOutcome::NoConnectedPeers);
     }
 
     #[test]
-    fn unstable_submit_new() {
+    fn submit_new() {
         let encoded = encoded_statement(true, FUTURE_EXPIRY, None);
         let expected_bytes = encoded.clone();
-        let result = block_on(validate_and_broadcast_statement_unstable(
+        let result = block_on(validate_and_broadcast_statement(
             &encoded,
             NOW,
             |bytes| async move {
@@ -564,43 +551,53 @@ mod tests {
                 BroadcastStatementResult { sent: 3, total: 5 }
             },
         ));
-        assert_eq!(result, Ok(StatementSubmitOutcome::New));
+        assert_eq!(result, SubmitOutcome::New);
     }
 
     #[test]
-    fn validate_and_broadcast_invalid_encoding() {
-        let result = block_on(validate_and_broadcast_statement(&[0xff, 0xff], |_| async {
-            unreachable!()
-        }));
+    fn invalid_reason_legacy_rendering() {
         assert_eq!(
-            result,
-            StatementSubmitResult::Invalid {
-                reason: InvalidReason::Encoding
+            InvalidReason::AlreadyExpired.to_legacy(),
+            methods::InvalidReason::AlreadyExpired
+        );
+        assert_eq!(
+            InvalidReason::NoProof.to_legacy(),
+            methods::InvalidReason::NoProof
+        );
+        assert_eq!(
+            InvalidReason::EncodingTooLarge {
+                submitted_size: 7,
+                max_size: 5,
+            }
+            .to_legacy(),
+            methods::InvalidReason::EncodingTooLarge {
+                submitted_size: 7,
+                max_size: 5,
             }
         );
     }
 
     #[test]
-    fn validate_and_broadcast_no_peers() {
-        let result = block_on(validate_and_broadcast_statement(
-            &valid_statement(),
-            |_| async { BroadcastStatementResult { sent: 0, total: 0 } },
-        ));
+    fn invalid_reason_unstable_rendering() {
         assert_eq!(
-            result,
-            StatementSubmitResult::InternalError {
-                error: InternalError::NoConnectedPeers
+            InvalidReason::AlreadyExpired.to_unstable(),
+            StatementSubmitInvalidReason::AlreadyExpired
+        );
+        assert_eq!(
+            InvalidReason::NoProof.to_unstable(),
+            StatementSubmitInvalidReason::NoProof
+        );
+        assert_eq!(
+            InvalidReason::EncodingTooLarge {
+                submitted_size: 7,
+                max_size: 5,
+            }
+            .to_unstable(),
+            StatementSubmitInvalidReason::EncodingTooLarge {
+                submitted_size: 7,
+                max_size: 5,
             }
         );
-    }
-
-    #[test]
-    fn validate_and_broadcast_new() {
-        let result = block_on(validate_and_broadcast_statement(
-            &valid_statement(),
-            |_| async { BroadcastStatementResult { sent: 3, total: 5 } },
-        ));
-        assert_eq!(result, StatementSubmitResult::New);
     }
 
     #[test]

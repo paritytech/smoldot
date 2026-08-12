@@ -3007,19 +3007,45 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                     methods::MethodCall::statement_submit { encoded } => {
                         let network = me.network_service.clone();
-                        let result = super::statement::validate_and_broadcast_statement(
+                        let outcome = super::statement::validate_and_broadcast_statement(
                             &encoded.0,
+                            me.platform.now_from_unix_epoch(),
                             |bytes| async move { network.broadcast_statement(bytes).await },
                         )
                         .await;
 
-                        let _ = me
-                            .responses_tx
-                            .send(
-                                methods::Response::statement_submit(result)
-                                    .to_json_response(request_id_json),
-                            )
-                            .await;
+                        let response = match outcome {
+                            super::statement::SubmitOutcome::New => {
+                                methods::Response::statement_submit(
+                                    methods::StatementSubmitResult::New,
+                                )
+                                .to_json_response(request_id_json)
+                            }
+                            super::statement::SubmitOutcome::Invalid(reason) => {
+                                methods::Response::statement_submit(
+                                    methods::StatementSubmitResult::Invalid(reason.to_legacy()),
+                                )
+                                .to_json_response(request_id_json)
+                            }
+                            super::statement::SubmitOutcome::InvalidEncoding => {
+                                parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::InvalidParams(Some(
+                                        "The `encoded` parameter doesn't decode into a statement",
+                                    )),
+                                    None,
+                                )
+                            }
+                            super::statement::SubmitOutcome::NoConnectedPeers => {
+                                parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::InternalError,
+                                    Some(r#""No connected peers to broadcast the statement to""#),
+                                )
+                            }
+                        };
+
+                        let _ = me.responses_tx.send(response).await;
                     }
 
                     methods::MethodCall::statement_subscribeStatement { filter } => {
@@ -3068,17 +3094,27 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                     methods::MethodCall::statement_unstable_submit { encoded } => {
                         let network = me.network_service.clone();
-                        let result = super::statement::validate_and_broadcast_statement_unstable(
+                        let outcome = super::statement::validate_and_broadcast_statement(
                             &encoded.0,
                             me.platform.now_from_unix_epoch(),
                             |bytes| async move { network.broadcast_statement(bytes).await },
                         )
                         .await;
 
-                        let response = match result {
-                            Ok(outcome) => methods::Response::statement_unstable_submit(outcome)
-                                .to_json_response(request_id_json),
-                            Err(super::statement::StatementSubmitError::InvalidEncoding) => {
+                        let response = match outcome {
+                            super::statement::SubmitOutcome::New => {
+                                methods::Response::statement_unstable_submit(
+                                    methods::StatementSubmitOutcome::New,
+                                )
+                                .to_json_response(request_id_json)
+                            }
+                            super::statement::SubmitOutcome::Invalid(reason) => {
+                                methods::Response::statement_unstable_submit(
+                                    methods::StatementSubmitOutcome::Invalid(reason.to_unstable()),
+                                )
+                                .to_json_response(request_id_json)
+                            }
+                            super::statement::SubmitOutcome::InvalidEncoding => {
                                 parse::build_error_response(
                                     request_id_json,
                                     parse::ErrorResponse::InvalidParams(Some(
@@ -3087,7 +3123,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     None,
                                 )
                             }
-                            Err(super::statement::StatementSubmitError::NoConnectedPeers) => {
+                            super::statement::SubmitOutcome::NoConnectedPeers => {
                                 parse::build_error_response(
                                     request_id_json,
                                     parse::ErrorResponse::InternalError,

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added
+
+- Add `statement_unstable_submit`, the statement-store submission function of the new JSON-RPC interface specification. It validates the statement exactly like `statement_submit` and differs only in the field names of its `encodingTooLarge` outcome, which are `camelCase` rather than `snake_case`. ([#3335](https://github.com/paritytech/smoldot/pull/3335))
+
+### Changed
+
+- **Breaking**: `statement_submit` now validates the statement the way a full node does before gossiping it, instead of only checking that it decodes. A statement that has already expired, exceeds the maximum statement size, or carries no proof is answered with `{"status":"invalid","reason":...}` and is no longer broadcast to peers. ([#3335](https://github.com/paritytech/smoldot/pull/3335))
+- **Breaking**: `statement_submit` no longer reports a payload that doesn't decode as `{"status":"invalid","reason":"Invalid statement encoding"}`, nor a statement that reached no peer as `{"status":"internalError",...}`. Matching polkadot-sdk, both are now JSON-RPC errors (`-32602` and `-32603` respectively). ([#3335](https://github.com/paritytech/smoldot/pull/3335))
+
+### Fixed
+
+- `statement_submit` no longer answers `{"status":"new"}` for a statement that reached no peer. Peers whose statement substream is absent or whose notification queue is full were counted as having received it. ([#3335](https://github.com/paritytech/smoldot/pull/3335))
+
 ## 3.3.2 - 2026-07-24
 
 ### Changed
