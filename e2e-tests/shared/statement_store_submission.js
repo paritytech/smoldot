@@ -53,23 +53,30 @@ export default async function statementStoreSubmission(ctx) {
 
   await new Promise((r) => setTimeout(r, PEER_SETTLE_MS));
 
-  let submitResult;
+  let ok = false;
+  let outcome;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    submitResult = await rpc.sendRpcAndWait(para, "statement_submit", [statementHex]);
+    // A statement reaching no peer is answered with a JSON-RPC error, which `sendRpcAndWait`
+    // throws. That is the expected answer while gossip peers are still settling, so it has to be
+    // retried like any other non-`new` one rather than aborting the test.
+    try {
+      const submitResult = await rpc.sendRpcAndWait(para, "statement_submit", [statementHex]);
+      // Smoldot returns {"status":"new"} on success
+      ok = submitResult?.status === "new";
+      outcome = JSON.stringify(submitResult);
+    } catch (error) {
+      outcome = error.message;
+    }
 
-    // Smoldot returns {"status":"new"} on success
-    if (submitResult?.status === "new") break;
+    if (ok) break;
     if (attempt < MAX_RETRIES - 1) {
-      ctx.log(
-        `statement_submit attempt ${attempt + 1} returned: ${JSON.stringify(submitResult)}, retrying in 5s...`,
-      );
+      ctx.log(`statement_submit attempt ${attempt + 1} returned: ${outcome}, retrying in 5s...`);
       await new Promise((r) => setTimeout(r, 5000));
     }
   }
 
-  const ok = submitResult?.status === "new";
-  report("statement_submit accepted", ok, JSON.stringify(submitResult));
+  report("statement_submit accepted", ok, outcome);
   if (!ok) {
-    throw new Error(`statement_submit never returned status "new": ${JSON.stringify(submitResult)}`);
+    throw new Error(`statement_submit never returned status "new": ${outcome}`);
   }
 }

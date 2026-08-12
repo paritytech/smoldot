@@ -3008,17 +3008,33 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let network = me.network_service.clone();
                         let result = super::statement::validate_and_broadcast_statement(
                             &encoded.0,
+                            me.platform.now_from_unix_epoch(),
                             |bytes| async move { network.broadcast_statement(bytes).await },
                         )
                         .await;
 
-                        let _ = me
-                            .responses_tx
-                            .send(
-                                methods::Response::statement_submit(result)
-                                    .to_json_response(request_id_json),
-                            )
-                            .await;
+                        let response = match result {
+                            Ok(result) => methods::Response::statement_submit(result)
+                                .to_json_response(request_id_json),
+                            Err(super::statement::StatementSubmitError::InvalidEncoding) => {
+                                parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::InvalidParams(Some(
+                                        "The `encoded` parameter doesn't decode into a statement",
+                                    )),
+                                    None,
+                                )
+                            }
+                            Err(super::statement::StatementSubmitError::NoConnectedPeers) => {
+                                parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::InternalError,
+                                    Some(r#""No connected peers to broadcast the statement to""#),
+                                )
+                            }
+                        };
+
+                        let _ = me.responses_tx.send(response).await;
                     }
 
                     methods::MethodCall::statement_subscribeStatement { filter } => {

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed
+
+- **Breaking**: `statement_submit` now validates the statement the way a full node does before gossiping it, instead of only checking that it decodes. A statement that has already expired, exceeds the maximum statement size, or carries no proof is answered with `{"status":"invalid","reason":...}` and is no longer broadcast to peers. ([#3340](https://github.com/paritytech/smoldot/pull/3340))
+- **Breaking**: `statement_submit` no longer reports a payload that doesn't decode as `{"status":"invalid","reason":"Invalid statement encoding"}`, nor a statement that reached no peer as `{"status":"internalError",...}`. Matching polkadot-sdk, both are now JSON-RPC errors, with codes `-32602` and `-32603` respectively. ([#3340](https://github.com/paritytech/smoldot/pull/3340))
+
+### Fixed
+
+- `statement_submit` no longer answers `{"status":"new"}` for a statement that reached no peer. Peers whose statement substream is absent or whose notification queue is full were wrongly counted as having received it. ([#3340](https://github.com/paritytech/smoldot/pull/3340))
+
 ## 3.3.2 - 2026-07-24
 
 ### Changed

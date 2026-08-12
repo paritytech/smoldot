@@ -18,9 +18,7 @@
 use crate::network_service::{self, BroadcastStatementResult};
 use alloc::{string::String, vec::Vec};
 use core::{num::NonZero, time::Duration};
-use smoldot::json_rpc::methods::{
-    HexString, InternalError, InvalidReason, StatementSubmitResult, TopicFilter,
-};
+use smoldot::json_rpc::methods::{HexString, InvalidReason, StatementSubmitResult, TopicFilter};
 use smoldot::network::codec;
 
 /// Configuration for the Statement Store protocol.
@@ -71,32 +69,68 @@ impl StatementProtocolConfig {
     }
 }
 
+/// Failure of a `statement_submit` request, reported as a JSON-RPC error rather than a
+/// [`StatementSubmitResult`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatementSubmitError {
+    /// The submitted bytes don't decode into a statement.
+    InvalidEncoding,
+    /// The statement is valid but reached no peer. A light client keeps no store, so a statement
+    /// nobody received is nowhere at all.
+    NoConnectedPeers,
+}
+
 /// Validates a SCALE-encoded statement and broadcasts it to the network.
 ///
-/// Returns the appropriate [`StatementSubmitResult`] based on the decode and broadcast outcome.
+/// The checks run in the order polkadot-sdk's `Store::submit` applies them — expiry, then size,
+/// then proof — so that a client submitting a statement failing several of them is told the same
+/// reason a full node would give. Checks needing a local store or chain state are skipped.
+///
 /// The `broadcast` closure is only called if the statement is valid.
 pub async fn validate_and_broadcast_statement<F, Fut>(
     encoded: &[u8],
+    now_from_unix_epoch: Duration,
     broadcast: F,
-) -> StatementSubmitResult
+) -> Result<StatementSubmitResult, StatementSubmitError>
 where
     F: FnOnce(Vec<u8>) -> Fut,
     Fut: core::future::Future<Output = BroadcastStatementResult>,
 {
-    if codec::decode_statement(encoded).is_err() {
-        return StatementSubmitResult::Invalid {
-            reason: InvalidReason::Encoding,
-        };
+    let Ok(statement) = codec::decode_statement(encoded) else {
+        return Err(StatementSubmitError::InvalidEncoding);
+    };
+
+    // The most significant 32 bits of `expiry` are the expiration timestamp in seconds since
+    // the UNIX epoch. A statement expiring exactly now is already expired, the deadline being the
+    // first instant at which the statement no longer holds.
+    if now_from_unix_epoch.as_secs() >= statement.expiry >> 32 {
+        return Ok(StatementSubmitResult::Invalid(
+            InvalidReason::AlreadyExpired,
+        ));
     }
 
-    let broadcasted = broadcast(encoded.to_vec()).await;
-    if broadcasted.total == 0 {
-        StatementSubmitResult::InternalError {
-            error: InternalError::NoConnectedPeers,
-        }
-    } else {
-        StatementSubmitResult::New
+    if encoded.len() > codec::MAX_STATEMENT_SIZE {
+        return Ok(StatementSubmitResult::Invalid(
+            InvalidReason::EncodingTooLarge {
+                submitted_size: encoded.len(),
+                max_size: codec::MAX_STATEMENT_SIZE,
+            },
+        ));
     }
+
+    if statement.proof.is_none() {
+        return Ok(StatementSubmitResult::Invalid(InvalidReason::NoProof));
+    }
+
+    // Counted on `sent` rather than `total`: a peer can be gossip-connected while its statement
+    // substream is absent or its notification queue full, in which case the statement reached
+    // nobody and reporting `new` would tell the client it was published when it wasn't.
+    let broadcasted = broadcast(encoded.to_vec()).await;
+    if broadcasted.sent == 0 {
+        return Err(StatementSubmitError::NoConnectedPeers);
+    }
+
+    Ok(StatementSubmitResult::New)
 }
 
 pub(super) struct StatementSubscription {
@@ -351,52 +385,129 @@ mod tests {
         }
     }
 
-    fn valid_statement() -> Vec<u8> {
+    const NOW: Duration = Duration::from_secs(1_000);
+
+    /// Expiration timestamp, in the most significant 32 bits, later than [`NOW`].
+    const FUTURE_EXPIRY: u64 = 2_000 << 32;
+
+    fn encoded_statement(with_proof: bool, expiry: u64, data: Option<Vec<u8>>) -> Vec<u8> {
         codec::encode_statement(&codec::Statement {
-            proof: None,
+            proof: with_proof.then(|| codec::Proof::Ed25519 {
+                signature: [0; 64],
+                signer: [0; 32],
+            }),
             decryption_key: None,
-            expiry: 42,
+            expiry,
             channel: None,
             topics: Vec::new(),
-            data: None,
+            data,
         })
         .unwrap()
     }
 
     #[test]
-    fn validate_and_broadcast_invalid_encoding() {
-        let result = block_on(validate_and_broadcast_statement(&[0xff, 0xff], |_| async {
+    fn submit_invalid_encoding() {
+        let result = block_on(validate_and_broadcast_statement(
+            &[0xff, 0xff],
+            NOW,
+            |_| async { unreachable!() },
+        ));
+        assert_eq!(result, Err(StatementSubmitError::InvalidEncoding));
+    }
+
+    #[test]
+    fn submit_already_expired() {
+        // The statement also has no proof: the expiry check runs first.
+        let encoded = encoded_statement(false, 500 << 32, None);
+        let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
             unreachable!()
         }));
         assert_eq!(
             result,
-            StatementSubmitResult::Invalid {
-                reason: InvalidReason::Encoding
-            }
+            Ok(StatementSubmitResult::Invalid(
+                InvalidReason::AlreadyExpired
+            ))
         );
     }
 
     #[test]
-    fn validate_and_broadcast_no_peers() {
-        let result = block_on(validate_and_broadcast_statement(
-            &valid_statement(),
-            |_| async { BroadcastStatementResult { sent: 0, total: 0 } },
-        ));
+    fn submit_expiry_equal_to_now_is_expired() {
+        let encoded = encoded_statement(true, NOW.as_secs() << 32, None);
+        let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
+            unreachable!()
+        }));
         assert_eq!(
             result,
-            StatementSubmitResult::InternalError {
-                error: InternalError::NoConnectedPeers
-            }
+            Ok(StatementSubmitResult::Invalid(
+                InvalidReason::AlreadyExpired
+            ))
         );
     }
 
     #[test]
-    fn validate_and_broadcast_new() {
+    fn submit_encoding_too_large() {
+        // The statement also has no proof: the size check runs before the proof check.
+        let encoded = encoded_statement(false, FUTURE_EXPIRY, Some(vec![0; 1024 * 1024]));
+        assert!(encoded.len() > codec::MAX_STATEMENT_SIZE);
+        let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
+            unreachable!()
+        }));
+        assert_eq!(
+            result,
+            Ok(StatementSubmitResult::Invalid(
+                InvalidReason::EncodingTooLarge {
+                    submitted_size: encoded.len(),
+                    max_size: codec::MAX_STATEMENT_SIZE,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn submit_no_proof() {
+        let encoded = encoded_statement(false, FUTURE_EXPIRY, None);
+        let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
+            unreachable!()
+        }));
+        assert_eq!(
+            result,
+            Ok(StatementSubmitResult::Invalid(InvalidReason::NoProof))
+        );
+    }
+
+    #[test]
+    fn submit_no_peers() {
+        let encoded = encoded_statement(true, FUTURE_EXPIRY, None);
+        let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
+            BroadcastStatementResult { sent: 0, total: 0 }
+        }));
+        assert_eq!(result, Err(StatementSubmitError::NoConnectedPeers));
+    }
+
+    #[test]
+    fn submit_reaching_no_peer_is_not_new() {
+        // Gossip-connected peers whose statement substream is missing or whose queue is full leave
+        // the statement unsent. Answering `new` would tell the client it was published.
+        let encoded = encoded_statement(true, FUTURE_EXPIRY, None);
+        let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
+            BroadcastStatementResult { sent: 0, total: 5 }
+        }));
+        assert_eq!(result, Err(StatementSubmitError::NoConnectedPeers));
+    }
+
+    #[test]
+    fn submit_new() {
+        let encoded = encoded_statement(true, FUTURE_EXPIRY, None);
+        let expected_bytes = encoded.clone();
         let result = block_on(validate_and_broadcast_statement(
-            &valid_statement(),
-            |_| async { BroadcastStatementResult { sent: 3, total: 5 } },
+            &encoded,
+            NOW,
+            |bytes| async move {
+                assert_eq!(bytes, expected_bytes);
+                BroadcastStatementResult { sent: 3, total: 5 }
+            },
         ));
-        assert_eq!(result, StatementSubmitResult::New);
+        assert_eq!(result, Ok(StatementSubmitResult::New));
     }
 
     #[test]

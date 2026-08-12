@@ -464,7 +464,8 @@ define_methods! {
     /// Returns, as an opaque string, the version of the client serving these JSON-RPC requests.
     system_version() -> Cow<'a, str>,
 
-    /// Broadcast a new statement to peers (light node has no local statement-store).
+    /// Validate a SCALE-encoded statement and broadcast it to peers (light node has no local
+    /// statement-store).
     statement_submit(encoded: HexString) -> StatementSubmitResult,
     /// Subscribe to statements matching the given filter. Returns subscription ID.
     statement_subscribeStatement(filter: TopicFilter) -> Cow<'a, str>,
@@ -1104,29 +1105,40 @@ pub enum SystemPeerRole {
 
 /// Result of submitting a statement.
 ///
-/// JSON format is compatible with polkadot-sdk's `SubmitResult`.
+/// JSON format is compatible with polkadot-sdk's `SubmitResult`. `known`, `knownExpired` and
+/// `rejected` are omitted: all three report a decision of a local statement store, which a light
+/// client has none of. Like polkadot-sdk, a failure that leaves no outcome to report — a payload
+/// that doesn't decode, or a statement that reached no peer — is answered with a JSON-RPC error
+/// rather than a variant of this type.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum StatementSubmitResult {
     New,
-    Invalid { reason: InvalidReason },
-    InternalError { error: InternalError },
+    Invalid(InvalidReason),
 }
 
 /// Reason why a submitted statement was rejected as invalid.
+///
+/// Mirrors polkadot-sdk's `InvalidReason`, down to the `snake_case` field names of
+/// [`InvalidReason::EncodingTooLarge`].
+///
+/// `badProof` is never reported: telling a bad proof from a good one means verifying a signature,
+/// which is more CPU than a light client should spend on a submission, so only the presence of a
+/// proof is checked.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "reason", rename_all = "camelCase")]
 pub enum InvalidReason {
-    /// The SCALE-encoded statement failed to decode.
-    #[serde(rename = "Invalid statement encoding")]
-    Encoding,
-}
-
-/// Reason why a submitted statement could not be processed internally.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum InternalError {
-    /// The statement is valid but there were no connected peers to broadcast it to.
-    #[serde(rename = "No connected peers")]
-    NoConnectedPeers,
+    /// The statement has no authenticity proof.
+    NoProof,
+    /// The encoded statement exceeds the maximum allowed size.
+    EncodingTooLarge {
+        /// Size in bytes of the submitted encoding.
+        submitted_size: usize,
+        /// Maximum allowed size in bytes.
+        max_size: usize,
+    },
+    /// The statement's expiry is in the past.
+    AlreadyExpired,
 }
 
 /// Notification event for statement subscriptions.
@@ -1549,29 +1561,35 @@ mod tests {
 
     #[test]
     fn statement_submit_result_serialization() {
-        use super::{InternalError, InvalidReason, StatementSubmitResult};
+        use super::{InvalidReason, StatementSubmitResult};
 
         let new = StatementSubmitResult::New;
         assert_eq!(serde_json::to_string(&new).unwrap(), r#"{"status":"new"}"#);
 
-        let invalid = StatementSubmitResult::Invalid {
-            reason: InvalidReason::Encoding,
-        };
+        let no_proof = StatementSubmitResult::Invalid(InvalidReason::NoProof);
         assert_eq!(
-            serde_json::to_string(&invalid).unwrap(),
-            r#"{"status":"invalid","reason":"Invalid statement encoding"}"#
+            serde_json::to_string(&no_proof).unwrap(),
+            r#"{"status":"invalid","reason":"noProof"}"#
         );
 
-        let internal = StatementSubmitResult::InternalError {
-            error: InternalError::NoConnectedPeers,
-        };
+        let expired = StatementSubmitResult::Invalid(InvalidReason::AlreadyExpired);
         assert_eq!(
-            serde_json::to_string(&internal).unwrap(),
-            r#"{"status":"internalError","error":"No connected peers"}"#
+            serde_json::to_string(&expired).unwrap(),
+            r#"{"status":"invalid","reason":"alreadyExpired"}"#
+        );
+
+        // Field names stay `snake_case`, as polkadot-sdk spells them on this type.
+        let too_large = StatementSubmitResult::Invalid(InvalidReason::EncodingTooLarge {
+            submitted_size: 2_000_000,
+            max_size: 1_048_575,
+        });
+        assert_eq!(
+            serde_json::to_string(&too_large).unwrap(),
+            r#"{"status":"invalid","reason":"encodingTooLarge","submitted_size":2000000,"max_size":1048575}"#
         );
 
         // Round-trips: the typed fields deserialize back from their wire strings.
-        for value in [new, invalid, internal] {
+        for value in [new, no_proof, expired, too_large] {
             let json = serde_json::to_string(&value).unwrap();
             assert_eq!(
                 serde_json::from_str::<StatementSubmitResult>(&json).unwrap(),
