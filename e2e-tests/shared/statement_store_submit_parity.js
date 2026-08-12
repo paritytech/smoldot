@@ -15,24 +15,16 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// Submits each case in PARITY_CASES to smoldot and checks its answer against `expected`, which
-// Rust has already reconciled with the one a full node gave for the same statement. Nothing has
-// to travel back from here — the PASS/FAIL of each case is the whole result.
-//
-// Answers are shaped `{"result": <value>}` or `{"errorCode": <number>}` on both sides.
-// A rejection keeps only its code: the messages are free-form and differ between
-// implementations without saying anything about the outcome.
+// Submits statements to a light node, comparing each answer with the one Rust expects.
 
 import { createRpc } from "./rpc.js";
 
 export const fileInputs = ["RELAY_CHAIN_SPEC", "PARA_CHAIN_SPEC", "PARITY_CASES"];
 
-// Statements are gossiped, not synced, so peers are all this needs.
 const PEER_SETTLE_MS = 10_000;
 const MAX_RETRIES = 10;
 const RETRY_DELAY_MS = 5_000;
 
-/// Key-sorted JSON, so comparing two answers doesn't depend on field order.
 function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") {
@@ -44,7 +36,6 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 
-/// Submits once, normalizing both outcomes into the shape Rust uses.
 async function submitOnce(rpc, para, hex) {
   try {
     return { result: await rpc.sendRpcAndWait(para, "statement_submit", [hex]) };
@@ -64,7 +55,6 @@ export default async function statementStoreSubmitParity(ctx) {
     throw new Error("Required inputs: RELAY_CHAIN_SPEC, PARA_CHAIN_SPEC, PARITY_CASES");
   }
   const cases = JSON.parse(files.PARITY_CASES);
-  // An empty list reports nothing and exits green, which reads as parity.
   if (!Array.isArray(cases) || cases.length === 0) {
     throw new Error("PARITY_CASES holds no case to compare");
   }
