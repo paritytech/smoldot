@@ -15,18 +15,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// Tests for the stream-liveness check in `remote-instance.ts`: commands
-// arriving from the server (the wasm side) for a connection or substream that
-// was already reset locally must be dropped, never forwarded to
-// `eventCallback` — while commands for anything still live must get through.
+// Tests for the stream-liveness check in `remote-instance.ts`: commands for a
+// connection or substream that was already reset locally must be dropped,
+// while commands for anything still live must get through.
 //
-// Two things make stream id 0 the interesting case. It is the first substream
-// of every multi-stream (WebRTC) connection, so a truthiness test
-// (`message.streamId && ...`) exempted it from the check. It is *also* the id
-// the wasm side reports for every single-stream (WebSocket, TCP) connection,
-// which has no substreams at all and therefore never reports one open — so
-// checking it against the live-substream set drops every single outbound write
-// on such a connection. Both directions of that mistake are covered below.
+// Stream id 0 is the interesting case, because it means two different things.
+// It is the first substream of a multi-stream connection, and it is also what
+// the wasm side reports for a single-stream connection, which has no substreams
+// at all. Both directions of that ambiguity are covered below.
 //
 // No wasm and no browser involved: the test plays the server end of the
 // `MessagePort` protocol by hand.
@@ -116,13 +112,11 @@ async function commandReaches(ty, { address, streamId, openIds = [], resetIds = 
 const sendReaches = (opts) => commandReaches("stream-send", opts);
 const sendCloseReaches = (opts) => commandReaches("stream-send-close", opts);
 
-// --- Single-stream connections -----------------------------------------------
-//
-// These have no substreams, so `streamOpened` is never called for them and the
-// live-substream set stays empty forever. The wasm side nonetheless reports
-// stream id 0 for every write. Checking that 0 against the empty set would
-// drop every write on the connection, which is issue #3342: the peer receives
-// nothing, so it replies with nothing, and the libp2p handshake times out.
+// Single-stream connections have no substreams, so `streamOpened` is never called for them and
+// the live-substream set stays empty forever. The wasm side nonetheless reports stream id 0 for
+// every write. Checking that 0 against the empty set would drop every write on the connection,
+// which is issue #3342: the peer receives nothing, so it replies with nothing, and the libp2p
+// handshake times out.
 
 test("stream-send on a single-stream connection reaches the callback", async (t) => {
   t.true(await sendReaches({ address: WEBSOCKET_ADDRESS, streamId: 0 }));
@@ -147,11 +141,9 @@ test("stream-send on a reset single-stream connection is dropped", async (t) => 
   t.false(ctx.events.some((e) => e.ty === "stream-send"));
 });
 
-// --- Multi-stream connections ------------------------------------------------
-//
-// These do have substreams, reported open by the platform. A command for a
-// substream that was already reset locally must be dropped, including for
-// substream 0, which carries the Noise handshake. That is #3326.
+// Multi-stream connections do have substreams, reported open by the platform. A command for a
+// substream that was already reset locally must be dropped, including for substream 0, which
+// carries the Noise handshake. That is #3326.
 
 test("stream-send for a live substream reaches the callback", async (t) => {
   t.true(await sendReaches({ address: WEBRTC_ADDRESS, streamId: 3, openIds: [3] }));
