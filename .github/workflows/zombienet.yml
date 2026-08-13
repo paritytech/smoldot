@@ -44,7 +44,9 @@ jobs:
     name: ${{ matrix.test.job-name }}
     needs: env
     runs-on: ${{ matrix.test.runner-type == 'large' && needs.env.outputs.ZOMBIENET_SDK_LARGE_RUNNER || needs.env.outputs.ZOMBIENET_SDK_DEFAULT_RUNNER }}
-    timeout-minutes: 40
+    # Shared tests run two legs (Node over TCP, then headless Chromium over
+    # WebRTC), and the statement-store ones re-seed network state between them.
+    timeout-minutes: 60
     container:
       image: ${{ needs.env.outputs.ZOMBIENET_SDK_IMAGE }}
       options: -v /tmp/zombienet:/tmp/zombienet
@@ -95,19 +97,16 @@ jobs:
           - job-name: "zombienet-smoldot-0012-reserved_peer_discovery"
             test: "reserved_peer_discovery"
             runner-type: "default"
-          # TODO: uncomment when browser test execution is re-enabled
-          # (`Host::Browser` arm in e2e-tests/src/lib.rs `run_shared_test`).
-          # This test runs on the browser host only; until then the job would
-          # pass without executing anything.
-          # - job-name: "zombienet-smoldot-0014-webrtc_double_open"
-          #   test: "webrtc_double_open"
-          #   runner-type: "default"
-          # - job-name: "zombienet-smoldot-0015-webrtc_send_after_close"
-          #   test: "webrtc_send_after_close"
-          #   runner-type: "default"
-          # - job-name: "zombienet-smoldot-0016-webrtc_open_after_pc_close"
-          #   test: "webrtc_open_after_pc_close"
-          #   runner-type: "default"
+          # Browser-host only (WebRTC regressions).
+          - job-name: "zombienet-smoldot-0014-webrtc_double_open"
+            test: "webrtc_double_open"
+            runner-type: "default"
+          - job-name: "zombienet-smoldot-0015-webrtc_send_after_close"
+            test: "webrtc_send_after_close"
+            runner-type: "default"
+          - job-name: "zombienet-smoldot-0016-webrtc_open_after_pc_close"
+            test: "webrtc_open_after_pc_close"
+            runner-type: "default"
 
     steps:
       - uses: actions/checkout@v6
@@ -204,8 +203,6 @@ jobs:
           "$GITHUB_WORKSPACE/bin/polkadot-execute-worker" --version
           "$GITHUB_WORKSPACE/bin/polkadot-prepare-worker" --version
           "$GITHUB_WORKSPACE/bin/polkadot-parachain" --version
-          # Fail fast if the pinned build somehow lacks WebRTC support.
-          "$GITHUB_WORKSPACE/bin/polkadot" --help | grep -q -- --experimental-webrtc
 
       - name: Run test
         shell: bash

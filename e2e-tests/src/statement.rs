@@ -110,24 +110,21 @@ pub async fn spawn_network(
         .expect("base_dir is valid UTF-8")
         .to_owned();
 
-    // Per-node `with_args` replaces the chain-level `with_default_args`, so
-    // every node that gets `listener_args` must repeat the defaults.
-    let validator_args = |name: &str| {
-        let mut args: Vec<Arg> = vec!["-lparachain=debug".into()];
-        args.extend(crate::listener_args(name));
-        args
-    };
-    let collator_args = |name: &str| {
+    let validator_args = || [vec!["-lparachain=debug".into()], crate::webrtc_args()].concat();
+
+    // The parachain declares no chain-level `with_default_args`, so the collators
+    // carry theirs per node.
+    let collator_args = || {
         let log_filter = std::env::var("SMOLDOT_E2E_COLLATOR_LOG")
             .unwrap_or_else(|_| "info,statement-store=info,statement-gossip=info".to_string());
         let log_arg = format!("-l{log_filter}");
-        let mut args = vec![
+        let mut args: Vec<Arg> = vec![
             "--force-authoring".into(),
             "--authoring=slot-based".into(),
             "--enable-statement-store".into(),
             log_arg.as_str().into(),
         ];
-        args.extend(crate::listener_args(name));
+        args.extend(crate::webrtc_args());
         args
     };
 
@@ -137,15 +134,17 @@ pub async fn spawn_network(
                 .with_default_command("polkadot")
                 .with_default_image(images.polkadot.as_str())
                 .with_default_args(vec!["-lparachain=debug".into()])
+                // Node-level `with_args` replaces the chain-level defaults, so the log
+                // filter is repeated alongside each validator's own WebRTC port.
                 .with_validator(|node| {
                     node.with_name("validator-0")
                         .bootnode(true)
-                        .with_args(validator_args("validator-0"))
+                        .with_args(validator_args())
                 })
                 .with_validator(|node| {
                     node.with_name("validator-1")
                         .bootnode(true)
-                        .with_args(validator_args("validator-1"))
+                        .with_args(validator_args())
                 })
         })
         .with_parachain(|p| {
@@ -157,13 +156,9 @@ pub async fn spawn_network(
                 .with_collator(|n| {
                     n.with_name("alice")
                         .bootnode(true)
-                        .with_args(collator_args("alice"))
+                        .with_args(collator_args())
                 })
-                .with_collator(|n| {
-                    n.with_name("bob")
-                        .bootnode(true)
-                        .with_args(collator_args("bob"))
-                })
+                .with_collator(|n| n.with_name("bob").bootnode(true).with_args(collator_args()))
         })
         .with_global_settings(|g| {
             g.with_base_dir(base_dir_str.as_str())
