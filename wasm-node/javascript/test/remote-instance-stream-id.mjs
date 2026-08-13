@@ -15,14 +15,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// Tests for the stream-liveness check in `remote-instance.ts`: commands for a
-// connection or substream that was already reset locally must be dropped,
-// while commands for anything still live must get through.
+// Tests for the stream-liveness check in `remote-instance.ts`.
 //
-// Stream id 0 is the interesting case, because it means two different things.
-// It is the first substream of a multi-stream connection, and it is also what
-// the wasm side reports for a single-stream connection, which has no substreams
-// at all. Both directions of that ambiguity are covered below.
+// Commands for a connection or substream that was already reset locally must be
+// dropped, while commands for anything still live must get through. Stream id 0
+// is the interesting case, because it means two different things. It is the
+// first substream of a multi-stream connection, and it is also what the wasm
+// side reports for a single-stream connection, which has no substreams at all.
+// Both directions of that ambiguity are covered below.
 //
 // No wasm and no browser involved: the test plays the server end of the
 // `MessagePort` protocol by hand.
@@ -38,11 +38,15 @@ const WEBRTC_ADDRESS = {
   targetIp: "127.0.0.1",
   remoteTlsCertificateSha256: new Uint8Array(32),
 };
+const PAYLOAD = [new Uint8Array([1, 2, 3])];
 
-// Sets up a client connected to a hand-driven fake server. Returns the
-// captured events, the client `Instance` (whose `streamOpened`/`streamReset`
-// stand in for what `client.ts` reports when the platform fires callbacks),
-// and helpers to post server messages.
+/**
+ * Connects a client to a hand-driven fake server.
+ *
+ * The returned `instance` is the client `Instance`. Calling `streamOpened` and
+ * `streamReset` on it stands in for what `client.ts` reports when the platform
+ * fires the matching callbacks.
+ */
 async function setup() {
   const { port1, port2 } = new MessageChannel();
   const events = [];
@@ -66,8 +70,8 @@ async function setup() {
   const instance = await instancePromise;
 
   // Unknown message types fall through the switch and reach `eventCallback`
-  // untouched, which makes a posted sentinel a reliable "all previous
-  // messages processed" barrier.
+  // untouched, which makes a posted sentinel a reliable "all previous messages
+  // processed" barrier.
   let flushCount = 0;
   const flush = async () => {
     const ty = `__test_flush_${flushCount++}`;
@@ -77,7 +81,7 @@ async function setup() {
     }
   };
 
-  // Open ports keep the Node event loop alive; close them so ava can exit.
+  // Open ports keep the Node event loop alive. Close them so ava can exit.
   const close = () => {
     port1.close();
     port2.close();
@@ -87,80 +91,140 @@ async function setup() {
   return { events, instance, serverPort, flush, close };
 }
 
-// Opens connection 1 at the given address with the given substream ids
-// reported open, then reset ids reported reset again — mirroring platform
-// callbacks reaching client.ts.
-async function withConnection({ instance, serverPort, flush }, address, openIds, resetIds) {
+/**
+ * Opens connection 1 at the given address, then reports substreams open and reset on it.
+ *
+ * Reporting mirrors the platform callbacks that reach `client.ts`.
+ */
+async function withConnection({ instance, serverPort, flush }, address, openIds = [], resetIds = []) {
   serverPort.postMessage({ ty: "new-connection", connectionId: 1, address });
   await flush();
   for (const id of openIds) instance.streamOpened(1, id, "outbound");
   for (const id of resetIds) instance.streamReset(1, id, "test reset");
 }
 
-async function commandReaches(ty, { address, streamId, openIds = [], resetIds = [] }) {
+const reached = (ctx, ty, streamId) =>
+  ctx.events.some((e) => e.ty === ty && e.streamId === streamId);
+
+// A single-stream connection has no substreams, so `streamOpened` is never
+// called for it and the live-substream set stays empty forever. The wasm side
+// nonetheless reports stream id 0 for every write. Checking that 0 against the
+// empty set drops every write on the connection, which is issue #3342. The peer
+// then receives nothing, so it answers nothing, and the handshake times out.
+
+test("stream-send on a single-stream connection works", async (t) => {
+  // Given
   const ctx = await setup();
-  await withConnection(ctx, address, openIds, resetIds);
-  const message = ty === "stream-send"
-    ? { ty, connectionId: 1, streamId, data: [new Uint8Array([1, 2, 3])] }
-    : { ty, connectionId: 1, streamId };
-  ctx.serverPort.postMessage(message);
+  await withConnection(ctx, WEBSOCKET_ADDRESS);
+
+  // When
+  ctx.serverPort.postMessage({ ty: "stream-send", connectionId: 1, streamId: 0, data: PAYLOAD });
   await ctx.flush();
+
+  // Then
+  t.true(reached(ctx, "stream-send", 0));
   ctx.close();
-  return ctx.events.some((e) => e.ty === ty && e.streamId === streamId);
-}
-
-const sendReaches = (opts) => commandReaches("stream-send", opts);
-const sendCloseReaches = (opts) => commandReaches("stream-send-close", opts);
-
-// Single-stream connections have no substreams, so `streamOpened` is never called for them and
-// the live-substream set stays empty forever. The wasm side nonetheless reports stream id 0 for
-// every write. Checking that 0 against the empty set would drop every write on the connection,
-// which is issue #3342: the peer receives nothing, so it replies with nothing, and the libp2p
-// handshake times out.
-
-test("stream-send on a single-stream connection reaches the callback", async (t) => {
-  t.true(await sendReaches({ address: WEBSOCKET_ADDRESS, streamId: 0 }));
 });
 
-test("stream-send-close on a single-stream connection reaches the callback", async (t) => {
-  t.true(await sendCloseReaches({ address: WEBSOCKET_ADDRESS, streamId: 0 }));
-});
-
-test("stream-send on a reset single-stream connection is dropped", async (t) => {
+test("stream-send-close on a single-stream connection works", async (t) => {
+  // Given
   const ctx = await setup();
-  await withConnection(ctx, WEBSOCKET_ADDRESS, [], []);
+  await withConnection(ctx, WEBSOCKET_ADDRESS);
+
+  // When
+  ctx.serverPort.postMessage({ ty: "stream-send-close", connectionId: 1, streamId: 0 });
+  await ctx.flush();
+
+  // Then
+  t.true(reached(ctx, "stream-send-close", 0));
+  ctx.close();
+});
+
+test("stream-send on a reset single-stream connection fails", async (t) => {
+  // Given
+  const ctx = await setup();
+  await withConnection(ctx, WEBSOCKET_ADDRESS);
   ctx.instance.connectionReset(1, "test reset");
-  ctx.serverPort.postMessage({
-    ty: "stream-send",
-    connectionId: 1,
-    streamId: 0,
-    data: [new Uint8Array([1, 2, 3])],
-  });
+
+  // When
+  ctx.serverPort.postMessage({ ty: "stream-send", connectionId: 1, streamId: 0, data: PAYLOAD });
   await ctx.flush();
+
+  // Then
+  t.false(reached(ctx, "stream-send", 0));
   ctx.close();
-  t.false(ctx.events.some((e) => e.ty === "stream-send"));
 });
 
-// Multi-stream connections do have substreams, reported open by the platform. A command for a
-// substream that was already reset locally must be dropped, including for substream 0, which
-// carries the Noise handshake. That is #3326.
+// A multi-stream connection does have substreams, reported open by the
+// platform. A command for a substream that was already reset locally must be
+// dropped, including for substream 0, which carries the Noise handshake.
 
-test("stream-send for a live substream reaches the callback", async (t) => {
-  t.true(await sendReaches({ address: WEBRTC_ADDRESS, streamId: 3, openIds: [3] }));
+test("stream-send for a live substream works", async (t) => {
+  // Given
+  const ctx = await setup();
+  await withConnection(ctx, WEBRTC_ADDRESS, [3]);
+
+  // When
+  ctx.serverPort.postMessage({ ty: "stream-send", connectionId: 1, streamId: 3, data: PAYLOAD });
+  await ctx.flush();
+
+  // Then
+  t.true(reached(ctx, "stream-send", 3));
+  ctx.close();
 });
 
-test("stream-send for a reset substream is dropped", async (t) => {
-  t.false(await sendReaches({ address: WEBRTC_ADDRESS, streamId: 3, openIds: [3], resetIds: [3] }));
+test("stream-send for a reset substream fails", async (t) => {
+  // Given
+  const ctx = await setup();
+  await withConnection(ctx, WEBRTC_ADDRESS, [3], [3]);
+
+  // When
+  ctx.serverPort.postMessage({ ty: "stream-send", connectionId: 1, streamId: 3, data: PAYLOAD });
+  await ctx.flush();
+
+  // Then
+  t.false(reached(ctx, "stream-send", 3));
+  ctx.close();
 });
 
-test("stream-send for reset substream 0 is dropped", async (t) => {
-  t.false(await sendReaches({ address: WEBRTC_ADDRESS, streamId: 0, openIds: [0], resetIds: [0] }));
+test("stream-send for reset substream 0 fails", async (t) => {
+  // Given
+  const ctx = await setup();
+  await withConnection(ctx, WEBRTC_ADDRESS, [0], [0]);
+
+  // When
+  ctx.serverPort.postMessage({ ty: "stream-send", connectionId: 1, streamId: 0, data: PAYLOAD });
+  await ctx.flush();
+
+  // Then
+  t.false(reached(ctx, "stream-send", 0));
+  ctx.close();
 });
 
-test("stream-send-close for reset substream 0 is dropped", async (t) => {
-  t.false(await sendCloseReaches({ address: WEBRTC_ADDRESS, streamId: 0, openIds: [0], resetIds: [0] }));
+test("stream-send-close for reset substream 0 fails", async (t) => {
+  // Given
+  const ctx = await setup();
+  await withConnection(ctx, WEBRTC_ADDRESS, [0], [0]);
+
+  // When
+  ctx.serverPort.postMessage({ ty: "stream-send-close", connectionId: 1, streamId: 0 });
+  await ctx.flush();
+
+  // Then
+  t.false(reached(ctx, "stream-send-close", 0));
+  ctx.close();
 });
 
-test("stream-send for a never-opened substream is dropped", async (t) => {
-  t.false(await sendReaches({ address: WEBRTC_ADDRESS, streamId: 0 }));
+test("stream-send for a never-opened substream fails", async (t) => {
+  // Given
+  const ctx = await setup();
+  await withConnection(ctx, WEBRTC_ADDRESS);
+
+  // When
+  ctx.serverPort.postMessage({ ty: "stream-send", connectionId: 1, streamId: 0, data: PAYLOAD });
+  await ctx.flush();
+
+  // Then
+  t.false(reached(ctx, "stream-send", 0));
+  ctx.close();
 });
