@@ -106,12 +106,10 @@ async function withConnection({ instance, serverPort, flush }, address, openIds 
 const reached = (ctx, ty, streamId) =>
   ctx.events.some((e) => e.ty === ty && e.streamId === streamId);
 
-// A single-stream connection has no substreams, so `streamOpened` is never
-// called for it and the live-substream set stays empty forever. The wasm side
-// nonetheless reports stream id 0 for every write. Checking that 0 against the
-// empty set drops every write on the connection, which is issue #3342. The peer
-// then receives nothing, so it answers nothing, and the handshake times out.
-
+// Regression test for issue #3342. `streamOpened` is never called for a
+// single-stream connection, so checking stream id 0 against the live-substream
+// set drops every write, and the handshake times out with the peer never having
+// received a byte.
 test("stream-send on a single-stream connection works", async (t) => {
   // Given
   const ctx = await setup();
@@ -155,10 +153,6 @@ test("stream-send on a reset single-stream connection fails", async (t) => {
   ctx.close();
 });
 
-// A multi-stream connection does have substreams, reported open by the
-// platform. A command for a substream that was already reset locally must be
-// dropped, including for substream 0, which carries the Noise handshake.
-
 test("stream-send for a live substream works", async (t) => {
   // Given
   const ctx = await setup();
@@ -187,6 +181,9 @@ test("stream-send for a reset substream fails", async (t) => {
   ctx.close();
 });
 
+// Regression test for pull request #3326. Substream 0 carries the Noise
+// handshake, and a truthiness check on the stream id exempted it from the
+// liveness check, so a write racing its reset reached a dead data channel.
 test("stream-send for reset substream 0 fails", async (t) => {
   // Given
   const ctx = await setup();
