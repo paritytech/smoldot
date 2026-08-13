@@ -77,8 +77,6 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
 
     const state = {
         jsonRpcResponses: new Map<number, string[]>(),
-        // Note that only multi-stream connections have substreams, and thus only they have
-        // stream-scoped state. A `streamId` is meaningful only for these connections.
         connections: new Map<number, { ty: "single-stream" } | { ty: "multi-stream", liveStreams: Set<number> }>(),
     };
 
@@ -276,8 +274,6 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
     const state: {
         // Always set except at the very beginning.
         instance: instance.Instance | null,
-        // See the equivalent field on the client side: only multi-stream connections have
-        // substreams, and thus only they have stream-scoped state.
         connections: Map<number, { ty: "single-stream" } | { ty: "multi-stream", liveStreams: Set<number> }>,
         acceptedJsonRpcResponses: Map<number, number>,
         onExecutorShutdownOrWasmPanic?: (() => void),
