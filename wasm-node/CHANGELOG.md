@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- In remote-instance mode (any client constructed with `ClientOptions.portToWorker`), no longer silently drop every outbound write on single-stream connections, which made WebSocket and TCP connections unable to complete the libp2p handshake: the remote received nothing, so it answered nothing, and the connection was torn down on the handshake timeout. Single-stream connections have no substream, so the stale-substream check that [#3326](https://github.com/paritytech/smoldot/pull/3326) tightened no longer applies to them. ([#3342](https://github.com/paritytech/smoldot/issues/3342); regression from [#3326](https://github.com/paritytech/smoldot/pull/3326))
+
 ## 3.4.0 - 2026-08-07
 
 ### Added
