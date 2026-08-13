@@ -1,6 +1,6 @@
 [package]
 name = "smoldot-light"
-version = "2.0.0"
+version = "2.0.1"
 description = "Browser bindings to a light client for Substrate-based blockchains"
 documentation = "https://docs.rs/smoldot-light"
 authors.workspace = true
