@@ -996,6 +996,80 @@ enum ToBackgroundChain {
     },
 }
 
+#[cfg(all(test, feature = "std"))]
+pub(crate) mod test_stub {
+    //! Test-only stand-in for a [`NetworkServiceChain`].
+    //!
+    //! The returned chain is not backed by a real networking background task. Instead, the
+    //! test injects network [`Event`]s through the [`StubControl`], and every request sent to
+    //! the chain (blocks, warp-sync, storage proofs, ...) is parked forever, like a peer that
+    //! never answers. This makes it possible to drive the sync service through scripted
+    //! network activity without any actual networking.
+
+    use super::{Event, NetworkServiceChain, PlatformRef, ToBackgroundChain};
+    use alloc::{sync::Arc, vec::Vec};
+    use core::time::Duration;
+
+    pub(crate) struct StubControl {
+        subscribers: Arc<async_lock::Mutex<Vec<async_channel::Sender<Event>>>>,
+    }
+
+    impl StubControl {
+        /// Delivers `event` to every subscriber of the stubbed chain, waiting first for at
+        /// least one subscription to exist.
+        pub(crate) async fn inject(&self, event: Event) {
+            loop {
+                {
+                    let subscribers = self.subscribers.lock().await;
+                    if !subscribers.is_empty() {
+                        for tx in subscribers.iter() {
+                            let _ = tx.send(event.clone()).await;
+                        }
+                        return;
+                    }
+                }
+                smol::Timer::after(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
+    /// Builds a stubbed [`NetworkServiceChain`] together with its [`StubControl`].
+    pub(crate) fn new<TPlat: PlatformRef>(
+        platform: &TPlat,
+    ) -> (Arc<NetworkServiceChain<TPlat>>, StubControl) {
+        let (keep_alive_tx, keep_alive_rx) = async_channel::bounded(4);
+        let (messages_tx, messages_rx) = async_channel::bounded(32);
+        let subscribers = Arc::new(async_lock::Mutex::new(Vec::new()));
+
+        platform.spawn_task("network-service-stub".into(), {
+            let subscribers = subscribers.clone();
+            async move {
+                let _keep_alive_rx = keep_alive_rx;
+                // Messages parked here never get an answer: their `oneshot::Sender`s are kept
+                // alive so the requesting future pends forever instead of seeing an error.
+                let mut parked = Vec::new();
+                while let Ok(message) = messages_rx.recv().await {
+                    match message {
+                        ToBackgroundChain::Subscribe { sender } => {
+                            subscribers.lock().await.push(sender)
+                        }
+                        other => parked.push(other),
+                    }
+                }
+            }
+        });
+
+        (
+            Arc::new(NetworkServiceChain {
+                _keep_alive_messages_tx: keep_alive_tx,
+                messages_tx,
+                marker: core::marker::PhantomData,
+            }),
+            StubControl { subscribers },
+        )
+    }
+}
+
 struct BackgroundTask<TPlat: PlatformRef> {
     /// See [`Config::platform`].
     platform: TPlat,
