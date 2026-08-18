@@ -42,7 +42,10 @@ This repository contains the following components:
 Smoldot pledges to support the Polkadot, Kusama, Westend, and Rococo chains, where "support" means "everything works as intended".
 
 Because Polkadot, Kusama, Westend, and Rococo were built using the Substrate framework, smoldot has to support most features found in the Substrate repository. Consequently, smoldot is able to connect to most Substrate-based chains.
-However, given that Substrate is a very generic framework that doesn't offer any specification, and that any user of Substrate can in principle modify most aspects of it in any way they want, it is not possible to offer a guarantee that smoldot is compatible with all Substrate-based chains.
+
+However, given that Substrate is a very generic framework that doesn't offer any specification, and that any user of Substrate can in principle modify most aspects of it in any way they want. 
+
+It is not possible to offer a guarantee that smoldot is compatible with all Substrate-based chains.
 
 ## Can I embed smoldot into a mobile application or an application in general?
 
