@@ -84,7 +84,7 @@ In most likelihood, the worst that could happen when using smoldot is "it's not 
 
 ## I've tried using smoldot and it's very slow!
 
-If you are using smoldot through PolkadotJS, it is likely that the issue you are suffering from isn't smoldot's fault. The JSON-RPC protocol used by PolkadotJS to talk to smoldot is generally poorly designed and is completely inadapted to light clients, and the smoldot light client has to use a lot of guesswork to understand what PolkadotJS desires. [A new JSON-RPC protocol](https://github.com/paritytech/json-rpc-interface-spec/) has been developed and is supported by both smoldot and Substrate, but higher-level libraries or UIs haven't updated to it yet.
+If you are using smoldot through PolkadotJS, it is likely that the issue you are suffering from isn't smoldot's fault. The JSON-RPC protocol used by PolkadotJS to talk to smoldot is generally poorly designed and is completely unadapted to light clients, and the smoldot light client has to use a lot of guesswork to understand what PolkadotJS desires. [A new JSON-RPC protocol](https://github.com/paritytech/json-rpc-interface-spec/) has been developed and is supported by both smoldot and Substrate, but higher-level libraries or UIs haven't updated to it yet.
 
 However, please open an issue nonetheless. We unfortunately can't magically discover the issues that you see, especially when it comes to poor performances.
 
