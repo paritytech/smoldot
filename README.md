@@ -42,7 +42,10 @@ This repository contains the following components:
 Smoldot pledges to support the Polkadot, Kusama, Westend, and Rococo chains, where "support" means "everything works as intended".
 
 Because Polkadot, Kusama, Westend, and Rococo were built using the Substrate framework, smoldot has to support most features found in the Substrate repository. Consequently, smoldot is able to connect to most Substrate-based chains.
-However, given that Substrate is a very generic framework that doesn't offer any specification, and that any user of Substrate can in principle modify most aspects of it in any way they want, it is not possible to offer a guarantee that smoldot is compatible with all Substrate-based chains.
+
+However, given that Substrate is a very generic framework that doesn't offer any specification, and that any user of Substrate can in principle modify most aspects of it in any way they want. 
+
+It is not possible to offer a guarantee that smoldot is compatible with all Substrate-based chains.
 
 ## Can I embed smoldot into a mobile application or an application in general?
 
@@ -53,7 +56,9 @@ Yes! There exists two ways of doing that:
 
 For technologies other than Rust or JavaScript, the second solution has obviously more overhead since there are more layers, but is easier.
 
-While it is not excluded to add Flutter/React Native/etc. packages to this repository that make it as easy as possible to integrate smoldot, the main maintainer of this repository unfortunately doesn't know enough about mobile development to create or maintain these packages.
+While it is not excluded to add Flutter/React Native/etc. packages to this repository that make it as easy as possible to integrate smoldot. 
+
+The main maintainer of this repository unfortunately doesn't know enough about mobile development to create or maintain these packages.
 
 ## How can I attack smoldot?
 
@@ -79,7 +84,7 @@ In most likelihood, the worst that could happen when using smoldot is "it's not 
 
 ## I've tried using smoldot and it's very slow!
 
-If you are using smoldot through PolkadotJS, it is likely that the issue you are suffering from isn't smoldot's fault. The JSON-RPC protocol used by PolkadotJS to talk to smoldot is generally poorly designed and is completely inadapted to light clients, and the smoldot light client has to use a lot of guesswork to understand what PolkadotJS desires. [A new JSON-RPC protocol](https://github.com/paritytech/json-rpc-interface-spec/) has been developed and is supported by both smoldot and Substrate, but higher-level libraries or UIs haven't updated to it yet.
+If you are using smoldot through PolkadotJS, it is likely that the issue you are suffering from isn't smoldot's fault. The JSON-RPC protocol used by PolkadotJS to talk to smoldot is generally poorly designed and is completely unadapted to light clients, and the smoldot light client has to use a lot of guesswork to understand what PolkadotJS desires. [A new JSON-RPC protocol](https://github.com/paritytech/json-rpc-interface-spec/) has been developed and is supported by both smoldot and Substrate, but higher-level libraries or UIs haven't updated to it yet.
 
 However, please open an issue nonetheless. We unfortunately can't magically discover the issues that you see, especially when it comes to poor performances.
 
@@ -135,7 +140,7 @@ Where "crash" includes: Rust panics, JavaScript exceptions (except for the ones 
 
 In order to run the wasm light node, you must have installed [rustup](https://rustup.rs/).
 
-The wasm light node can be tested with `cd wasm-node/javascript` and `npm install; npm start`. This will compile the smoldot wasm light node and start a WebSocket server capable of answering JSON-RPC requests. This demo will print a list of URLs that you can navigate to in order to connect to a certain chain. For example you can navigate to <https://ipfs.io/ipns/dotapps.io/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestend2> in order to interact with the Westend chain.
+The wasm light node can be tested with `cd wasm-node/javascript` and `npm install; npm start`. This will compile the smoldot wasm light node and start a WebSocket server capable of answering JSON-RPC requests. This demo will print a list of URLs that you can navigate to in order to connect to a certain chain. For example, you can navigate to <https://ipfs.io/ipns/dotapps.io/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestend2> in order to interact with the Westend chain.
 
 > Note: The `npm start` command starts a small JavaScript shim, on top of the wasm light node, that hard codes the chain to Westend and starts the WebSocket server. The wasm light node itself can connect to a variety of different chains (not only Westend) and doesn't start any server.
 
