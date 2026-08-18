@@ -56,7 +56,9 @@ Yes! There exists two ways of doing that:
 
 For technologies other than Rust or JavaScript, the second solution has obviously more overhead since there are more layers, but is easier.
 
-While it is not excluded to add Flutter/React Native/etc. packages to this repository that make it as easy as possible to integrate smoldot, the main maintainer of this repository unfortunately doesn't know enough about mobile development to create or maintain these packages.
+While it is not excluded to add Flutter/React Native/etc. packages to this repository that make it as easy as possible to integrate smoldot. 
+
+The main maintainer of this repository unfortunately doesn't know enough about mobile development to create or maintain these packages.
 
 ## How can I attack smoldot?
 
