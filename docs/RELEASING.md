@@ -56,7 +56,7 @@ Apply these rules per package:
 Why `lib/` or `light-base/` alone forces an npm bump:
 `wasm-node/javascript/prepare.mjs` compiles `smoldot-light-wasm` at pack time.
 That crate path-depends on `smoldot-light` → `smoldot`, so any change in
-`lib/` or `light-base/` ends up in the embedded `.wasm` (base64'd into
+`lib/` or `light-base/` ends up in the embedded `.wasm` (base64-encoded into
 `src/internals/bytecode/*.ts`) even when `wasm-node/` itself is untouched.
 
 Semver level:
