@@ -27,7 +27,9 @@ A version-bumping release commit drives four outputs:
 
 All release tags are pushed by CI. `tags-publish` reads the version files
 and pushes `npm-smoldot-v<X.Y.Z>`, `smoldot-v<A.B.C>`, and
-`smoldot-light-v<A.B.C>` to the merge commit, but only the ones whose
+`smoldot-light-v<A.B.C>` to the merge commit. 
+
+Only the ones whose
 version names don't already exist on the remote — so a non-bumping push
 to `main` is a no-op for each tag.
 
