@@ -66,7 +66,7 @@ Semver level:
 - Breaking API change → **major**
 
 Version streams are independent; do not force lockstep. `crates-io-publish`
-wraps each publish in `continue-on-error: true`, so a re-publish attempt at
+wraps each publish in `continue-on-error: true`, so a republish attempt at
 the same version is tolerated.
 
 ---
