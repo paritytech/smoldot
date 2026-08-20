@@ -104,7 +104,7 @@ needs to track the current compatibility range, not the exact version.
 
 **CI-enforced invariant:** `wasm-node/javascript/package.json` `.version` and
 `wasm-node/rust/Cargo.toml` `[package].version` must match exactly. The
-`wasm-node-versions-match` job fails the build on any mismatch.
+`wasm-node-versions-match` job causes the build to fail on any mismatch.
 
 ---
 
