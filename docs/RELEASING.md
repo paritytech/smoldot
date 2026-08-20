@@ -27,7 +27,9 @@ A version-bumping release commit drives four outputs:
 
 All release tags are pushed by CI. `tags-publish` reads the version files
 and pushes `npm-smoldot-v<X.Y.Z>`, `smoldot-v<A.B.C>`, and
-`smoldot-light-v<A.B.C>` to the merge commit, but only the ones whose
+`smoldot-light-v<A.B.C>` to the merge commit. 
+
+Only the ones whose
 version names don't already exist on the remote — so a non-bumping push
 to `main` is a no-op for each tag.
 
@@ -54,7 +56,7 @@ Apply these rules per package:
 Why `lib/` or `light-base/` alone forces an npm bump:
 `wasm-node/javascript/prepare.mjs` compiles `smoldot-light-wasm` at pack time.
 That crate path-depends on `smoldot-light` → `smoldot`, so any change in
-`lib/` or `light-base/` ends up in the embedded `.wasm` (base64'd into
+`lib/` or `light-base/` ends up in the embedded `.wasm` (base64-encoded into
 `src/internals/bytecode/*.ts`) even when `wasm-node/` itself is untouched.
 
 Semver level:
@@ -64,7 +66,7 @@ Semver level:
 - Breaking API change → **major**
 
 Version streams are independent; do not force lockstep. `crates-io-publish`
-wraps each publish in `continue-on-error: true`, so a re-publish attempt at
+wraps each publish in `continue-on-error: true`, so a republish attempt at
 the same version is tolerated.
 
 ---
@@ -102,7 +104,7 @@ needs to track the current compatibility range, not the exact version.
 
 **CI-enforced invariant:** `wasm-node/javascript/package.json` `.version` and
 `wasm-node/rust/Cargo.toml` `[package].version` must match exactly. The
-`wasm-node-versions-match` job fails the build on any mismatch.
+`wasm-node-versions-match` job causes the build to fail on any mismatch.
 
 ---
 
@@ -196,7 +198,7 @@ Run this every release; it only validates packaging and local build.
 cargo publish --dry-run --locked --allow-dirty -p smoldot-light
 ```
 
-Run this **only if `smoldot` is not being bumped**. Otherwise it fails on
+Run this **only if `smoldot` is not being bumped**. Otherwise, it fails on
 `smoldot` path-dep resolution against crates.io — harmless
 
 ---
