@@ -198,7 +198,7 @@ Run this every release; it only validates packaging and local build.
 cargo publish --dry-run --locked --allow-dirty -p smoldot-light
 ```
 
-Run this **only if `smoldot` is not being bumped**. Otherwise it fails on
+Run this **only if `smoldot` is not being bumped**. Otherwise, it fails on
 `smoldot` path-dep resolution against crates.io — harmless
 
 ---
