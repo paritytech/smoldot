@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{
-    BlockNotification, BootstrapMode, ConfigSubstrateCompatibleRuntimeCodeHint,
+    BlockNotification, BootstrapMode, BootstrapStatus, ConfigSubstrateCompatibleRuntimeCodeHint,
     FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground,
 };
 use crate::{log, network_service, platform::PlatformRef, util};
@@ -119,7 +119,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         mode: ModeState::Deciding,
         bootstrap_complete: false,
         chosen_bootstrap_mode: None,
-        pending_bootstrap_mode_requests: Vec::new(),
+        bootstrap_status_subscribers: Vec::new(),
+        last_reported_warp_progress: None,
         deciding_packets_seen: 0,
         mode_decision_deadline: future::Either::Left(Box::pin(
             platform.sleep(MODE_DECISION_TIMEOUT),
@@ -401,8 +402,19 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         &task.log_target,
                         "mode-decision; transition=Ready (WarpSyncFinished)",
                     );
+                    let finalized_height = task
+                        .sync
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!())
+                        .finalized_block_number();
                     drain_pending_subscriptions(&mut task);
                     commit_bootstrap_mode(&mut task, BootstrapMode::WarpSync);
+                    emit_bootstrap_status(
+                        &mut task.bootstrap_status_subscribers,
+                        BootstrapStatus::WarpSyncFinished {
+                            finalized: finalized_height,
+                        },
+                    );
                     task.bootstrap_complete = true;
                     // Post-bootstrap re-warp is allowed; the `Stop` flows through
                     // `all_notifications.clear()` above.
@@ -441,6 +453,29 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             verified_hash = HashDisplay(&fragment_hash),
                             verified_height = fragment_number
                         );
+
+                        // Compute the current warp target from the max best-block
+                        // height advertised across connected sources. Clamp so
+                        // `target >= at` when peer samples lag the fragments already
+                        // verified.
+                        let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
+                        let peer_best = sync
+                            .sources()
+                            .map(|src| sync.source_best_block(src).0)
+                            .max()
+                            .unwrap_or(0);
+                        let target = cmp::max(peer_best, fragment_number);
+                        let progress = (fragment_number, target);
+                        if task.last_reported_warp_progress != Some(progress) {
+                            task.last_reported_warp_progress = Some(progress);
+                            emit_bootstrap_status(
+                                &mut task.bootstrap_status_subscribers,
+                                BootstrapStatus::WarpSyncProgress {
+                                    at: fragment_number,
+                                    target,
+                                },
+                            );
+                        }
                     }
                     Err(err) => {
                         log!(
@@ -1134,15 +1169,6 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 ));
             }
 
-            WakeUpReason::ForegroundMessage(ToBackground::BootstrapMode { send_back }) => {
-                // Answer immediately if the mode is committed, otherwise queue.
-                if let Some(mode) = task.chosen_bootstrap_mode {
-                    let _ = send_back.send(mode);
-                } else {
-                    task.pending_bootstrap_mode_requests.push(send_back);
-                }
-            }
-
             WakeUpReason::ForegroundMessage(ToBackground::WarpSyncPosition { send_back }) => {
                 // `Status::Sync` means warp is not (or no longer) engaged. The two warp
                 // statuses expose the height proven finalized by the fragments so far.
@@ -1163,6 +1189,23 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     } => Some(finalized_block_number),
                 };
                 let _ = send_back.send(position);
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::SubscribeBootstrapStatus {
+                send_back,
+            }) => {
+                // Unbounded so an in-progress warp cannot deadlock the sync loop on a
+                // slow subscriber. A subscriber that stops reading builds up memory,
+                // which is bounded by the number of warp fragments times three status
+                // variants, plus a `ModeCommitted` snapshot.
+                let (tx, rx) = async_channel::unbounded();
+                // Snapshot what has already happened so a late subscriber does not
+                // miss earlier transitions.
+                if let Some(mode) = task.chosen_bootstrap_mode {
+                    let _ = tx.try_send(BootstrapStatus::ModeCommitted { mode });
+                }
+                task.bootstrap_status_subscribers.push(tx);
+                let _ = send_back.send(rx);
             }
 
             WakeUpReason::ForegroundClosed => {
@@ -1668,13 +1711,18 @@ struct Task<TPlat: PlatformRef> {
     /// Mode chosen at bootstrap-commit time. `None` during [`ModeState::Deciding`] and
     /// [`ModeState::AwaitingWarp`]. Set to [`BootstrapMode::WarpSync`] when
     /// `WarpSyncFinished` promotes us to [`ModeState::Ready`], or to
-    /// [`BootstrapMode::AllForks`] when [`commit_all_forks_only`] fires. Exposed via
-    /// `SyncService::bootstrap_mode`.
+    /// [`BootstrapMode::AllForks`] when [`commit_all_forks_only`] fires. Broadcast as
+    /// [`BootstrapStatus::ModeCommitted`] on the first transition.
     chosen_bootstrap_mode: Option<BootstrapMode>,
 
-    /// [`ToBackground::BootstrapMode`] requests received before the mode was chosen.
-    /// Drained at commit time.
-    pending_bootstrap_mode_requests: Vec<oneshot::Sender<BootstrapMode>>,
+    /// Senders for live [`BootstrapStatus`] streams (see
+    /// `SyncService::subscribe_bootstrap_status`). Emissions use a retain-if-full
+    /// pattern so a slow subscriber never blocks the sync loop.
+    bootstrap_status_subscribers: Vec<async_channel::Sender<BootstrapStatus>>,
+
+    /// Last `(at, target)` reported on a [`BootstrapStatus::WarpSyncProgress`] event.
+    /// Used to dedupe emissions.
+    last_reported_warp_progress: Option<(u64, u64)>,
 
     /// Below-gap packets observed while [`ModeState::Deciding`]; gates AllForksOnly commit.
     deciding_packets_seen: usize,
@@ -1899,31 +1947,28 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
         .set_warp_completion_suppressed(false);
 }
 
-/// Records the chosen bootstrap mode and answers any queued
-/// `SyncService::bootstrap_mode` callers. Idempotent: only the first call takes effect
-/// so the reported mode always reflects the initial bootstrap.
+/// Records the chosen bootstrap mode and broadcasts a
+/// [`BootstrapStatus::ModeCommitted`] event to every subscriber. Idempotent: only the
+/// first call takes effect so the reported mode always reflects the initial bootstrap.
 fn commit_bootstrap_mode<TPlat: PlatformRef>(task: &mut Task<TPlat>, mode: BootstrapMode) {
-    commit_bootstrap_mode_inner(
-        &mut task.chosen_bootstrap_mode,
-        &mut task.pending_bootstrap_mode_requests,
-        mode,
+    if task.chosen_bootstrap_mode.is_some() {
+        return;
+    }
+    task.chosen_bootstrap_mode = Some(mode);
+    emit_bootstrap_status(
+        &mut task.bootstrap_status_subscribers,
+        BootstrapStatus::ModeCommitted { mode },
     );
 }
 
-/// Pure-logic portion of [`commit_bootstrap_mode`], extracted so it can be unit-tested
-/// without a full [`Task`] fixture.
-fn commit_bootstrap_mode_inner(
-    chosen: &mut Option<BootstrapMode>,
-    pending: &mut Vec<oneshot::Sender<BootstrapMode>>,
-    mode: BootstrapMode,
+/// Broadcasts a [`BootstrapStatus`] to every current subscriber. Uses a retain-if-full
+/// pattern so a slow subscriber has its sender dropped rather than blocking the sync
+/// loop.
+fn emit_bootstrap_status(
+    subscribers: &mut Vec<async_channel::Sender<BootstrapStatus>>,
+    event: BootstrapStatus,
 ) {
-    if chosen.is_some() {
-        return;
-    }
-    *chosen = Some(mode);
-    for send_back in pending.drain(..) {
-        let _ = send_back.send(mode);
-    }
+    subscribers.retain(|sender| sender.try_send(event.clone()).is_ok());
 }
 
 #[cfg(test)]
@@ -2119,65 +2164,59 @@ mod tests {
         );
     }
 
-    // The two tests below exercise `commit_bootstrap_mode` through its extracted
-    // pure helper, since a full `Task<TPlat>` fixture would require a live
-    // `NetworkServiceChain`.
+    // These tests exercise the bootstrap-status broadcast helper, since a full
+    // `Task<TPlat>` fixture would require a live `NetworkServiceChain`.
 
     #[test]
-    fn commit_bootstrap_mode_drains_pending() {
+    fn emit_bootstrap_status_delivers_to_all_open_subscribers() {
         // Given
-        let mut chosen: Option<BootstrapMode> = None;
-        let mut pending: Vec<oneshot::Sender<BootstrapMode>> = Vec::new();
+        let mut subscribers = Vec::new();
         let mut receivers = Vec::new();
         for _ in 0..3 {
-            let (tx, rx) = oneshot::channel();
-            pending.push(tx);
+            let (tx, rx) = async_channel::unbounded();
+            subscribers.push(tx);
             receivers.push(rx);
         }
 
         // When
-        commit_bootstrap_mode_inner(&mut chosen, &mut pending, BootstrapMode::WarpSync);
+        emit_bootstrap_status(
+            &mut subscribers,
+            BootstrapStatus::ModeCommitted {
+                mode: BootstrapMode::WarpSync,
+            },
+        );
 
         // Then
-        assert_eq!(chosen, Some(BootstrapMode::WarpSync));
-        assert!(pending.is_empty());
-        for mut rx in receivers {
-            assert_eq!(rx.try_recv(), Ok(Some(BootstrapMode::WarpSync)));
+        assert_eq!(subscribers.len(), 3);
+        for rx in receivers {
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(BootstrapStatus::ModeCommitted {
+                    mode: BootstrapMode::WarpSync
+                })
+            ));
         }
     }
 
     #[test]
-    fn commit_bootstrap_mode_is_idempotent() {
+    fn emit_bootstrap_status_drops_closed_subscribers() {
         // Given
-        let mut chosen: Option<BootstrapMode> = None;
-        let mut pending: Vec<oneshot::Sender<BootstrapMode>> = Vec::new();
-        let mut initial_receivers = Vec::new();
-        for _ in 0..2 {
-            let (tx, rx) = oneshot::channel();
-            pending.push(tx);
-            initial_receivers.push(rx);
-        }
-        commit_bootstrap_mode_inner(&mut chosen, &mut pending, BootstrapMode::WarpSync);
-        assert_eq!(chosen, Some(BootstrapMode::WarpSync));
-        assert!(pending.is_empty());
-        for mut rx in initial_receivers {
-            assert_eq!(rx.try_recv(), Ok(Some(BootstrapMode::WarpSync)));
-        }
-        let mut later_receivers = Vec::new();
-        for _ in 0..2 {
-            let (tx, rx) = oneshot::channel();
-            pending.push(tx);
-            later_receivers.push(rx);
-        }
+        let (tx_healthy, rx_healthy) = async_channel::unbounded();
+        let (tx_closed, rx_closed) = async_channel::unbounded::<BootstrapStatus>();
+        drop(rx_closed);
+        let mut subscribers = vec![tx_healthy, tx_closed];
 
         // When
-        commit_bootstrap_mode_inner(&mut chosen, &mut pending, BootstrapMode::AllForks);
+        emit_bootstrap_status(
+            &mut subscribers,
+            BootstrapStatus::WarpSyncFinished { finalized: 42 },
+        );
 
         // Then
-        assert_eq!(chosen, Some(BootstrapMode::WarpSync));
-        assert_eq!(pending.len(), 2);
-        for mut rx in later_receivers {
-            assert_eq!(rx.try_recv(), Ok(None));
-        }
+        assert_eq!(subscribers.len(), 1);
+        assert!(matches!(
+            rx_healthy.try_recv(),
+            Ok(BootstrapStatus::WarpSyncFinished { finalized: 42 })
+        ));
     }
 }

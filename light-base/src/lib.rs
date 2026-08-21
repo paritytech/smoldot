@@ -1339,130 +1339,73 @@ fn start_services<TPlat: platform::PlatformRef>(
         }
     });
 
-    // Bootstrap sequence. Emissions are strictly ordered:
-    //   ModeDecision -> (WarpSyncProgress*)* -> WarpSyncFinished ->
-    //     BootstrapComplete
-    // The warp-progress poller is spawned from inside this task after
-    // `ModeDecision`, so it cannot race ahead. `warp_done` gates the poller
-    // so no stray `WarpSyncProgress` lands after `WarpSyncFinished`.
+    // Bootstrap sequence. `ModeDecision`, `WarpSyncProgress`, and
+    // `WarpSyncFinished` come from the sync service's state-transition stream
+    // (see `SyncService::subscribe_bootstrap_status`), so ordering is dictated
+    // by the state machine that owns those transitions. `BootstrapComplete` is
+    // emitted from here on the first block that arrives on the
+    // `subscribe_all` stream. Only a `Weak<SyncService>` is captured, so a
+    // stuck warp does not keep the chain alive after `remove_chain`.
     platform.spawn_task("lifecycle-bootstrap".into(), {
         let lifecycle_service = lifecycle_service.clone();
-        let sync_service = sync_service.clone();
-        let platform = platform.clone();
+        let sync_service = Arc::downgrade(&sync_service);
         async move {
-            // `subscribe_all` returns after the sync service commits its
-            // bootstrap mode, so `bootstrap_mode()` answers immediately here.
-            let subscription = sync_service.subscribe_all(16, false).await;
-            let mode = match sync_service.bootstrap_mode().await {
-                sync_service::BootstrapMode::WarpSync => lifecycle_service::SyncMode::WarpSync,
-                sync_service::BootstrapMode::AllForks => lifecycle_service::SyncMode::AllForks,
+            let Some(sync_service_arc) = sync_service.upgrade() else {
+                return;
             };
-            lifecycle_service
-                .emit(lifecycle_service::LifecycleEvent::ModeDecision { mode })
-                .await;
+            let status_stream = sync_service_arc.subscribe_bootstrap_status().await;
+            drop(sync_service_arc);
 
-            let warp_done = Arc::new(async_lock::RwLock::new(false));
-            if matches!(mode, lifecycle_service::SyncMode::WarpSync) {
-                // The poller holds `Weak` clones so that after `remove_chain`
-                // it does not keep the chain alive for the remainder of its
-                // 60 s window. Upgrade on each iteration and exit if either
-                // service has been dropped.
-                platform.spawn_task("lifecycle-warp-progress".into(), {
-                    let lifecycle_service = Arc::downgrade(&lifecycle_service);
-                    let sync_service = Arc::downgrade(&sync_service);
-                    let platform = platform.clone();
-                    let warp_done = warp_done.clone();
-                    async move {
-                        // `at` is the fragment position reported by the sync
-                        // service (the highest block proven finalized by
-                        // fragments verified so far). `target` is the highest
-                        // best-block height advertised by any connected peer,
-                        // clamped to a running max so a departing peer never
-                        // regresses it.
-                        let mut last_reported: Option<(u64, u64)> = None;
-                        let mut max_target: u64 = 0;
-                        for _ in 0..120 {
-                            platform.sleep(Duration::from_millis(500)).await;
-                            if *warp_done.read().await {
-                                return;
-                            }
-                            let Some(sync_service_arc) = sync_service.upgrade() else {
-                                return;
-                            };
-                            let at = match sync_service_arc.warp_sync_position().await {
-                                Some(at) => at,
-                                None => {
-                                    // The state machine has already left warp;
-                                    // the outer task will emit
-                                    // `WarpSyncFinished` when the first block
-                                    // streams in.
-                                    drop(sync_service_arc);
-                                    return;
-                                }
-                            };
-                            let peer_best = sync_service_arc
-                                .syncing_peers()
-                                .await
-                                .map(|(_, _, best, _)| best)
-                                .max()
-                                .unwrap_or(0);
-                            drop(sync_service_arc);
-                            if peer_best > max_target {
-                                max_target = peer_best;
-                            }
-                            // Keep `target >= at` even if the best-peer sample
-                            // lags the fragments we have already verified.
-                            if at > max_target {
-                                max_target = at;
-                            }
-                            let progress = (at, max_target);
-                            if last_reported != Some(progress) {
-                                last_reported = Some(progress);
-                                let Some(lifecycle_service_arc) = lifecycle_service.upgrade()
-                                else {
-                                    return;
-                                };
-                                lifecycle_service_arc
-                                    .emit(lifecycle_service::LifecycleEvent::WarpSyncProgress {
-                                        at: progress.0,
-                                        target: progress.1,
-                                    })
-                                    .await;
+            // Translate `BootstrapStatus` events into `LifecycleEvent`
+            // emissions until the stream closes.
+            let lifecycle_service_clone = lifecycle_service.clone();
+            let status_relay = async move {
+                while let Ok(status) = status_stream.recv().await {
+                    let event = match status {
+                        sync_service::BootstrapStatus::ModeCommitted { mode } => {
+                            lifecycle_service::LifecycleEvent::ModeDecision {
+                                mode: match mode {
+                                    sync_service::BootstrapMode::WarpSync => {
+                                        lifecycle_service::SyncMode::WarpSync
+                                    }
+                                    sync_service::BootstrapMode::AllForks => {
+                                        lifecycle_service::SyncMode::AllForks
+                                    }
+                                },
                             }
                         }
-                    }
-                });
-            }
+                        sync_service::BootstrapStatus::WarpSyncProgress { at, target } => {
+                            lifecycle_service::LifecycleEvent::WarpSyncProgress { at, target }
+                        }
+                        sync_service::BootstrapStatus::WarpSyncFinished { finalized } => {
+                            lifecycle_service::LifecycleEvent::WarpSyncFinished { finalized }
+                        }
+                    };
+                    lifecycle_service_clone.emit(event).await;
+                }
+            };
 
-            // The poller has its own clone of `sync_service`. Drop the outer
-            // one so this task no longer contributes to keeping the chain
-            // alive.
-            drop(sync_service);
-
-            // The first item on `new_blocks` (either `Block` or `Finalized`)
-            // means live-block streaming has started. Waiting only for
-            // `Finalized` would push this out by the GRANDPA round cadence
-            // for no additional signal.
-            let new_blocks = subscription.new_blocks;
-            if new_blocks.recv().await.is_ok() {
-                if matches!(mode, lifecycle_service::SyncMode::WarpSync) {
-                    // Stop the poller before the finished event so no
-                    // `WarpSyncProgress` can land after `WarpSyncFinished`.
-                    *warp_done.write().await = true;
-                    let header = subscription.finalized_block_scale_encoded_header;
-                    let finalized_height = header::decode(&header, block_number_bytes)
-                        .map(|h| h.number)
-                        .unwrap_or(0);
+            // `BootstrapComplete` is separate: it means "live blocks are
+            // flowing", which only shows up on `subscribe_all`. The first item
+            // on `new_blocks` (either `Block` or `Finalized`) is enough. This
+            // await blocks until the sync service reaches `Ready`.
+            let bootstrap_complete = async {
+                let Some(sync_service_arc) = sync_service.upgrade() else {
+                    return;
+                };
+                let subscription = sync_service_arc.subscribe_all(16, false).await;
+                drop(sync_service_arc);
+                if subscription.new_blocks.recv().await.is_ok() {
                     lifecycle_service
-                        .emit(lifecycle_service::LifecycleEvent::WarpSyncFinished {
-                            finalized: finalized_height,
-                        })
+                        .emit(lifecycle_service::LifecycleEvent::BootstrapComplete)
                         .await;
                 }
-                lifecycle_service
-                    .emit(lifecycle_service::LifecycleEvent::BootstrapComplete)
-                    .await;
-            }
+            };
+
+            // Both branches run concurrently. The relay drains the stream, and
+            // the bootstrap-complete branch races the first block. The task
+            // exits once both finish.
+            futures_lite::future::zip(status_relay, bootstrap_complete).await;
         }
     });
 
