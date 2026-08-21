@@ -1434,51 +1434,23 @@ fn start_services<TPlat: platform::PlatformRef>(
             const SYNC_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
             const WARP_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(45);
 
-            // Subscribe to network events for live peer-count tracking, then
-            // drop the `NetworkServiceChain` Arc so this task holds only the
-            // receiver.
-            let events = {
-                let Some(network_service_chain_arc) = network_service_chain.upgrade() else {
-                    return;
-                };
-                network_service_chain_arc.subscribe().await
-            };
-
             let started = platform.now();
-            // Most recent moment we observed a live peer. Seeded to
-            // `started` so `NoPeers` can only trip after the window elapses.
+            // Seeded so `NoPeers` can only trip after the window elapses.
             let mut last_peer_seen = started.clone();
-            let mut peer_count: usize = 0;
-            // Set the first time `is_near_head_of_chain_heuristic()` returns
-            // true. Gates the two post-bootstrap heuristics.
             let mut bootstrap_complete = false;
-            // Most recent moment `is_near_head_of_chain_heuristic()` was
-            // true. Only consulted after `bootstrap_complete`.
             let mut last_near_head_seen = started.clone();
-            // Most recent warp position observed and the moment we last saw
-            // it advance. `None` once warp is no longer engaged.
             let mut last_warp_position: Option<u64> = None;
             let mut last_warp_advance_seen = started.clone();
-            // Reason latched by the most recent unmatched `Stalled`
-            // emission, or `None` if currently healthy.
             let mut last_stall_reason: Option<lifecycle_service::StallReason> = None;
 
             loop {
-                // Drain pending network events non-blockingly. A closed
-                // sender means the per-chain network task is gone. Exit.
-                loop {
-                    match events.try_recv() {
-                        Ok(network_service::Event::Connected { .. }) => {
-                            peer_count = peer_count.saturating_add(1);
-                        }
-                        Ok(network_service::Event::Disconnected { .. }) => {
-                            peer_count = peer_count.saturating_sub(1);
-                        }
-                        Ok(_) => {}
-                        Err(async_channel::TryRecvError::Empty) => break,
-                        Err(async_channel::TryRecvError::Closed) => return,
-                    }
-                }
+                // Polling prevents a `subscribe` channel drained on a 5s tick from
+                // back-pressuring the whole networking layer.
+                let Some(network_service_chain_arc) = network_service_chain.upgrade() else {
+                    return;
+                };
+                let peer_count = network_service_chain_arc.peers_list().await.count();
+                drop(network_service_chain_arc);
                 if peer_count > 0 {
                     last_peer_seen = platform.now();
                 }
