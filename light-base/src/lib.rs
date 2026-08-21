@@ -1376,18 +1376,21 @@ fn start_services<TPlat: platform::PlatformRef>(
             };
 
             // The first block on `new_blocks` means live-block streaming has started,
-            // which is our `BootstrapComplete` signal. `subscribe_all` blocks until the
-            // sync service reaches `Ready`.
+            // which is our `BootstrapComplete` signal. The channel can close before a
+            // block arrives, so resubscribe on close.
             let bootstrap_complete = async {
-                let Some(sync_service_arc) = sync_service.upgrade() else {
-                    return;
-                };
-                let subscription = sync_service_arc.subscribe_all(16, false).await;
-                drop(sync_service_arc);
-                if subscription.new_blocks.recv().await.is_ok() {
-                    lifecycle_service
-                        .emit(lifecycle_service::LifecycleEvent::BootstrapComplete)
-                        .await;
+                loop {
+                    let Some(sync_service_arc) = sync_service.upgrade() else {
+                        return;
+                    };
+                    let subscription = sync_service_arc.subscribe_all(16, false).await;
+                    drop(sync_service_arc);
+                    if subscription.new_blocks.recv().await.is_ok() {
+                        lifecycle_service
+                            .emit(lifecycle_service::LifecycleEvent::BootstrapComplete)
+                            .await;
+                        return;
+                    }
                 }
             };
 
