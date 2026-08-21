@@ -30,6 +30,7 @@
 
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use async_lock::Mutex;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Sync mode picked by the client after startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,16 +126,11 @@ pub enum LifecycleEvent {
 /// Reason a subscription was terminated with [`LifecycleEvent::Stopped`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-    /// The subscriber's bounded channel filled up and the broadcaster dropped
-    /// its [`async_channel::Sender`] on a subsequent [`LifecycleService::emit`].
-    ///
-    /// Reserved by the schema. Not currently emitted, because `Vec::retain`
-    /// in `emit` drops the sender before a terminal event can be pushed
-    /// through it. A future revision may add a sideband to deliver this.
+    /// The subscriber's bounded channel filled up and the broadcaster dropped its
+    /// sender on a subsequent [`LifecycleService::emit`].
     Lagged,
     /// The broadcaster has been dropped, typically because the chain was
-    /// removed from the client. All subscribers observe their receiver
-    /// closing.
+    /// removed from the client.
     ChainRemoved,
 }
 
@@ -160,7 +156,40 @@ struct Inner {
     /// returned by [`LifecycleService::bug_report_trace`].
     history: VecDeque<LifecycleEvent>,
     /// Active subscribers. A `try_send` failure marks a subscriber as dropped.
-    subscribers: Vec<async_channel::Sender<LifecycleEvent>>,
+    subscribers: Vec<Subscriber>,
+}
+
+struct Subscriber {
+    tx: async_channel::Sender<LifecycleEvent>,
+    /// Set to `true` when the broadcaster drops this subscriber for lagging.
+    /// The pump reads it after seeing a closed channel to distinguish a
+    /// [`StopReason::Lagged`] from a [`StopReason::ChainRemoved`].
+    lagged: Arc<AtomicBool>,
+}
+
+/// Handle returned by [`LifecycleService::subscribe`].
+pub struct Subscription {
+    receiver: async_channel::Receiver<LifecycleEvent>,
+    /// Shared with the broadcaster. `true` iff this subscriber was dropped for lagging.
+    lagged: Arc<AtomicBool>,
+}
+
+impl Subscription {
+    /// Awaits the next event. Returns `None` when the broadcaster drops this subscriber.
+    pub async fn recv(&self) -> Option<LifecycleEvent> {
+        self.receiver.recv().await.ok()
+    }
+
+    /// Non-blocking receive. Returns an error when the channel is empty or closed.
+    pub fn try_recv(&self) -> Result<LifecycleEvent, async_channel::TryRecvError> {
+        self.receiver.try_recv()
+    }
+
+    /// True if the broadcaster dropped this subscriber for lagging. Meaningful only after
+    /// [`Subscription::recv`] yields `None`.
+    pub fn was_lagged(&self) -> bool {
+        self.lagged.load(Ordering::SeqCst)
+    }
 }
 
 impl LifecycleService {
@@ -175,7 +204,9 @@ impl LifecycleService {
     }
 
     /// Emits an event to every active subscriber and appends it to the
-    /// history. Subscribers whose channel is full are dropped.
+    /// history. Subscribers whose channel is full are dropped and marked as
+    /// lagged so the pump can report [`StopReason::Lagged`] instead of
+    /// [`StopReason::ChainRemoved`].
     pub async fn emit(&self, event: LifecycleEvent) {
         let mut inner = self.inner.lock().await;
         if inner.history.len() == HISTORY_CAPACITY {
@@ -184,16 +215,24 @@ impl LifecycleService {
         inner.history.push_back(event.clone());
         inner
             .subscribers
-            .retain(|tx| tx.try_send(event.clone()).is_ok());
+            .retain(|sub| match sub.tx.try_send(event.clone()) {
+                Ok(()) => true,
+                Err(async_channel::TrySendError::Full(_)) => {
+                    sub.lagged.store(true, Ordering::SeqCst);
+                    false
+                }
+                Err(async_channel::TrySendError::Closed(_)) => false,
+            });
     }
 
-    /// Subscribes to lifecycle events. The returned receiver first yields the
-    /// retained history in emission order, then live events. If a subscriber
-    /// falls behind on the live tail it is silently dropped by the next
-    /// [`LifecycleService::emit`].
-    pub async fn subscribe(&self) -> async_channel::Receiver<LifecycleEvent> {
+    /// Subscribes to lifecycle events. The returned [`Subscription`] first yields the
+    /// retained history in emission order, then live events. If the subscriber falls
+    /// behind on the live tail it is dropped on the next [`LifecycleService::emit`],
+    /// with `was_lagged()` set to `true`.
+    pub async fn subscribe(&self) -> Subscription {
         debug_assert!(SUBSCRIBER_CHANNEL_CAPACITY >= HISTORY_CAPACITY);
         let (tx, rx) = async_channel::bounded(SUBSCRIBER_CHANNEL_CAPACITY);
+        let lagged = Arc::new(AtomicBool::new(false));
         let mut inner = self.inner.lock().await;
         // The capacity invariant plus the outer `Mutex` held here guarantees
         // that every `try_send` in this loop succeeds. If a future edit
@@ -201,11 +240,20 @@ impl LifecycleService {
         for event in &inner.history {
             if tx.try_send(event.clone()).is_err() {
                 debug_assert!(false, "subscribe replay try_send failed under invariant");
-                return rx;
+                return Subscription {
+                    receiver: rx,
+                    lagged,
+                };
             }
         }
-        inner.subscribers.push(tx);
-        rx
+        inner.subscribers.push(Subscriber {
+            tx,
+            lagged: lagged.clone(),
+        });
+        Subscription {
+            receiver: rx,
+            lagged,
+        }
     }
 
     /// Returns a snapshot of the retained event history, without subscribing
@@ -340,10 +388,12 @@ mod tests {
                 assert_eq!(tag_of(ev), idx as u64);
             }
             let mut slow_count = 0;
-            while let Ok(_) = slow.try_recv() {
+            while slow.try_recv().is_ok() {
                 slow_count += 1;
             }
             assert_eq!(slow_count, SUBSCRIBER_CHANNEL_CAPACITY);
+            assert!(slow.was_lagged());
+            assert!(!healthy.was_lagged());
         });
     }
 

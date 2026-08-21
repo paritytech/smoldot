@@ -540,15 +540,15 @@ enum Event<TPlat: PlatformRef> {
     /// `Mutex`.
     LifecycleFollowReady {
         request_id_json: String,
-        events_rx: async_channel::Receiver<lifecycle_service::LifecycleEvent>,
+        subscription: lifecycle_service::Subscription,
     },
     /// One iteration of the `lifecycle_unstable_follow` events pump. `event` is `None`
-    /// when the broadcaster channel closes. The receiver is shipped along so the main
-    /// loop can re-arm the next iteration.
+    /// when the broadcaster channel closes. The subscription is shipped along so the
+    /// main loop can re-arm and read `was_lagged` on close.
     LifecycleFollowEvent {
         subscription_id: String,
         event: Option<lifecycle_service::LifecycleEvent>,
-        events_rx: async_channel::Receiver<lifecycle_service::LifecycleEvent>,
+        subscription: lifecycle_service::Subscription,
     },
 }
 
@@ -3104,10 +3104,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             let lifecycle_service = me.lifecycle_service.clone();
                             let request_id_json = request_id_json.to_owned();
                             Box::pin(async move {
-                                let events_rx = lifecycle_service.subscribe().await;
+                                let subscription = lifecycle_service.subscribe().await;
                                 Event::LifecycleFollowReady {
                                     request_id_json,
-                                    events_rx,
+                                    subscription,
                                 }
                             })
                         });
@@ -6201,7 +6201,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
             WakeUpReason::Event(Event::LifecycleFollowReady {
                 request_id_json,
-                events_rx,
+                subscription,
             }) => {
                 // Off-loop setup resolved. Assign an id, record the subscription,
                 // acknowledge the caller, and arm the first pump iteration.
@@ -6227,11 +6227,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     .await;
 
                 me.background_tasks.push(Box::pin(async move {
-                    let event = events_rx.recv().await.ok();
+                    let event = subscription.recv().await;
                     Event::LifecycleFollowEvent {
                         subscription_id,
                         event,
-                        events_rx,
+                        subscription,
                     }
                 }));
             }
@@ -6239,7 +6239,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             WakeUpReason::Event(Event::LifecycleFollowEvent {
                 subscription_id,
                 event,
-                events_rx,
+                subscription,
             }) => {
                 // Caller already unfollowed (or the id was never issued): drop the
                 // event and stop the pump.
@@ -6324,24 +6324,26 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         // Re-arm the pump for the next event.
                         me.background_tasks.push(Box::pin(async move {
-                            let next = events_rx.recv().await.ok();
+                            let next = subscription.recv().await;
                             Event::LifecycleFollowEvent {
                                 subscription_id,
                                 event: next,
-                                events_rx,
+                                subscription,
                             }
                         }));
                     }
                     None => {
-                        // Broadcaster gone. Emit a terminal `Stopped { ChainRemoved }`
-                        // so the client sees a clean shutdown rather than a silent drop,
-                        // then remove the subscription.
+                        // Broadcaster dropped this sender. `was_lagged` disambiguates a
+                        // slow-consumer eviction from a chain removal.
+                        let reason = if subscription.was_lagged() {
+                            methods::LifecycleStopReason::Lagged
+                        } else {
+                            methods::LifecycleStopReason::ChainRemoved
+                        };
                         let notification =
                             methods::ServerToClient::lifecycle_unstable_followEvent {
                                 subscription: Cow::Borrowed(&subscription_id),
-                                result: methods::LifecycleEvent::Stopped {
-                                    reason: methods::LifecycleStopReason::ChainRemoved,
-                                },
+                                result: methods::LifecycleEvent::Stopped { reason },
                             }
                             .to_json_request_object_parameters(None);
                         let _ = me.responses_tx.send(notification).await;

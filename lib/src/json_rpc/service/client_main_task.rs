@@ -1213,9 +1213,7 @@ impl SubscriptionStartProcess {
                 methods::Response::chainHead_v1_follow(Cow::Borrowed(&self.subscription_id))
             }
             methods::MethodCall::lifecycle_unstable_follow { .. } => {
-                methods::Response::lifecycle_unstable_follow(Cow::Borrowed(
-                    &self.subscription_id,
-                ))
+                methods::Response::lifecycle_unstable_follow(Cow::Borrowed(&self.subscription_id))
             }
             _ => unreachable!(),
         }

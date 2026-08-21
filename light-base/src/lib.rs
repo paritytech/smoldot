@@ -1078,10 +1078,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     /// # Panic
     ///
     /// Panics if the [`ChainId`] is invalid.
-    pub async fn lifecycle_events(
-        &self,
-        chain_id: ChainId,
-    ) -> async_channel::Receiver<lifecycle_service::LifecycleEvent> {
+    pub async fn lifecycle_events(&self, chain_id: ChainId) -> lifecycle_service::Subscription {
         let key = &self.public_api_chains.get(chain_id.0).unwrap().key;
         let chains_by_key = self.chains_by_key.as_ref().unwrap();
         let running = chains_by_key.get(key).unwrap();
