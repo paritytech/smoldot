@@ -1212,6 +1212,11 @@ impl SubscriptionStartProcess {
             methods::MethodCall::chainHead_v1_follow { .. } => {
                 methods::Response::chainHead_v1_follow(Cow::Borrowed(&self.subscription_id))
             }
+            methods::MethodCall::lifecycle_unstable_follow { .. } => {
+                methods::Response::lifecycle_unstable_follow(Cow::Borrowed(
+                    &self.subscription_id,
+                ))
+            }
             _ => unreachable!(),
         }
         .to_json_response(request_id);
