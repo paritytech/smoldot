@@ -51,37 +51,34 @@ mod substrate_compat;
 pub use network_service::Role;
 
 /// Bootstrap mode picked by the sync service after startup.
-///
-/// Delivered as the first event on [`SyncService::subscribe_bootstrap_status`], via
-/// [`BootstrapStatus::ModeCommitted`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapMode {
-    /// Skip forward via GRANDPA authority-set proofs to a recent finalized block.
+    /// GrandPa warp sync.
     WarpSync,
-    /// Verify every block from the checkpoint upward. Chosen when warp sync is
-    /// unavailable (no GRANDPA, no warp-eligible peer) or for parachains.
+    /// All-forks catch-up. Chosen when warp sync is unavailable or for parachains.
     AllForks,
 }
 
-/// State-transition event emitted by the sync service during bootstrap.
-///
-/// Delivered on the receiver returned by [`SyncService::subscribe_bootstrap_status`]. Events
-/// come out of the state machine directly, so a subscriber observes the transitions in real
-/// time instead of inferring them from external polls. See issue #3301.
+/// State-transition event emitted during bootstrap. See
+/// [`SyncService::subscribe_bootstrap_status`].
 #[derive(Debug, Clone)]
 pub enum BootstrapStatus {
-    /// The sync service has committed a bootstrap mode. Emitted at most once per instance,
-    /// always as the first event on the stream. A late subscriber receives the mode
-    /// snapshot immediately.
+    /// Bootstrap mode has been committed. Emitted at most once per instance, as the
+    /// first event on the stream.
     ModeCommitted { mode: BootstrapMode },
-    /// Warp fragments have been verified. `at` is the height of the highest block proven
-    /// finalized so far. `target` is the highest best-block height advertised by any
-    /// currently-connected peer, clamped so it never drops below `at`. Only emitted while
-    /// the mode is [`BootstrapMode::WarpSync`] and warp is in progress.
-    WarpSyncProgress { at: u64, target: u64 },
+    /// One or more warp fragments have been verified. `target` is clamped so it never
+    /// drops below `at`. Only emitted while the mode is [`BootstrapMode::WarpSync`].
+    WarpSyncProgress {
+        /// Highest block proven finalized so far.
+        at: u64,
+        /// Highest best-block height advertised by a connected peer.
+        target: u64,
+    },
     /// Warp sync has finished. Only emitted when the mode is [`BootstrapMode::WarpSync`].
-    /// `finalized` is the height of the finalized block the state machine settled on.
-    WarpSyncFinished { finalized: u64 },
+    WarpSyncFinished {
+        /// Height of the finalized block the state machine settled on.
+        finalized: u64,
+    },
 }
 
 /// Configuration for a [`SyncService`].
@@ -294,12 +291,9 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         rx.await.unwrap()
     }
 
-    /// Subscribe to bootstrap state-transition events.
-    ///
-    /// The stream is single-consumer and starts with a snapshot of what has already
-    /// been decided (a [`BootstrapStatus::ModeCommitted`] if the mode is already
-    /// committed at the time of the call), then continues with live events. The
-    /// receiver is closed when the sync task exits or the chain is removed.
+    /// Subscribe to bootstrap state-transition events. A late subscriber first receives
+    /// a [`BootstrapStatus::ModeCommitted`] snapshot if the mode is already committed,
+    /// then live events.
     pub async fn subscribe_bootstrap_status(&self) -> async_channel::Receiver<BootstrapStatus> {
         let (send_back, rx) = oneshot::channel();
 

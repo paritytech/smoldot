@@ -1339,13 +1339,8 @@ fn start_services<TPlat: platform::PlatformRef>(
         }
     });
 
-    // Bootstrap sequence. `ModeDecision`, `WarpSyncProgress`, and
-    // `WarpSyncFinished` come from the sync service's state-transition stream
-    // (see `SyncService::subscribe_bootstrap_status`), so ordering is dictated
-    // by the state machine that owns those transitions. `BootstrapComplete` is
-    // emitted from here on the first block that arrives on the
-    // `subscribe_all` stream. Only a `Weak<SyncService>` is captured, so a
-    // stuck warp does not keep the chain alive after `remove_chain`.
+    // Only a `Weak<SyncService>` is captured, so a stuck warp does not keep the chain
+    // alive after `remove_chain`.
     platform.spawn_task("lifecycle-bootstrap".into(), {
         let lifecycle_service = lifecycle_service.clone();
         let sync_service = Arc::downgrade(&sync_service);
@@ -1356,8 +1351,6 @@ fn start_services<TPlat: platform::PlatformRef>(
             let status_stream = sync_service_arc.subscribe_bootstrap_status().await;
             drop(sync_service_arc);
 
-            // Translate `BootstrapStatus` events into `LifecycleEvent`
-            // emissions until the stream closes.
             let lifecycle_service_clone = lifecycle_service.clone();
             let status_relay = async move {
                 while let Ok(status) = status_stream.recv().await {
@@ -1385,10 +1378,9 @@ fn start_services<TPlat: platform::PlatformRef>(
                 }
             };
 
-            // `BootstrapComplete` is separate: it means "live blocks are
-            // flowing", which only shows up on `subscribe_all`. The first item
-            // on `new_blocks` (either `Block` or `Finalized`) is enough. This
-            // await blocks until the sync service reaches `Ready`.
+            // The first block on `new_blocks` means live-block streaming has started,
+            // which is our `BootstrapComplete` signal. `subscribe_all` blocks until the
+            // sync service reaches `Ready`.
             let bootstrap_complete = async {
                 let Some(sync_service_arc) = sync_service.upgrade() else {
                     return;
@@ -1402,9 +1394,6 @@ fn start_services<TPlat: platform::PlatformRef>(
                 }
             };
 
-            // Both branches run concurrently. The relay drains the stream, and
-            // the bootstrap-complete branch races the first block. The task
-            // exits once both finish.
             futures_lite::future::zip(status_relay, bootstrap_complete).await;
         }
     });

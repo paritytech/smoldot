@@ -454,16 +454,13 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             verified_height = fragment_number
                         );
 
-                        // Compute the current warp target from the max best-block
-                        // height advertised across connected sources. Clamp so
-                        // `target >= at` when peer samples lag the fragments already
-                        // verified.
                         let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
                         let peer_best = sync
                             .sources()
                             .map(|src| sync.source_best_block(src).0)
                             .max()
                             .unwrap_or(0);
+                        // A peer sample can lag the fragments we already verified.
                         let target = cmp::max(peer_best, fragment_number);
                         let progress = (fragment_number, target);
                         if task.last_reported_warp_progress != Some(progress) {
@@ -1194,13 +1191,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             WakeUpReason::ForegroundMessage(ToBackground::SubscribeBootstrapStatus {
                 send_back,
             }) => {
-                // Unbounded so an in-progress warp cannot deadlock the sync loop on a
-                // slow subscriber. A subscriber that stops reading builds up memory,
-                // which is bounded by the number of warp fragments times three status
-                // variants, plus a `ModeCommitted` snapshot.
+                // Unbounded so a slow subscriber does not deadlock the sync loop.
                 let (tx, rx) = async_channel::unbounded();
-                // Snapshot what has already happened so a late subscriber does not
-                // miss earlier transitions.
                 if let Some(mode) = task.chosen_bootstrap_mode {
                     let _ = tx.try_send(BootstrapStatus::ModeCommitted { mode });
                 }
@@ -1708,20 +1700,14 @@ struct Task<TPlat: PlatformRef> {
     /// Once `true`, warp may re-engage and any later completion is allowed to fire a `Stop`.
     bootstrap_complete: bool,
 
-    /// Mode chosen at bootstrap-commit time. `None` during [`ModeState::Deciding`] and
-    /// [`ModeState::AwaitingWarp`]. Set to [`BootstrapMode::WarpSync`] when
-    /// `WarpSyncFinished` promotes us to [`ModeState::Ready`], or to
-    /// [`BootstrapMode::AllForks`] when [`commit_all_forks_only`] fires. Broadcast as
-    /// [`BootstrapStatus::ModeCommitted`] on the first transition.
+    /// Bootstrap mode, once committed. `None` while the state machine is still
+    /// deciding.
     chosen_bootstrap_mode: Option<BootstrapMode>,
 
-    /// Senders for live [`BootstrapStatus`] streams (see
-    /// `SyncService::subscribe_bootstrap_status`). Emissions use a retain-if-full
-    /// pattern so a slow subscriber never blocks the sync loop.
+    /// Subscribers to the [`BootstrapStatus`] stream.
     bootstrap_status_subscribers: Vec<async_channel::Sender<BootstrapStatus>>,
 
-    /// Last `(at, target)` reported on a [`BootstrapStatus::WarpSyncProgress`] event.
-    /// Used to dedupe emissions.
+    /// Deduplicates consecutive [`BootstrapStatus::WarpSyncProgress`] emissions.
     last_reported_warp_progress: Option<(u64, u64)>,
 
     /// Below-gap packets observed while [`ModeState::Deciding`]; gates AllForksOnly commit.
@@ -1947,9 +1933,8 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
         .set_warp_completion_suppressed(false);
 }
 
-/// Records the chosen bootstrap mode and broadcasts a
-/// [`BootstrapStatus::ModeCommitted`] event to every subscriber. Idempotent: only the
-/// first call takes effect so the reported mode always reflects the initial bootstrap.
+/// Idempotent. Only the first call takes effect so the reported mode always reflects
+/// the initial bootstrap.
 fn commit_bootstrap_mode<TPlat: PlatformRef>(task: &mut Task<TPlat>, mode: BootstrapMode) {
     if task.chosen_bootstrap_mode.is_some() {
         return;
@@ -1961,9 +1946,7 @@ fn commit_bootstrap_mode<TPlat: PlatformRef>(task: &mut Task<TPlat>, mode: Boots
     );
 }
 
-/// Broadcasts a [`BootstrapStatus`] to every current subscriber. Uses a retain-if-full
-/// pattern so a slow subscriber has its sender dropped rather than blocking the sync
-/// loop.
+/// Drops subscribers whose receiver is closed or full.
 fn emit_bootstrap_status(
     subscribers: &mut Vec<async_channel::Sender<BootstrapStatus>>,
     event: BootstrapStatus,
@@ -2163,9 +2146,6 @@ mod tests {
             NeighborPacketOutcome::CommitAllForksOnly,
         );
     }
-
-    // These tests exercise the bootstrap-status broadcast helper, since a full
-    // `Task<TPlat>` fixture would require a live `NetworkServiceChain`.
 
     #[test]
     fn emit_bootstrap_status_delivers_to_all_open_subscribers() {

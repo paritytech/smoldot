@@ -1151,8 +1151,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     }),
                     _,
                 ) => {
-                    // Parachains commit `AllForks` immediately. Deliver a one-shot
-                    // snapshot and drop the sender so the stream ends.
+                    // Parachains never warp-sync.
                     let (tx, rx) = async_channel::unbounded();
                     let _ = tx.try_send(BootstrapStatus::ModeCommitted {
                         mode: BootstrapMode::AllForks,
