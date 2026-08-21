@@ -1166,28 +1166,6 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 ));
             }
 
-            WakeUpReason::ForegroundMessage(ToBackground::WarpSyncPosition { send_back }) => {
-                // `Status::Sync` means warp is not (or no longer) engaged. The two warp
-                // statuses expose the height proven finalized by the fragments so far.
-                let position = match task
-                    .sync
-                    .as_ref()
-                    .unwrap_or_else(|| unreachable!())
-                    .status()
-                {
-                    all::Status::Sync => None,
-                    all::Status::WarpSyncFragments {
-                        finalized_block_number,
-                        ..
-                    }
-                    | all::Status::WarpSyncChainInformation {
-                        finalized_block_number,
-                        ..
-                    } => Some(finalized_block_number),
-                };
-                let _ = send_back.send(position);
-            }
-
             WakeUpReason::ForegroundMessage(ToBackground::SubscribeBootstrapStatus {
                 send_back,
             }) => {

@@ -1138,14 +1138,6 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 }
 
                 (
-                    WakeUpReason::ForegroundMessage(ToBackground::WarpSyncPosition { send_back }),
-                    _,
-                ) => {
-                    // Parachains never warp-sync.
-                    let _ = send_back.send(None);
-                }
-
-                (
                     WakeUpReason::ForegroundMessage(ToBackground::SubscribeBootstrapStatus {
                         send_back,
                     }),

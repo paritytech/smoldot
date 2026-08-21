@@ -51,9 +51,6 @@ pub enum StallReason {
     /// Warp sync has been in progress but its target hasn't advanced for the
     /// watchdog threshold.
     WarpNoProgress,
-    /// Post-bootstrap sync has produced no new block notifications for the
-    /// watchdog threshold. Suggests all connected peers have gone quiet.
-    SyncNoProgress,
     /// The bootstrap window (from chain-add to `BootstrapComplete`) exceeded the
     /// watchdog threshold without completing.
     BootstrapTimeout,

@@ -1215,8 +1215,6 @@ pub enum LifecycleStallReason {
     NoPeers,
     /// Warp sync did not advance within the watchdog window.
     WarpNoProgress,
-    /// Post-bootstrap sync produced no new-block notifications within the watchdog window.
-    SyncNoProgress,
     /// Bootstrap did not complete within the watchdog window.
     BootstrapTimeout,
 }

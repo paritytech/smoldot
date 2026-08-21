@@ -6256,9 +6256,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             lifecycle_service::StallReason::WarpNoProgress => {
                                 methods::LifecycleStallReason::WarpNoProgress
                             }
-                            lifecycle_service::StallReason::SyncNoProgress => {
-                                methods::LifecycleStallReason::SyncNoProgress
-                            }
                             lifecycle_service::StallReason::BootstrapTimeout => {
                                 methods::LifecycleStallReason::BootstrapTimeout
                             }

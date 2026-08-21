@@ -635,11 +635,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 ));
             }
 
-            WakeUpReason::ForegroundMessage(ToBackground::WarpSyncPosition { send_back }) => {
-                // Parachains never warp-sync.
-                let _ = send_back.send(None);
-            }
-
             WakeUpReason::ForegroundMessage(ToBackground::SubscribeBootstrapStatus {
                 send_back,
             }) => {

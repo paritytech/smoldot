@@ -272,25 +272,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         rx.await.unwrap()
     }
 
-    /// Height proven finalized by the warp-sync fragments verified so far, while a
-    /// warp sync is in progress.
-    ///
-    /// Returns `Some(height)` while the state machine is downloading GRANDPA warp
-    /// fragments or building chain information from them. Monotonically non-decreasing
-    /// during a single warp sync. Returns `None` otherwise: before warp starts, once it
-    /// has finished, when the mode is [`BootstrapMode::AllForks`], and for
-    /// [`ConfigChainType::Parachain`] chains.
-    pub async fn warp_sync_position(&self) -> Option<u64> {
-        let (send_back, rx) = oneshot::channel();
-
-        self.to_background
-            .send(ToBackground::WarpSyncPosition { send_back })
-            .await
-            .unwrap();
-
-        rx.await.unwrap()
-    }
-
     /// Subscribe to bootstrap state-transition events. A late subscriber first receives
     /// a [`BootstrapStatus::ModeCommitted`] snapshot if the mode is already committed,
     /// then live events.
@@ -1489,10 +1470,6 @@ enum ToBackground {
     /// See [`SyncService::serialize_chain_information`].
     SerializeChainInformation {
         send_back: oneshot::Sender<Option<chain::chain_information::ValidChainInformation>>,
-    },
-    /// See [`SyncService::warp_sync_position`].
-    WarpSyncPosition {
-        send_back: oneshot::Sender<Option<u64>>,
     },
     /// See [`SyncService::subscribe_bootstrap_status`].
     SubscribeBootstrapStatus {

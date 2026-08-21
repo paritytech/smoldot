@@ -1421,24 +1421,22 @@ fn start_services<TPlat: platform::PlatformRef>(
         let network_service_chain = Arc::downgrade(&network_service_chain);
         let platform = platform.clone();
         async move {
-            // `NoPeers` trips after 30 s without a live peer, matching the
-            // connect-timeout order of magnitude. `BootstrapTimeout` is the
-            // hard 60 s ceiling from chain-add. `SyncNoProgress` uses the
-            // same 60 s window post-bootstrap. `WarpNoProgress` trips at 45 s
-            // of unchanged `warp_sync_position()` while warp is engaged, so
-            // it fires before `BootstrapTimeout` when the finer-grained
-            // signal is available.
             const POLL_INTERVAL: Duration = Duration::from_secs(5);
             const NO_PEERS_TIMEOUT: Duration = Duration::from_secs(30);
             const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
-            const SYNC_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
             const WARP_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(45);
+
+            let status_stream = {
+                let Some(sync_service_arc) = sync_service.upgrade() else {
+                    return;
+                };
+                sync_service_arc.subscribe_bootstrap_status().await
+            };
 
             let started = platform.now();
             // Seeded so `NoPeers` can only trip after the window elapses.
             let mut last_peer_seen = started.clone();
             let mut bootstrap_complete = false;
-            let mut last_near_head_seen = started.clone();
             let mut last_warp_position: Option<u64> = None;
             let mut last_warp_advance_seen = started.clone();
             let mut last_stall_reason: Option<lifecycle_service::StallReason> = None;
@@ -1455,43 +1453,29 @@ fn start_services<TPlat: platform::PlatformRef>(
                     last_peer_seen = platform.now();
                 }
 
-                // Sample the near-head heuristic and warp position together
-                // to avoid a second round-trip through the sync service.
-                {
-                    let Some(sync_service_arc) = sync_service.upgrade() else {
-                        return;
-                    };
-                    let near_head = sync_service_arc.is_near_head_of_chain_heuristic().await;
-                    let warp_position = sync_service_arc.warp_sync_position().await;
-                    drop(sync_service_arc);
-                    if near_head {
-                        last_near_head_seen = platform.now();
-                        bootstrap_complete = true;
-                    }
-                    // Track warp fragment advances. When `warp_position` goes
-                    // back to `None` we clear the tracker so any subsequent
-                    // warp phase starts fresh.
-                    match (warp_position, last_warp_position) {
-                        (Some(new), Some(prev)) if new > prev => {
-                            last_warp_position = Some(new);
-                            last_warp_advance_seen = platform.now();
-                        }
-                        (Some(new), None) => {
-                            last_warp_position = Some(new);
-                            last_warp_advance_seen = platform.now();
-                        }
-                        (None, Some(_)) => {
+                // Drain authoritative state-machine signals since the last tick.
+                while let Ok(status) = status_stream.try_recv() {
+                    match status {
+                        sync_service::BootstrapStatus::ModeCommitted { .. } => {
+                            bootstrap_complete = true;
                             last_warp_position = None;
                         }
-                        _ => {}
+                        sync_service::BootstrapStatus::WarpSyncProgress { at, .. } => {
+                            if last_warp_position != Some(at) {
+                                last_warp_position = Some(at);
+                                last_warp_advance_seen = platform.now();
+                            }
+                        }
+                        sync_service::BootstrapStatus::WarpSyncFinished { .. } => {
+                            last_warp_position = None;
+                        }
                     }
                 }
 
-                // Priority: `NoPeers` > `BootstrapTimeout` > `WarpNoProgress`
-                // > `SyncNoProgress`. `NoPeers` wins so a disconnected chain
-                // does not silently switch categories. `WarpNoProgress` is
-                // reported instead of `BootstrapTimeout` when a finer signal
-                // is available.
+                // Priority: `NoPeers` > `BootstrapTimeout` > `WarpNoProgress`.
+                // `NoPeers` wins so a disconnected chain does not silently switch
+                // categories. `WarpNoProgress` is reported instead of
+                // `BootstrapTimeout` when a finer signal is available.
                 let now = platform.now();
                 let no_peers = now.clone() - last_peer_seen.clone() >= NO_PEERS_TIMEOUT;
                 let bootstrap_stuck =
@@ -1499,16 +1483,12 @@ fn start_services<TPlat: platform::PlatformRef>(
                 let warp_stuck = !bootstrap_complete
                     && last_warp_position.is_some()
                     && now.clone() - last_warp_advance_seen.clone() >= WARP_NO_PROGRESS_TIMEOUT;
-                let sync_stuck = bootstrap_complete
-                    && now.clone() - last_near_head_seen.clone() >= SYNC_NO_PROGRESS_TIMEOUT;
                 let active = if no_peers {
                     Some(lifecycle_service::StallReason::NoPeers)
                 } else if bootstrap_stuck {
                     Some(lifecycle_service::StallReason::BootstrapTimeout)
                 } else if warp_stuck {
                     Some(lifecycle_service::StallReason::WarpNoProgress)
-                } else if sync_stuck {
-                    Some(lifecycle_service::StallReason::SyncNoProgress)
                 } else {
                     None
                 };
