@@ -180,7 +180,8 @@ impl Subscription {
         self.receiver.recv().await.ok()
     }
 
-    /// Non-blocking receive. Returns an error when the channel is empty or closed.
+    /// Tries to receive an event without blocking. Returns an error when the channel
+    /// is empty or closed.
     pub fn try_recv(&self) -> Result<LifecycleEvent, async_channel::TryRecvError> {
         self.receiver.try_recv()
     }

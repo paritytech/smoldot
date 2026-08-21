@@ -6333,8 +6333,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         }));
                     }
                     None => {
-                        // Broadcaster dropped this sender. `was_lagged` disambiguates a
-                        // slow-consumer eviction from a chain removal.
+                        // Broadcaster dropped this sender. `was_lagged` tells us whether
+                        // this subscriber was dropped for falling behind, or the chain
+                        // was removed.
                         let reason = if subscription.was_lagged() {
                             methods::LifecycleStopReason::Lagged
                         } else {
