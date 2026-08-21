@@ -1225,7 +1225,7 @@ pub enum LifecycleStallReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LifecycleStopReason {
-    /// Subscriber fell behind and its channel was dropped. Reserved. Not currently emitted.
+    /// The subscriber fell behind and its channel was dropped by the broadcaster.
     Lagged,
     /// The broadcaster is gone, typically because the chain was removed.
     ChainRemoved,
