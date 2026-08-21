@@ -142,8 +142,10 @@ struct Background<TPlat: PlatformRef> {
     /// See [`Config::lifecycle_service`].
     lifecycle_service: Arc<lifecycle_service::LifecycleService>,
 
-    /// Active `lifecycle_unstable_follow` subscriptions, keyed by subscription id.
-    lifecycle_subscriptions: hashbrown::HashMap<String, (), fnv::FnvBuildHasher>,
+    /// Active `lifecycle_unstable_follow` subscriptions. The value is notified when the
+    /// subscription is cancelled so the pump future exits.
+    lifecycle_subscriptions:
+        hashbrown::HashMap<String, Arc<event_listener::Event>, fnv::FnvBuildHasher>,
 
     /// Tasks that are spawned by the service and running in the background.
     background_tasks: stream::FuturesUnordered<Pin<Box<dyn Future<Output = Event<TPlat>> + Send>>>,
@@ -543,12 +545,12 @@ enum Event<TPlat: PlatformRef> {
         subscription: lifecycle_service::Subscription,
     },
     /// One iteration of the `lifecycle_unstable_follow` events pump. `event` is `None`
-    /// when the broadcaster channel closes. The subscription is shipped along so the
-    /// main loop can re-arm and read `was_lagged` on close.
+    /// when the broadcaster channel closes or the subscription is cancelled.
     LifecycleFollowEvent {
         subscription_id: String,
         event: Option<lifecycle_service::LifecycleEvent>,
         subscription: lifecycle_service::Subscription,
+        cancel: Arc<event_listener::Event>,
     },
 }
 
@@ -3114,10 +3116,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::lifecycle_unstable_unfollow { subscription } => {
-                        // Removing the entry orphans the pump task: on its next event the
-                        // wake-up handler sees the missing subscription and drops the event
-                        // without re-arming. The call succeeds whether the id was known.
-                        me.lifecycle_subscriptions.remove(&*subscription);
+                        // Notifying wakes the pump, which drops the receiver and lets the
+                        // broadcaster prune the sender on its next emit. The call succeeds
+                        // whether the id is known.
+                        if let Some(cancel) = me.lifecycle_subscriptions.remove(&*subscription) {
+                            cancel.notify(usize::MAX);
+                        }
                         let _ = me
                             .responses_tx
                             .send(
@@ -6211,9 +6215,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     bs58::encode(bytes).into_string()
                 };
 
+                let cancel = Arc::new(event_listener::Event::new());
                 let _prev_value = me
                     .lifecycle_subscriptions
-                    .insert(subscription_id.clone(), ());
+                    .insert(subscription_id.clone(), cancel.clone());
                 debug_assert!(_prev_value.is_none());
 
                 let _ = me
@@ -6227,11 +6232,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     .await;
 
                 me.background_tasks.push(Box::pin(async move {
-                    let event = subscription.recv().await;
+                    let cancelled = cancel.listen();
+                    let event = futures_lite::future::or(subscription.recv(), async move {
+                        cancelled.await;
+                        None
+                    })
+                    .await;
                     Event::LifecycleFollowEvent {
                         subscription_id,
                         event,
                         subscription,
+                        cancel,
                     }
                 }));
             }
@@ -6240,6 +6251,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 subscription_id,
                 event,
                 subscription,
+                cancel,
             }) => {
                 // Caller already unfollowed (or the id was never issued): drop the
                 // event and stop the pump.
@@ -6321,11 +6333,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         // Re-arm the pump for the next event.
                         me.background_tasks.push(Box::pin(async move {
-                            let next = subscription.recv().await;
+                            let cancelled = cancel.listen();
+                            let next = futures_lite::future::or(subscription.recv(), async move {
+                                cancelled.await;
+                                None
+                            })
+                            .await;
                             Event::LifecycleFollowEvent {
                                 subscription_id,
                                 event: next,
                                 subscription,
+                                cancel,
                             }
                         }));
                     }
