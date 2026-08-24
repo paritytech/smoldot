@@ -178,6 +178,9 @@ pub struct ChainMetrics {
     pub blocks_requests: RequestMetrics,
     pub warp_sync_requests: RequestMetrics,
     pub storage_proof_requests: RequestMetrics,
+    /// Child trie storage proof requests. Sent over the same wire protocol as
+    /// [`ChainMetrics::storage_proof_requests`], but counted separately.
+    pub child_storage_proof_requests: RequestMetrics,
     pub call_proof_requests: RequestMetrics,
     pub peer_bans: LabeledCounter<BanReason>,
     pub gossip_peers_connected: Gauge,
@@ -273,6 +276,7 @@ pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::Metr
         ("blocks", &chain.blocks_requests),
         ("warp-sync", &chain.warp_sync_requests),
         ("storage-proof", &chain.storage_proof_requests),
+        ("child-storage-proof", &chain.child_storage_proof_requests),
         ("call-proof", &chain.call_proof_requests),
     ];
 

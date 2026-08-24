@@ -156,8 +156,9 @@ const SLOTS = [
   { light: "#eb6834", dark: "#d95926" },
   { light: "#1baf7a", dark: "#199e70" },
   { light: "#eda100", dark: "#c98500" },
+  { light: "#e87ba4", dark: "#d55181" },
 ];
-const PROTOCOLS = ["blocks", "warp-sync", "storage-proof", "call-proof"];
+const PROTOCOLS = ["blocks", "warp-sync", "storage-proof", "child-storage-proof", "call-proof"];
 
 const charts = [];
 function addChart(cfg) {
@@ -548,7 +549,7 @@ const html = `<!doctype html>
   --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
   --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
   --bad: #d03b3b;
-  --s0: #2a78d6; --s1: #eb6834; --s2: #1baf7a; --s3: #eda100;
+  --s0: #2a78d6; --s1: #eb6834; --s2: #1baf7a; --s3: #eda100; --s4: #e87ba4;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -557,7 +558,7 @@ const html = `<!doctype html>
     --ink: #ffffff; --ink2: #c3c2b7; --muted: #898781;
     --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
     --bad: #d03b3b;
-    --s0: #3987e5; --s1: #d95926; --s2: #199e70; --s3: #c98500;
+    --s0: #3987e5; --s1: #d95926; --s2: #199e70; --s3: #c98500; --s4: #d55181;
   }
 }
 * { box-sizing: border-box; }

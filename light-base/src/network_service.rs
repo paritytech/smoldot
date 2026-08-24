@@ -620,7 +620,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
 
         let result = rx.await.unwrap();
         self.metrics
-            .storage_proof_requests
+            .child_storage_proof_requests
             .observe(result.is_ok(), self.platform.now() - when_started);
         result
     }
