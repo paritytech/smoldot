@@ -345,7 +345,6 @@ pub enum BanSeverity {
 )]
 #[strum(serialize_all = "kebab-case")]
 pub enum BanReason {
-    BadBlock,
     BadBlockAnnounce,
     BadChildTrieRoot,
     BadGrandpaCommit,

@@ -429,7 +429,6 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "bad-block",
                 "bad-block-announce",
                 "bad-child-trie-root",
                 "bad-grandpa-commit",
