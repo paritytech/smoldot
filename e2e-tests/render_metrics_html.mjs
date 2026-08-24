@@ -89,14 +89,28 @@ function rateSeries(chain, name, labels) {
 }
 
 // Per-interval mean: (deltaNum / deltaDen), null when the denominator didn't move.
+// Denominator entries are matched by label subset: labels left unspecified (e.g.
+// `outcome`) are summed over, so a duration total covering all attempts is
+// divided by successes + failures.
 function meanSeries(chain, numName, numLabels, denName, denLabels) {
   const nk = metricKey(numName, numLabels);
-  const dk = metricKey(denName, denLabels);
   const rows = indexed.get(chain);
+  const wanted = Object.entries(denLabels ?? {}).map(([k, v]) => `${k}=${v}`);
+  const dks = new Set();
+  for (const row of rows) {
+    for (const key of row.values.keys()) {
+      if (!key.startsWith(`${denName}|`)) continue;
+      const pairs = key.slice(denName.length + 1).split(",");
+      if (wanted.every((w) => pairs.includes(w))) dks.add(key);
+    }
+  }
   const out = [];
   for (let i = 1; i < rows.length; i++) {
     const dn = (rows[i].values.get(nk) ?? NaN) - (rows[i - 1].values.get(nk) ?? NaN);
-    const dd = (rows[i].values.get(dk) ?? NaN) - (rows[i - 1].values.get(dk) ?? NaN);
+    let dd = 0;
+    for (const dk of dks) {
+      dd += (rows[i].values.get(dk) ?? NaN) - (rows[i - 1].values.get(dk) ?? NaN);
+    }
     out.push({ t: rows[i].t, v: !Number.isFinite(dn) || !(dd > 0) || dn < 0 ? null : dn / dd });
   }
   return out;
@@ -208,7 +222,7 @@ for (const chain of chains) {
       points: meanSeries(
         chain,
         "networkRequestSecondsTotal", { protocol: p },
-        "networkRequestsTotal", { protocol: p, outcome: "success" },
+        "networkRequestsTotal", { protocol: p },
       ),
     })),
   });
