@@ -1472,7 +1472,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                     }
                 }
 
-                // Priority: `NoPeers` > `BootstrapTimeout` > `WarpNoProgress`.
+                // Priority: `NoPeers` > `WarpNoProgress` > `BootstrapTimeout`.
                 // `NoPeers` wins so a disconnected chain does not silently switch
                 // categories. `WarpNoProgress` is reported instead of
                 // `BootstrapTimeout` when a finer signal is available.
@@ -1485,10 +1485,10 @@ fn start_services<TPlat: platform::PlatformRef>(
                     && now.clone() - last_warp_advance_seen.clone() >= WARP_NO_PROGRESS_TIMEOUT;
                 let active = if no_peers {
                     Some(lifecycle_service::StallReason::NoPeers)
-                } else if bootstrap_stuck {
-                    Some(lifecycle_service::StallReason::BootstrapTimeout)
                 } else if warp_stuck {
                     Some(lifecycle_service::StallReason::WarpNoProgress)
+                } else if bootstrap_stuck {
+                    Some(lifecycle_service::StallReason::BootstrapTimeout)
                 } else {
                     None
                 };
