@@ -454,6 +454,9 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             verified_height = fragment_number
                         );
 
+                        // `ModeCommitted` must precede any `WarpSyncProgress` on the stream.
+                        commit_bootstrap_mode(&mut task, BootstrapMode::WarpSync);
+
                         let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
                         let peer_best = sync
                             .sources()
