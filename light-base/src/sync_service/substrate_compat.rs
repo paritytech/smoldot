@@ -409,12 +409,14 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         .finalized_block_number();
                     drain_pending_subscriptions(&mut task);
                     commit_bootstrap_mode(&mut task, BootstrapMode::WarpSync);
-                    emit_bootstrap_status(
-                        &mut task.bootstrap_status_subscribers,
-                        BootstrapStatus::WarpSyncFinished {
-                            finalized: finalized_height,
-                        },
-                    );
+                    if !task.bootstrap_complete {
+                        emit_bootstrap_status(
+                            &mut task.bootstrap_status_subscribers,
+                            BootstrapStatus::WarpSyncFinished {
+                                finalized: finalized_height,
+                            },
+                        );
+                    }
                     task.bootstrap_complete = true;
                     // Post-bootstrap re-warp is allowed; the `Stop` flows through
                     // `all_notifications.clear()` above.
