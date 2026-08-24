@@ -1472,10 +1472,10 @@ fn start_services<TPlat: platform::PlatformRef>(
                     }
                 }
 
-                // Priority: `NoPeers` > `WarpNoProgress` > `BootstrapTimeout`.
-                // `NoPeers` wins so a disconnected chain does not silently switch
-                // categories. `WarpNoProgress` is reported instead of
-                // `BootstrapTimeout` when a finer signal is available.
+                // `NoPeers` is checked first so a disconnected chain does not silently
+                // switch categories. When a bootstrap timeout and a stalled warp are
+                // both in play, `WarpNoProgress` is preferred because it is the finer
+                // signal.
                 let now = platform.now();
                 let no_peers = now.clone() - last_peer_seen.clone() >= NO_PEERS_TIMEOUT;
                 let bootstrap_stuck =
