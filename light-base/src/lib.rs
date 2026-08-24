@@ -1150,7 +1150,7 @@ fn start_services<TPlat: platform::PlatformRef>(
         })
     });
 
-    let network_metrics = network_service.metrics().clone();
+    let network_metrics = network_service.metrics();
 
     let network_service_chain = network_service.add_chain(network_service::ConfigChain {
         log_name: log_name.clone(),

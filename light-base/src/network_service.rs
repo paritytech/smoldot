@@ -252,8 +252,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     }
 
     /// Returns the process-wide network metrics.
-    pub fn metrics(&self) -> &Arc<metrics::NetworkMetrics> {
-        &self.metrics
+    pub fn metrics(&self) -> Arc<metrics::NetworkMetrics> {
+        self.metrics.clone()
     }
 
     /// Adds a chain to the list of chains that the network service connects to.
