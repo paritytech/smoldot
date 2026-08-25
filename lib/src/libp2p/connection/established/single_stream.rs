@@ -771,6 +771,12 @@ where
             _ => panic!(),
         };
 
+        // The substream might have been reset by the remote (and thus removed from the yamux state
+        // machine) at the same time as the coordinator decided to reject it. See issue #3304.
+        if !self.inner.yamux.has_substream(substream_id) {
+            return;
+        }
+
         self.inner.yamux[substream_id]
             .as_mut()
             .unwrap()
@@ -885,8 +891,10 @@ where
             _ => panic!(),
         };
 
+        // The substream might have been reset by the remote (and thus removed from the yamux state
+        // machine) while the accept and close messages were in flight. See issue #3304.
         if !self.inner.yamux.has_substream(substream_id) {
-            panic!()
+            return;
         }
 
         self.inner.yamux[substream_id]

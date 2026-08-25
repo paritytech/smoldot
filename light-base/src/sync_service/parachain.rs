@@ -1042,11 +1042,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 }));
             }
 
-            // Statement store protocol events are handled by the JSON-RPC service.
-            WakeUpReason::NetworkEvent(network_service::Event::StatementsNotification {
-                ..
-            }) => {}
-
             // Unreachable variants - parachains don't use warp sync, finality proofs, or Grandpa
             WakeUpReason::NetworkEvent(
                 network_service::Event::GrandpaNeighborPacket { .. }

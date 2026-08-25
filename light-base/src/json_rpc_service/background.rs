@@ -255,8 +255,8 @@ struct Background<TPlat: PlatformRef> {
     next_statement_affinity_update: Option<Pin<Box<TPlat::Delay>>>,
     last_statement_affinity_update: Option<TPlat::Instant>,
 
-    /// Receiver for network events (statements from peers).
-    network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
+    /// Receiver for statement notifications from peers.
+    statement_events_rx: Option<async_channel::Receiver<network_service::StatementEvent>>,
 }
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -264,16 +264,18 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     /// If no update was ever sent, or the last update was more than the configured
     /// affinity update interval ago, the update fires immediately.
     /// Otherwise, it fires after the remaining interval.
+    ///
+    /// Does nothing when the chain runs without the statement protocol. Subscriptions can still be
+    /// created in that case, so this is reachable, and there is no affinity to advertise.
     fn schedule_statement_affinity_update(&mut self) {
         if self.statement_affinity_stale {
             return;
         }
+        let Some(config) = self.statement_protocol_config.as_ref() else {
+            return;
+        };
         self.statement_affinity_stale = true;
-        let interval = self
-            .statement_protocol_config
-            .as_ref()
-            .expect("affinity updates require statement protocol; qed")
-            .affinity_update_interval();
+        let interval = config.affinity_update_interval();
         let delay = match &self.last_statement_affinity_update {
             Some(last) => {
                 let elapsed = self.platform.now() - last.clone();
@@ -661,7 +663,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
         statement_affinity_stale: false,
         next_statement_affinity_update: None,
         last_statement_affinity_update: None,
-        network_events_rx: None,
+        statement_events_rx: None,
         platform: config.platform,
     };
 
@@ -696,7 +698,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
             NetworkStatementsReceived(Vec<([u8; 32], codec::Statement)>),
-            MustSubscribeNetworkEvents,
+            MustSubscribeStatementEvents,
             StatementAffinityUpdate,
         }
 
@@ -799,19 +801,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 WakeUpReason::StatementAffinityUpdate
             })
             .or(async {
-                let Some(rx) = &me.network_events_rx else {
-                    return WakeUpReason::MustSubscribeNetworkEvents;
+                if me.statement_protocol_config.is_none() {
+                    future::pending::<()>().await;
+                }
+                let Some(rx) = &me.statement_events_rx else {
+                    return WakeUpReason::MustSubscribeStatementEvents;
                 };
-                loop {
-                    let Ok(event) = rx.recv().await else {
-                        me.network_events_rx = None;
-                        return WakeUpReason::MustSubscribeNetworkEvents;
-                    };
-                    match event {
-                        network_service::Event::StatementsNotification { statements, .. } => {
-                            return WakeUpReason::NetworkStatementsReceived(statements);
-                        }
-                        _ => {}
+                match rx.recv().await {
+                    Ok(network_service::StatementEvent::StatementsNotification {
+                        statements,
+                        ..
+                    }) => WakeUpReason::NetworkStatementsReceived(statements),
+                    Err(_) => {
+                        me.statement_events_rx = None;
+                        WakeUpReason::MustSubscribeStatementEvents
                     }
                 }
             })
@@ -854,9 +857,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     .await;
             }
 
-            WakeUpReason::MustSubscribeNetworkEvents => {
-                debug_assert!(me.network_events_rx.is_none());
-                me.network_events_rx = Some(me.network_service.subscribe().await);
+            WakeUpReason::MustSubscribeStatementEvents => {
+                debug_assert!(me.statement_events_rx.is_none());
+                me.statement_events_rx = Some(me.network_service.subscribe_statements().await);
             }
 
             WakeUpReason::NetworkStatementsReceived(statements) => {
