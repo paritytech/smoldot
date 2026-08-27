@@ -25,8 +25,8 @@ pub mod statement;
 
 pub use network::{
     elastic_scaling_genesis_overrides, listener_args, prepare_runtime_spec, prepare_runtime_specs,
-    run_chainhead_v1_follow, run_smoke, spawn_scenario, spawned_chain_spec_paths, FollowChain,
-    LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC,
+    run_chainhead_v1_follow, run_lifecycle, run_smoke, spawn_scenario, spawned_chain_spec_paths,
+    FollowChain, LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC,
     ELASTIC_MAX_VALIDATORS_PER_CORE, ELASTIC_SCALING_CORES, ELASTIC_VALIDATOR_COUNT,
     FINALIZED_METRIC, PARA_ID,
 };
