@@ -50,6 +50,21 @@ mod substrate_compat;
 
 pub use network_service::Role;
 
+/// Coarse state of the sync service. See [`SyncService::subscribe_sync_status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncStatus {
+    /// A GrandPa warp sync is in progress.
+    WarpSyncing {
+        /// Highest block proven finalized by the warp sync fragments verified so far.
+        at: u64,
+        /// Highest best block advertised by a connected peer. Never below `at`.
+        target: u64,
+    },
+    /// The sync service is serving the chain. Sent when the initial bootstrap completes and
+    /// again at the end of every later warp sync.
+    Ready,
+}
+
 /// Configuration for a [`SyncService`].
 pub struct Config<TPlat: PlatformRef> {
     /// Name of the chain, for logging purposes.
@@ -201,6 +216,24 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
 
         self.to_background
             .send(ToBackground::SerializeChainInformation { send_back })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Subscribes to the coarse state of the sync service. If the initial bootstrap is already
+    /// complete, the first item is [`SyncStatus::Ready`]. Afterwards, one item is sent for each
+    /// warp sync fragment that changes the progress values, and a [`SyncStatus::Ready`] each
+    /// time a warp sync ends.
+    ///
+    /// Consecutive duplicates are never sent. The channel is unbounded so that the sync service
+    /// never waits on the receiver: the receiver is expected to drain it promptly.
+    pub async fn subscribe_sync_status(&self) -> async_channel::Receiver<SyncStatus> {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .send(ToBackground::SubscribeSyncStatus { send_back })
             .await
             .unwrap();
 
@@ -1425,5 +1458,9 @@ enum ToBackground {
     /// See [`SyncService::serialize_chain_information`].
     SerializeChainInformation {
         send_back: oneshot::Sender<Option<chain::chain_information::ValidChainInformation>>,
+    },
+    /// See [`SyncService::subscribe_sync_status`].
+    SubscribeSyncStatus {
+        send_back: oneshot::Sender<async_channel::Receiver<SyncStatus>>,
     },
 }

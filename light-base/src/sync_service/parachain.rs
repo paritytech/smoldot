@@ -175,6 +175,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         pending_subscriptions: VecDeque::new(),
         bootstrap_complete: false,
+        sync_status_subscribers: Vec::new(),
         log_target,
         from_network_service: None,
         network_service,
@@ -622,6 +623,17 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 let _ = send_back.send(out);
             }
 
+            WakeUpReason::ForegroundMessage(ToBackground::SubscribeSyncStatus { send_back }) => {
+                // Parachains never warp sync, so the only item ever sent is `Ready`.
+                let (tx, rx) = async_channel::unbounded();
+                if task.bootstrap_complete {
+                    let _ = tx.try_send(super::SyncStatus::Ready);
+                } else {
+                    task.sync_status_subscribers.push(tx);
+                }
+                let _ = send_back.send(rx);
+            }
+
             WakeUpReason::ForegroundMessage(ToBackground::SerializeChainInformation {
                 send_back,
             }) => {
@@ -943,6 +955,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 if !task.bootstrap_complete {
                     drain_pending_subscriptions(&mut task);
                     task.bootstrap_complete = true;
+                    for tx in task.sync_status_subscribers.drain(..) {
+                        let _ = tx.try_send(super::SyncStatus::Ready);
+                    }
                 }
             }
 
@@ -1081,6 +1096,11 @@ struct Task<TPlat: PlatformRef> {
     /// `false` until the first drain runs. Once `true`, subsequent `SubscribeAll` requests
     /// get the current finalized synchronously.
     bootstrap_complete: bool,
+
+    /// Subscribers of [`super::SyncService::subscribe_sync_status`] waiting for the initial
+    /// bootstrap to complete. Drained, with a `Ready`, at the same time as
+    /// [`Task::pending_subscriptions`].
+    sync_status_subscribers: Vec<async_channel::Sender<super::SyncStatus>>,
 
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::Event>>>>,
