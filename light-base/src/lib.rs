@@ -936,6 +936,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 transactions_service: services.transactions_service.clone(),
                 runtime_service: services.runtime_service.clone(),
                 bitswap_service: services.bitswap_service.clone(),
+                lifecycle_service: services.lifecycle_service.clone(),
                 chain_name: chain_spec.name().to_owned(),
                 chain_ty: chain_spec.chain_type().to_owned(),
                 chain_is_live: chain_spec.has_live_network(),
