@@ -1014,7 +1014,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
                     | methods::MethodCall::bitswap_unstable_get { .. }
                     | methods::MethodCall::bitswap_unstable_stream { .. }
-                    | methods::MethodCall::bitswap_unstable_unstream { .. } => {}
+                    | methods::MethodCall::bitswap_unstable_unstream { .. }
+                    | methods::MethodCall::lifecycle_unstable_follow { .. }
+                    | methods::MethodCall::lifecycle_unstable_unfollow { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -3091,7 +3093,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::system_networkState { .. }
                     | methods::MethodCall::system_removeReservedPeer { .. }
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
-                    | methods::MethodCall::sudo_network_unstable_unwatch { .. }) => {
+                    | methods::MethodCall::sudo_network_unstable_unwatch { .. }
+                    | methods::MethodCall::lifecycle_unstable_follow { .. }
+                    | methods::MethodCall::lifecycle_unstable_unfollow { .. }) => {
                         // TODO: implement the ones that make sense to implement ^
                         log!(
                             &me.platform,
