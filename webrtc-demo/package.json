@@ -1,0 +1,10 @@
+{
+  "name": "smoldot-webrtc-demo",
+  "private": true,
+  "type": "module",
+  "description": "smoldot light client locked to a single full node (WebRTC or localhost WebSocket), exposing a JSON-RPC endpoint for polkadot.js apps",
+  "dependencies": {
+    "smoldot": "^3.4.0",
+    "ws": "^8.18.0"
+  }
+}
