@@ -544,6 +544,12 @@ define_methods! {
     sudo_network_unstable_unwatch(subscription: Cow<'a, str>) -> (),
     chainHead_unstable_finalizedDatabase(#[rename = "maxSizeBytes"] max_size_bytes: Option<u64>) -> Cow<'a, str>,
 
+    /// Subscribe to typed chain lifecycle events. Returns the subscription id used to
+    /// match notifications and to `_unfollow`. Schema is unstable. See
+    /// <https://github.com/paritytech/smoldot/issues/3301>.
+    lifecycle_unstable_follow() -> Cow<'a, str>,
+    /// Cancel a `lifecycle_unstable_follow` subscription. No-op if the id is unknown.
+    lifecycle_unstable_unfollow(subscription: Cow<'a, str>) -> (),
 }
 
 define_methods! {
@@ -567,6 +573,9 @@ define_methods! {
 
     // Statement notification sent when statements matching subscribed topics are received.
     statement_statement(subscription: Cow<'a, str>, result: StatementEvent) -> (),
+
+    /// Lifecycle notification. See `lifecycle_unstable_follow` for the schema.
+    lifecycle_unstable_followEvent(subscription: Cow<'a, str>, result: LifecycleEvent) -> (),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1157,6 +1166,84 @@ pub enum StatementEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remaining: Option<u32>,
     },
+}
+
+/// Notification event for `lifecycle_unstable_follow` subscriptions.
+///
+/// Schema is unstable. Unknown `kind` values should be ignored. See
+/// <https://github.com/paritytech/smoldot/issues/3301>.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum LifecycleEvent {
+    /// Chain added, starting up.
+    Connecting,
+    /// First peer seen since the chain was added.
+    FirstPeer,
+    /// Bootstrap mode committed. Emitted once, before any warp or bootstrap-complete
+    /// event. Relay chains report `warpSync` if warp commits before the deadline and
+    /// `allForks` otherwise. Parachains are always `allForks`.
+    ModeDecision { mode: LifecycleSyncMode },
+    /// Warp sync progress. Only emitted while `mode` is `warpSync`. Polled at ~500 ms
+    /// cadence and re-emitted only when `(at, target)` changes. Both fields are
+    /// monotonically non-decreasing during warp. `target` is clamped so it never
+    /// drops below `at`.
+    #[serde(rename_all = "camelCase")]
+    WarpSyncProgress {
+        /// Highest block whose finality is proven by the warp fragments verified so far.
+        at: u64,
+        /// Highest best-block height advertised by any currently-connected peer.
+        target: u64,
+    },
+    /// Warp sync finished. Only emitted while `mode` is `warpSync`.
+    #[serde(rename_all = "camelCase")]
+    WarpSyncFinished {
+        /// Height decoded from the initial finalized-block header, or `0` if decode fails.
+        finalized: u64,
+    },
+    /// Initial bootstrap complete and the chain is ready to serve queries. Emitted at
+    /// most once per instance, after warp (if any) and once new-block streaming begins.
+    BootstrapComplete,
+    /// The health watchdog considers the chain stalled. Re-arms after emitting: when
+    /// the condition clears, a matching `recovered` event is emitted.
+    Stalled { reason: LifecycleStallReason },
+    /// The condition that produced the most recent `stalled` has cleared. `previously`
+    /// echoes the reason from that `stalled` so clients can correlate the pair.
+    #[serde(rename_all = "camelCase")]
+    Recovered { previously: LifecycleStallReason },
+    /// Terminal event. No further events will be delivered for this subscription.
+    Stopped { reason: LifecycleStopReason },
+}
+
+/// Sync mode reported by [`LifecycleEvent::ModeDecision`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LifecycleSyncMode {
+    /// Skip forward via GRANDPA authority-set proofs to a recent finalized block.
+    WarpSync,
+    /// Verify every block from the checkpoint upward.
+    AllForks,
+}
+
+/// Reason for a [`LifecycleEvent::Stalled`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LifecycleStallReason {
+    /// No peer connected within the watchdog window.
+    NoPeers,
+    /// Warp sync did not advance within the watchdog window.
+    WarpNoProgress,
+    /// Bootstrap did not complete within the watchdog window.
+    BootstrapTimeout,
+}
+
+/// Reason for a [`LifecycleEvent::Stopped`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LifecycleStopReason {
+    /// The subscriber fell behind and its channel was dropped by the broadcaster.
+    Lagged,
+    /// The broadcaster is gone, typically because the chain was removed.
+    ChainRemoved,
 }
 
 /// Filter for subscribing to statements based on topics.

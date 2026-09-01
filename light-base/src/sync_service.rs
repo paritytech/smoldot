@@ -50,6 +50,37 @@ mod substrate_compat;
 
 pub use network_service::Role;
 
+/// Bootstrap mode picked by the sync service after startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapMode {
+    /// GrandPa warp sync.
+    WarpSync,
+    /// All-forks catch-up. Chosen when warp sync is unavailable or for parachains.
+    AllForks,
+}
+
+/// State-transition event emitted during bootstrap. See
+/// [`SyncService::subscribe_bootstrap_status`].
+#[derive(Debug, Clone)]
+pub enum BootstrapStatus {
+    /// Bootstrap mode has been committed. Emitted at most once per instance, as the
+    /// first event on the stream.
+    ModeCommitted { mode: BootstrapMode },
+    /// One or more warp fragments have been verified. `target` is clamped so it never
+    /// drops below `at`. Only emitted while the mode is [`BootstrapMode::WarpSync`].
+    WarpSyncProgress {
+        /// Highest block proven finalized so far.
+        at: u64,
+        /// Highest best-block height advertised by a connected peer.
+        target: u64,
+    },
+    /// Warp sync has finished. Only emitted when the mode is [`BootstrapMode::WarpSync`].
+    WarpSyncFinished {
+        /// Height of the finalized block the state machine settled on.
+        finalized: u64,
+    },
+}
+
 /// Configuration for a [`SyncService`].
 pub struct Config<TPlat: PlatformRef> {
     /// Name of the chain, for logging purposes.
@@ -235,6 +266,20 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 buffer_size,
                 runtime_interest,
             })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Subscribe to bootstrap state-transition events. A late subscriber first receives
+    /// a [`BootstrapStatus::ModeCommitted`] snapshot if the mode is already committed,
+    /// then live events.
+    pub async fn subscribe_bootstrap_status(&self) -> async_channel::Receiver<BootstrapStatus> {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .send(ToBackground::SubscribeBootstrapStatus { send_back })
             .await
             .unwrap();
 
@@ -1425,5 +1470,9 @@ enum ToBackground {
     /// See [`SyncService::serialize_chain_information`].
     SerializeChainInformation {
         send_back: oneshot::Sender<Option<chain::chain_information::ValidChainInformation>>,
+    },
+    /// See [`SyncService::subscribe_bootstrap_status`].
+    SubscribeBootstrapStatus {
+        send_back: oneshot::Sender<async_channel::Receiver<BootstrapStatus>>,
     },
 }
