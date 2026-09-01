@@ -81,7 +81,7 @@ pub enum StatementSubmitError {
     /// The submitted bytes don't decode into a statement.
     InvalidEncoding,
     /// The statement is valid but reached none of the gossip-connected peers. A light
-    /// client keeps no store, so a statement nobody received is nowhere at all.
+    /// client keeps no store, so a statement nobody received is permanently lost.
     NotSent { connected: usize },
 }
 
