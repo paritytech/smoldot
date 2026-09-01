@@ -514,7 +514,11 @@ function connect(config: ConnectionConfig): Connection {
                     killAllJs();
 
                 } else {
-                    const channel = state.dataChannels.get(streamId)!;
+                    // The stream might have already been reset from the JS side, with the
+                    // notification still on its way to smoldot.
+                    const channel = state.dataChannels.get(streamId);
+                    if (channel === undefined)
+                        return;
                     channel.channel.onopen = null;
                     channel.channel.onerror = null;
                     channel.channel.onclose = null;
@@ -526,7 +530,14 @@ function connect(config: ConnectionConfig): Connection {
             },
 
             send: (data: Array<Uint8Array>, streamId: number): void => {
-                const channel = state.dataChannels.get(streamId)!;
+                // The stream might have already been reset from the JS side (entry removed),
+                // or the channel might have left the `open` state before its `close` event
+                // (which reports the reset) is dispatched; sending would then throw. Dropping
+                // the data is fine, as the stream is reset or about to be.
+                // See <https://github.com/paritytech/smoldot/issues/3322>.
+                const channel = state.dataChannels.get(streamId);
+                if (channel === undefined || channel.channel.readyState !== "open")
+                    return;
                 for (const buffer of data) {
                     channel.bufferedBytes += buffer.length;
                 }
@@ -538,6 +549,13 @@ function connect(config: ConnectionConfig): Connection {
             openOutSubstream: () => {
                 // `openOutSubstream` can only be called after we have called `config.onOpen`,
                 // therefore `pc` is guaranteed to be non-null.
+                // The browser can however move the connection to `closed` before the
+                // `connectionstatechange` event (which reports the reset) is dispatched;
+                // `createDataChannel` would then throw. Doing nothing is fine, as the
+                // connection is about to be reset anyway.
+                // See <https://github.com/paritytech/smoldot/issues/3325>.
+                if (state.pc!.signalingState === "closed")
+                    return;
                 // Note that the label passed to `createDataChannel` is required to be empty as
                 // per the libp2p WebRTC specification.
                 // TODO: adjusting the options based on the first substream is a bit hacky

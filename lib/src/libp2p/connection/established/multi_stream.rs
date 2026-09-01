@@ -241,7 +241,7 @@ where
     pub fn reset_substream(&mut self, substream_id: &TSubId) {
         let mut substream = self.in_substreams.remove(substream_id).unwrap();
         let _was_in = self.out_in_substreams_map.remove(&substream.id);
-        debug_assert!(_was_in.is_none());
+        debug_assert!(_was_in.is_some());
 
         if Some(substream_id) == self.ping_substream.as_ref() {
             self.ping_substream = None;
@@ -774,8 +774,11 @@ where
             _ => panic!(),
         };
 
-        // TODO: can panic if pending event hasn't been processed
-        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+        // The substream might have been reset by the remote (and thus removed from the state
+        // machine) at the same time as the coordinator decided to reject it. See issue #3304.
+        let Some(inner_substream_id) = self.out_in_substreams_map.get(&substream_id) else {
+            return;
+        };
 
         self.in_substreams
             .get_mut(inner_substream_id)
@@ -892,7 +895,11 @@ where
             _ => panic!(),
         };
 
-        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+        // The substream might have been reset by the remote (and thus removed from the state
+        // machine) while the accept and close messages were in flight. See issue #3304.
+        let Some(inner_substream_id) = self.out_in_substreams_map.get(&substream_id) else {
+            return;
+        };
 
         self.in_substreams
             .get_mut(inner_substream_id)
