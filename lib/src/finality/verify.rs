@@ -432,6 +432,33 @@ pub fn verify_justification<'a>(
         return Err(JustificationVerifyError::NotEnoughSignatures);
     }
 
+    // A pre-commit is signed over the block that this specific pre-commit targets, and not over
+    // the block that the justification as a whole claims to finalize. In order for the
+    // justification to actually prove anything, every pre-commit must therefore target either
+    // that block or one of its descendants. The `votes_ancestries` field contains the headers
+    // that link the targets of the pre-commits to the target of the justification.
+    //
+    // The map below contains, for each header found in `votes_ancestries`, the hash of its
+    // parent and whether the entry has been used by at least one of the pre-commits.
+    let num_votes_ancestries = decoded_justification.votes_ancestries.len();
+    let mut votes_ancestries = {
+        let mut map = hashbrown::HashMap::<[u8; 32], ([u8; 32], bool), _>::with_capacity_and_hasher(
+            num_votes_ancestries,
+            crate::util::SipHasherBuild::new({
+                let mut seed = [0; 16];
+                randomness.fill_bytes(&mut seed);
+                seed
+            }),
+        );
+        for header in decoded_justification.votes_ancestries.clone() {
+            map.insert(
+                header.hash(config.block_number_bytes),
+                (*header.parent_hash, false),
+            );
+        }
+        map
+    };
+
     // Verifying all the signatures together brings better performances than verifying them one
     // by one.
     // Note that batched ed25519 verification has some issues. The code below uses a special
@@ -456,7 +483,32 @@ pub fn verify_justification<'a>(
             }
         }
 
-        // TODO: must check signed block ancestry using `votes_ancestries`
+        // Check that the pre-commit targets either the block that the justification claims to
+        // finalize or one of its descendants. Without this check, signatures legitimately
+        // produced for one block could be re-used in a justification that claims to finalize a
+        // completely different block.
+        if precommit.target_hash == decoded_justification.target_hash {
+            if precommit.target_number != decoded_justification.target_number {
+                return Err(JustificationVerifyError::BadAncestry);
+            }
+        } else {
+            let mut current_hash = *precommit.target_hash;
+            let mut num_steps = 0;
+            while current_hash != *decoded_justification.target_hash {
+                let Some((parent_hash, used)) = votes_ancestries.get_mut(&current_hash) else {
+                    return Err(JustificationVerifyError::BadAncestry);
+                };
+                *used = true;
+                current_hash = *parent_hash;
+
+                // A valid chain of ancestors visits each entry of `votes_ancestries` at most
+                // once. Guarantees that the loop always terminates.
+                num_steps += 1;
+                if num_steps > num_votes_ancestries {
+                    return Err(JustificationVerifyError::BadAncestry);
+                }
+            }
+        }
 
         let mut msg = Vec::with_capacity(1 + 32 + 4 + 8 + 8);
         msg.push(1u8); // This `1` indicates which kind of message is being signed.
@@ -489,13 +541,19 @@ pub fn verify_justification<'a>(
         )));
     }
 
+    // Reject justifications that contain headers that no pre-commit has made use of.
+    if votes_ancestries.values().any(|(_, used)| !*used) {
+        return Err(JustificationVerifyError::UnusedAncestryEntry);
+    }
+
     // Actual signatures verification performed here.
     batch
         .verify(&mut randomness)
         .map_err(|_| JustificationVerifyError::BadSignature)?;
 
-    // TODO: must check that votes_ancestries doesn't contain any unused entry
-    // TODO: there's also a "ghost" thing?
+    // Note that the "ghost" of the pre-commits is intentionally not calculated. Doing so would
+    // additionally detect justifications that could have finalized a block higher than the one
+    // that they claim to finalize, which isn't a problem from a safety point of view.
 
     Ok(())
 }
@@ -517,4 +575,354 @@ pub enum JustificationVerifyError {
     NotAuthority { authority_key: [u8; 32] },
     /// Justification doesn't contain enough authorities signatures to be valid.
     NotEnoughSignatures,
+    /// One of the pre-commits targets a block that is neither the block that the justification
+    /// claims to finalize nor one of its descendants.
+    BadAncestry,
+    /// The justification contains a header that isn't used by any of the pre-commits.
+    UnusedAncestryEntry,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{JustificationVerifyConfig, JustificationVerifyError, verify_justification};
+    use crate::header;
+
+    use alloc::vec::Vec;
+
+    const BLOCK_NUMBER_BYTES: usize = 4;
+    const SET_ID: u64 = 12;
+    const ROUND: u64 = 34;
+
+    /// Number of authorities used by all the tests below. The number of pre-commits required in
+    /// order to reach the threshold is `(NUM_AUTHORITIES * 2 / 3) + 1`, in other words 3.
+    const NUM_AUTHORITIES: u8 = 4;
+
+    /// Description of a pre-commit to put in a justification built by [`encode_justification`].
+    struct Precommit<'a> {
+        /// Key that actually produces the signature.
+        signer: &'a ed25519_zebra::SigningKey,
+        /// Public key written in the pre-commit. If `None`, the one of [`Precommit::signer`] is
+        /// used.
+        declared_public_key: Option<[u8; 32]>,
+        target_hash: [u8; 32],
+        target_number: u64,
+    }
+
+    fn precommit(
+        signer: &ed25519_zebra::SigningKey,
+        target_hash: [u8; 32],
+        target_number: u64,
+    ) -> Precommit<'_> {
+        Precommit {
+            signer,
+            declared_public_key: None,
+            target_hash,
+            target_number,
+        }
+    }
+
+    fn signing_key(index: u8) -> ed25519_zebra::SigningKey {
+        ed25519_zebra::SigningKey::from([index + 1; 32])
+    }
+
+    fn public_key(key: &ed25519_zebra::SigningKey) -> [u8; 32] {
+        <[u8; 32]>::from(ed25519_zebra::VerificationKeyBytes::from(key))
+    }
+
+    /// Builds the list of signing keys used by the tests, alongside with the list of their public
+    /// keys in the format expected by [`JustificationVerifyConfig::authorities_list`].
+    fn authorities() -> (Vec<ed25519_zebra::SigningKey>, Vec<[u8; 32]>) {
+        let keys = (0..NUM_AUTHORITIES).map(signing_key).collect::<Vec<_>>();
+        let public_keys = keys.iter().map(public_key).collect::<Vec<_>>();
+        (keys, public_keys)
+    }
+
+    /// Builds a header whose parent is `parent_hash`.
+    fn header(parent_hash: [u8; 32], number: u64) -> header::Header {
+        header::Header {
+            parent_hash,
+            number,
+            state_root: [0; 32],
+            extrinsics_root: [0; 32],
+            digest: header::DigestRef::empty().into(),
+        }
+    }
+
+    /// SCALE-encodes a justification. Note that the pre-commits are always signed over the block
+    /// that they themselves target, exactly like a legitimate authority would do.
+    fn encode_justification(
+        target_hash: [u8; 32],
+        target_number: u64,
+        precommits: &[Precommit],
+        votes_ancestries: &[header::Header],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&ROUND.to_le_bytes());
+        out.extend_from_slice(&target_hash);
+        out.extend_from_slice(&u32::try_from(target_number).unwrap().to_le_bytes());
+
+        out.extend_from_slice(crate::util::encode_scale_compact_usize(precommits.len()).as_ref());
+        for precommit in precommits {
+            let target_number = u32::try_from(precommit.target_number)
+                .unwrap()
+                .to_le_bytes();
+
+            let mut msg = Vec::new();
+            msg.push(1u8);
+            msg.extend_from_slice(&precommit.target_hash);
+            msg.extend_from_slice(&target_number);
+            msg.extend_from_slice(&ROUND.to_le_bytes());
+            msg.extend_from_slice(&SET_ID.to_le_bytes());
+
+            out.extend_from_slice(&precommit.target_hash);
+            out.extend_from_slice(&target_number);
+            out.extend_from_slice(&precommit.signer.sign(&msg).to_bytes());
+            out.extend_from_slice(
+                &precommit
+                    .declared_public_key
+                    .unwrap_or_else(|| public_key(precommit.signer)),
+            );
+        }
+
+        out.extend_from_slice(
+            crate::util::encode_scale_compact_usize(votes_ancestries.len()).as_ref(),
+        );
+        for header in votes_ancestries {
+            out.extend_from_slice(&header.scale_encoding_vec(BLOCK_NUMBER_BYTES));
+        }
+
+        out
+    }
+
+    fn verify(
+        justification: &[u8],
+        authorities_list: &[[u8; 32]],
+    ) -> Result<(), JustificationVerifyError> {
+        verify_justification(JustificationVerifyConfig {
+            justification,
+            block_number_bytes: BLOCK_NUMBER_BYTES,
+            authorities_set_id: SET_ID,
+            authorities_list: authorities_list.iter().map(|a| &a[..]),
+            randomness_seed: [0; 32],
+        })
+    }
+
+    #[test]
+    fn valid_justification_without_ancestries() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &keys[..3]
+                .iter()
+                .map(|k| precommit(k, target_hash, 10))
+                .collect::<Vec<_>>(),
+            &[],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(matches!(result, Ok(())), "{result:?}");
+    }
+
+    #[test]
+    fn valid_justification_with_ancestries() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let child = header(target_hash, 11);
+        let child_hash = child.hash(BLOCK_NUMBER_BYTES);
+        let grand_child = header(child_hash, 12);
+        let grand_child_hash = grand_child.hash(BLOCK_NUMBER_BYTES);
+
+        // The three pre-commits target three different blocks: the target of the justification
+        // itself, one of its children, and one of its grand-children.
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], child_hash, 11),
+                precommit(&keys[2], grand_child_hash, 12),
+            ],
+            &[child, grand_child],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(matches!(result, Ok(())), "{result:?}");
+    }
+
+    /// Regression test for the vulnerability where pre-commits are never bound to the block that
+    /// the justification claims to finalize. Genuine signatures produced for one block must not
+    /// be accepted as a proof that some other block is finalized.
+    #[test]
+    fn precommits_cant_be_retargeted() {
+        let (keys, authorities) = authorities();
+        let genuinely_signed_block = [0xaa; 32];
+        let fabricated_block = [0xbb; 32];
+
+        let justification = encode_justification(
+            fabricated_block,
+            10,
+            &keys[..3]
+                .iter()
+                .map(|k| precommit(k, genuinely_signed_block, 10))
+                .collect::<Vec<_>>(),
+            &[],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::BadAncestry)),
+            "{result:?}"
+        );
+    }
+
+    /// Same as [`valid_justification_with_ancestries`], but the headers that link the pre-commits
+    /// to the target of the justification are missing.
+    #[test]
+    fn missing_ancestry_headers() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let child = header(target_hash, 11);
+        let child_hash = child.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &keys[..3]
+                .iter()
+                .map(|k| precommit(k, child_hash, 11))
+                .collect::<Vec<_>>(),
+            &[],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::BadAncestry)),
+            "{result:?}"
+        );
+    }
+
+    /// A pre-commit that targets the same hash as the justification but a different height must
+    /// be rejected.
+    #[test]
+    fn precommit_target_height_mismatch() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[2], target_hash, 11),
+            ],
+            &[],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::BadAncestry)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn unused_ancestry_entry() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let child = header(target_hash, 11);
+        let child_hash = child.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &keys[..3]
+                .iter()
+                .map(|k| precommit(k, child_hash, 11))
+                .collect::<Vec<_>>(),
+            &[child, header([0xcc; 32], 99)],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::UnusedAncestryEntry)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn bad_signature_detected() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        // The last pre-commit is signed by `keys[2]` but claims to come from `keys[3]`.
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                Precommit {
+                    declared_public_key: Some(public_key(&keys[3])),
+                    ..precommit(&keys[2], target_hash, 10)
+                },
+            ],
+            &[],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::BadSignature)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn not_authority_detected() {
+        let (keys, authorities) = authorities();
+        let not_an_authority = signing_key(NUM_AUTHORITIES);
+        let target_hash = [0xaa; 32];
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&not_an_authority, target_hash, 10),
+            ],
+            &[],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::NotAuthority { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn not_enough_signatures() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &keys[..2]
+                .iter()
+                .map(|k| precommit(k, target_hash, 10))
+                .collect::<Vec<_>>(),
+            &[],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::NotEnoughSignatures)),
+            "{result:?}"
+        );
+    }
 }
