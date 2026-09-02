@@ -97,7 +97,10 @@ jobs:
           - job-name: "zombienet-smoldot-0012-reserved_peer_discovery"
             test: "reserved_peer_discovery"
             runner-type: "default"
-          # Browser-host only (WebRTC regressions).
+          - job-name: "zombienet-smoldot-0015-statement_store_submit_parity"
+            test: "statement_store_submit_parity"
+            runner-type: "default"
+            # Browser-host only (WebRTC regressions).
           - job-name: "zombienet-smoldot-0014-webrtc_double_open"
             test: "webrtc_double_open"
             runner-type: "default"

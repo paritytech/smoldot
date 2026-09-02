@@ -3010,17 +3010,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let network = me.network_service.clone();
                         let result = super::statement::validate_and_broadcast_statement(
                             &encoded.0,
+                            me.platform.now_from_unix_epoch(),
                             |bytes| async move { network.broadcast_statement(bytes).await },
                         )
                         .await;
 
-                        let _ = me
-                            .responses_tx
-                            .send(
-                                methods::Response::statement_submit(result)
-                                    .to_json_response(request_id_json),
-                            )
-                            .await;
+                        let response = match result {
+                            Ok(result) => methods::Response::statement_submit(result)
+                                .to_json_response(request_id_json),
+                            Err(error) => error.to_json_rpc_error(request_id_json),
+                        };
+
+                        let _ = me.responses_tx.send(response).await;
                     }
 
                     methods::MethodCall::statement_subscribeStatement { filter } => {
