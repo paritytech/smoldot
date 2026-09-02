@@ -439,11 +439,10 @@ pub fn verify_justification<'a>(
     // that link the targets of the pre-commits to the target of the justification.
     //
     // The map below contains, for each header found in `votes_ancestries`, the hash of its
-    // parent and whether the entry has been used by at least one of the pre-commits.
-    let num_votes_ancestries = decoded_justification.votes_ancestries.len();
-    let mut votes_ancestries = {
-        let mut map = hashbrown::HashMap::<[u8; 32], ([u8; 32], bool), _>::with_capacity_and_hasher(
-            num_votes_ancestries,
+    // parent.
+    let votes_ancestries = {
+        let mut map = hashbrown::HashMap::<[u8; 32], [u8; 32], _>::with_capacity_and_hasher(
+            decoded_justification.votes_ancestries.len(),
             crate::util::SipHasherBuild::new({
                 let mut seed = [0; 16];
                 randomness.fill_bytes(&mut seed);
@@ -451,13 +450,21 @@ pub fn verify_justification<'a>(
             }),
         );
         for header in decoded_justification.votes_ancestries.clone() {
-            map.insert(
-                header.hash(config.block_number_bytes),
-                (*header.parent_hash, false),
-            );
+            map.insert(header.hash(config.block_number_bytes), *header.parent_hash);
         }
         map
     };
+
+    // Hashes of the headers found in `votes_ancestries` that at least one pre-commit has walked
+    // through. Used at the end to detect headers that no pre-commit needed.
+    let mut used_votes_ancestries = hashbrown::HashSet::<[u8; 32], _>::with_capacity_and_hasher(
+        votes_ancestries.len(),
+        crate::util::SipHasherBuild::new({
+            let mut seed = [0; 16];
+            randomness.fill_bytes(&mut seed);
+            seed
+        }),
+    );
 
     // Verifying all the signatures together brings better performances than verifying them one
     // by one.
@@ -495,16 +502,16 @@ pub fn verify_justification<'a>(
             let mut current_hash = *precommit.target_hash;
             let mut num_steps = 0;
             while current_hash != *decoded_justification.target_hash {
-                let Some((parent_hash, used)) = votes_ancestries.get_mut(&current_hash) else {
+                let Some(parent_hash) = votes_ancestries.get(&current_hash) else {
                     return Err(JustificationVerifyError::BadAncestry);
                 };
-                *used = true;
+                used_votes_ancestries.insert(current_hash);
                 current_hash = *parent_hash;
 
                 // A valid chain of ancestors visits each entry of `votes_ancestries` at most
                 // once. Guarantees that the loop always terminates.
                 num_steps += 1;
-                if num_steps > num_votes_ancestries {
+                if num_steps > votes_ancestries.len() {
                     return Err(JustificationVerifyError::BadAncestry);
                 }
             }
@@ -542,7 +549,7 @@ pub fn verify_justification<'a>(
     }
 
     // Reject justifications that contain headers that no pre-commit has made use of.
-    if votes_ancestries.values().any(|(_, used)| !*used) {
+    if used_votes_ancestries.len() != votes_ancestries.len() {
         return Err(JustificationVerifyError::UnusedAncestryEntry);
     }
 
