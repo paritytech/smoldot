@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- Add `grandpa_subscribeJustifications` and `grandpa_unsubscribeJustifications` to the legacy JSON-RPC API. Every time the light client verifies a Grandpa finality proof, the corresponding SCALE-encoded Grandpa justification is sent to the subscribers. Finality proofs that were received as Grandpa *commit* messages, which is the normal case in steady state, are re-encoded as justifications, with the headers that link every pre-commit back to the finalized block added to the `votes_ancestries` field. Pre-commits that the light client can't link back to the finalized block are left out, as a verifier assigns them no voting weight anyway. ([#3288](https://github.com/paritytech/smoldot/issues/3288))
+- `chain_getBlock` now returns the Grandpa justification of the requested block instead of always returning `null`: either the one the light client verified itself while finalizing that block, or the one a full node serves alongside the block, verified locally against the authority set that signed it. ([#3288](https://github.com/paritytech/smoldot/issues/3288))
+
 ## 3.4.1 - 2026-08-13
 
 ### Fixed

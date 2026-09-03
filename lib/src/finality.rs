@@ -26,4 +26,5 @@
 //! that they are known by the node.
 
 pub mod decode;
+pub mod encode;
 pub mod verify;

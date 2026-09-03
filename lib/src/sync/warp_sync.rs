@@ -1576,6 +1576,25 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         Some((source_id, &self.inner.sources[source_id.0].user_data))
     }
 
+    /// Returns the SCALE-encoded header and justification of the fragment that [`Self::verify`]
+    /// is about to verify, or `None` if the source has sent an empty list of fragments.
+    ///
+    /// Exposed so that the justification, which is otherwise dropped once verified, can be kept:
+    /// every fragment is an authority-set-change block, and a consumer that verifies Grandpa
+    /// itself cannot skip one of those.
+    pub fn fragment(&self) -> Option<(&[u8], &[u8])> {
+        let entry = self
+            .inner
+            .verify_queue
+            .front()
+            .unwrap_or_else(|| unreachable!());
+        let fragment = entry.fragments.get(entry.next_fragment_to_verify_index)?;
+        Some((
+            &fragment.scale_encoded_header,
+            &fragment.scale_encoded_justification,
+        ))
+    }
+
     /// Verify one warp sync fragment.
     ///
     /// Must be passed a randomly-generated value that is used by the verification process. Note

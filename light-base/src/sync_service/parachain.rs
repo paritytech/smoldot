@@ -634,6 +634,32 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 ));
             }
 
+            WakeUpReason::ForegroundMessage(ToBackground::SubscribeFinalityProofs {
+                send_back,
+                ..
+            }) => {
+                // The finality of a parachain is derived from the relay chain rather than proven
+                // by a Grandpa justification. Return an already-closed channel.
+                let (_, rx) = async_channel::bounded(1);
+                let _ = send_back.send(rx);
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::FinalityProof { send_back, .. }) => {
+                let _ = send_back.send(None);
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::GrandpaAuthoritySetFor {
+                send_back,
+                ..
+            }) => {
+                // A parachain has no Grandpa authority set of its own.
+                let _ = send_back.send(None);
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::RetainFinalityProof { .. }) => {
+                // No proof is ever produced for a parachain block, so there is none to keep.
+            }
+
             WakeUpReason::ForegroundClosed => {
                 return;
             }
