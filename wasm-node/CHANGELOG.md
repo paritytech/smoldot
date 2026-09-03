@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- `chain_getBlock` no longer returns the `justifications` field nested inside the `block` object. The response type is `sp_runtime::generic::SignedBlock`, in which `justifications` is a sibling of `block`, and both that struct and the inner block are `deny_unknown_fields`, so the misplaced field made the response impossible to decode for Substrate-based JSON-RPC clients even when there was no justification to report.
+
 ## 3.4.1 - 2026-08-13
 
 ### Fixed

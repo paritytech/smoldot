@@ -1386,28 +1386,33 @@ impl serde::Serialize for Block {
     where
         S: serde::Serializer,
     {
+        // The shape below must match `sp_runtime::generic::SignedBlock`, whose `justifications`
+        // field is a *sibling* of `block` and not one of its members. Both `SignedBlock` and the
+        // inner `Block` are annotated with `deny_unknown_fields`, so putting `justifications` in
+        // the wrong object makes the response impossible to decode for Substrate-based clients,
+        // even when there is no justification to report.
         #[derive(serde::Serialize)]
         struct SerdeBlock<'a> {
             block: SerdeBlockInner<'a>,
+            justifications: Option<Vec<Vec<Vec<u8>>>>,
         }
 
         #[derive(serde::Serialize)]
         struct SerdeBlockInner<'a> {
             extrinsics: &'a [HexString],
             header: &'a Header,
-            justifications: Option<Vec<Vec<Vec<u8>>>>,
         }
 
         SerdeBlock {
             block: SerdeBlockInner {
                 extrinsics: &self.extrinsics,
                 header: &self.header,
-                justifications: self.justifications.as_ref().map(|list| {
-                    list.iter()
-                        .map(|(e, j)| vec![e.to_vec(), j.clone()])
-                        .collect()
-                }),
             },
+            justifications: self.justifications.as_ref().map(|list| {
+                list.iter()
+                    .map(|(e, j)| vec![e.to_vec(), j.clone()])
+                    .collect()
+            }),
         }
         .serialize(serializer)
     }
@@ -1773,6 +1778,50 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&evt).unwrap(),
             r#"{"event":"streamDone"}"#
+        );
+    }
+
+    /// Builds a `chain_getBlock` response with an empty header and the given justifications.
+    fn block_response(justifications: Option<Vec<([u8; 4], Vec<u8>)>>) -> String {
+        serde_json::to_string(&super::Block {
+            extrinsics: Vec::new(),
+            header: super::Header {
+                parent_hash: super::HashHexString([0; 32]),
+                extrinsics_root: super::HashHexString([0; 32]),
+                state_root: super::HashHexString([0; 32]),
+                number: 0,
+                digest: super::HeaderDigest { logs: Vec::new() },
+            },
+            justifications,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn chain_get_block_justifications_are_a_sibling_of_block() {
+        // The wire type is `sp_runtime::generic::SignedBlock`, in which `justifications` sits
+        // next to `block` rather than inside it. Both that struct and the inner block are
+        // `deny_unknown_fields`, so the exact placement is what makes the response decodable;
+        // it is therefore pinned here with a literal JSON assertion.
+        assert_eq!(
+            block_response(None),
+            r#"{"block":{"extrinsics":[],"header":{"parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","extrinsicsRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","number":"0x0","digest":{"logs":[]}}},"justifications":null}"#
+        );
+    }
+
+    #[test]
+    fn chain_get_block_justification_encoding() {
+        // A justification is a `(ConsensusEngineId, Vec<u8>)` pair, both serialized as arrays of
+        // bytes, matching `sp_runtime::Justifications`.
+        let json = block_response(Some(vec![(*b"FRNK", vec![1, 2, 3])]));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            parsed["block"].get("justifications").is_none(),
+            "justifications must not be nested inside `block`"
+        );
+        assert_eq!(
+            parsed["justifications"],
+            serde_json::json!([[[70, 82, 78, 75], [1, 2, 3]]])
         );
     }
 }
