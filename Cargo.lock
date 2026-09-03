@@ -2813,6 +2813,7 @@ dependencies = [
  "slab",
  "smol",
  "smoldot",
+ "soketto",
  "zeroize",
 ]
 

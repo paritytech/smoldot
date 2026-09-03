@@ -13,6 +13,10 @@ include.workspace = true
 name = "basic"
 required-features = ["std"]
 
+[[example]]
+name = "json-rpc-server"
+required-features = ["std"]
+
 [dependencies]
 async-channel = { version = "2.5.0", default-features = false }
 async-lock = { version = "3.0.0", default-features = false }
@@ -53,3 +57,4 @@ wasmtime = ["smoldot/wasmtime"]
 
 [dev-dependencies]
 env_logger = "0.11.4"
+soketto = "0.8.0"
