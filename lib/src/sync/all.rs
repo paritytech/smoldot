@@ -2290,6 +2290,21 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
         )
     }
 
+    /// Returns the finality proof that is about to be verified.
+    ///
+    /// See [`all_forks::FinalityProofVerify::finality_proof`].
+    pub fn finality_proof(&self) -> all_forks::FinalityProofRef<'_> {
+        self.inner.finality_proof()
+    }
+
+    /// Returns the SCALE-encoded header of a non-finalized block, identified by its hash, or
+    /// `None` if that block isn't known.
+    ///
+    /// See [`all_forks::FinalityProofVerify::non_finalized_block_header`].
+    pub fn non_finalized_block_header(&self, hash: &[u8; 32]) -> Option<&[u8]> {
+        self.inner.non_finalized_block_header(hash)
+    }
+
     /// Perform the verification.
     ///
     /// A randomness seed must be provided and will be used during the verification. Note that the
@@ -2413,6 +2428,14 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
             ud.outer_source_id,
             &self.shared.sources[ud.outer_source_id.0].user_data,
         ))
+    }
+
+    /// Returns the SCALE-encoded header and justification of the fragment that [`Self::perform`]
+    /// is about to verify.
+    ///
+    /// See [`warp_sync::VerifyWarpSyncFragment::fragment`].
+    pub fn fragment(&self) -> Option<(&[u8], &[u8])> {
+        self.inner.fragment()
     }
 
     /// Perform the verification.

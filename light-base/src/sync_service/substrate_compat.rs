@@ -36,11 +36,11 @@ use futures_lite::FutureExt as _;
 use futures_util::{FutureExt as _, StreamExt as _, future, stream};
 use hashbrown::HashMap;
 use smoldot::{
-    chain, header,
+    chain, finality, header,
     informant::HashDisplay,
     libp2p,
     network::{self, codec},
-    sync::all,
+    sync::{all, all_forks},
 };
 
 /// Maximum wait for the first GrandpaNeighborPacket before falling back to AllForksOnly.
@@ -53,6 +53,54 @@ const MODE_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Below warp sync minimum gap packets to observe before committing AllForksOnly. Avoids one lagging
 /// first peer locking us into the slow path when our local finalized is a stale checkpoint.
 const MODE_DECISION_MIN_PACKETS: usize = 2;
+
+/// Number of finality proofs of recently-finalized blocks kept in order to answer
+/// [`super::SyncService::finality_proof`].
+///
+/// Kept small: a justification weighs upwards of 100 bytes per authority, and the purpose is to
+/// serve the proof of a block a JSON-RPC client has just been told about, not historical ones.
+const RECENT_FINALITY_PROOFS_CACHE_SIZE: NonZero<usize> = match NonZero::<usize>::new(8) {
+    Some(v) => v,
+    None => unreachable!(),
+};
+
+/// Number of finality proofs of authority-set-change blocks kept in order to answer
+/// [`super::SyncService::finality_proof`].
+///
+/// Kept apart from [`RECENT_FINALITY_PROOFS_CACHE_SIZE`], and much larger, because such blocks
+/// occur only about once per session while a consumer that verifies Grandpa itself has to prove
+/// every set transition in order and cannot skip one.
+const MANDATORY_FINALITY_PROOFS_CACHE_SIZE: NonZero<usize> = match NonZero::<usize>::new(64) {
+    Some(v) => v,
+    None => unreachable!(),
+};
+
+/// Number of past Grandpa authority sets whose composition is kept, on top of the current one, in
+/// order to verify justifications fetched from the network. See
+/// [`super::SyncService::verified_finality_proof_from_block`].
+///
+/// One set lasts one session, so this bounds how far behind the chain a fetched justification can
+/// be and still be verifiable.
+const GRANDPA_AUTHORITY_SETS_HISTORY: usize = 16;
+
+/// One Grandpa authority set, and the range of blocks that it is responsible for finalizing.
+struct GrandpaAuthoritySet {
+    /// Identifier of the set. Part of the message that the authorities sign, and therefore
+    /// needed to verify a justification they produced.
+    set_id: u64,
+
+    /// ed25519 public keys of the authorities of the set.
+    authorities: Vec<[u8; 32]>,
+
+    /// Height of the first block that this set finalizes.
+    first_block: u64,
+
+    /// Height of the last block that this set finalizes, or `None` while this is the current set.
+    ///
+    /// The block that enacts a change of authorities is itself finalized by the outgoing set, so
+    /// this is that block's height rather than the one before it.
+    last_block: Option<u64>,
+}
 
 /// Starts a sync service background task to synchronize a chain (relay chain or not) that is
 /// built with Substrate.
@@ -125,6 +173,27 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         .fuse(),
         pending_subscriptions: VecDeque::new(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
+        block_number_bytes,
+        finality_proofs_subscriptions: Vec::new(),
+        recent_finality_proofs: lru::LruCache::with_hasher(
+            RECENT_FINALITY_PROOFS_CACHE_SIZE,
+            util::SipHasherBuild::new({
+                let mut seed = [0; 16];
+                platform.fill_random_bytes(&mut seed);
+                seed
+            }),
+        ),
+        mandatory_finality_proofs: lru::LruCache::with_hasher(
+            MANDATORY_FINALITY_PROOFS_CACHE_SIZE,
+            util::SipHasherBuild::new({
+                let mut seed = [0; 16];
+                platform.fill_random_bytes(&mut seed);
+                seed
+            }),
+        ),
+        // Seeded on the first finality-proof verification, when the chain information is known to
+        // be available.
+        grandpa_authority_sets: VecDeque::new(),
         log_target,
         from_network_service: None,
         network_service,
@@ -416,6 +485,12 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .proof_sender()
                     .map(|(_, (peer_id, _))| peer_id.clone());
 
+                // Grabbed before `perform` consumes the verifier and drops it. Only retained
+                // below, once the verification has succeeded.
+                let fragment_justification = verify
+                    .fragment()
+                    .map(|(_, justification)| justification.to_vec());
+
                 let (sync, result) = verify.perform({
                     let mut seed = [0; 32];
                     task.platform.fill_random_bytes(&mut seed);
@@ -438,6 +513,18 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             verified_hash = HashDisplay(&fragment_hash),
                             verified_height = fragment_number
                         );
+
+                        // Not reported to the finality-proof subscribers: those follow finality
+                        // as it happens, and a warp sync leaps over most of the chain. A full
+                        // node likewise stores these justifications without notifying anybody.
+                        if let Some(scale_encoded_justification) = fragment_justification {
+                            task.retain_finality_proof(super::FinalityProof {
+                                consensus_engine_id: *b"FRNK",
+                                scale_encoded_justification,
+                                target_hash: fragment_hash,
+                                target_number: fragment_number,
+                            });
+                        }
                     }
                     Err(err) => {
                         log!(
@@ -568,6 +655,38 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             WakeUpReason::SyncProcess(all::ProcessOne::VerifyFinalityProof(verify)) => {
                 // Finality proof to verify.
                 let sender = verify.sender().1.0.clone();
+                // Built before the verification, as it needs the headers of the blocks that the
+                // pre-commits target and `perform` consumes the state machine. Built for every
+                // proof, including the ones that turn out invalid and are thrown away below.
+                let proof_to_report = match verify.finality_proof() {
+                    all_forks::FinalityProofRef::GrandpaCommit(commit) => {
+                        match finality::encode::grandpa_commit_to_justification(
+                            commit,
+                            task.block_number_bytes,
+                            |hash| verify.non_finalized_block_header(hash).map(|h| h.to_vec()),
+                        ) {
+                            Ok(scale_encoded_justification) => {
+                                Some((*b"FRNK", scale_encoded_justification))
+                            }
+                            Err(error) => {
+                                log!(
+                                    &task.platform,
+                                    Warn,
+                                    &task.log_target,
+                                    format!(
+                                        "Failed to turn a Grandpa commit into a justification: \
+                                        {error}"
+                                    )
+                                );
+                                None
+                            }
+                        }
+                    }
+                    all_forks::FinalityProofRef::Justification {
+                        consensus_engine_id,
+                        scale_encoded_justification,
+                    } => Some((consensus_engine_id, scale_encoded_justification.to_vec())),
+                };
                 match verify.perform({
                     let mut seed = [0; 32];
                     task.platform.fill_random_bytes(&mut seed);
@@ -589,6 +708,43 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             finalized_blocks = finalized_blocks_newest_to_oldest.len(),
                             sender
                         );
+
+                        // `finalized_blocks_newest_to_oldest` is never empty, and its first
+                        // element is the block that the proof targets.
+                        if let Some((consensus_engine_id, scale_encoded_justification)) =
+                            proof_to_report
+                        {
+                            let target = finalized_blocks_newest_to_oldest
+                                .first()
+                                .unwrap_or_else(|| unreachable!());
+                            task.on_verified_finality_proof(
+                                super::FinalityProof {
+                                    consensus_engine_id,
+                                    scale_encoded_justification,
+                                    target_hash: target.block_hash,
+                                    target_number: sync.finalized_block_number(),
+                                },
+                                header_changes_authority_set(
+                                    &target.header,
+                                    task.block_number_bytes,
+                                ),
+                            );
+                        }
+
+                        // Tracked so that a justification fetched from the network later can be
+                        // verified against the set that signed it. A set change can be anywhere
+                        // in the batch, not only at the proof's target.
+                        let enacted_at = finalized_blocks_newest_to_oldest
+                            .iter()
+                            .find(|block| {
+                                header_changes_authority_set(&block.header, task.block_number_bytes)
+                            })
+                            .and_then(|block| {
+                                header::decode(&block.header, task.block_number_bytes)
+                                    .ok()
+                                    .map(|header| header.number)
+                            });
+                        task.refresh_grandpa_authority_sets(&sync, enacted_at);
 
                         if updates_best_block {
                             task.network_up_to_date_best = false;
@@ -1118,6 +1274,43 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 let _ = send_back.send(out);
             }
 
+            WakeUpReason::ForegroundMessage(ToBackground::SubscribeFinalityProofs {
+                send_back,
+                buffer_size,
+            }) => {
+                // Frontend wants to be notified of the finality proofs that we verify.
+                let (tx, rx) = async_channel::bounded(cmp::max(buffer_size, 1));
+                task.finality_proofs_subscriptions.push(tx);
+                let _ = send_back.send(rx);
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::FinalityProof {
+                send_back,
+                block_hash,
+            }) => {
+                // Frontend is querying the finality proof of a specific block.
+                let outcome = task
+                    .mandatory_finality_proofs
+                    .get(&block_hash)
+                    .or_else(|| task.recent_finality_proofs.get(&block_hash))
+                    .cloned();
+                let _ = send_back.send(outcome);
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::GrandpaAuthoritySetFor {
+                send_back,
+                block_number,
+            }) => {
+                // Frontend needs the authority set that finalized a specific block, in order to
+                // verify a justification it has fetched from the network.
+                let _ = send_back.send(task.grandpa_authority_set_for(block_number));
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::RetainFinalityProof { proof }) => {
+                // Frontend has fetched and verified a proof and wants it cached.
+                task.retain_finality_proof(proof);
+            }
+
             WakeUpReason::ForegroundMessage(ToBackground::SerializeChainInformation {
                 send_back,
             }) => {
@@ -1614,6 +1807,9 @@ struct Task<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     platform: TPlat,
 
+    /// Number of bytes of the block number in the networking protocol.
+    block_number_bytes: usize,
+
     /// Main syncing state machine. Contains a list of peers, requests, and blocks, and manages
     /// everything about the non-finalized chain.
     ///
@@ -1657,6 +1853,22 @@ struct Task<TPlat: PlatformRef> {
     /// All event subscribers that are interested in events about the chain.
     all_notifications: Vec<async_channel::Sender<Notification>>,
 
+    /// All subscribers that are interested in the finality proofs that we verify.
+    /// See [`super::SyncService::subscribe_finality_proofs`].
+    finality_proofs_subscriptions: Vec<async_channel::Sender<super::FinalityProof>>,
+
+    /// Finality proofs of the most recently finalized blocks, keyed by the hash of the block
+    /// that they finalize. See [`RECENT_FINALITY_PROOFS_CACHE_SIZE`].
+    recent_finality_proofs: lru::LruCache<[u8; 32], super::FinalityProof, util::SipHasherBuild>,
+    /// Same, for the blocks that change the Grandpa authority set. Kept apart so that a slow
+    /// consumer can't lose them to ordinary churn. See
+    /// [`MANDATORY_FINALITY_PROOFS_CACHE_SIZE`].
+    mandatory_finality_proofs: lru::LruCache<[u8; 32], super::FinalityProof, util::SipHasherBuild>,
+
+    /// Composition of the current Grandpa authority set and of a bounded number of its
+    /// predecessors, oldest first. See [`GRANDPA_AUTHORITY_SETS_HISTORY`].
+    grandpa_authority_sets: VecDeque<GrandpaAuthoritySet>,
+
     /// Contains a `Delay` after which we print a warning about GrandPa warp sync taking a long
     /// time. Set to `Pending` after the warp sync has finished, so that future remains pending
     /// forever.
@@ -1674,6 +1886,27 @@ struct Task<TPlat: PlatformRef> {
     >,
 }
 
+/// Returns `true` if the given SCALE-encoded header schedules a change of the Grandpa authority
+/// set.
+///
+/// An undecodable header is reported as not changing the set. It has been verified by the time
+/// this is called, and being wrong this way only sends its proof to the smaller cache.
+fn header_changes_authority_set(scale_encoded_header: &[u8], block_number_bytes: usize) -> bool {
+    let Ok(header) = header::decode(scale_encoded_header, block_number_bytes) else {
+        return false;
+    };
+
+    header.digest.logs().any(|log| {
+        matches!(
+            log,
+            header::DigestItemRef::GrandpaConsensus(
+                header::GrandpaConsensusLogRef::ScheduledChange(_)
+                    | header::GrandpaConsensusLogRef::ForcedChange { .. }
+            )
+        )
+    })
+}
+
 enum RequestOutcome {
     Block(Result<Vec<codec::BlockData>, network_service::BlocksRequestError>),
     WarpSync(
@@ -1687,6 +1920,99 @@ enum RequestOutcome {
 }
 
 impl<TPlat: PlatformRef> Task<TPlat> {
+    /// Reports a locally-verified finality proof to the subscribers, and keeps it around so
+    /// that [`super::SyncService::finality_proof`] can serve it.
+    ///
+    /// `changes_authority_set` routes the proof to the longer-lived cache; see
+    /// [`MANDATORY_FINALITY_PROOFS_CACHE_SIZE`].
+    fn on_verified_finality_proof(
+        &mut self,
+        proof: super::FinalityProof,
+        changes_authority_set: bool,
+    ) {
+        // Contrary to `dispatch_all_subscribers`, a subscriber whose buffer is full is kept:
+        // proofs are independent, so missing one doesn't leave it inconsistent.
+        self.finality_proofs_subscriptions
+            .retain(|subscription| !subscription.is_closed());
+        for subscription in &self.finality_proofs_subscriptions {
+            let _ = subscription.try_send(proof.clone());
+        }
+
+        if changes_authority_set {
+            self.mandatory_finality_proofs.put(proof.target_hash, proof);
+        } else {
+            self.recent_finality_proofs.put(proof.target_hash, proof);
+        }
+    }
+
+    /// Records the composition of the current Grandpa authority set, closing the previous entry
+    /// if the set has changed.
+    ///
+    /// `enacted_at` is the height of the highest just-finalized block that enacts a change of
+    /// authorities, if any. That block is finalized by the outgoing set, so it is recorded as
+    /// that set's last one.
+    fn refresh_grandpa_authority_sets<TRq, TSrc, TBl>(
+        &mut self,
+        sync: &all::AllSync<TRq, TSrc, TBl>,
+        enacted_at: Option<u64>,
+    ) {
+        let chain_information = sync.as_chain_information();
+        let chain_information = chain_information.as_ref();
+        let chain::chain_information::ChainInformationFinalityRef::Grandpa {
+            after_finalized_block_authorities_set_id,
+            finalized_triggered_authorities,
+            ..
+        } = chain_information.finality
+        else {
+            return;
+        };
+
+        if self
+            .grandpa_authority_sets
+            .back()
+            .is_some_and(|set| set.set_id == after_finalized_block_authorities_set_id)
+        {
+            return;
+        }
+
+        // The set has changed, or this is the first call.
+        let finalized_number = chain_information.finalized_block_header.number;
+        let boundary = enacted_at.unwrap_or(finalized_number);
+        if let Some(previous) = self.grandpa_authority_sets.back_mut() {
+            previous.last_block = Some(boundary);
+        }
+        self.grandpa_authority_sets.push_back(GrandpaAuthoritySet {
+            set_id: after_finalized_block_authorities_set_id,
+            authorities: finalized_triggered_authorities
+                .iter()
+                .map(|authority| authority.public_key)
+                .collect(),
+            first_block: boundary.saturating_add(1),
+            last_block: None,
+        });
+        while self.grandpa_authority_sets.len() > GRANDPA_AUTHORITY_SETS_HISTORY {
+            self.grandpa_authority_sets.pop_front();
+        }
+    }
+
+    /// Returns the identifier and composition of the Grandpa authority set that is responsible
+    /// for finalizing the given block, if it is known.
+    fn grandpa_authority_set_for(&self, block_number: u64) -> Option<(u64, Vec<[u8; 32]>)> {
+        self.grandpa_authority_sets
+            .iter()
+            .find(|set| {
+                block_number >= set.first_block
+                    && set.last_block.is_none_or(|last| block_number <= last)
+            })
+            .map(|set| (set.set_id, set.authorities.clone()))
+    }
+
+    /// Keeps a finality proof of an authority-set-change block around for
+    /// [`super::SyncService::finality_proof`], without reporting it to the subscribers.
+    fn retain_finality_proof(&mut self, proof: super::FinalityProof) {
+        self.mandatory_finality_proofs.put(proof.target_hash, proof);
+    }
+
     /// Sends a notification to all the notification receivers.
     fn dispatch_all_subscribers(&mut self, notification: Notification) {
         // Elements in `all_notifications` are removed one by one and inserted back if the

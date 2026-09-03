@@ -470,6 +470,7 @@ impl ClientMainTask {
                 | methods::MethodCall::state_subscribeRuntimeVersion { .. }
                 | methods::MethodCall::state_subscribeStorage { .. }
                 | methods::MethodCall::statement_subscribeStatement { .. }
+                | methods::MethodCall::grandpa_subscribeJustifications { .. }
                 | methods::MethodCall::transaction_v1_broadcast { .. }
                 | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. }
                 | methods::MethodCall::sudo_network_unstable_watch { .. }
@@ -638,7 +639,8 @@ impl ClientMainTask {
                 methods::MethodCall::chain_unsubscribeAllHeads { subscription, .. }
                 | methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription, .. }
                 | methods::MethodCall::chain_unsubscribeNewHeads { subscription, .. }
-                | methods::MethodCall::statement_unsubscribeStatement { subscription, .. } => {
+                | methods::MethodCall::statement_unsubscribeStatement { subscription, .. }
+                | methods::MethodCall::grandpa_unsubscribeJustifications { subscription, .. } => {
                     // TODO: DRY with above
                     // TODO: must check whether type of subscription matches
                     match self.inner.active_subscriptions.get_mut(&**subscription) {
@@ -663,6 +665,10 @@ impl ClientMainTask {
                                     methods::Response::statement_unsubscribeStatement(true)
                                         .to_json_response(request_id)
                                 }
+                                methods::MethodCall::grandpa_unsubscribeJustifications {
+                                    ..
+                                } => methods::Response::grandpa_unsubscribeJustifications(true)
+                                    .to_json_response(request_id),
                                 _ => unreachable!(),
                             });
 
@@ -687,6 +693,10 @@ impl ClientMainTask {
                                     methods::Response::statement_unsubscribeStatement(false)
                                         .to_json_response(request_id)
                                 }
+                                methods::MethodCall::grandpa_unsubscribeJustifications {
+                                    ..
+                                } => methods::Response::grandpa_unsubscribeJustifications(false)
+                                    .to_json_response(request_id),
                                 _ => unreachable!(),
                             };
 

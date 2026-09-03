@@ -39,6 +39,7 @@ use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
     chain,
     executor::host,
+    finality, header,
     libp2p::PeerId,
     network::{codec, service},
     trie::{self, Nibble, minimize_proof, prefix_proof, proof_decode},
@@ -234,6 +235,161 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 send_back,
                 buffer_size,
                 runtime_interest,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Subscribes to the finality proofs (Grandpa justifications) of the chain.
+    ///
+    /// Every time the sync service finalizes blocks after verifying a finality proof, that proof
+    /// is sent on the returned channel as a Grandpa justification.
+    ///
+    /// If the channel is full, the notification is silently discarded. Contrary to
+    /// [`SyncService::subscribe_all`], the channel is **not** closed in that situation, as
+    /// finality proofs are independent from each other.
+    ///
+    /// Nothing is reported for blocks finalized before the subscription was created or as part of
+    /// a Grandpa warp sync; use [`SyncService::finality_proof`] for those. Parachains never
+    /// report anything, as their finality is derived from the relay chain.
+    pub async fn subscribe_finality_proofs(
+        &self,
+        buffer_size: usize,
+    ) -> async_channel::Receiver<FinalityProof> {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .send(ToBackground::SubscribeFinalityProofs {
+                send_back,
+                buffer_size,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Returns the finality proof (Grandpa justification) of the given block, if the sync service
+    /// happens to still have it.
+    ///
+    /// Only a small number of the most recently finalized blocks are covered, plus, for much
+    /// longer, the blocks that change the Grandpa authority set - including those covered by a
+    /// Grandpa warp sync, whose every fragment is such a block. `None` is returned for any other
+    /// block, even a finalized one, and for every block of a parachain.
+    ///
+    /// See [`SyncService::verified_finality_proof_from_block`] for obtaining the proof of a block
+    /// that isn't covered.
+    pub async fn finality_proof(&self, block_hash: &[u8; 32]) -> Option<FinalityProof> {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .send(ToBackground::FinalityProof {
+                send_back,
+                block_hash: *block_hash,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Verifies a finality proof that came back alongside a block downloaded from the network,
+    /// and keeps it around so that [`SyncService::finality_proof`] can serve it.
+    ///
+    /// Grandpa finalizes blocks in ranges, so a node only ever builds proofs for the blocks that
+    /// happened to be commit targets. A consumer that must prove a *specific* block final to a
+    /// third party has to get that proof elsewhere; full nodes keep the justifications of
+    /// authority-set-change blocks permanently and serve them alongside the block itself, at no
+    /// extra round trip.
+    ///
+    /// `block` is unverified data from a peer, so this checks that the header hashes to
+    /// `block_hash`, that the justification targets that same block, and that it is signed by the
+    /// authority set responsible for finalizing it. Returns `None` when that set is no longer
+    /// remembered: being unable to check a proof is treated as not having one.
+    pub async fn verified_finality_proof_from_block(
+        &self,
+        block_hash: &[u8; 32],
+        block: &codec::BlockData,
+    ) -> Option<FinalityProof> {
+        let scale_encoded_justification = block
+            .justifications
+            .as_ref()?
+            .iter()
+            .find(|justification| justification.engine_id == *b"FRNK")?
+            .justification
+            .clone();
+
+        // The header is self-verifying: hashing it must give back what was asked for.
+        let scale_encoded_header = block.header.as_ref()?;
+        if header::hash_from_scale_encoded_header(scale_encoded_header) != *block_hash {
+            return None;
+        }
+        let target_number = header::decode(scale_encoded_header, self.block_number_bytes)
+            .ok()?
+            .number;
+
+        // A peer could answer with a justification that is perfectly valid but proves some other
+        // block, which would say nothing about this one.
+        let decoded = finality::decode::decode_grandpa_justification(
+            &scale_encoded_justification,
+            self.block_number_bytes,
+        )
+        .ok()?;
+        if decoded.target_hash != block_hash || decoded.target_number != target_number {
+            return None;
+        }
+
+        let (authorities_set_id, authorities) =
+            self.grandpa_authority_set_for(target_number).await?;
+
+        let mut randomness_seed = [0u8; 32];
+        self.platform.fill_random_bytes(&mut randomness_seed);
+        if let Err(error) =
+            finality::verify::verify_justification(finality::verify::JustificationVerifyConfig {
+                justification: &scale_encoded_justification[..],
+                block_number_bytes: self.block_number_bytes,
+                authorities_set_id,
+                authorities_list: authorities.iter().map(|authority| &authority[..]),
+                randomness_seed,
+            })
+        {
+            log!(
+                &self.platform,
+                Debug,
+                "sync-service",
+                format!("Justification received alongside a block failed verification: {error}")
+            );
+            return None;
+        }
+
+        let proof = FinalityProof {
+            consensus_engine_id: *b"FRNK",
+            scale_encoded_justification,
+            target_hash: *block_hash,
+            target_number,
+        };
+
+        self.to_background
+            .send(ToBackground::RetainFinalityProof {
+                proof: proof.clone(),
+            })
+            .await
+            .unwrap();
+
+        Some(proof)
+    }
+
+    /// Returns the identifier and composition of the Grandpa authority set responsible for
+    /// finalizing the given block, if the sync service still remembers it.
+    async fn grandpa_authority_set_for(&self, block_number: u64) -> Option<(u64, Vec<[u8; 32]>)> {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .send(ToBackground::GrandpaAuthoritySetFor {
+                send_back,
+                block_number,
             })
             .await
             .unwrap();
@@ -1373,6 +1529,30 @@ pub enum Notification {
     },
 }
 
+/// Proof that a block is finalized.
+///
+/// See [`SyncService::subscribe_finality_proofs`] and [`SyncService::finality_proof`].
+#[derive(Debug, Clone)]
+pub struct FinalityProof {
+    /// Consensus engine id the justification is meant for. Always `*b"FRNK"` (Grandpa) at the
+    /// moment, as Grandpa is the only finality algorithm that smoldot supports.
+    pub consensus_engine_id: [u8; 4],
+
+    /// SCALE-encoded Grandpa justification, verified against the authority set active at
+    /// [`FinalityProof::target_number`].
+    ///
+    /// When the verified proof was a Grandpa *commit*, which in steady state is the normal case,
+    /// this is an equivalent justification built from it by
+    /// [`smoldot::finality::encode::grandpa_commit_to_justification`].
+    pub scale_encoded_justification: Vec<u8>,
+
+    /// BLAKE2 hash of the header of the block that this proof finalizes.
+    pub target_hash: [u8; 32],
+
+    /// Height of the block that this proof finalizes.
+    pub target_number: u64,
+}
+
 /// Notification about a new block.
 ///
 /// See [`SyncService::subscribe_all`].
@@ -1426,4 +1606,21 @@ enum ToBackground {
     SerializeChainInformation {
         send_back: oneshot::Sender<Option<chain::chain_information::ValidChainInformation>>,
     },
+    /// See [`SyncService::subscribe_finality_proofs`].
+    SubscribeFinalityProofs {
+        send_back: oneshot::Sender<async_channel::Receiver<FinalityProof>>,
+        buffer_size: usize,
+    },
+    /// See [`SyncService::finality_proof`].
+    FinalityProof {
+        send_back: oneshot::Sender<Option<FinalityProof>>,
+        block_hash: [u8; 32],
+    },
+    /// Asks for the Grandpa authority set that finalized a given block.
+    GrandpaAuthoritySetFor {
+        send_back: oneshot::Sender<Option<(u64, Vec<[u8; 32]>)>>,
+        block_number: u64,
+    },
+    /// Caches a finality proof that the frontend has fetched and verified.
+    RetainFinalityProof { proof: FinalityProof },
 }

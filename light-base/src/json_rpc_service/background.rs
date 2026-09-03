@@ -96,6 +96,13 @@ pub(super) struct Config<TPlat: PlatformRef> {
     pub statement_protocol_config: Option<StatementProtocolConfig>,
 }
 
+/// Number of finality proofs the sync service may buffer for the JSON-RPC service before it
+/// starts discarding them.
+///
+/// Discarding one only means that `grandpa_subscribeJustifications` subscribers miss a
+/// justification, which a full node does too.
+const FINALITY_PROOFS_BUFFER_SIZE: usize = 16;
+
 /// Fields used to process JSON-RPC requests in the background.
 struct Background<TPlat: PlatformRef> {
     /// Target to use for all the logs.
@@ -168,6 +175,12 @@ struct Background<TPlat: PlatformRef> {
     /// List of all active `state_subscribeRuntimeVersion` subscriptions, indexed by the
     /// subscription ID.
     runtime_version_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
+    /// List of all active `grandpa_subscribeJustifications` subscriptions, indexed by the
+    /// subscription ID.
+    grandpa_justifications_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
+    /// `true` if a task that pulls finality proofs out of the sync service is currently present
+    /// in [`Background::background_tasks`]. Set back to `false` if the stream ever ends.
+    grandpa_justifications_stream_active: bool,
     /// List of all active `author_submitAndWatchExtrinsic`, `transaction_v1_broadcast`, and
     /// `transactionWatch_v1_submitAndWatch` subscriptions, indexed by the subscription ID.
     /// When it comes to `author_submitAndWatchExtrinsic` and
@@ -448,7 +461,17 @@ enum Event<TPlat: PlatformRef> {
         request_id_json: String,
         result: Result<codec::BlockData, ()>,
         expected_block_hash: [u8; 32],
+        /// Finality proof of the block, if the sync service happens to still have it.
+        finality_proof: Option<sync_service::FinalityProof>,
     },
+    /// A finality proof has been verified by the sync service. Sent to the
+    /// `grandpa_subscribeJustifications` subscribers.
+    FinalityProof {
+        proof: sync_service::FinalityProof,
+        stream: Pin<Box<async_channel::Receiver<sync_service::FinalityProof>>>,
+    },
+    /// The stream of finality proofs of the sync service has ended.
+    FinalityProofsStreamDead,
     ChainHeadSubscriptionWithRuntimeReady {
         subscription_id: String,
         subscription: runtime_service::SubscribeAll<TPlat>,
@@ -609,6 +632,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
             2,
             Default::default(),
         ),
+        grandpa_justifications_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
+            0,
+            Default::default(),
+        ),
+        grandpa_justifications_stream_active: false,
         transactions_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
             2,
             Default::default(),
@@ -932,6 +960,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::childstate_getStorageHash { .. }
                     | methods::MethodCall::childstate_getStorageSize { .. }
                     | methods::MethodCall::grandpa_roundState { .. }
+                    | methods::MethodCall::grandpa_subscribeJustifications { .. }
+                    | methods::MethodCall::grandpa_unsubscribeJustifications { .. }
                     | methods::MethodCall::offchain_localStorageGet { .. }
                     | methods::MethodCall::offchain_localStorageSet { .. }
                     | methods::MethodCall::payment_queryInfo { .. }
@@ -1458,6 +1488,61 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::Response::chain_unsubscribeAllHeads(exists)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::grandpa_subscribeJustifications {} => {
+                        let subscription_id = {
+                            let mut subscription_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut subscription_id);
+                            bs58::encode(subscription_id).into_string()
+                        };
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::grandpa_subscribeJustifications(Cow::Borrowed(
+                                    &subscription_id,
+                                ))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+
+                        me.grandpa_justifications_subscriptions
+                            .insert(subscription_id);
+
+                        // The sync service builds proofs whether or not anybody is listening,
+                        // so this only decides when forwarding starts. Proofs from before the
+                        // first subscription stay reachable through `chain_getBlock`.
+                        if !me.grandpa_justifications_stream_active {
+                            me.grandpa_justifications_stream_active = true;
+                            me.background_tasks.push(Box::pin({
+                                let sync_service = me.sync_service.clone();
+                                async move {
+                                    let mut stream = Box::pin(
+                                        sync_service
+                                            .subscribe_finality_proofs(FINALITY_PROOFS_BUFFER_SIZE)
+                                            .await,
+                                    );
+                                    match stream.next().await {
+                                        Some(proof) => Event::FinalityProof { proof, stream },
+                                        None => Event::FinalityProofsStreamDead,
+                                    }
+                                }
+                            }));
+                        }
+                    }
+
+                    methods::MethodCall::grandpa_unsubscribeJustifications { subscription } => {
+                        let exists = me
+                            .grandpa_justifications_subscriptions
+                            .remove(&subscription);
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::grandpa_unsubscribeJustifications(exists)
                                     .to_json_response(request_id_json),
                             )
                             .await;
@@ -3218,13 +3303,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     Box::pin(async move {
                         let result = if let Some(block_number) = block_number {
                             sync_service
+                                .clone()
                                 .block_query(
                                     block_number,
                                     block_hash,
                                     codec::BlocksRequestFields {
                                         header: true,
                                         body: true,
-                                        justifications: false,
+                                        // Costs no extra round trip, and is the only way to
+                                        // reach the proof of a block finalized before this node
+                                        // started. See `verified_finality_proof_from_block`.
+                                        justifications: true,
                                     },
                                     3,
                                     Duration::from_secs(8),
@@ -3233,12 +3322,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .await
                         } else {
                             sync_service
+                                .clone()
                                 .block_query_unknown_number(
                                     block_hash,
                                     codec::BlocksRequestFields {
                                         header: true,
                                         body: true,
-                                        justifications: false,
+                                        // See above.
+                                        justifications: true,
                                     },
                                     3,
                                     Duration::from_secs(8),
@@ -3246,10 +3337,24 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 )
                                 .await
                         };
+                        // Prefer the proof the sync service verified while finalizing; fall
+                        // back to the one the peer sent, which is verified locally.
+                        let finality_proof = match sync_service.finality_proof(&block_hash).await {
+                            Some(proof) => Some(proof),
+                            None => match result.as_ref() {
+                                Ok(block) => {
+                                    sync_service
+                                        .verified_finality_proof_from_block(&block_hash, block)
+                                        .await
+                                }
+                                Err(_) => None,
+                            },
+                        };
                         Event::ChainGetBlockResult {
                             request_id_json,
                             result,
                             expected_block_hash: block_hash,
+                            finality_proof,
                         }
                     })
                 });
@@ -5751,10 +5856,50 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }));
             }
 
+            WakeUpReason::Event(Event::FinalityProof { proof, mut stream }) => {
+                log!(
+                    &me.platform,
+                    Debug,
+                    &me.log_target,
+                    "grandpa-justification",
+                    target_hash = HashDisplay(&proof.target_hash),
+                    target_number = proof.target_number,
+                    subscribers = me.grandpa_justifications_subscriptions.len(),
+                );
+
+                for subscription_id in &me.grandpa_justifications_subscriptions {
+                    let _ = me
+                        .responses_tx
+                        .send(
+                            methods::ServerToClient::grandpa_justifications {
+                                subscription: Cow::Borrowed(&**subscription_id),
+                                result: methods::HexString(
+                                    proof.scale_encoded_justification.clone(),
+                                ),
+                            }
+                            .to_json_request_object_parameters(None),
+                        )
+                        .await;
+                }
+
+                me.background_tasks.push(Box::pin(async move {
+                    match stream.next().await {
+                        Some(proof) => Event::FinalityProof { proof, stream },
+                        None => Event::FinalityProofsStreamDead,
+                    }
+                }));
+            }
+
+            WakeUpReason::Event(Event::FinalityProofsStreamDead) => {
+                // Happens for parachains, which never report a finality proof.
+                me.grandpa_justifications_stream_active = false;
+            }
+
             WakeUpReason::Event(Event::ChainGetBlockResult {
                 request_id_json,
                 mut result,
                 expected_block_hash,
+                finality_proof,
             }) => {
                 // A network request necessary to fulfill `chain_getBlock` has finished.
 
@@ -5800,9 +5945,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     me.sync_service.block_number_bytes(),
                                 )
                                 .unwrap(),
-                                // There's no way to verify the correctness of the justifications, consequently
-                                // we always return an empty list.
-                                justifications: None,
+                                // Only ever a locally-verified justification; see where
+                                // `finality_proof` is built.
+                                justifications: finality_proof.map(|proof| {
+                                    vec![(
+                                        proof.consensus_engine_id,
+                                        proof.scale_encoded_justification,
+                                    )]
+                                }),
                             })
                             .to_json_response(&request_id_json),
                         )
