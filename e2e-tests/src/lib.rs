@@ -189,20 +189,38 @@ pub async fn run_js_test(script: &str, env_vars: &[(&str, &str)]) -> Result<(), 
         cmd.env(key, val);
     }
 
-    let output = cmd.output().await.expect("failed to run node");
+    // Both streams are piped and forwarded as the lines arrive, rather than collected with
+    // `output()`, so that a JS process which hangs and gets dropped before it exits still leaves
+    // its output in the log. Inheriting our stdout/stderr instead would hang the CI step: an
+    // orphaned descendant (Chromium, via Playwright) keeps the job's log pipe open forever.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    async fn forward(stream: impl tokio::io::AsyncRead + Unpin, tag: &str) {
+        use tokio::io::AsyncBufReadExt as _;
 
-    eprintln!("--- JS stderr ---\n{stderr}");
-    eprintln!("--- JS stdout ---\n{stdout}");
+        let mut lines = tokio::io::BufReader::new(stream).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            eprintln!("[{tag}] {line}");
+        }
+    }
 
-    if output.status.success() {
+    let mut child = cmd.spawn().expect("failed to run node");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+
+    // Waiting only after the pipes close would hang on a child that leaves a descendant holding
+    // them; draining them only after the exit would deadlock on a full pipe. So: all three.
+    let (status, _, _) = tokio::join!(
+        child.wait(),
+        forward(stdout, "js:out"),
+        forward(stderr, "js:err"),
+    );
+
+    let status = status.expect("failed to wait for node");
+    if status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "JS test exited with {}\nstdout:\n{}\nstderr:\n{}",
-            output.status, stdout, stderr
-        ))
+        Err(format!("JS test exited with {status}"))
     }
 }
