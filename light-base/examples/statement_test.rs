@@ -63,14 +63,12 @@ fn main() {
                 potential_relay_chains: iter::empty(),
                 database_content: "",
                 user_data: (),
-                statement_protocol_config: Some(
-                    smoldot_light::network_service::StatementProtocolConfig::new(
-                        core::num::NonZeroUsize::new(65536).unwrap(),
-                        0.01,
-                        rand::random(),
-                        core::time::Duration::from_secs(1),
-                    ),
-                ),
+                statement_protocol_config: Some(smoldot_light::StatementProtocolConfig::new(
+                    core::num::NonZeroUsize::new(65536).unwrap(),
+                    0.01,
+                    rand::random(),
+                    core::time::Duration::from_secs(1),
+                )),
             })
             .unwrap();
 
@@ -91,14 +89,12 @@ fn main() {
                     potential_relay_chains: [relay_chain_id].into_iter(),
                     database_content: "",
                     user_data: (),
-                    statement_protocol_config: Some(
-                        smoldot_light::network_service::StatementProtocolConfig::new(
-                            core::num::NonZeroUsize::new(65536).unwrap(),
-                            0.01,
-                            rand::random(),
-                            core::time::Duration::from_secs(1),
-                        ),
-                    ),
+                    statement_protocol_config: Some(smoldot_light::StatementProtocolConfig::new(
+                        core::num::NonZeroUsize::new(65536).unwrap(),
+                        0.01,
+                        rand::random(),
+                        core::time::Duration::from_secs(1),
+                    )),
                 })
                 .unwrap();
 

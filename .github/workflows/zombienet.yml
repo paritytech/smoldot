@@ -95,12 +95,21 @@ jobs:
           - job-name: "zombienet-smoldot-0012-reserved_peer_discovery"
             test: "reserved_peer_discovery"
             runner-type: "default"
+          - job-name: "zombienet-smoldot-0015-statement_store_submit_parity"
+            test: "statement_store_submit_parity"
+            runner-type: "default"
           # TODO: uncomment when browser test execution is re-enabled
           # (`Host::Browser` arm in e2e-tests/src/lib.rs `run_shared_test`).
           # This test runs on the browser host only; until then the job would
           # pass without executing anything.
           # - job-name: "zombienet-smoldot-0014-webrtc_double_open"
           #   test: "webrtc_double_open"
+          #   runner-type: "default"
+          # - job-name: "zombienet-smoldot-0015-webrtc_send_after_close"
+          #   test: "webrtc_send_after_close"
+          #   runner-type: "default"
+          # - job-name: "zombienet-smoldot-0016-webrtc_open_after_pc_close"
+          #   test: "webrtc_open_after_pc_close"
           #   runner-type: "default"
 
     steps:

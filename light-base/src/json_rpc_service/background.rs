@@ -16,7 +16,9 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    bitswap_service, log, network_service,
+    bitswap_service,
+    json_rpc_service::StatementProtocolConfig,
+    log, network_service,
     platform::PlatformRef,
     runtime_service, sync_service, transactions_service,
     util::{self, SipHasherBuild},
@@ -91,11 +93,7 @@ pub(super) struct Config<TPlat: PlatformRef> {
     pub genesis_block_hash: [u8; 32],
 
     /// Statement protocol configuration. `None` if the statement protocol is disabled.
-    pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
-
-    /// Maximum number of seen statement hashes tracked per subscription for dedup.
-    /// `None` if the statement protocol is disabled.
-    pub max_seen_statements: Option<NonZero<usize>>,
+    pub statement_protocol_config: Option<StatementProtocolConfig>,
 }
 
 /// Fields used to process JSON-RPC requests in the background.
@@ -126,7 +124,7 @@ struct Background<TPlat: PlatformRef> {
     /// Randomness used for various purposes, such as generating subscription IDs.
     randomness: ChaCha20Rng,
 
-    statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+    statement_protocol_config: Option<StatementProtocolConfig>,
 
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
@@ -240,10 +238,6 @@ struct Background<TPlat: PlatformRef> {
     state_get_keys_paged_cache:
         lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
 
-    /// Maximum number of seen statement hashes tracked per subscription for dedup.
-    /// `None` if the statement protocol is disabled.
-    max_seen_statements: Option<NonZero<usize>>,
-
     /// Active statement subscriptions, indexed by topic for efficient matching.
     statement_subscriptions: super::statement::StatementSubscriptions,
 
@@ -251,8 +245,8 @@ struct Background<TPlat: PlatformRef> {
     next_statement_affinity_update: Option<Pin<Box<TPlat::Delay>>>,
     last_statement_affinity_update: Option<TPlat::Instant>,
 
-    /// Receiver for network events (statements from peers).
-    network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
+    /// Receiver for statement notifications from peers.
+    statement_events_rx: Option<async_channel::Receiver<network_service::StatementEvent>>,
 }
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -260,16 +254,18 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     /// If no update was ever sent, or the last update was more than the configured
     /// affinity update interval ago, the update fires immediately.
     /// Otherwise, it fires after the remaining interval.
+    ///
+    /// Does nothing when the chain runs without the statement protocol. Subscriptions can still be
+    /// created in that case, so this is reachable, and there is no affinity to advertise.
     fn schedule_statement_affinity_update(&mut self) {
         if self.statement_affinity_stale {
             return;
         }
+        let Some(config) = self.statement_protocol_config.as_ref() else {
+            return;
+        };
         self.statement_affinity_stale = true;
-        let interval = self
-            .statement_protocol_config
-            .as_ref()
-            .expect("affinity updates require statement protocol; qed")
-            .affinity_update_interval();
+        let interval = config.affinity_update_interval();
         let delay = match &self.last_statement_affinity_update {
             Some(last) => {
                 let elapsed = self.platform.now() - last.clone();
@@ -651,12 +647,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
         ),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: false,
-        max_seen_statements: config.max_seen_statements,
         statement_subscriptions: super::statement::StatementSubscriptions::with_capacity(16),
         statement_affinity_stale: false,
         next_statement_affinity_update: None,
         last_statement_affinity_update: None,
-        network_events_rx: None,
+        statement_events_rx: None,
         platform: config.platform,
     };
 
@@ -691,7 +686,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
             NetworkStatementsReceived(Vec<([u8; 32], codec::Statement)>),
-            MustSubscribeNetworkEvents,
+            MustSubscribeStatementEvents,
             StatementAffinityUpdate,
         }
 
@@ -794,19 +789,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 WakeUpReason::StatementAffinityUpdate
             })
             .or(async {
-                let Some(rx) = &me.network_events_rx else {
-                    return WakeUpReason::MustSubscribeNetworkEvents;
+                if me.statement_protocol_config.is_none() {
+                    future::pending::<()>().await;
+                }
+                let Some(rx) = &me.statement_events_rx else {
+                    return WakeUpReason::MustSubscribeStatementEvents;
                 };
-                loop {
-                    let Ok(event) = rx.recv().await else {
-                        me.network_events_rx = None;
-                        return WakeUpReason::MustSubscribeNetworkEvents;
-                    };
-                    match event {
-                        network_service::Event::StatementsNotification { statements, .. } => {
-                            return WakeUpReason::NetworkStatementsReceived(statements);
-                        }
-                        _ => {}
+                match rx.recv().await {
+                    Ok(network_service::StatementEvent::StatementsNotification {
+                        statements,
+                        ..
+                    }) => WakeUpReason::NetworkStatementsReceived(statements),
+                    Err(_) => {
+                        me.statement_events_rx = None;
+                        WakeUpReason::MustSubscribeStatementEvents
                     }
                 }
             })
@@ -849,9 +845,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     .await;
             }
 
-            WakeUpReason::MustSubscribeNetworkEvents => {
-                debug_assert!(me.network_events_rx.is_none());
-                me.network_events_rx = Some(me.network_service.subscribe().await);
+            WakeUpReason::MustSubscribeStatementEvents => {
+                debug_assert!(me.statement_events_rx.is_none());
+                me.statement_events_rx = Some(me.network_service.subscribe_statements().await);
             }
 
             WakeUpReason::NetworkStatementsReceived(statements) => {
@@ -3014,17 +3010,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let network = me.network_service.clone();
                         let result = super::statement::validate_and_broadcast_statement(
                             &encoded.0,
+                            me.platform.now_from_unix_epoch(),
                             |bytes| async move { network.broadcast_statement(bytes).await },
                         )
                         .await;
 
-                        let _ = me
-                            .responses_tx
-                            .send(
-                                methods::Response::statement_submit(result)
-                                    .to_json_response(request_id_json),
-                            )
-                            .await;
+                        let response = match result {
+                            Ok(result) => methods::Response::statement_submit(result)
+                                .to_json_response(request_id_json),
+                            Err(error) => error.to_json_rpc_error(request_id_json),
+                        };
+
+                        let _ = me.responses_tx.send(response).await;
                     }
 
                     methods::MethodCall::statement_subscribeStatement { filter } => {
@@ -3037,7 +3034,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         me.statement_subscriptions.insert(
                             subscription_id.clone(),
                             filter,
-                            me.max_seen_statements,
+                            me.statement_protocol_config
+                                .as_ref()
+                                .map(|c| c.max_seen_statements()),
                         );
 
                         me.schedule_statement_affinity_update();

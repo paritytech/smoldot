@@ -77,7 +77,7 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
 
     const state = {
         jsonRpcResponses: new Map<number, string[]>(),
-        connections: new Map<number, Set<number>>(),
+        connections: new Map<number, { ty: "single-stream" } | { ty: "multi-stream", liveStreams: Set<number> }>(),
     };
 
     portToServer.onmessage = (messageEvent) => {
@@ -101,7 +101,9 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
                 break;
             }
             case "new-connection": {
-                state.connections.set(message.connectionId, new Set());
+                state.connections.set(message.connectionId, message.address.ty === "webrtc"
+                    ? { ty: "multi-stream", liveStreams: new Set() }
+                    : { ty: "single-stream" });
                 break;
             }
             case "connection-reset": {
@@ -119,28 +121,34 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
             }
             case "connection-stream-reset": {
                 // The connection might have been reset locally in the past.
-                if (!state.connections.has(message.connectionId))
+                const connection = state.connections.get(message.connectionId);
+                if (!connection)
                     return;
-                // The stream might have been reset locally in the past.
-                if (!state.connections.get(message.connectionId)!.has(message.streamId))
+                // The stream might have been reset locally in the past. This message is only
+                // ever sent for multi-stream connections.
+                if (connection.ty !== "multi-stream" || !connection.liveStreams.has(message.streamId))
                     return;
                 break;
             }
             case "stream-send": {
                 // The connection might have been reset locally in the past.
-                if (!state.connections.has(message.connectionId))
+                const connection = state.connections.get(message.connectionId);
+                if (!connection)
                     return;
-                // The stream might have been reset locally in the past.
-                if (message.streamId && !state.connections.get(message.connectionId)!.has(message.streamId))
+                // The stream might have been reset locally in the past. Single-stream
+                // connections have no substream, so there is nothing to check: the liveness of
+                // the connection itself, checked above, is the only thing that matters.
+                if (connection.ty === "multi-stream" && !connection.liveStreams.has(message.streamId!))
                     return;
                 break;
             }
             case "stream-send-close": {
                 // The connection might have been reset locally in the past.
-                if (!state.connections.has(message.connectionId))
+                const connection = state.connections.get(message.connectionId);
+                if (!connection)
                     return;
-                // The stream might have been reset locally in the past.
-                if (message.streamId && !state.connections.get(message.connectionId)!.has(message.streamId))
+                // Same as for `stream-send` above.
+                if (connection.ty === "multi-stream" && !connection.liveStreams.has(message.streamId!))
                     return;
                 break;
             }
@@ -207,7 +215,10 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
         },
 
         streamOpened(connectionId, streamId, direction) {
-            state.connections.get(connectionId)!.add(streamId);
+            const connection = state.connections.get(connectionId)!;
+            // Only multi-stream connections ever open substreams.
+            if (connection.ty === "multi-stream")
+                connection.liveStreams.add(streamId);
             const msg: ClientToServer = { ty: "stream-opened", connectionId, streamId, direction };
             portToServer.postMessage(msg);
         },
@@ -218,7 +229,9 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
         },
 
         streamReset(connectionId, streamId, message) {
-            state.connections.get(connectionId)!.delete(streamId);
+            const connection = state.connections.get(connectionId)!;
+            if (connection.ty === "multi-stream")
+                connection.liveStreams.delete(streamId);
             const msg: ClientToServer = { ty: "stream-reset", connectionId, streamId, message };
             portToServer.postMessage(msg);
         },
@@ -261,7 +274,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
     const state: {
         // Always set except at the very beginning.
         instance: instance.Instance | null,
-        connections: Map<number, Set<number>>,
+        connections: Map<number, { ty: "single-stream" } | { ty: "multi-stream", liveStreams: Set<number> }>,
         acceptedJsonRpcResponses: Map<number, number>,
         onExecutorShutdownOrWasmPanic?: (() => void),
     } = {
@@ -305,7 +318,9 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 return;
             }
             case "new-connection": {
-                state.connections.set(event.connectionId, new Set());
+                state.connections.set(event.connectionId, event.address.ty === "webrtc"
+                    ? { ty: "multi-stream", liveStreams: new Set() }
+                    : { ty: "single-stream" });
                 break;
             }
             case "connection-reset": {
@@ -313,7 +328,9 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 break;
             }
             case "connection-stream-reset": {
-                state.connections.get(event.connectionId)!.delete(event.streamId);
+                const connection = state.connections.get(event.connectionId)!;
+                if (connection.ty === "multi-stream")
+                    connection.liveStreams.delete(event.streamId);
                 break;
             }
         }
@@ -385,40 +402,49 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
             }
             case "stream-message": {
                 // The connection might have been reset locally in the past.
-                if (!state.connections.has(message.connectionId))
+                const connection = state.connections.get(message.connectionId);
+                if (!connection)
                     return;
-                // The stream might have been reset locally in the past.
-                if (message.streamId !== undefined && !state.connections.get(message.connectionId)!.has(message.streamId))
+                // The stream might have been reset locally in the past. Single-stream
+                // connections have no substream, so only the connection's own liveness,
+                // checked above, matters.
+                if (connection.ty === "multi-stream" && !connection.liveStreams.has(message.streamId!))
                     return;
                 state.instance!.streamMessage(message.connectionId, message.message, message.streamId);
                 break;
             }
             case "stream-opened": {
                 // The connection might have been reset locally in the past.
-                if (!state.connections.has(message.connectionId))
+                const connection = state.connections.get(message.connectionId);
+                if (!connection)
                     return;
-                state.connections.get(message.connectionId)!.add(message.streamId);
+                // Only multi-stream connections ever open substreams.
+                if (connection.ty === "multi-stream")
+                    connection.liveStreams.add(message.streamId);
                 state.instance!.streamOpened(message.connectionId, message.streamId, message.direction);
                 break;
             }
             case "stream-writable-bytes": {
                 // The connection might have been reset locally in the past.
-                if (!state.connections.has(message.connectionId))
+                const connection = state.connections.get(message.connectionId);
+                if (!connection)
                     return;
-                // The stream might have been reset locally in the past.
-                if (message.streamId !== undefined && !state.connections.get(message.connectionId)!.has(message.streamId))
+                // Same as for `stream-message` above.
+                if (connection.ty === "multi-stream" && !connection.liveStreams.has(message.streamId!))
                     return;
                 state.instance!.streamWritableBytes(message.connectionId, message.numExtra, message.streamId);
                 break;
             }
             case "stream-reset": {
                 // The connection might have been reset locally in the past.
-                if (!state.connections.has(message.connectionId))
+                const connection = state.connections.get(message.connectionId);
+                if (!connection)
                     return;
-                // The stream might have been reset locally in the past.
-                if (!state.connections.get(message.connectionId)!.has(message.streamId))
+                // The stream might have been reset locally in the past. This message is only
+                // ever sent for multi-stream connections.
+                if (connection.ty !== "multi-stream" || !connection.liveStreams.has(message.streamId))
                     return;
-                state.connections.get(message.connectionId)!.delete(message.streamId);
+                connection.liveStreams.delete(message.streamId);
                 state.instance!.streamReset(message.connectionId, message.streamId, message.message);
                 break;
             }

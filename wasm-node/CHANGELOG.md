@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+## 3.4.1 - 2026-08-13
+
+### Fixed
+
+- No longer panic when `statement_subscribeStatement` is called on a chain that runs without the statement protocol: inserting the subscription scheduled a topic-affinity update, which required the statement protocol config to be present. The update is now skipped, since there is no affinity to advertise. ([#3334](https://github.com/paritytech/smoldot/pull/3334))
+- In remote-instance mode (any client constructed with `ClientOptions.portToWorker`), no longer silently drop every outbound write on single-stream connections, which made WebSocket and TCP connections unable to complete the libp2p handshake: the remote received nothing, so it answered nothing, and the connection was torn down on the handshake timeout. Single-stream connections have no substream, so the stale-substream check that [#3326](https://github.com/paritytech/smoldot/pull/3326) tightened no longer applies to them. ([#3346](https://github.com/paritytech/smoldot/pull/3346); fixes [#3342](https://github.com/paritytech/smoldot/issues/3342); regression from [#3326](https://github.com/paritytech/smoldot/pull/3326))
+
+## 3.4.0 - 2026-08-07
+
+### Added
+
+- Implement the [RFC-0163](https://github.com/polkadot-fellows/RFCs/blob/main/text/0163-ec-host-functions.md) elliptic curve host functions: scalar multiplication and multi-scalar multiplication on bandersnatch (`ed_on_bls12_381_bandersnatch`), and scalar multiplication, multi-scalar multiplication, multi Miller loop and final exponentiation on BLS12-381. This lets smoldot execute runtimes that verify bandersnatch ring-VRF proofs (proof-of-personhood chains). The remaining RFC-0163 functions (Pallas, Vesta) are registered but unimplemented. ([#3331](https://github.com/paritytech/smoldot/pull/3331); fixes [#3328](https://github.com/paritytech/smoldot/issues/3328))
+
+### Fixed
+
+- Fix a panic (`assertion failed: task.event_pending_send.is_none()` in debug builds) or a silently lost connection event (release builds, later causing a sync service panic on an unmatched `Disconnected`) when a peer ban raced with a network event that was still being delivered to subscribers. ([#3314](https://github.com/paritytech/smoldot/pull/3314); fixes [#3312](https://github.com/paritytech/smoldot/issues/3312))
+- No longer crash with an uncaught `InvalidStateError` when sending on an `RTCDataChannel` that left the `open` state before its `close` event was delivered; the send is skipped, since the pending `close` event resets the stream anyway. ([#3324](https://github.com/paritytech/smoldot/pull/3324); fixes [#3322](https://github.com/paritytech/smoldot/issues/3322))
+- In remote-instance mode, no longer crash with an uncaught `TypeError` when a message addressed to the first substream of a WebRTC connection (stream id 0) raced with that substream's reset: stream id 0 was accidentally exempt from the stale-message check. ([#3326](https://github.com/paritytech/smoldot/pull/3326); related to [#3322](https://github.com/paritytech/smoldot/issues/3322))
+- No longer crash with an uncaught `InvalidStateError` when opening a substream on an `RTCPeerConnection` that moved to `closed` before its `connectionstatechange` event was delivered. ([#3327](https://github.com/paritytech/smoldot/pull/3327); fixes [#3325](https://github.com/paritytech/smoldot/issues/3325))
+- Fix a panic in the connection task when the remote resets an inbound notifications substream while a message about that substream is still in flight (a duplicate reject, or a close right after an accept). ([#3329](https://github.com/paritytech/smoldot/pull/3329); fixes [#3304](https://github.com/paritytech/smoldot/issues/3304))
+
+## 3.3.2 - 2026-07-24
+
+### Changed
+
+- Match incoming statements against statement-store subscriptions through a topic index instead of scanning every subscription, making statement matching efficient when many subscriptions are active. Filter semantics are unchanged. ([#3281](https://github.com/paritytech/smoldot/pull/3281); fixes [#3144](https://github.com/paritytech/smoldot/issues/3144), [#3147](https://github.com/paritytech/smoldot/issues/3147))
+
+### Fixed
+
+- Fix a panic (`called Result::unwrap() on an Err value` in `runtime_service`) during parachain sync, caused by a relay chain block being unpinned twice when its parahead fetch finished but the block was pruned before being reported. ([#3287](https://github.com/paritytech/smoldot/pull/3287); fixes [#3286](https://github.com/paritytech/smoldot/issues/3286))
+- No longer crash the entire client when WebRTC is unavailable in the environment (e.g. inside a worker thread, where `RTCPeerConnection` doesn't exist); WebRTC connections are now forbidden instead. ([#3303](https://github.com/paritytech/smoldot/pull/3303); fixes [#3302](https://github.com/paritytech/smoldot/issues/3302))
+- JS exceptions thrown by code called from within the Wasm are no longer silently swallowed (which left an unusable instance and misleading errors on later calls); they now trigger the regular crash handling with a `wasm-panic` event carrying the original message and stack. ([#3308](https://github.com/paritytech/smoldot/pull/3308); related to [#3302](https://github.com/paritytech/smoldot/issues/3302), [#3306](https://github.com/paritytech/smoldot/issues/3306), [#3307](https://github.com/paritytech/smoldot/issues/3307))
+- Fix a panic (`same stream_id used multiple times in connection_stream_opened`) when a browser delivers the `open` event of an `RTCDataChannel` more than once. ([#3309](https://github.com/paritytech/smoldot/pull/3309); fixes [#3305](https://github.com/paritytech/smoldot/issues/3305))
+
 ## 3.3.1 - 2026-07-02
 
 ### Added

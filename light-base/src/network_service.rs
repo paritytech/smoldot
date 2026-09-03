@@ -48,13 +48,13 @@ use crate::{
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     format,
     string::{String, ToString as _},
     sync::Arc,
     vec::{self, Vec},
 };
-use core::{cmp, mem, num::NonZero, num::NonZeroUsize, pin::Pin, time::Duration};
+use core::{cmp, mem, num::NonZero, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{StreamExt as _, future, stream};
@@ -77,54 +77,6 @@ use service::SendTopicAffinityError;
 pub use service::{
     ChainId, EncodedMerkleProof, PeerId, QueueNotificationError, SendBitswapMessageError,
 };
-
-/// Configuration for the Statement Store protocol.
-#[derive(Debug, Clone)]
-pub struct StatementProtocolConfig {
-    /// Per-subscription LRU cache size used for deduplicating delivered statements.
-    max_seen_statements: NonZeroUsize,
-    false_positive_rate: f64,
-    bloom_seed: u128,
-    affinity_update_interval: Duration,
-}
-
-impl StatementProtocolConfig {
-    pub fn new(
-        max_seen_statements: NonZeroUsize,
-        false_positive_rate: f64,
-        bloom_seed: u128,
-        affinity_update_interval: Duration,
-    ) -> Self {
-        assert!(
-            false_positive_rate.is_finite()
-                && false_positive_rate > 0.0
-                && false_positive_rate < 1.0
-        );
-        assert!(!affinity_update_interval.is_zero());
-        StatementProtocolConfig {
-            max_seen_statements,
-            false_positive_rate,
-            bloom_seed,
-            affinity_update_interval,
-        }
-    }
-
-    pub fn max_seen_statements(&self) -> NonZeroUsize {
-        self.max_seen_statements
-    }
-
-    pub fn false_positive_rate(&self) -> f64 {
-        self.false_positive_rate
-    }
-
-    pub fn bloom_seed(&self) -> u128 {
-        self.bloom_seed
-    }
-
-    pub fn affinity_update_interval(&self) -> Duration {
-        self.affinity_update_interval
-    }
-}
 
 mod tasks;
 
@@ -186,8 +138,8 @@ pub struct ConfigChain {
     /// number of the finalized block at the time of the initialization.
     pub grandpa_protocol_finalized_block_height: Option<u64>,
 
-    /// If `Some`, enables the statement store protocol.
-    pub statement_protocol_config: Option<StatementProtocolConfig>,
+    /// If `true`, enables the statement store protocol.
+    pub enable_statement_protocol: bool,
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
@@ -257,13 +209,16 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             chains_ever_gossip_connected: HashSet::with_capacity_and_hasher(4, Default::default()),
             v2_statement_peers: HashMap::with_capacity_and_hasher(4, Default::default()),
             current_affinity_filter: HashMap::with_capacity_and_hasher(4, Default::default()),
-            event_pending_send: None,
+            events_pending_send: VecDeque::with_capacity(4),
             event_senders: either::Left(Vec::new()),
             pending_new_subscriptions: Vec::new(),
             bitswap_event_pending_send: None,
             bitswap_connected_peers: 0,
             bitswap_event_senders: either::Left(Vec::new()),
             pending_new_bitswap_subscriptions: Vec::new(),
+            statement_event_pending_send: None,
+            statement_event_senders: either::Left(Vec::new()),
+            pending_new_statement_subscriptions: Vec::new(),
             important_nodes: HashMap::with_capacity_and_hasher(16, Default::default()),
             main_messages_rx: Box::pin(main_messages_rx),
             messages_rx: stream::SelectAll::new(),
@@ -307,7 +262,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                         set_id: 0,
                     },
                 ),
-                enable_statement_protocol: config.statement_protocol_config.is_some(),
+                enable_statement_protocol: config.enable_statement_protocol,
                 fork_id: config.fork_id.clone(),
                 block_number_bytes: config.block_number_bytes,
                 best_hash: config.best_block.1,
@@ -410,6 +365,27 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
 
         self.messages_tx
             .send(ToBackgroundChain::SubscribeBitswap { sender: tx })
+            .await
+            .unwrap();
+
+        rx
+    }
+
+    /// Subscribes to the statement notifications that happen on the network.
+    ///
+    /// Note that this function is `async`, but it should return very quickly.
+    ///
+    /// The `Receiver` **must** be polled continuously. When the channel is full, the networking
+    /// connections will be back-pressured until the channel isn't full anymore.
+    ///
+    /// The `Receiver` never yields `None` unless the [`NetworkService`] crashes or is destroyed.
+    /// If `None` is yielded and the [`NetworkService`] is still alive, you should call
+    /// [`NetworkServiceChain::subscribe_statements`] again to obtain a new `Receiver`.
+    pub async fn subscribe_statements(&self) -> async_channel::Receiver<StatementEvent> {
+        let (tx, rx) = async_channel::bounded(128);
+
+        self.messages_tx
+            .send(ToBackgroundChain::SubscribeStatements { sender: tx })
             .await
             .unwrap();
 
@@ -806,11 +782,6 @@ pub enum Event {
         peer_id: PeerId,
         message: service::EncodedGrandpaCommitMessage,
     },
-    /// Received a statement notification from the network.
-    StatementsNotification {
-        peer_id: PeerId,
-        statements: Vec<([u8; 32], codec::Statement)>,
-    },
 }
 
 /// Bitswap event that can be generated by the network service. Because Bitswap messages are big
@@ -821,6 +792,16 @@ pub enum BitswapEvent {
     BitswapMessage {
         peer_id: PeerId,
         message: service::EncodedBitswapMessage,
+    },
+}
+
+/// Statement event that can be generated by the network service.
+#[derive(Debug, Clone)]
+pub enum StatementEvent {
+    /// Received a statement notification from the network.
+    StatementsNotification {
+        peer_id: PeerId,
+        statements: Vec<([u8; 32], codec::Statement)>,
     },
 }
 
@@ -925,6 +906,9 @@ enum ToBackgroundChain {
     },
     SubscribeBitswap {
         sender: async_channel::Sender<BitswapEvent>,
+    },
+    SubscribeStatements {
+        sender: async_channel::Sender<StatementEvent>,
     },
     DisconnectAndBan {
         peer_id: PeerId,
@@ -1077,8 +1061,12 @@ struct BackgroundTask<TPlat: PlatformRef> {
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
 
-    /// Event about to be sent on the senders of [`BackgroundTask::event_senders`].
-    event_pending_send: Option<(ChainId, Event)>,
+    /// Events about to be sent on the senders of [`BackgroundTask::event_senders`].
+    ///
+    /// Network events are only pulled when this queue is empty, keeping it small. A queue is
+    /// nonetheless necessary, as processing a [`ToBackgroundChain::DisconnectAndBan`] message can
+    /// generate an event while another event is already waiting to be dispatched.
+    events_pending_send: VecDeque<(ChainId, Event)>,
 
     /// Bitswap event about to be sent on the senders of [`BackgroundTask::bitswap_event_senders`].
     bitswap_event_pending_send: Option<BitswapEvent>,
@@ -1121,6 +1109,24 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// this list. Once [`BackgroundTask::bitswap_event_senders`] is ready, we properly initialize
     /// these senders.
     pending_new_bitswap_subscriptions: Vec<async_channel::Sender<BitswapEvent>>,
+
+    /// Statement event about to be sent on the senders of
+    /// [`BackgroundTask::statement_event_senders`].
+    statement_event_pending_send: Option<(ChainId, StatementEvent)>,
+
+    /// Sending statement events through the public API.
+    ///
+    /// Contains either senders, or a `Future` that is currently sending an event and will yield
+    /// the senders back once it is finished.
+    statement_event_senders: either::Either<
+        Vec<(ChainId, async_channel::Sender<StatementEvent>)>,
+        Pin<Box<dyn Future<Output = Vec<(ChainId, async_channel::Sender<StatementEvent>)>> + Send>>,
+    >,
+
+    /// Whenever [`NetworkServiceChain::subscribe_statements`] is called, the new sender is added to
+    /// this list. Once [`BackgroundTask::statement_event_senders`] is ready, we properly initialize
+    /// these senders.
+    pending_new_statement_subscriptions: Vec<(ChainId, async_channel::Sender<StatementEvent>)>,
 
     main_messages_rx: Pin<Box<async_channel::Receiver<ToBackground<TPlat>>>>,
 
@@ -1217,6 +1223,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             },
             EventSendersReady,
             BitswapEventSendersReady,
+            StatementEventSendersReady,
             StartDiscovery(ChainId),
         }
 
@@ -1245,10 +1252,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
             };
             let service_event = async {
-                if let Some(event) = (task.event_pending_send.is_none()
+                if let Some(event) = (task.events_pending_send.is_empty()
                     && task.bitswap_event_pending_send.is_none()
+                    && task.statement_event_pending_send.is_none()
                     && task.pending_new_subscriptions.is_empty()
-                    && task.pending_new_bitswap_subscriptions.is_empty())
+                    && task.pending_new_bitswap_subscriptions.is_empty()
+                    && task.pending_new_statement_subscriptions.is_empty())
                 .then(|| task.network.next_event())
                 .flatten()
                 {
@@ -1391,7 +1400,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let event_senders = event_sending_future.await;
                     task.event_senders = either::Left(event_senders);
                     WakeUpReason::EventSendersReady
-                } else if task.event_pending_send.is_some()
+                } else if !task.events_pending_send.is_empty()
                     || !task.pending_new_subscriptions.is_empty()
                 {
                     WakeUpReason::EventSendersReady
@@ -1413,6 +1422,21 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     future::pending().await
                 }
             };
+            let finished_sending_statement_event = async {
+                if let either::Right(statement_event_sending_future) =
+                    &mut task.statement_event_senders
+                {
+                    let statement_event_senders = statement_event_sending_future.await;
+                    task.statement_event_senders = either::Left(statement_event_senders);
+                    WakeUpReason::StatementEventSendersReady
+                } else if task.statement_event_pending_send.is_some()
+                    || !task.pending_new_statement_subscriptions.is_empty()
+                {
+                    WakeUpReason::StatementEventSendersReady
+                } else {
+                    future::pending().await
+                }
+            };
             let start_discovery = async {
                 let Some(mut next_discovery) = task.chains_by_next_discovery.first_entry() else {
                     future::pending().await
@@ -1429,6 +1453,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 .or(next_recent_connection_restore)
                 .or(finished_sending_event)
                 .or(finished_sending_bitswap_event)
+                .or(finished_sending_statement_event)
                 .or(start_discovery)
                 .await
         };
@@ -1490,7 +1515,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 };
 
                 if let Some((event_to_dispatch_chain_id, event_to_dispatch)) =
-                    task.event_pending_send.take()
+                    task.events_pending_send.pop_front()
                 {
                     let mut event_senders = mem::take(event_senders);
                     task.event_senders = either::Right(Box::pin(async move {
@@ -1571,6 +1596,36 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     bitswap_event_senders.append(&mut task.pending_new_bitswap_subscriptions);
                 }
             }
+            WakeUpReason::StatementEventSendersReady => {
+                // We made sure that the senders were ready before generating an event.
+                let either::Left(statement_event_senders) = &mut task.statement_event_senders
+                else {
+                    unreachable!()
+                };
+
+                if let Some((event_to_dispatch_chain_id, event_to_dispatch)) =
+                    task.statement_event_pending_send.take()
+                {
+                    let mut statement_event_senders = mem::take(statement_event_senders);
+                    task.statement_event_senders = either::Right(Box::pin(async move {
+                        // Elements in `statement_event_senders` are removed one by one and
+                        // inserted back if the channel is still open.
+                        for index in (0..statement_event_senders.len()).rev() {
+                            let (event_sender_chain_id, event_sender) =
+                                statement_event_senders.swap_remove(index);
+                            if event_sender_chain_id == event_to_dispatch_chain_id {
+                                if event_sender.send(event_to_dispatch.clone()).await.is_err() {
+                                    continue;
+                                }
+                            }
+                            statement_event_senders.push((event_sender_chain_id, event_sender));
+                        }
+                        statement_event_senders
+                    }));
+                } else if !task.pending_new_statement_subscriptions.is_empty() {
+                    statement_event_senders.append(&mut task.pending_new_statement_subscriptions);
+                }
+            }
             WakeUpReason::MessageFromConnection {
                 connection_id,
                 message,
@@ -1631,6 +1686,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 ToBackgroundChain::SubscribeBitswap { sender },
             ) => {
                 task.pending_new_bitswap_subscriptions.push(sender);
+            }
+            WakeUpReason::MessageForChain(
+                chain_id,
+                ToBackgroundChain::SubscribeStatements { sender },
+            ) => {
+                task.pending_new_statement_subscriptions
+                    .push((chain_id, sender));
             }
             WakeUpReason::MessageForChain(
                 chain_id,
@@ -1701,8 +1763,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         peers.remove(&peer_id);
                     }
 
-                    debug_assert!(task.event_pending_send.is_none());
-                    task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
+                    // Unlike the network-event handlers below, this message handler can run
+                    // while another event is already queued, hence the push to a queue.
+                    task.events_pending_send
+                        .push_back((chain_id, Event::Disconnected { peer_id }));
                 }
             }
             WakeUpReason::MessageForChain(
@@ -2505,9 +2569,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send =
-                    Some((chain_id, Event::BlockAnnounce { peer_id, announce }));
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send
+                    .push_back((chain_id, Event::BlockAnnounce { peer_id, announce }));
             }
             WakeUpReason::NetworkEvent(service::Event::GossipConnected {
                 peer_id,
@@ -2541,8 +2605,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 task.chains_ever_gossip_connected.insert(chain_id);
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send = Some((
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send.push_back((
                     chain_id,
                     Event::Connected {
                         peer_id,
@@ -2658,8 +2722,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peers.remove(&peer_id);
                 }
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send
+                    .push_back((chain_id, Event::Disconnected { peer_id }));
             }
             WakeUpReason::NetworkEvent(service::Event::BitswapConnected { peer_id }) => {
                 task.bitswap_connected_peers = task.bitswap_connected_peers.saturating_add(1);
@@ -3209,8 +3274,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .unwrap()
                     .finalized_block_height = Some(state.commit_finalized_height);
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send = Some((
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send.push_back((
                     chain_id,
                     Event::GrandpaNeighborPacket {
                         peer_id,
@@ -3233,24 +3298,24 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     target_block_hash = HashDisplay(message.decode().target_hash),
                 );
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send =
-                    Some((chain_id, Event::GrandpaCommitMessage { peer_id, message }));
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send
+                    .push_back((chain_id, Event::GrandpaCommitMessage { peer_id, message }));
             }
             WakeUpReason::NetworkEvent(service::Event::StatementsNotification {
                 chain_id,
                 peer_id,
                 statements,
             }) => {
-                debug_assert!(task.event_pending_send.is_none());
+                debug_assert!(task.statement_event_pending_send.is_none());
 
                 if statements.is_empty() {
                     continue;
                 }
 
-                task.event_pending_send = Some((
+                task.statement_event_pending_send = Some((
                     chain_id,
-                    Event::StatementsNotification {
+                    StatementEvent::StatementsNotification {
                         peer_id,
                         statements,
                     },

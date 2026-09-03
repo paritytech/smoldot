@@ -107,7 +107,7 @@ mod util;
 pub mod network_service;
 pub mod platform;
 
-pub use json_rpc_service::HandleRpcError;
+pub use json_rpc_service::{HandleRpcError, StatementProtocolConfig};
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
@@ -145,7 +145,7 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     pub json_rpc: AddChainConfigJsonRpc,
 
     /// If `Some`, enables the statement store networking protocol.
-    pub statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+    pub statement_protocol_config: Option<StatementProtocolConfig>,
 }
 
 /// See [`AddChainConfig::json_rpc`].
@@ -677,10 +677,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
         let statement_protocol_config = config.statement_protocol_config;
 
-        let max_seen_statements = statement_protocol_config
-            .as_ref()
-            .map(|c| c.max_seen_statements());
-
         // Start the services of the chain to add, or grab the services if they already exist.
         let (services, log_name) = match chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
@@ -729,7 +725,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_spec.fork_id().map(|f| f.to_owned()),
                         config,
                         network_identify_agent_version,
-                        statement_protocol_config.clone(),
+                        statement_protocol_config.is_some(),
                     )
                 };
 
@@ -945,7 +941,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 system_version: self.platform.client_version().into_owned(),
                 genesis_block_hash,
                 statement_protocol_config,
-                max_seen_statements,
             });
 
             Some(frontend)
@@ -1134,7 +1129,7 @@ fn start_services<TPlat: platform::PlatformRef>(
     fork_id: Option<String>,
     config: StartServicesChainTy<'_, TPlat>,
     network_identify_agent_version: String,
-    statement_protocol_config: Option<network_service::StatementProtocolConfig>,
+    enable_statement_protocol: bool,
 ) -> ChainServices<TPlat> {
     let network_service = network_service.get_or_insert_with(|| {
         network_service::NetworkService::new(network_service::Config {
@@ -1178,7 +1173,7 @@ fn start_services<TPlat: platform::PlatformRef>(
         },
         fork_id,
         block_number_bytes,
-        statement_protocol_config,
+        enable_statement_protocol,
     });
 
     let (sync_service, runtime_service) = match config {

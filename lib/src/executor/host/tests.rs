@@ -19,6 +19,7 @@
 
 use super::{Config, HeapPages, HostVm, HostVmPrototype, StorageProofSizeBehavior, vm::ExecHint};
 
+mod elliptic_curves;
 mod hash_algorithms;
 mod initialization;
 mod run;
