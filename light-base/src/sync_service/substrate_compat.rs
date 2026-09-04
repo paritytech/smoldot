@@ -119,6 +119,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         mode: ModeState::Deciding,
         bootstrap_complete: false,
         deciding_packets_seen: 0,
+        last_warp_progress: 0,
         mode_decision_deadline: future::Either::Left(Box::pin(
             platform.sleep(MODE_DECISION_TIMEOUT),
         ))
@@ -886,11 +887,12 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             task.mode = ModeState::AwaitingWarp {
                                 target_finalized: finalized_block_height,
                             };
+                            // Baseline for the stall check at the next deadline firing.
+                            task.last_warp_progress = warp_sync_progress(
+                                task.sync.as_ref().unwrap_or_else(|| unreachable!()),
+                            );
                             // Keep the deadline armed as a warp-stall fallback.
-                            task.mode_decision_deadline = future::Either::Left(Box::pin(
-                                task.platform.sleep(MODE_DECISION_TIMEOUT),
-                            ))
-                            .fuse();
+                            arm_mode_decision_deadline(&mut task);
                             // Allow warp completion to rebuild all_forks.
                             task.sync
                                 .as_mut()
@@ -1545,39 +1547,36 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     commit_all_forks_only(&mut task);
                 }
                 ModeState::AwaitingWarp { .. } => {
-                    // TODO: warp never reaching `is_finished=true` keeps subscribe_all queued.
-                    // https://github.com/paritytech/smoldot/pull/3268#discussion_r3319656011
-                    if warp_sync_can_proceed(task.sync.as_ref().unwrap_or_else(|| unreachable!())) {
-                        task.mode_decision_deadline = future::Either::Left(Box::pin(
-                            task.platform.sleep(MODE_DECISION_TIMEOUT),
-                        ))
-                        .fuse();
+                    let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
+                    let progress = warp_sync_progress(sync);
+                    // A pending completion counts as progress: committing here would
+                    // discard it via `commit_all_forks_only`.
+                    let advanced =
+                        progress > task.last_warp_progress || sync.has_pending_warp_completion();
+                    task.last_warp_progress = progress;
+
+                    if advanced {
+                        arm_mode_decision_deadline(&mut task);
                         log!(
                             &task.platform,
                             Debug,
                             &task.log_target,
                             "mode-decision; awaiting-warp deadline re-armed",
+                            warp_finalized = progress,
                         );
                     } else {
-                        // Warp starved: drop back to Deciding so a future warp-eligible peer
-                        // can re-trigger CommitWarpAhead instead of locking in AllForksOnly.
-                        // Re-suppress: no mode chosen yet, no subscribers drained.
-                        task.sync
-                            .as_mut()
-                            .unwrap_or_else(|| unreachable!())
-                            .set_warp_completion_suppressed(true);
-                        task.mode = ModeState::Deciding;
-                        task.deciding_packets_seen = 0;
-                        task.mode_decision_deadline = future::Either::Left(Box::pin(
-                            task.platform.sleep(MODE_DECISION_TIMEOUT),
-                        ))
-                        .fuse();
+                        // Warp stalled for a full window: commit so queued `SubscribeAll`
+                        // requests receive a response (the checkpoint header). Warp stays
+                        // unsuppressed; a later completion still resets subscriptions at
+                        // the warped head.
                         log!(
                             &task.platform,
                             Debug,
                             &task.log_target,
-                            "mode-decision; warp starved, back to Deciding",
+                            "mode-decision; committed=AllForksOnly (warp stalled)",
+                            warp_finalized = progress,
                         );
+                        commit_all_forks_only(&mut task);
                     }
                 }
                 ModeState::Ready => {
@@ -1633,6 +1632,11 @@ struct Task<TPlat: PlatformRef> {
 
     /// Below-gap packets observed while [`ModeState::Deciding`]; gates AllForksOnly commit.
     deciding_packets_seen: usize,
+
+    /// Warp's verified finalized height at `AwaitingWarp` entry or the previous deadline
+    /// firing; an unchanged reading across a `MODE_DECISION_TIMEOUT` window commits
+    /// AllForksOnly.
+    last_warp_progress: u64,
 
     /// Replaced with `pending` on mode commit so it never fires again.
     mode_decision_deadline:
@@ -1799,6 +1803,30 @@ fn warp_sync_can_proceed(
                     | all::DesiredRequest::RuntimeCallMerkleProof { .. }
             )
         }),
+    }
+}
+
+/// (Re-)arms the mode-decision deadline with a fresh `MODE_DECISION_TIMEOUT` window.
+fn arm_mode_decision_deadline<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
+    task.mode_decision_deadline =
+        future::Either::Left(Box::pin(task.platform.sleep(MODE_DECISION_TIMEOUT))).fuse();
+}
+
+/// Warp sync's verified finalized height; an unchanged reading across a deadline window
+/// means warp is alive but not progressing.
+fn warp_sync_progress(
+    sync: &all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>,
+) -> u64 {
+    match sync.status() {
+        all::Status::WarpSyncFragments {
+            finalized_block_number,
+            ..
+        }
+        | all::Status::WarpSyncChainInformation {
+            finalized_block_number,
+            ..
+        } => finalized_block_number,
+        all::Status::Sync => sync.finalized_block_number(),
     }
 }
 
@@ -1989,6 +2017,20 @@ mod tests {
         let _ = add_peer(&mut sync, 100);
         let _ = sync.abort_in_flight_warp_requests();
         assert!(warp_sync_can_proceed(&sync));
+    }
+
+    // Advancing the height requires crypto-correct fragments (see module TODO).
+    #[test]
+    fn warp_progress_reports_warp_verified_finalized() {
+        let mut sync = fresh_sync();
+        assert!(matches!(
+            sync.status(),
+            Status::WarpSyncFragments { .. } | Status::WarpSyncChainInformation { .. }
+        ));
+        assert_eq!(warp_sync_progress(&sync), 0);
+        let src = add_peer(&mut sync, 100);
+        dispatch_warp(&mut sync, src);
+        assert_eq!(warp_sync_progress(&sync), 0);
     }
 
     #[test]
