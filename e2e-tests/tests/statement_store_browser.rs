@@ -76,8 +76,7 @@ async fn browser_ping_pong() -> Result<(), anyhow::Error> {
     let relay_spec_str = relay_spec_path.to_str().unwrap().to_string();
     let para_spec_str = para_spec_path.to_str().unwrap().to_string();
 
-    // NOTE: temporarily disable tests exec within browser.
-    for (leg, host) in [Host::Node /* Host::Browser */].into_iter().enumerate() {
+    for (leg, host) in [Host::Node, Host::Browser].into_iter().enumerate() {
         // Statements *and topics* needs to be re-created for each host
         // otherwise they persist in the collators' store: a reused topic_b
         // would push the previous host's stmt_B during the initial sync, and

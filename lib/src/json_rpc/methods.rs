@@ -1116,8 +1116,9 @@ pub enum SystemPeerRole {
 ///   submission should. Only the presence of a proof is checked, so a badly-signed statement is
 ///   answered `new` and left for its peers to reject.
 /// - `internalError` — reports a failing database, which a client without one cannot have.
-/// - `known`, `knownExpired` — reserved for a source that may not resubmit, and an RPC submission
-///   always may, so no store would change the answer.
+/// - `known`, `knownExpired` — a full node answers these when its store already holds the
+///   statement, or held it until it expired. A light client keeps no store to find it in, so a
+///   resubmission is broadcast again and answered `new`.
 ///
 /// A failure leaving no outcome to report — a payload that doesn't decode, or a statement that
 /// reached no peer — is answered with a JSON-RPC error carrying polkadot-sdk's statement-store

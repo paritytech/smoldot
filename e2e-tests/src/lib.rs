@@ -24,9 +24,9 @@ pub mod snapshot;
 pub mod statement;
 
 pub use network::{
-    elastic_scaling_genesis_overrides, listener_args, prepare_runtime_spec, prepare_runtime_specs,
-    run_chainhead_v1_follow, run_smoke, spawn_scenario, spawned_chain_spec_paths, FollowChain,
-    LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC,
+    elastic_scaling_genesis_overrides, prepare_runtime_spec, prepare_runtime_specs,
+    run_chainhead_v1_follow, run_smoke, spawn_scenario, spawned_chain_spec_paths, webrtc_args,
+    FollowChain, LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC,
     ELASTIC_MAX_VALIDATORS_PER_CORE, ELASTIC_SCALING_CORES, ELASTIC_VALIDATOR_COUNT,
     FINALIZED_METRIC, PARA_ID,
 };
@@ -66,16 +66,7 @@ pub async fn run_shared_test(
     // Both runners are launched via `run_js_test`.
     let script = match host {
         Host::Node => "hosts/node/run.js",
-        // NOTE: temporarily disable test execution within the browser.
-        // The reason is a blocking fix needed upstream.
-        // Waiting until it is fixed.
-        // When re-enabling, also uncomment the browser-only
-        // `zombienet-smoldot-0014-webrtc_double_open`,
-        // `zombienet-smoldot-0015-webrtc_send_after_close` and
-        // `zombienet-smoldot-0016-webrtc_open_after_pc_close` entries in
-        // `.github/workflows/zombienet.yml`.
-        // Host::Browser => "hosts/browser/run.js",
-        _ => return Ok(()),
+        Host::Browser => "hosts/browser/run.js",
     };
     run_js_test(script, &env).await
 }
