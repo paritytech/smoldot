@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["methods","parse","payment_info","service"]};

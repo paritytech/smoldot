@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["VALIDATION_FUNCTION_NAME"],"enum":["InvalidTransaction","TransactionSource","TransactionValidityError","UnknownTransaction"],"fn":["decode_validate_transaction_return_value","validate_transaction_runtime_parameters_v2","validate_transaction_runtime_parameters_v3"],"struct":["DecodeError","ValidTransaction"]};

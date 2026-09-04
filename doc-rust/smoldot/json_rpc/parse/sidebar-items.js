@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ErrorResponse","Response"],"fn":["build_error_response","build_parse_error_response","build_request","build_success_response","parse_request","parse_response"],"struct":["ParseError","Request"]};
