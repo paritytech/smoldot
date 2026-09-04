@@ -20,6 +20,12 @@
 import { Client, ClientOptionsWithBytecode } from './public-types.js'
 import { start as innerStart, Connection, ConnectionConfig } from './internals/client.js'
 
+// How long a newly-created `RTCDataChannel` is given to reach the `open` state before the
+// connection it belongs to is considered dead. Opening a channel on a healthy connection is a
+// local SCTP operation and completes immediately, so this only ever fires on a connection whose
+// remote has gone away without the browser noticing.
+const DATA_CHANNEL_OPEN_TIMEOUT_MS = 20000;
+
 export {
     AddChainError,
     AddChainOptions,
@@ -279,6 +285,25 @@ function connect(config: ConnectionConfig): Connection {
 
             let isOpen = { value: false };
 
+            // A channel opened on a dead connection can stay silent forever: none of `onopen`,
+            // `onerror` or `onclose` fires. That happens when the remote goes away without
+            // closing anything, as when a node is killed and restarted: its old data channels
+            // close, but the `RTCPeerConnection` stays in the `connected` state, so no
+            // `connectionstatechange` reports the death and every later channel is created on an
+            // SCTP association that no longer has a peer. Nothing above this layer bounds the
+            // wait either, since the platform API cannot report a substream-open failure and
+            // `network_service/tasks.rs` just counts pending opens. Time it out here and reuse
+            // the failure path below, which tears the connection down so smoldot re-dials.
+            const openTimeout = setTimeout(() => {
+                // `killAllJs` empties `dataChannels`, so a channel that is no longer in there
+                // belongs to a connection something else has already torn down. Resetting it a
+                // second time would report the same death twice.
+                if (isOpen.value || !state.dataChannels.has(streamId))
+                    return;
+                killAllJs();
+                config.onConnectionReset("data channel failed to open: timeout");
+            }, DATA_CHANNEL_OPEN_TIMEOUT_MS);
+
             dataChannel.onopen = () => {
                 // Guard against the `open` event firing more than once for the same channel.
                 // Reporting the same stream id twice would make smoldot panic (observed in
@@ -288,6 +313,7 @@ function connect(config: ConnectionConfig): Connection {
                 if (isOpen.value)
                     return;
                 isOpen.value = true;
+                clearTimeout(openTimeout);
                 config.onStreamOpened(streamId, direction);
                 config.onWritableBytes(65536, streamId);
             };
@@ -295,6 +321,8 @@ function connect(config: ConnectionConfig): Connection {
             dataChannel.onerror = dataChannel.onclose = (event) => {
                 // Note that Firefox doesn't support <https://developer.mozilla.org/en-US/docs/Web/API/RTCErrorEvent>.
                 const message = (event instanceof RTCErrorEvent) ? event.error.toString() : "RTCDataChannel closed";
+
+                clearTimeout(openTimeout);
 
                 if (!isOpen.value) {
                     // Substream wasn't opened yet and thus has failed to open. The API has no

@@ -63,15 +63,16 @@ async fn reserved_peer_discovery() -> Result<(), anyhow::Error> {
             r.with_chain("westend-local")
                 .with_default_command("polkadot")
                 .with_default_image(images.polkadot.as_str())
+                // The WebRTC listener is per node: one UDP port each.
                 .with_validator(|n| {
-                    let mut args = vec![("--in-peers-light", "0").into()];
-                    args.extend(listener_args("alice"));
-                    n.with_name("validator-a").bootnode(true).with_args(args)
+                    n.with_name("validator-a")
+                        .bootnode(true)
+                        .with_args([vec![("--in-peers-light", "0").into()], webrtc_args()].concat())
                 })
                 .with_validator(|n| {
                     n.with_name("validator-b")
                         .bootnode(false)
-                        .with_args(listener_args("bob"))
+                        .with_args(webrtc_args())
                 })
         })
         .with_global_settings(|g| g.with_base_dir(base_dir_str.as_str()))

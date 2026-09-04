@@ -24,9 +24,9 @@ pub mod snapshot;
 pub mod statement;
 
 pub use network::{
-    elastic_scaling_genesis_overrides, listener_args, prepare_runtime_spec, prepare_runtime_specs,
-    run_chainhead_v1_follow, run_smoke, spawn_scenario, spawned_chain_spec_paths, FollowChain,
-    LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC,
+    elastic_scaling_genesis_overrides, prepare_runtime_spec, prepare_runtime_specs,
+    run_chainhead_v1_follow, run_smoke, spawn_scenario, spawned_chain_spec_paths, webrtc_args,
+    FollowChain, LiveNetwork, Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC,
     ELASTIC_MAX_VALIDATORS_PER_CORE, ELASTIC_SCALING_CORES, ELASTIC_VALIDATOR_COUNT,
     FINALIZED_METRIC, PARA_ID,
 };
@@ -66,16 +66,7 @@ pub async fn run_shared_test(
     // Both runners are launched via `run_js_test`.
     let script = match host {
         Host::Node => "hosts/node/run.js",
-        // NOTE: temporarily disable test execution within the browser.
-        // The reason is a blocking fix needed upstream.
-        // Waiting until it is fixed.
-        // When re-enabling, also uncomment the browser-only
-        // `zombienet-smoldot-0014-webrtc_double_open`,
-        // `zombienet-smoldot-0015-webrtc_send_after_close` and
-        // `zombienet-smoldot-0016-webrtc_open_after_pc_close` entries in
-        // `.github/workflows/zombienet.yml`.
-        // Host::Browser => "hosts/browser/run.js",
-        _ => return Ok(()),
+        Host::Browser => "hosts/browser/run.js",
     };
     run_js_test(script, &env).await
 }
@@ -198,20 +189,38 @@ pub async fn run_js_test(script: &str, env_vars: &[(&str, &str)]) -> Result<(), 
         cmd.env(key, val);
     }
 
-    let output = cmd.output().await.expect("failed to run node");
+    // Both streams are piped and forwarded as the lines arrive, rather than collected with
+    // `output()`, so that a JS process which hangs and gets dropped before it exits still leaves
+    // its output in the log. Inheriting our stdout/stderr instead would hang the CI step: an
+    // orphaned descendant (Chromium, via Playwright) keeps the job's log pipe open forever.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    async fn forward(stream: impl tokio::io::AsyncRead + Unpin, tag: &str) {
+        use tokio::io::AsyncBufReadExt as _;
 
-    eprintln!("--- JS stderr ---\n{stderr}");
-    eprintln!("--- JS stdout ---\n{stdout}");
+        let mut lines = tokio::io::BufReader::new(stream).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            eprintln!("[{tag}] {line}");
+        }
+    }
 
-    if output.status.success() {
+    let mut child = cmd.spawn().expect("failed to run node");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+
+    // Waiting only after the pipes close would hang on a child that leaves a descendant holding
+    // them; draining them only after the exit would deadlock on a full pipe. So: all three.
+    let (status, _, _) = tokio::join!(
+        child.wait(),
+        forward(stdout, "js:out"),
+        forward(stderr, "js:err"),
+    );
+
+    let status = status.expect("failed to wait for node");
+    if status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "JS test exited with {}\nstdout:\n{}\nstderr:\n{}",
-            output.status, stdout, stderr
-        ))
+        Err(format!("JS test exited with {status}"))
     }
 }

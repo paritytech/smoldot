@@ -35,41 +35,27 @@ use zombienet_sdk::{Arg, LocalFileSystem, Network, NetworkConfig, NetworkConfigB
 pub const PARA_ID: u32 = 1004;
 pub const PARA_CHAIN: &str = "people-westend-local";
 
-/// UDP port for `name`'s WebRTC listener. `validator-{i}` gets `33000 + i`
-/// (any index below ELASTIC_VALIDATOR_COUNT), the fixed names live above that range.
-fn webrtc_udp_port(name: &str) -> u16 {
-    let mut base_port = 33000;
-    if let Some(i) = name
-        .strip_prefix("validator-")
-        .and_then(|s| s.parse::<u16>().ok())
-    {
-        if u32::from(i) >= ELASTIC_VALIDATOR_COUNT {
-            unreachable!("validator name: {name}, not associated to any udp port")
-        }
-        return base_port + i;
-    }
-    base_port += ELASTIC_VALIDATOR_COUNT as u16;
-    match name {
-        "alice" => base_port,
-        "bob" => base_port + 1,
-        // Bulletin network collators (src/harness.rs).
-        "collator-1" => base_port + 2,
-        "collator-2" => base_port + 3,
-        _ => unreachable!("name: {name}, not associated to any udp port"),
-    }
-}
+/// First UDP port handed out to a `webrtc-direct` listener.
+const WEBRTC_BASE_UDP_PORT: u16 = 30333;
 
-/// Looks up the fixed WebRTC UDP port assigned to `name` and returns the CLI
-/// args that make a substrate node listen for WebRTC on it.
-pub fn listener_args(name: &str) -> Vec<Arg> {
-    let udp_port = webrtc_udp_port(name);
+/// Hands out `WEBRTC_BASE_UDP_PORT`s, one per [`webrtc_args`] call.
+static WEBRTC_PORT_COUNTER: std::sync::atomic::AtomicU16 =
+    std::sync::atomic::AtomicU16::new(WEBRTC_BASE_UDP_PORT);
+
+/// CLI args that make a node listen for WebRTC on a fixed UDP port.
+///
+/// An explicit `webrtc-direct` listen address is honored regardless of role or flag.
+///
+/// Call once per node: every call returns a distinct port because all nodes share
+/// loopback under the native provider, and two of them asking for the same port means the
+/// second fails to bind.
+pub fn webrtc_args() -> Vec<Arg> {
+    let port = WEBRTC_PORT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // The `=` form is deliberate: zombienet's port-rewrite scan only matches
+    // `Arg::Option` pairs, so the pair form would steal the node's TCP slot.
     vec![
-        ("--listen-addr", "/ip4/0.0.0.0/tcp/0/ws").into(),
-        "--experimental-webrtc".into(),
-        (
-            "--listen-addr",
-            format!("/ip4/127.0.0.1/udp/{udp_port}/webrtc-direct").as_str(),
-        )
+        format!("--listen-addr=/ip4/127.0.0.1/udp/{port}/webrtc-direct")
+            .as_str()
             .into(),
     ]
 }
@@ -265,10 +251,11 @@ fn build_network_config(
             }
             // Per-node DB, element i onto validator-i; empty on Fresh.
             // validator-0 outside the fold sets the typestate.
+            // The WebRTC listener is per node: one UDP port each.
             .with_validator(|n| {
                 n.with_name("validator-0")
                     .bootnode(true)
-                    .with_args(listener_args("validator-0"))
+                    .with_args(webrtc_args())
                     .with_optional_db_snapshot(relay_dbs.first().cloned())
             });
             (1..ELASTIC_VALIDATOR_COUNT).fold(r, |acc, i| {
@@ -276,7 +263,7 @@ fn build_network_config(
                 acc.with_validator(|n| {
                     n.with_name(&format!("validator-{i}"))
                         .bootnode(true)
-                        .with_args(listener_args(&format!("validator-{i}")))
+                        .with_args(webrtc_args())
                         .with_optional_db_snapshot(db)
                 })
             })
@@ -296,18 +283,21 @@ fn build_network_config(
                 None => p,
                 Some(path) => p.with_chain_spec_path(path),
             };
+            // Node-level `with_args` replaces the parachain `default_args`, so the two
+            // default flags are repeated alongside each collator's own WebRTC port.
+            let collator_args = || {
+                [
+                    vec!["--force-authoring".into(), "--authoring=slot-based".into()],
+                    webrtc_args(),
+                ]
+                .concat()
+            };
             p.with_collator(|n| {
-                // Node-level `with_args` replaces the parachain `default_args`,
-                // so the two default flags must be repeated here.
-                let mut args = vec!["--force-authoring".into(), "--authoring=slot-based".into()];
-                args.extend(listener_args("alice"));
-                n.with_name("alice").bootnode(true).with_args(args)
+                n.with_name("alice")
+                    .bootnode(true)
+                    .with_args(collator_args())
             })
-            .with_collator(|n| {
-                let mut args = vec!["--force-authoring".into(), "--authoring=slot-based".into()];
-                args.extend(listener_args("bob"));
-                n.with_name("bob").bootnode(true).with_args(args)
-            })
+            .with_collator(|n| n.with_name("bob").bootnode(true).with_args(collator_args()))
         })
         .with_global_settings(|g| {
             g.with_base_dir(base_dir_str).with_spawn_concurrency(1) // https://github.com/paritytech/smoldot/pull/3249#issuecomment-4438807458
@@ -432,44 +422,70 @@ pub async fn prepare_runtime_spec(
     Ok(out)
 }
 
+/// Drops every `/p2p/<peer_id>` component past the first.
+///
+/// The litep2p backend already appends the local peer id to each listen address,
+/// and `system_localListenAddresses` appends another one unconditionally, so the
+/// RPC hands back `…/p2p/<id>/p2p/<id>`. smoldot's bootnode parser pops exactly
+/// one trailing `/p2p/` and rejects whatever is left over.
+fn normalize_p2p_suffix(addr: &str) -> String {
+    match addr.match_indices("/p2p/").nth(1) {
+        Some((idx, _)) => addr[..idx].to_string(),
+        None => addr.to_string(),
+    }
+}
+
 /// For each named node, returns its dialable multiaddrs to seed `bootNodes`.
+///
+/// Nodes listen on wildcard addresses, which litep2p expands into one advertised
+/// multiaddr per interface. Only the loopback ones are kept: the light clients run
+/// in the same network namespace, and the container/LAN addresses would just cost
+/// smoldot dial timeouts.
 async fn collect_bootnode_multiaddrs(
     network: &Network<LocalFileSystem>,
     names: &[&str],
 ) -> Result<Vec<String>, anyhow::Error> {
     let mut out: Vec<String> = Vec::new();
     for name in names {
-        let node = network.get_node(*name)?;
-        let rpc = node.rpc().await?;
-        let mut listen_addrs: Vec<String> = rpc
-            .request::<Vec<String>>("system_localListenAddresses", RpcParams::new())
-            .await
-            .map_err(|e| anyhow!("{name}: system_localListenAddresses failed: {e}"))?
-            .into_iter()
-            // Keep only loopback addresses.
+        let mut listen_addrs: Vec<String> = rpc_listen_addresses(network, name)
+            .await?
+            .iter()
             .filter(|addr| addr.contains("/ip4/127.0.0.1/"))
+            .map(|addr| normalize_p2p_suffix(addr))
             .collect();
-        // Sanitize multiaddrs: system_localListenAddresses currently appends an
-        // extra /p2p/<peer_id> even when one is already present.
-        for addr in listen_addrs.iter_mut() {
-            if addr.matches("/p2p/").count() == 2 {
-                if let Some(idx) = addr.rfind("/p2p/") {
-                    addr.truncate(idx);
-                }
-            }
-        }
+        // `system_localListenAddresses` is backed by a HashSet, so its order
+        // varies between calls; sort to keep the generated specs reproducible.
+        listen_addrs.sort();
+        listen_addrs.dedup();
 
         let has_tcp = listen_addrs.iter().any(|a| a.contains("/tcp/"));
-        let has_webrtc = listen_addrs.iter().any(|a| a.contains("/webrtc"));
+        // The certhash matters: smoldot rejects a `/webrtc-direct` multiaddr that
+        // lacks one, and an unparsable bootnode is dropped with a warning rather
+        // than an error — the browser host would then hang instead of failing.
+        let has_webrtc = listen_addrs
+            .iter()
+            .any(|a| a.contains("/webrtc-direct/") && a.contains("/certhash/"));
         if !has_tcp || !has_webrtc {
             return Err(anyhow!(
-                "{name}: missing TCP or WebRTC listen address (got {listen_addrs:?})"
+                "{name}: missing loopback TCP or WebRTC listen address (got {listen_addrs:?})"
             ));
         }
 
         out.extend(listen_addrs);
     }
     Ok(out)
+}
+
+/// Reads a node's advertised listen addresses over JSON-RPC.
+async fn rpc_listen_addresses(
+    network: &Network<LocalFileSystem>,
+    name: &str,
+) -> Result<Vec<String>, anyhow::Error> {
+    let node = network.get_node(name)?;
+    let rpc = node.rpc().await?;
+    rpc.request::<Vec<String>>("system_localListenAddresses", RpcParams::new())
+        .await
+        .map_err(|e| anyhow!("{name}: system_localListenAddresses failed: {e}"))
 }
 
 fn write_spec_with_bootnodes(
@@ -589,8 +605,7 @@ pub async fn run_chainhead_v1_follow(
         FollowChain::Para => "para",
     };
 
-    // NOTE: temporarily disable tests exec within browser.
-    for host in [crate::Host::Node /* crate::Host::Browser */] {
+    for host in [crate::Host::Node, crate::Host::Browser] {
         // Re-sample the live heights per host: the network keeps advancing
         // while the previous host runs, and the validator compares smoldot's
         // initial finalized against these values for the lag-regression check.

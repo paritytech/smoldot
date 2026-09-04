@@ -801,6 +801,9 @@ where
     /// determined by calling [`MultiStream::notification_substream_queued_bytes`]) is below a
     /// certain threshold. If above, the notification should be silently discarded.
     ///
+    /// If the substream has already been reset by the remote, the notification is silently
+    /// discarded.
+    ///
     /// # Panic
     ///
     /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
@@ -816,7 +819,11 @@ where
             _ => panic!(),
         };
 
-        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+        // The substream might have been reset by the remote, and thus removed from the state
+        // machine, while the `QueueNotification` message was in flight.
+        let Some(inner_substream_id) = self.out_in_substreams_map.get(&substream_id) else {
+            return;
+        };
 
         self.in_substreams
             .get_mut(inner_substream_id)
@@ -859,6 +866,8 @@ where
     /// This can be done even when in the negotiation phase, in other words before the remote has
     /// accepted/refused the substream.
     ///
+    /// If the substream has already been reset by the remote, this method has no effect.
+    ///
     /// # Panic
     ///
     /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
@@ -870,7 +879,11 @@ where
             _ => panic!(),
         };
 
-        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+        // The substream might have been reset by the remote, and thus removed from the state
+        // machine, while the `CloseOutNotifications` message was in flight.
+        let Some(inner_substream_id) = self.out_in_substreams_map.get(&substream_id) else {
+            return;
+        };
 
         self.in_substreams
             .get_mut(inner_substream_id)

@@ -69,8 +69,8 @@ const BAD_PROOF_COSTS_CPU: &str =
 ///   collator, which no chain spec can shrink, and it is another store-side rejection, so
 ///   `rejected_account_full` already covers what it would say about smoldot.
 /// - `InternalError` reports a database failure, which a submission cannot provoke.
-/// - `KnownExpired` would mean storing a statement and waiting for it to expire, and it shares
-///   the guard `known` already asserts.
+/// - `KnownExpired` would mean storing a statement and waiting for it to expire, and it is
+///   another answer read off the store's contents, which `known` already covers.
 #[tokio::test(flavor = "multi_thread")]
 async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
@@ -116,15 +116,21 @@ async fn submit_answers_match_full_node() -> Result<(), anyhow::Error> {
         },
         Case {
             name: "known",
-            // Resubmitting a statement the store already holds. `known` is never the answer: it is
-            // reserved for a source that may not resubmit, and an RPC submission always may.
+            // Resubmitting a statement the store already holds. Since polkadot-sdk#12774 the
+            // store answers `known` whatever the source: the duplicate check it runs under its
+            // write lock no longer asks whether the source may resubmit. A light client keeps no
+            // store to find the statement in, so it broadcasts again and answers `new`.
             hex: create_test_statement(&allowed_seed, &topic, b"parity-known"),
             prelude: vec![create_test_statement(
                 &allowed_seed,
                 &topic,
                 b"parity-known",
             )],
-            expected: Expected::Same(resolved(json!({"status": "new"}))),
+            expected: Expected::Divergent {
+                light_node: resolved(json!({"status": "new"})),
+                full_node: resolved(json!({"status": "known"})),
+                why: NO_STORE,
+            },
         },
         Case {
             name: "rejected_no_allowance",

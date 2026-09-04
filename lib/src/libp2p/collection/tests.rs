@@ -1078,3 +1078,241 @@ fn multi_stream_close_in_notifications_crossing_remote_reset() {
             .any(|(_, ev)| { matches!(ev, Event::StartShutdown { .. } | Event::Shutdown { .. }) })
     );
 }
+
+/// The same crossing as [`multi_stream_close_in_notifications_crossing_remote_reset`], but on the
+/// *outbound* side of a notifications substream: the API user requests the closing of a substream
+/// it opened (in production, a peer ban) while the remote resets the data channel that carries it.
+///
+/// The connection task's own `outbound_substreams_map` still holds the entry, because the
+/// `NotificationsOutReset` event that removes it has not been pulled out of the state machine yet.
+/// The `CloseOutNotifications` message therefore passes the task's guard and reaches a state
+/// machine that has already dropped the substream.
+#[test]
+fn multi_stream_close_out_notifications_crossing_remote_reset() {
+    let mut harness = MultiHarness::new();
+
+    // Complete the connection handshake on both sides.
+    let events = harness.pump(true, true);
+    assert!(
+        events
+            .iter()
+            .any(|(s, e)| *s == Side::Alice && matches!(e, Event::HandshakeFinished { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|(s, e)| *s == Side::Bob && matches!(e, Event::HandshakeFinished { .. }))
+    );
+    accept_ping_inbounds(&mut harness, &events);
+
+    // Bob opens an outbound notifications substream. The data channel that will carry it is the
+    // next one that the harness allocates.
+    let notif_channel = harness.next_channel_id;
+    let bob_sub = harness.bob.network.open_out_notifications(
+        harness.bob.conn_id,
+        "/test-notif/1.0.0".to_string(),
+        Duration::from_secs(10),
+        b"hello".to_vec(),
+        1024,
+    );
+
+    // Alice negotiates the inbound substream and must accept the protocol name.
+    let events = harness.pump(true, true);
+    assert_eq!(harness.next_channel_id, notif_channel + 1);
+    accept_ping_inbounds(&mut harness, &events);
+    let alice_inbound = events
+        .iter()
+        .find_map(|(side, ev)| match ev {
+            Event::InboundNegotiated {
+                substream_id,
+                protocol_name,
+                ..
+            } if *side == Side::Alice && protocol_name == "/test-notif/1.0.0" => {
+                Some(*substream_id)
+            }
+            _ => None,
+        })
+        .expect("Alice should report InboundNegotiated");
+    harness.alice.network.accept_inbound(
+        alice_inbound,
+        InboundTy::Notifications {
+            max_handshake_size: 1024,
+        },
+    );
+
+    // Alice reads Bob's handshake and reports the substream as open-in-wait.
+    let events = harness.pump(true, true);
+    accept_ping_inbounds(&mut harness, &events);
+    let alice_sub: SubstreamId = events
+        .iter()
+        .find_map(|(side, ev)| match ev {
+            Event::NotificationsInOpen { substream_id, .. } if *side == Side::Alice => {
+                Some(*substream_id)
+            }
+            _ => None,
+        })
+        .expect("Alice should report NotificationsInOpen");
+
+    // Alice accepts, which completes the opening of the substream on Bob's side.
+    harness
+        .alice
+        .network
+        .accept_in_notifications(alice_sub, b"hi".to_vec(), 1024);
+    let events = harness.pump(true, true);
+    accept_ping_inbounds(&mut harness, &events);
+    assert!(events.iter().any(|(side, ev)| *side == Side::Bob
+        && matches!(
+            ev,
+            Event::NotificationsOutResult { substream_id, result: Ok(_) }
+                if *substream_id == bob_sub
+        )));
+
+    // Bob requests the closing of the substream he opened. The message is now queued in Bob's
+    // coordinator but deliberately NOT delivered to Bob's connection task yet.
+    harness.bob.network.close_out_notifications(bob_sub);
+
+    // The data channel carrying the substream abruptly dies. Bob's state machine removes the
+    // substream from its maps and queues a `NotificationsOutReset` event that the task has not
+    // pulled yet, so the task's `outbound_substreams_map` still holds the entry.
+    harness.kill_channel(notif_channel);
+
+    // Deliver the held-back close. It passes the task's guard and reaches a state machine that no
+    // longer knows the substream. Without the fix, this panics in
+    // `MultiStream::close_out_notifications_substream` when unwrapping the map lookup.
+    let events_final = harness.pump(true, true);
+
+    // The stale close must be a silent no-op: the connection survives the crossing on both sides
+    // rather than being torn down.
+    assert!(
+        !events_final
+            .iter()
+            .any(|(_, ev)| { matches!(ev, Event::StartShutdown { .. } | Event::Shutdown { .. }) })
+    );
+
+    // Bob destroyed the substream himself when closing it, so the reset that crossed the close is
+    // swallowed by the coordinator instead of surfacing as an event.
+    assert!(!events_final.iter().any(|(side, ev)| *side == Side::Bob
+        && matches!(
+            ev,
+            Event::NotificationsOutReset { substream_id } if *substream_id == bob_sub
+        )));
+}
+
+/// The same crossing as [`multi_stream_close_out_notifications_crossing_remote_reset`], with a
+/// queued notification instead of a close: the API user queues a notification on a substream it
+/// opened while the remote resets the data channel that carries it.
+///
+/// Contrary to the close, the coordinator keeps the substream alive here, so the notification must
+/// be dropped and the reset must still be reported as a `NotificationsOutReset`.
+#[test]
+fn multi_stream_queue_notification_crossing_remote_reset() {
+    let mut harness = MultiHarness::new();
+
+    // Complete the connection handshake on both sides.
+    let events = harness.pump(true, true);
+    assert!(
+        events
+            .iter()
+            .any(|(s, e)| *s == Side::Alice && matches!(e, Event::HandshakeFinished { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|(s, e)| *s == Side::Bob && matches!(e, Event::HandshakeFinished { .. }))
+    );
+    accept_ping_inbounds(&mut harness, &events);
+
+    // Bob opens an outbound notifications substream. The data channel that will carry it is the
+    // next one that the harness allocates.
+    let notif_channel = harness.next_channel_id;
+    let bob_sub = harness.bob.network.open_out_notifications(
+        harness.bob.conn_id,
+        "/test-notif/1.0.0".to_string(),
+        Duration::from_secs(10),
+        b"hello".to_vec(),
+        1024,
+    );
+
+    // Alice negotiates the inbound substream and must accept the protocol name.
+    let events = harness.pump(true, true);
+    assert_eq!(harness.next_channel_id, notif_channel + 1);
+    accept_ping_inbounds(&mut harness, &events);
+    let alice_inbound = events
+        .iter()
+        .find_map(|(side, ev)| match ev {
+            Event::InboundNegotiated {
+                substream_id,
+                protocol_name,
+                ..
+            } if *side == Side::Alice && protocol_name == "/test-notif/1.0.0" => {
+                Some(*substream_id)
+            }
+            _ => None,
+        })
+        .expect("Alice should report InboundNegotiated");
+    harness.alice.network.accept_inbound(
+        alice_inbound,
+        InboundTy::Notifications {
+            max_handshake_size: 1024,
+        },
+    );
+
+    // Alice reads Bob's handshake and reports the substream as open-in-wait.
+    let events = harness.pump(true, true);
+    accept_ping_inbounds(&mut harness, &events);
+    let alice_sub: SubstreamId = events
+        .iter()
+        .find_map(|(side, ev)| match ev {
+            Event::NotificationsInOpen { substream_id, .. } if *side == Side::Alice => {
+                Some(*substream_id)
+            }
+            _ => None,
+        })
+        .expect("Alice should report NotificationsInOpen");
+
+    // Alice accepts, which completes the opening of the substream on Bob's side.
+    harness
+        .alice
+        .network
+        .accept_in_notifications(alice_sub, b"hi".to_vec(), 1024);
+    let events = harness.pump(true, true);
+    accept_ping_inbounds(&mut harness, &events);
+    assert!(events.iter().any(|(side, ev)| *side == Side::Bob
+        && matches!(
+            ev,
+            Event::NotificationsOutResult { substream_id, result: Ok(_) }
+                if *substream_id == bob_sub
+        )));
+
+    // Bob queues a notification on the substream he opened. The message is now queued in Bob's
+    // coordinator but deliberately NOT delivered to Bob's connection task yet.
+    harness
+        .bob
+        .network
+        .queue_notification(bob_sub, b"notif".to_vec())
+        .unwrap();
+
+    // The data channel carrying the substream abruptly dies. Bob's state machine removes the
+    // substream from its maps and queues a `NotificationsOutReset` event that the task has not
+    // pulled yet, so the task's `outbound_substreams_map` still holds the entry.
+    harness.kill_channel(notif_channel);
+
+    // Deliver the held-back notification. It passes the task's guard and reaches a state machine
+    // that no longer knows the substream. Without the fix, this panics in
+    // `MultiStream::write_notification_unbounded` when unwrapping the map lookup.
+    let events_final = harness.pump(true, true);
+
+    // The notification must be silently discarded rather than tear down the connection.
+    assert!(
+        !events_final
+            .iter()
+            .any(|(_, ev)| { matches!(ev, Event::StartShutdown { .. } | Event::Shutdown { .. }) })
+    );
+
+    // Bob never closed the substream himself, so the reset is still reported to him.
+    assert!(events_final.iter().any(|(side, ev)| *side == Side::Bob
+        && matches!(
+            ev,
+            Event::NotificationsOutReset { substream_id } if *substream_id == bob_sub
+        )));
+}
