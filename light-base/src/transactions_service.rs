@@ -102,6 +102,9 @@ pub struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
+    /// Metrics of the chain.
+    pub metrics: Arc<crate::metrics::ChainMetrics>,
+
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
 
@@ -145,6 +148,7 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         let background_task_config = BackgroundTaskConfig {
             log_target: log_target.clone(),
             platform: config.platform.clone(),
+            metrics: config.metrics,
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
             network_service: config.network_service,
@@ -320,11 +324,18 @@ pub enum TransactionStatus {
 }
 
 /// See [`TransactionStatus::Dropped`].
-#[derive(Debug, Clone)]
+// The generated `DropReasonKind` is the `reason` label of the
+// `transactionsDroppedTotal` metric; the strum derives are explained on
+// [`crate::metrics::MetricLabel`].
+#[derive(Debug, Clone, strum::EnumDiscriminants)]
+#[strum_discriminants(name(DropReasonKind))]
+#[strum_discriminants(derive(strum::EnumIter, strum::IntoStaticStr))]
+#[strum_discriminants(strum(serialize_all = "kebab-case"))]
 pub enum DropReason {
     /// Transaction has been included in a finalized block.
     ///
     /// This is a success path.
+    #[strum_discriminants(strum(disabled))]
     Finalized { block_hash: [u8; 32], index: u32 },
 
     /// Transaction has been dropped because there was a gap in the chain of blocks. It is
@@ -342,6 +353,9 @@ pub enum DropReason {
     ValidateError(ValidateTransactionError),
 
     /// Transaction service background task has crashed.
+    ///
+    /// Not counted in `transactionsDroppedTotal`: yielded outside the background task.
+    #[strum_discriminants(strum(disabled))]
     Crashed,
 }
 
@@ -403,6 +417,7 @@ enum ToBackground {
 struct BackgroundTaskConfig<TPlat: PlatformRef> {
     log_target: String,
     platform: TPlat,
+    metrics: Arc<crate::metrics::ChainMetrics>,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
@@ -422,6 +437,7 @@ async fn background_task<TPlat: PlatformRef>(
 
     let mut worker = Worker {
         platform: config.platform,
+        metrics: config.metrics,
         sync_service: config.sync_service,
         runtime_service: config.runtime_service,
         network_service: config.network_service,
@@ -462,6 +478,7 @@ async fn background_task<TPlat: PlatformRef>(
             // Because `runtime_service.subscribe_all()` might take a long time (potentially
             // forever), we need to process messages coming from the foreground in parallel.
             let from_foreground = &mut from_foreground;
+            let metrics = worker.metrics.clone();
             let messages_process = async move {
                 loop {
                     match from_foreground.next().await {
@@ -469,6 +486,7 @@ async fn background_task<TPlat: PlatformRef>(
                             updates_report: Some(updates_report),
                             ..
                         }) => {
+                            metrics.transactions_dropped.inc(&DropReason::GapInChain);
                             let _ = updates_report
                                 .0
                                 .send(TransactionStatus::Dropped(DropReason::GapInChain))
@@ -493,6 +511,10 @@ async fn background_task<TPlat: PlatformRef>(
         // Drop all pending transactions of the pool.
         for (_, pending) in worker.pending_transactions.transactions_iter_mut() {
             // TODO: only do this if transaction hasn't been validated yet
+            worker
+                .metrics
+                .transactions_dropped
+                .inc(&DropReason::GapInChain);
             pending.update_status(TransactionStatus::Dropped(DropReason::GapInChain));
         }
 
@@ -671,10 +693,12 @@ async fn background_task<TPlat: PlatformRef>(
                     ?error
                 );
 
-                transaction.update_status(TransactionStatus::Dropped(match error {
+                let reason = match error {
                     InvalidOrError::Invalid(err) => DropReason::Invalid(err),
                     InvalidOrError::ValidateError(err) => DropReason::ValidateError(err),
-                }));
+                };
+                worker.metrics.transactions_dropped.inc(&reason);
+                transaction.update_status(TransactionStatus::Dropped(reason));
             }
 
             // Start block bodies downloads that need to be started.
@@ -1225,6 +1249,10 @@ async fn background_task<TPlat: PlatformRef>(
                     if worker.pending_transactions.num_transactions()
                         >= worker.max_pending_transactions
                     {
+                        worker
+                            .metrics
+                            .transactions_dropped
+                            .inc(&DropReason::MaxPendingTransactionsReached);
                         if let Some((updates_report, _)) = updates_report {
                             let _ = updates_report.try_send(TransactionStatus::Dropped(
                                 DropReason::MaxPendingTransactionsReached,
@@ -1263,6 +1291,9 @@ async fn background_task<TPlat: PlatformRef>(
 struct Worker<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     platform: TPlat,
+
+    /// Metrics of the chain.
+    metrics: Arc<crate::metrics::ChainMetrics>,
 
     // How to download the bodies of blocks and synchronize the chain.
     sync_service: Arc<sync_service::SyncService<TPlat>>,

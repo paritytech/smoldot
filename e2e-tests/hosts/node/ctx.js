@@ -22,6 +22,7 @@
 // from `shared/rpc.js` and build it with `createRpc(ctx.client)`.
 
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { start } from "smoldot";
 import { waitForSyncMessage } from "../sync_file.js";
 
@@ -68,6 +69,12 @@ export async function makeNodeCtx({ env, files }) {
       for (const [name, content] of Object.entries(filesObj)) {
         fs.writeFileSync(`${dir}/${name}`, content);
       }
+    },
+    dumpMetrics: (dump) => {
+      const p = env.SMOLDOT_METRICS_OUT;
+      if (!p) return;
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, JSON.stringify(dump));
     },
     cleanup: async () => {
       await client.terminate().catch(() => {});

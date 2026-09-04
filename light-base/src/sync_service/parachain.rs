@@ -49,6 +49,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     parachain_id: u32,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+    metrics: Arc<crate::metrics::ChainMetrics>,
 ) {
     // Phase 1: Fetch the current finalized parachain head from the relay chain.
     let effective_chain_info = fetch_parachain_head_from_relay(
@@ -79,6 +80,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             &network_service,
             &effective_chain_info,
             block_number_bytes,
+            &metrics,
         )
         .await
         {
@@ -147,6 +149,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
 
     // Phase 4: Create AllSync with Aura consensus from the bootstrapped chain information.
     let mut task = Task {
+        metrics,
         sync: Some(all::AllSync::new(all::Config {
             chain_information: effective_chain_info,
             block_number_bytes,
@@ -308,6 +311,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             hash = HashDisplay(&verified_hash),
                             is_new_best = if is_new_best { "yes" } else { "no" }
                         );
+                        task.metrics.sync_blocks_verified.inc();
 
                         if is_new_best {
                             task.network_up_to_date_best = false;
@@ -339,6 +343,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             let sync = task.sync.as_mut().unwrap();
                             if let Ok(result) = sync.set_finalized_block(&pending_hash) {
                                 task.pending_parachain_finalization = None;
+                                task.metrics
+                                    .sync_finalized_block_height
+                                    .set(sync.finalized_block_number());
                                 if result.updates_best_block {
                                     task.network_up_to_date_best = false;
                                 }
@@ -378,6 +385,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             hash = HashDisplay(&verified_hash),
                             ?error
                         );
+                        task.metrics.sync_block_verify_errors.inc();
 
                         log!(
                             &task.platform,
@@ -519,7 +527,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                             .ban_and_disconnect(
                                 peer_id,
                                 network_service::BanSeverity::High,
-                                "bad-block-announce",
+                                network_service::BanReason::BadBlockAnnounce,
                             )
                             .await;
                     }
@@ -545,6 +553,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 let Some(sync) = &task.sync else {
                     unreachable!()
                 };
+                task.metrics
+                    .sync_best_block_height
+                    .set(sync.best_block_number());
                 task.network_service
                     .set_local_best_block(*sync.best_block_hash(), sync.best_block_number())
                     .await;
@@ -670,7 +681,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         source_peer_id,
                         network_service::BanSeverity::Low,
-                        "failed-blocks-request",
+                        network_service::BanReason::BlocksRequestFailed,
                     )
                     .await;
 
@@ -693,7 +704,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         sync[sync.request_source_id(request_id)].0.clone(),
                         network_service::BanSeverity::Low,
-                        "failed-storage-request",
+                        network_service::BanReason::StorageRequestFailed,
                     )
                     .await;
 
@@ -716,7 +727,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         sync[sync.request_source_id(request_id)].0.clone(),
                         network_service::BanSeverity::Low,
-                        "failed-call-proof-request",
+                        network_service::BanReason::CallProofRequestFailed,
                     )
                     .await;
 
@@ -907,6 +918,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 match sync.set_finalized_block(&finalized_hash) {
                     Ok(result) => {
                         task.pending_parachain_finalization = None;
+                        task.metrics
+                            .sync_finalized_block_height
+                            .set(sync.finalized_block_number());
                         if result.updates_best_block {
                             task.network_up_to_date_best = false;
                         }
@@ -964,6 +978,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 match sync.set_finalized_block(&hash) {
                     Ok(result) => {
                         task.pending_parachain_finalization = None;
+                        task.metrics
+                            .sync_finalized_block_height
+                            .set(sync.finalized_block_number());
                         if result.updates_best_block {
                             task.network_up_to_date_best = false;
                         }
@@ -1059,6 +1076,9 @@ struct Task<TPlat: PlatformRef> {
     peers_source_id_map: HashMap<libp2p::PeerId, all::SourceId, util::SipHasherBuild>,
 
     network_up_to_date_best: bool,
+
+    /// Metrics of the chain.
+    metrics: Arc<crate::metrics::ChainMetrics>,
 
     /// Channel to the paraheads background service.
     paraheads: async_channel::Sender<super::ToBackground>,
@@ -1308,6 +1328,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
+    metrics: &Arc<crate::metrics::ChainMetrics>,
 ) -> Result<BootstrappedParachain, String> {
     let ci_ref = chain_info.as_ref();
     let block_hash = ci_ref.finalized_block_header.hash(block_number_bytes);
@@ -1343,6 +1364,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
             chain_info,
             block_number_bytes,
             peer_id,
+            metrics,
         )
     })
     .await
@@ -1400,6 +1422,7 @@ async fn attempt_bootstrap_with_peer<TPlat: PlatformRef>(
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
     peer_id: libp2p::PeerId,
+    metrics: &Arc<crate::metrics::ChainMetrics>,
 ) -> Result<BootstrappedParachain, String> {
     let ci_ref = chain_info.as_ref();
     let state_root = *ci_ref.finalized_block_header.state_root;
@@ -1457,13 +1480,15 @@ async fn attempt_bootstrap_with_peer<TPlat: PlatformRef>(
         )
     );
 
+    let before_compilation = platform.now();
     let vm = executor::host::HostVmPrototype::new(executor::host::Config {
         module: &code,
         heap_pages,
         exec_hint: executor::vm::ExecHint::CompileWithNonDeterministicValidation,
         allow_unresolved_imports: true,
-    })
-    .map_err(|e| format!("Failed to compile runtime: {e}"))?;
+    });
+    metrics.observe_runtime_compilation(platform.now() - before_compilation, vm.is_ok());
+    let vm = vm.map_err(|e| format!("Failed to compile runtime: {e}"))?;
 
     // AuraApi_slot_duration
     let (slot_duration, vm) = {

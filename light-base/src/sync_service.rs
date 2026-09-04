@@ -64,6 +64,9 @@ pub struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
+    /// Metrics of the chain.
+    pub metrics: Arc<crate::metrics::ChainMetrics>,
+
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
     pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
@@ -154,6 +157,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 config_parachain.relay_chain.para_id,
                 from_foreground,
                 config.network_service.clone(),
+                config.metrics.clone(),
             )),
             ConfigChainType::SubstrateCompatible(config_substrate_compat) => {
                 Box::pin(substrate_compat::start_substrate_compatible_chain(
@@ -164,6 +168,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     config_substrate_compat.runtime_code_hint,
                     from_foreground,
                     config.network_service.clone(),
+                    config.metrics.clone(),
                 ))
             }
         };
@@ -344,7 +349,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         .ban_and_disconnect(
                             target,
                             network_service::BanSeverity::Low,
-                            "blocks-request-failed",
+                            network_service::BanReason::BlocksRequestFailed,
                         )
                         .await;
                     continue;
@@ -840,7 +845,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                             .ban_and_disconnect(
                                 target,
                                 network_service::BanSeverity::Low,
-                                "storage-request-failed",
+                                network_service::BanReason::StorageRequestFailed,
                             )
                             .await;
                         self.outcome_errors
@@ -866,7 +871,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         .ban_and_disconnect(
                             target,
                             network_service::BanSeverity::High,
-                            "bad-merkle-proof",
+                            network_service::BanReason::BadMerkleProof,
                         )
                         .await;
                     self.outcome_errors
@@ -892,7 +897,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                 .ban_and_disconnect(
                                     target,
                                     network_service::BanSeverity::High,
-                                    "bad-child-trie-root",
+                                    network_service::BanReason::BadChildTrieRoot,
                                 )
                                 .await;
                             self.outcome_errors

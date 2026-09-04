@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add the `sudo_unstable_metrics` JSON-RPC function, returning a snapshot of internal counters and gauges (network connections, per-protocol request outcomes and durations, peer bans, connected gossip peers, verified blocks and finality proofs, best/finalized block height, warp-sync progress and target height, runtime compilations, dropped transactions). The list of metrics and their labels is unstable and may change between versions. ([#3285](https://github.com/paritytech/smoldot/issues/3285))
+
 ## 3.4.1 - 2026-08-13
 
 ### Fixed
