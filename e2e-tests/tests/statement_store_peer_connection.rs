@@ -93,6 +93,13 @@ async fn recovers_statement_delivery_after_peer_restart() -> Result<(), anyhow::
                         ("RELAY_CHAIN_SPEC", relay_spec_str.as_str()),
                         ("PARA_CHAIN_SPEC", para_spec_str.as_str()),
                         ("STATEMENT_HEXES", statement_hexes.as_str()),
+                        // DIAGNOSTIC SCAFFOLDING - REVERT BEFORE MERGE.
+                        // Level 4 turns on smoldot's connection/dial/reset logging, which is
+                        // what tells us whether the browser re-dials alice too slowly or not
+                        // at all after her restart. Level 3 shows neither.
+                        ("SMOLDOT_LOG_LEVEL", "4"),
+                        // The JS body must outlive the lengthened Rust-side wait below.
+                        ("LISTEN_MS", "600000"),
                     ],
                 )
                 .await
@@ -111,7 +118,11 @@ async fn recovers_statement_delivery_after_peer_restart() -> Result<(), anyhow::
             .restart(None)
             .await
             .map_err(|e| anyhow::anyhow!("restart(alice) failed: {e}"))?;
-        wait_until_peered(alice, 1, 120).await?;
+        // DIAGNOSTIC SCAFFOLDING - REVERT BEFORE MERGE.
+        // 120 s is the budget this test is meant to enforce; it is widened here only so the
+        // run distinguishes "smoldot reconnects late" from "smoldot never reconnects". Do not
+        // keep a raised timeout as a way of making the job pass.
+        wait_until_peered(alice, 1, 300).await?;
         submit_statement(alice, &stmt_2_hex, "stmt_2").await?;
 
         let bob = network.get_node("bob")?;
