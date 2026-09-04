@@ -17,7 +17,7 @@
 
 use super::{
     BlockNotification, ConfigSubstrateCompatibleRuntimeCodeHint, FinalizedBlockRuntime,
-    Notification, SubscribeAll, ToBackground,
+    Notification, SubscribeAll, SyncStatus, ToBackground,
 };
 use crate::{log, network_service, platform::PlatformRef, util};
 
@@ -118,6 +118,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         .fuse(),
         mode: ModeState::Deciding,
         bootstrap_complete: false,
+        sync_status_subscribers: Vec::new(),
+        last_sent_sync_status: None,
         deciding_packets_seen: 0,
         mode_decision_deadline: future::Either::Left(Box::pin(
             platform.sleep(MODE_DECISION_TIMEOUT),
@@ -387,6 +389,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 // must be cleared.
                 task.all_notifications.clear();
 
+                emit_sync_status(&mut task, SyncStatus::Ready);
+
                 if matches!(
                     task.mode,
                     ModeState::AwaitingWarp { .. } | ModeState::Deciding
@@ -438,6 +442,24 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             verified_hash = HashDisplay(&fragment_hash),
                             verified_height = fragment_number
                         );
+
+                        if !task.sync_status_subscribers.is_empty() {
+                            let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
+                            let peers_best = sync
+                                .sources()
+                                .map(|src| sync.source_best_block(src).0)
+                                .max()
+                                .unwrap_or(0);
+                            emit_sync_status(
+                                &mut task,
+                                SyncStatus::WarpSyncing {
+                                    at: fragment_number,
+                                    // Peers may advertise a best block below what has just
+                                    // been verified.
+                                    target: cmp::max(peers_best, fragment_number),
+                                },
+                            );
+                        }
                     }
                     Err(err) => {
                         log!(
@@ -1118,6 +1140,15 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 let _ = send_back.send(out);
             }
 
+            WakeUpReason::ForegroundMessage(ToBackground::SubscribeSyncStatus { send_back }) => {
+                let (tx, rx) = async_channel::unbounded();
+                if task.bootstrap_complete {
+                    let _ = tx.try_send(SyncStatus::Ready);
+                }
+                task.sync_status_subscribers.push(tx);
+                let _ = send_back.send(rx);
+            }
+
             WakeUpReason::ForegroundMessage(ToBackground::SerializeChainInformation {
                 send_back,
             }) => {
@@ -1631,6 +1662,12 @@ struct Task<TPlat: PlatformRef> {
     /// Once `true`, warp may re-engage and any later completion is allowed to fire a `Stop`.
     bootstrap_complete: bool,
 
+    /// Subscribers of [`super::SyncService::subscribe_sync_status`].
+    sync_status_subscribers: Vec<async_channel::Sender<SyncStatus>>,
+
+    /// Last value sent to [`Task::sync_status_subscribers`], to avoid repeating it.
+    last_sent_sync_status: Option<SyncStatus>,
+
     /// Below-gap packets observed while [`ModeState::Deciding`]; gates AllForksOnly commit.
     deciding_packets_seen: usize,
 
@@ -1847,10 +1884,33 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
 
     drain_pending_subscriptions(task);
     task.bootstrap_complete = true;
+    emit_sync_status(task, SyncStatus::Ready);
     task.sync
         .as_mut()
         .unwrap_or_else(|| unreachable!())
         .set_warp_completion_suppressed(false);
+}
+
+/// Sends `status` to every subscriber of [`Task::sync_status_subscribers`], unless it is the
+/// same as the last value sent. Subscribers whose receiver is gone are removed.
+fn emit_sync_status<TPlat: PlatformRef>(task: &mut Task<TPlat>, status: SyncStatus) {
+    send_sync_status(
+        &mut task.sync_status_subscribers,
+        &mut task.last_sent_sync_status,
+        status,
+    );
+}
+
+fn send_sync_status(
+    subscribers: &mut Vec<async_channel::Sender<SyncStatus>>,
+    last_sent: &mut Option<SyncStatus>,
+    status: SyncStatus,
+) {
+    if *last_sent == Some(status) {
+        return;
+    }
+    *last_sent = Some(status);
+    subscribers.retain(|sender| sender.try_send(status).is_ok());
 }
 
 #[cfg(test)]
@@ -2044,5 +2104,60 @@ mod tests {
             neighbor_packet_outcome(&ModeState::Deciding, &sync, MODE_DECISION_MIN_PACKETS - 1,),
             NeighborPacketOutcome::CommitAllForksOnly,
         );
+    }
+
+    #[test]
+    fn send_sync_status_delivers_to_all_open_subscribers() {
+        let mut subscribers = Vec::new();
+        let mut receivers = Vec::new();
+        for _ in 0..3 {
+            let (tx, rx) = async_channel::unbounded();
+            subscribers.push(tx);
+            receivers.push(rx);
+        }
+        let mut last_sent = None;
+        let status = SyncStatus::WarpSyncing { at: 7, target: 42 };
+
+        send_sync_status(&mut subscribers, &mut last_sent, status);
+
+        assert_eq!(subscribers.len(), 3);
+        assert_eq!(last_sent, Some(status));
+        for rx in receivers {
+            assert_eq!(rx.try_recv(), Ok(status));
+        }
+    }
+
+    #[test]
+    fn send_sync_status_drops_closed_subscribers() {
+        let (tx_open, rx_open) = async_channel::unbounded();
+        let (tx_closed, rx_closed) = async_channel::unbounded::<SyncStatus>();
+        drop(rx_closed);
+        let mut subscribers = vec![tx_open, tx_closed];
+        let mut last_sent = None;
+
+        send_sync_status(&mut subscribers, &mut last_sent, SyncStatus::Ready);
+
+        assert_eq!(subscribers.len(), 1);
+        assert_eq!(rx_open.try_recv(), Ok(SyncStatus::Ready));
+    }
+
+    #[test]
+    fn send_sync_status_skips_consecutive_duplicates() {
+        let (tx, rx) = async_channel::unbounded();
+        let mut subscribers = vec![tx];
+        let mut last_sent = None;
+        let a = SyncStatus::WarpSyncing { at: 1, target: 9 };
+        let b = SyncStatus::WarpSyncing { at: 2, target: 9 };
+
+        send_sync_status(&mut subscribers, &mut last_sent, a);
+        send_sync_status(&mut subscribers, &mut last_sent, a);
+        send_sync_status(&mut subscribers, &mut last_sent, b);
+        send_sync_status(&mut subscribers, &mut last_sent, SyncStatus::Ready);
+        send_sync_status(&mut subscribers, &mut last_sent, SyncStatus::Ready);
+
+        assert_eq!(rx.try_recv(), Ok(a));
+        assert_eq!(rx.try_recv(), Ok(b));
+        assert_eq!(rx.try_recv(), Ok(SyncStatus::Ready));
+        assert!(rx.try_recv().is_err());
     }
 }

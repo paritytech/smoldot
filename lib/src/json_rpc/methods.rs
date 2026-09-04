@@ -544,6 +544,11 @@ define_methods! {
     sudo_network_unstable_unwatch(subscription: Cow<'a, str>) -> (),
     chainHead_unstable_finalizedDatabase(#[rename = "maxSizeBytes"] max_size_bytes: Option<u64>) -> Cow<'a, str>,
 
+    /// Subscribes to the lifecycle state of the chain. The first notification is the current
+    /// state, followed by one notification per change. Smoldot-specific, schema is unstable.
+    /// See <https://github.com/paritytech/smoldot/issues/3301>.
+    lifecycle_unstable_follow() -> Cow<'a, str>,
+    lifecycle_unstable_unfollow(subscription: Cow<'a, str>) -> (),
 }
 
 define_methods! {
@@ -567,6 +572,9 @@ define_methods! {
 
     // Statement notification sent when statements matching subscribed topics are received.
     statement_statement(subscription: Cow<'a, str>, result: StatementEvent) -> (),
+
+    // Notification of `lifecycle_unstable_follow`. Carries the full current state.
+    lifecycle_unstable_followEvent(subscription: Cow<'a, str>, result: LifecycleState) -> (),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1159,6 +1167,53 @@ pub enum StatementEvent {
     },
 }
 
+/// Current lifecycle state of a chain, as sent by `lifecycle_unstable_followEvent`.
+///
+/// Every notification carries the whole state, so a client never needs earlier notifications
+/// to interpret a later one. Unknown fields or variants should be ignored.
+///
+/// Schema is unstable. See <https://github.com/paritytech/smoldot/issues/3301>.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleState {
+    pub phase: LifecyclePhase,
+    /// `true` if at least one peer is currently connected on this chain.
+    pub has_peers: bool,
+    pub health: LifecycleHealth,
+}
+
+/// Bootstrap progress of a chain.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum LifecyclePhase {
+    /// The chain has been added and no block is being streamed yet.
+    Connecting,
+    /// A GrandPa warp sync is in progress. `at` is the highest block proven finalized so far,
+    /// `target` the highest best block advertised by a connected peer (never below `at`).
+    Syncing { at: u64, target: u64 },
+    /// New blocks are being streamed. Not terminal: a later warp sync moves the chain back to
+    /// `syncing`, then to `ready` again.
+    Ready,
+}
+
+/// Verdict of the built-in stall watchdog.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum LifecycleHealth {
+    Ok,
+    Stalled { reason: LifecycleStallReason },
+}
+
+/// Why the watchdog considers the chain stalled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LifecycleStallReason {
+    /// No peer has been connected for a while.
+    NoPeers,
+    /// A warp sync is in progress but has not advanced for a while.
+    NoProgress,
+}
+
 /// Filter for subscribing to statements based on topics.
 ///
 /// JSON format is compatible with polkadot-sdk's `TopicFilter`:
@@ -1562,6 +1617,41 @@ mod tests {
 
         assert_eq!(id, "1");
         assert!(matches!(call, super::MethodCall::statement_submit { .. }));
+    }
+
+    #[test]
+    fn lifecycle_state_serialization() {
+        use super::{LifecycleHealth, LifecyclePhase, LifecycleStallReason, LifecycleState};
+
+        let connecting = LifecycleState {
+            phase: LifecyclePhase::Connecting,
+            has_peers: false,
+            health: LifecycleHealth::Ok,
+        };
+        assert_eq!(
+            serde_json::to_string(&connecting).unwrap(),
+            r#"{"phase":{"kind":"connecting"},"hasPeers":false,"health":{"kind":"ok"}}"#
+        );
+
+        let syncing = LifecycleState {
+            phase: LifecyclePhase::Syncing {
+                at: 1200,
+                target: 29400,
+            },
+            has_peers: true,
+            health: LifecycleHealth::Stalled {
+                reason: LifecycleStallReason::NoProgress,
+            },
+        };
+        let json = serde_json::to_string(&syncing).unwrap();
+        assert_eq!(
+            json,
+            r#"{"phase":{"kind":"syncing","at":1200,"target":29400},"hasPeers":true,"health":{"kind":"stalled","reason":"noProgress"}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<LifecycleState>(&json).unwrap(),
+            syncing
+        );
     }
 
     #[test]

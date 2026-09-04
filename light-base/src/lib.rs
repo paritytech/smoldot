@@ -104,6 +104,7 @@ mod sync_service;
 mod transactions_service;
 mod util;
 
+pub mod lifecycle_service;
 pub mod network_service;
 pub mod platform;
 
@@ -291,6 +292,7 @@ struct ChainServices<TPlat: platform::PlatformRef> {
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
     bitswap_service: Arc<bitswap_service::BitswapService>,
+    lifecycle_service: Arc<lifecycle_service::LifecycleService>,
 }
 
 impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
@@ -301,6 +303,7 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
             runtime_service: self.runtime_service.clone(),
             transactions_service: self.transactions_service.clone(),
             bitswap_service: self.bitswap_service.clone(),
+            lifecycle_service: self.lifecycle_service.clone(),
         }
     }
 }
@@ -933,6 +936,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 transactions_service: services.transactions_service.clone(),
                 runtime_service: services.runtime_service.clone(),
                 bitswap_service: services.bitswap_service.clone(),
+                lifecycle_service: services.lifecycle_service.clone(),
                 chain_name: chain_spec.name().to_owned(),
                 chain_ty: chain_spec.chain_type().to_owned(),
                 chain_is_live: chain_spec.has_live_network(),
@@ -1061,6 +1065,21 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         json_rpc_sender.queue_rpc_request(json_rpc_request)
+    }
+
+    /// Subscribes to the lifecycle state of the given chain: bootstrap phase, peer presence and
+    /// stall verdict. The first item is the current state, then one item per change. See
+    /// [`lifecycle_service::LifecycleState`].
+    ///
+    /// The schema is unstable.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    pub fn lifecycle_state(&self, chain_id: ChainId) -> lifecycle_service::Subscription {
+        let key = &self.public_api_chains.get(chain_id.0).unwrap().key;
+        let running = self.chains_by_key.as_ref().unwrap().get(key).unwrap();
+        running.services.lifecycle_service.subscribe()
     }
 }
 
@@ -1283,11 +1302,145 @@ fn start_services<TPlat: platform::PlatformRef>(
         },
     ));
 
+    // The lifecycle service holds a small state describing what the chain is doing, for the
+    // benefit of embedders. Two tasks keep it up to date. Both hold only weak references so
+    // that they stop, rather than keep the chain alive, once the chain is removed.
+    let lifecycle_service = lifecycle_service::LifecycleService::new();
+
+    // Drives `LifecycleState::phase` from the sync service's own status: `Syncing` while a warp
+    // sync is in progress, `Ready` once the sync service serves the chain. Ends when the sync
+    // service is gone.
+    platform.spawn_task("lifecycle-phase".into(), {
+        let lifecycle_service = Arc::downgrade(&lifecycle_service);
+        let sync_service = Arc::downgrade(&sync_service);
+        let platform = platform.clone();
+        async move {
+            // Warp sync fragments can verify at dozens per second. Every status is applied
+            // as soon as it is received, but after a progress update the task pauses for
+            // this interval and then applies only the newest status that arrived meanwhile,
+            // so that consumers see at most a couple of progress updates per second while
+            // still seeing the start of a warp sync and its end without delay.
+            const PROGRESS_BATCH_INTERVAL: Duration = Duration::from_millis(500);
+
+            let sync_status = {
+                let Some(sync_service) = sync_service.upgrade() else {
+                    return;
+                };
+                sync_service.subscribe_sync_status().await
+            };
+
+            let apply = |status: sync_service::SyncStatus| {
+                let lifecycle_service = lifecycle_service.clone();
+                async move {
+                    let lifecycle_service = lifecycle_service.upgrade()?;
+                    let phase = match status {
+                        sync_service::SyncStatus::WarpSyncing { at, target } => {
+                            lifecycle_service::Phase::Syncing { at, target }
+                        }
+                        sync_service::SyncStatus::Ready => lifecycle_service::Phase::Ready,
+                    };
+                    lifecycle_service.update(|s| s.phase = phase).await;
+                    Some(())
+                }
+            };
+
+            while let Ok(status) = sync_status.recv().await {
+                if apply(status).await.is_none() {
+                    return;
+                }
+                if matches!(status, sync_service::SyncStatus::WarpSyncing { .. }) {
+                    platform.sleep(PROGRESS_BATCH_INTERVAL).await;
+                    let mut newest = None;
+                    while let Ok(newer) = sync_status.try_recv() {
+                        newest = Some(newer);
+                    }
+                    if let Some(newest) = newest
+                        && apply(newest).await.is_none()
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+
+    // Drives `LifecycleState::has_peers` and `LifecycleState::health` by polling the network
+    // service. Polling (rather than subscribing to network events) keeps this task from ever
+    // slowing down the networking. The poll is frequent during the first minutes after the
+    // chain is added, where an embedder is most likely to display the state, and relaxed
+    // afterwards or once the chain is running with peers.
+    platform.spawn_task("lifecycle-watchdog".into(), {
+        let lifecycle_service = Arc::downgrade(&lifecycle_service);
+        let network_service_chain = Arc::downgrade(&network_service_chain);
+        let platform = platform.clone();
+        async move {
+            const FAST_POLL_WINDOW: Duration = Duration::from_secs(120);
+
+            let started = platform.now();
+            let mut last_peer_seen = started.clone();
+            // Warp sync height last observed, and when it was first observed.
+            let mut last_progress: Option<(u64, TPlat::Instant)> = None;
+
+            loop {
+                let has_peers = {
+                    let Some(network_service_chain) = network_service_chain.upgrade() else {
+                        return;
+                    };
+                    network_service_chain.peers_list().await.next().is_some()
+                };
+                let Some(lifecycle_service) = lifecycle_service.upgrade() else {
+                    return;
+                };
+
+                let now = platform.now();
+                if has_peers {
+                    last_peer_seen = now.clone();
+                }
+
+                let state = lifecycle_service.current().await;
+                let no_progress_for = match (state.phase, &last_progress) {
+                    (lifecycle_service::Phase::Syncing { at, .. }, Some((seen_at, since)))
+                        if *seen_at == at =>
+                    {
+                        Some(now.clone() - since.clone())
+                    }
+                    (lifecycle_service::Phase::Syncing { at, .. }, _) => {
+                        last_progress = Some((at, now.clone()));
+                        Some(Duration::ZERO)
+                    }
+                    _ => {
+                        last_progress = None;
+                        None
+                    }
+                };
+                let health = lifecycle_service::health_verdict(
+                    now.clone() - last_peer_seen.clone(),
+                    no_progress_for,
+                );
+
+                lifecycle_service
+                    .update(|s| {
+                        s.has_peers = has_peers;
+                        s.health = health;
+                    })
+                    .await;
+                drop(lifecycle_service);
+
+                let settled = has_peers && matches!(state.phase, lifecycle_service::Phase::Ready);
+                let fast = !settled && now - started.clone() < FAST_POLL_WINDOW;
+                platform
+                    .sleep(Duration::from_secs(if fast { 1 } else { 5 }))
+                    .await;
+            }
+        }
+    });
+
     ChainServices {
         network_service: network_service_chain,
         runtime_service,
         sync_service,
         transactions_service,
         bitswap_service,
+        lifecycle_service,
     }
 }

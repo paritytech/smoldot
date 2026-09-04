@@ -18,7 +18,7 @@
 use crate::{
     bitswap_service,
     json_rpc_service::StatementProtocolConfig,
-    log, network_service,
+    lifecycle_service, log, network_service,
     platform::PlatformRef,
     runtime_service, sync_service, transactions_service,
     util::{self, SipHasherBuild},
@@ -71,6 +71,9 @@ pub(super) struct Config<TPlat: PlatformRef> {
 
     /// Service that fulfills IPFS CID requests.
     pub bitswap_service: Arc<bitswap_service::BitswapService>,
+
+    /// Lifecycle state of the chain, served by `lifecycle_unstable_follow`.
+    pub lifecycle_service: Arc<lifecycle_service::LifecycleService>,
 
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
@@ -136,6 +139,13 @@ struct Background<TPlat: PlatformRef> {
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
     /// See [`Config::bitswap_service`].
     bitswap_service: Arc<bitswap_service::BitswapService>,
+    /// See [`Config::lifecycle_service`].
+    lifecycle_service: Arc<lifecycle_service::LifecycleService>,
+
+    /// Active `lifecycle_unstable_follow` subscriptions. The event is notified on unfollow so
+    /// that the task waiting for the next state change stops.
+    lifecycle_subscriptions:
+        hashbrown::HashMap<String, Arc<event_listener::Event>, fnv::FnvBuildHasher>,
 
     /// Tasks that are spawned by the service and running in the background.
     background_tasks: stream::FuturesUnordered<Pin<Box<dyn Future<Output = Event<TPlat>> + Send>>>,
@@ -527,6 +537,63 @@ enum Event<TPlat: PlatformRef> {
         event: Option<(String, bitswap_service::BlockResult)>,
         events_rx: async_channel::Receiver<(String, bitswap_service::BlockResult)>,
     },
+    /// A `lifecycle_unstable_follow` subscription has a new state to report. `state` is `None`
+    /// if the chain is being removed or the subscription was cancelled.
+    LifecycleFollowEvent {
+        subscription_id: String,
+        state: Option<lifecycle_service::LifecycleState>,
+        subscription: lifecycle_service::Subscription,
+    },
+}
+
+/// Builds the task that waits for the next lifecycle state of a `lifecycle_unstable_follow`
+/// subscription, or for its cancellation.
+fn lifecycle_follow_task<TPlat: PlatformRef>(
+    subscription_id: String,
+    mut subscription: lifecycle_service::Subscription,
+    cancel: Arc<event_listener::Event>,
+) -> Pin<Box<dyn Future<Output = Event<TPlat>> + Send>> {
+    Box::pin(async move {
+        let cancelled = cancel.listen();
+        let state = futures_lite::future::or(subscription.next(), async {
+            cancelled.await;
+            None
+        })
+        .await;
+        Event::LifecycleFollowEvent {
+            subscription_id,
+            state,
+            subscription,
+        }
+    })
+}
+
+fn lifecycle_state_to_json_rpc(
+    state: lifecycle_service::LifecycleState,
+) -> methods::LifecycleState {
+    methods::LifecycleState {
+        phase: match state.phase {
+            lifecycle_service::Phase::Connecting => methods::LifecyclePhase::Connecting,
+            lifecycle_service::Phase::Syncing { at, target } => {
+                methods::LifecyclePhase::Syncing { at, target }
+            }
+            lifecycle_service::Phase::Ready => methods::LifecyclePhase::Ready,
+        },
+        has_peers: state.has_peers,
+        health: match state.health {
+            lifecycle_service::Health::Ok => methods::LifecycleHealth::Ok,
+            lifecycle_service::Health::Stalled { reason } => methods::LifecycleHealth::Stalled {
+                reason: match reason {
+                    lifecycle_service::StallReason::NoPeers => {
+                        methods::LifecycleStallReason::NoPeers
+                    }
+                    lifecycle_service::StallReason::NoProgress => {
+                        methods::LifecycleStallReason::NoProgress
+                    }
+                },
+            },
+        },
+    }
 }
 
 struct BitswapSubscription {
@@ -591,6 +658,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
         bitswap_service: config.bitswap_service.clone(),
+        lifecycle_service: config.lifecycle_service.clone(),
+        lifecycle_subscriptions: hashbrown::HashMap::with_hasher(Default::default()),
         background_tasks: stream::FuturesUnordered::new(),
         runtime_service_subscription: RuntimeServiceSubscription::NotCreated,
         all_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
@@ -825,6 +894,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.runtime_version_subscriptions.shrink_to_fit();
                 me.transactions_subscriptions.shrink_to_fit();
                 me.statement_subscriptions.shrink_to_fit();
+                me.lifecycle_subscriptions.shrink_to_fit();
                 me.legacy_api_stale_storage_subscriptions.shrink_to_fit();
                 me.multistage_requests_to_advance.shrink_to_fit();
                 me.block_headers_pending.shrink_to_fit();
@@ -1014,7 +1084,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
                     | methods::MethodCall::bitswap_unstable_get { .. }
                     | methods::MethodCall::bitswap_unstable_stream { .. }
-                    | methods::MethodCall::bitswap_unstable_unstream { .. } => {}
+                    | methods::MethodCall::bitswap_unstable_unstream { .. }
+                    | methods::MethodCall::lifecycle_unstable_follow { .. }
+                    | methods::MethodCall::lifecycle_unstable_unfollow { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -3068,6 +3140,68 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
+                    methods::MethodCall::lifecycle_unstable_follow {} => {
+                        // Same limit as `chainHead_v1_follow`.
+                        if me.lifecycle_subscriptions.len() >= 2 {
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::ApplicationDefined(
+                                        -32800,
+                                        "too many active follow subscriptions",
+                                    ),
+                                    None,
+                                ))
+                                .await;
+                            continue;
+                        }
+
+                        let subscription_id = {
+                            let mut bytes = [0u8; 32];
+                            me.randomness.fill_bytes(&mut bytes);
+                            bs58::encode(bytes).into_string()
+                        };
+
+                        let cancel = Arc::new(event_listener::Event::new());
+                        let _prev_value = me
+                            .lifecycle_subscriptions
+                            .insert(subscription_id.clone(), cancel.clone());
+                        debug_assert!(_prev_value.is_none());
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::lifecycle_unstable_follow(Cow::Borrowed(
+                                    &subscription_id,
+                                ))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+
+                        // The first item yielded by the subscription is the current state.
+                        me.background_tasks.push(lifecycle_follow_task(
+                            subscription_id,
+                            me.lifecycle_service.subscribe(),
+                            cancel,
+                        ));
+                    }
+
+                    methods::MethodCall::lifecycle_unstable_unfollow { subscription } => {
+                        // Succeeds whether or not the subscription exists, like the other
+                        // `unfollow`/`unwatch` functions.
+                        if let Some(cancel) = me.lifecycle_subscriptions.remove(&*subscription) {
+                            cancel.notify(usize::MAX);
+                        }
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::lifecycle_unstable_unfollow(())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
                     _method @ (methods::MethodCall::account_nextIndex { .. }
                     | methods::MethodCall::author_hasKey { .. }
                     | methods::MethodCall::author_hasSessionKeys { .. }
@@ -3113,6 +3247,41 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
                 }
+            }
+
+            WakeUpReason::Event(Event::LifecycleFollowEvent {
+                subscription_id,
+                state,
+                subscription,
+            }) => {
+                let Some(cancel) = me.lifecycle_subscriptions.get(&subscription_id).cloned() else {
+                    // Unfollowed in the meantime.
+                    continue;
+                };
+
+                let Some(state) = state else {
+                    // The chain is being removed. The JSON-RPC service goes away with it, so
+                    // there is nobody left to notify.
+                    me.lifecycle_subscriptions.remove(&subscription_id);
+                    continue;
+                };
+
+                let _ = me
+                    .responses_tx
+                    .send(
+                        methods::ServerToClient::lifecycle_unstable_followEvent {
+                            subscription: Cow::Borrowed(&subscription_id),
+                            result: lifecycle_state_to_json_rpc(state),
+                        }
+                        .to_json_request_object_parameters(None),
+                    )
+                    .await;
+
+                me.background_tasks.push(lifecycle_follow_task(
+                    subscription_id,
+                    subscription,
+                    cancel,
+                ));
             }
 
             WakeUpReason::AdvanceMultiStageRequest {
