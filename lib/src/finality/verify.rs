@@ -365,8 +365,6 @@ pub enum CommitVerifyError {
     BadAncestry,
 }
 
-// TODO: tests
-
 /// Configuration for a justification verification process.
 #[derive(Debug)]
 pub struct JustificationVerifyConfig<J, I> {
@@ -646,10 +644,20 @@ mod tests {
 
     /// Builds a header whose parent is `parent_hash`.
     fn header(parent_hash: [u8; 32], number: u64) -> header::Header {
+        header_with_state_root(parent_hash, number, [0; 32])
+    }
+
+    /// Same as [`header`], but with an explicit state root, in order to build distinct headers
+    /// that share the same parent and height.
+    fn header_with_state_root(
+        parent_hash: [u8; 32],
+        number: u64,
+        state_root: [u8; 32],
+    ) -> header::Header {
         header::Header {
             parent_hash,
             number,
-            state_root: [0; 32],
+            state_root,
             extrinsics_root: [0; 32],
             digest: header::DigestRef::empty().into(),
         }
@@ -759,6 +767,59 @@ mod tests {
         assert!(matches!(result, Ok(())), "{result:?}");
     }
 
+    /// The pre-commits are split between two forks that share the target of the justification as
+    /// their parent. This is the normal shape when a round finalizes a block below the best one.
+    #[test]
+    fn precommits_split_across_forks() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        // Two children of the target of the justification. Their state roots differ, otherwise
+        // they would be the same block.
+        let fork1 = header_with_state_root(target_hash, 11, [0x11; 32]);
+        let fork1_hash = fork1.hash(BLOCK_NUMBER_BYTES);
+        let fork2 = header_with_state_root(target_hash, 11, [0x22; 32]);
+        let fork2_hash = fork2.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], fork1_hash, 11),
+                precommit(&keys[1], fork1_hash, 11),
+                precommit(&keys[2], fork2_hash, 11),
+            ],
+            &[fork1, fork2],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(matches!(result, Ok(())), "{result:?}");
+    }
+
+    /// No pre-commit targets the block that the justification claims to finalize, they all target
+    /// one of its descendants. Because the "ghost" of the pre-commits is intentionally not
+    /// calculated, such a justification is valid even though it could have finalized a higher
+    /// block.
+    #[test]
+    fn precommits_above_target_are_accepted() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let child = header(target_hash, 11);
+        let child_hash = child.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &keys[..3]
+                .iter()
+                .map(|k| precommit(k, child_hash, 11))
+                .collect::<Vec<_>>(),
+            &[child],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(matches!(result, Ok(())), "{result:?}");
+    }
+
     /// Regression test for the vulnerability where pre-commits are never bound to the block that
     /// the justification claims to finalize. Genuine signatures produced for one block must not
     /// be accepted as a proof that some other block is finalized.
@@ -802,6 +863,37 @@ mod tests {
                 .map(|k| precommit(k, child_hash, 11))
                 .collect::<Vec<_>>(),
             &[],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::BadAncestry)),
+            "{result:?}"
+        );
+    }
+
+    /// Same as [`missing_ancestry_headers`], but only one of the two headers that link the
+    /// pre-commits to the target of the justification is missing. Contrary to that test, the walk
+    /// through the ancestry successfully goes through one header before failing.
+    #[test]
+    fn partially_missing_ancestry_headers() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let child = header(target_hash, 11);
+        let child_hash = child.hash(BLOCK_NUMBER_BYTES);
+        let grand_child = header(child_hash, 12);
+        let grand_child_hash = grand_child.hash(BLOCK_NUMBER_BYTES);
+
+        // The grand-child is provided, but the child that links it to the target of the
+        // justification isn't.
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &keys[..3]
+                .iter()
+                .map(|k| precommit(k, grand_child_hash, 12))
+                .collect::<Vec<_>>(),
+            &[grand_child],
         );
 
         let result = verify(&justification, &authorities);
