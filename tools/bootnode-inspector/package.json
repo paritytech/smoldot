@@ -1,0 +1,11 @@
+{
+  "name": "smoldot-bootnode-inspector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Inspects the bootnodes of a chain spec with smoldot: reachability, sync, discovered peers",
+  "type": "module",
+  "bin": { "bootnode-inspector": "./inspect.mjs" },
+  "scripts": { "start": "node inspect.mjs" },
+  "engines": { "node": ">=18" },
+  "dependencies": { "smoldot": "latest" }
+}
