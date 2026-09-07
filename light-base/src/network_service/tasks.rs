@@ -20,7 +20,7 @@ use crate::{
     platform::{PlatformRef, SubstreamDirection},
 };
 
-use alloc::{boxed::Box, string::String, sync::Arc};
+use alloc::{boxed::Box, collections::VecDeque, string::String, sync::Arc};
 use core::{pin, time::Duration};
 use futures_lite::FutureExt as _;
 use futures_util::{StreamExt as _, future, stream::FuturesUnordered};
@@ -217,6 +217,20 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     }
 }
 
+/// Time granted to the [`PlatformRef`] implementation to open an outbound substream, counted
+/// from the call to [`PlatformRef::open_out_substream`]. Once it has elapsed, the connection is
+/// considered dead and is reset.
+///
+/// Opening a substream on a healthy multi-stream connection takes at most one round trip with
+/// the remote, so this only ever fires on a connection whose remote has silently gone away. Some
+/// platforms can't detect that on their own: a browser's `RTCPeerConnection` stays in the
+/// `connected` state after every one of its data channels has been closed underneath it, and a
+/// channel created on it afterwards stays silent forever. The [`PlatformRef`] API has no way to
+/// report a failure to open a substream, and the connection state machine isn't aware of
+/// substreams that haven't opened yet, so nothing else would ever notice that the remote is
+/// gone: the connection would never be shut down, and the peer never re-dialed.
+const OUT_SUBSTREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Asynchronous task managing a specific multi-stream connection.
 ///
 /// > **Note**: This function is specific to WebRTC in the sense that it checks whether the reading
@@ -238,9 +252,12 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     // Future that sends a message to the coordinator. Only one message is sent to the coordinator
     // at a time. `None` if no message is being sent.
     let mut message_sending = pin::pin!(None);
-    // Number of substreams that are currently being opened by the `PlatformRef` implementation
-    // and that the `connection_task` state machine isn't aware of yet.
-    let mut pending_opening_out_substreams = 0;
+    // Deadlines (see `OUT_SUBSTREAM_OPEN_TIMEOUT`) of the substreams that are currently being
+    // opened by the `PlatformRef` implementation and that the `connection_task` state machine
+    // isn't aware of yet, in the order in which their opening was requested. The platform is
+    // expected to report them as opened in that same order; if it doesn't, the deadlines are
+    // close enough to each other that it doesn't matter.
+    let mut pending_opening_out_substreams = VecDeque::<TPlat::Instant>::new();
     // Stream that yields an item whenever a substream is ready to be read-written.
     // TODO: we box the future because of the type checker being annoying
     let mut when_substreams_rw_ready = FuturesUnordered::<
@@ -258,10 +275,43 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     let coordinator_write_ready = Arc::new(event_listener::Event::new());
 
     loop {
+        // Try pull message to send to the coordinator.
+        //
+        // Calling this method takes ownership of the task and returns that task if it has
+        // more work to do. If `None` is returned, then the entire task is gone and the
+        // connection must be abruptly closed, which is what happens when we return from
+        // this function.
+        //
+        // This is done at every iteration, and not only after a substream has been processed,
+        // because `reset` and `inject_coordinator_message` generate messages too. In
+        // particular, a connection whose substreams have all been reset has no substream left
+        // to wake this task up, and the shutdown that follows a `reset` would otherwise never
+        // be reported to the coordinator, which would keep believing that the connection is
+        // alive.
+        if message_sending.is_none() {
+            let (task_update, message) = connection_task.pull_message_to_coordinator();
+            let Some(task_update) = task_update else {
+                log!(
+                    &platform,
+                    Trace,
+                    "connections",
+                    "shutdown",
+                    address = address_string
+                );
+                return;
+            };
+            connection_task = task_update;
+            if let Some(message) = message {
+                message_sending.set(Some(
+                    connection_to_coordinator.send((connection_id, message)),
+                ));
+            }
+        }
+
         // Start opening new outbound substreams, if needed.
         for _ in 0..connection_task
             .desired_outbound_substreams()
-            .saturating_sub(pending_opening_out_substreams)
+            .saturating_sub(u32::try_from(pending_opening_out_substreams.len()).unwrap_or(u32::MAX))
         {
             log!(
                 &platform,
@@ -271,7 +321,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 address = address_string
             );
             platform.open_out_substream(&mut connection);
-            pending_opening_out_substreams += 1;
+            pending_opening_out_substreams.push_back(platform.now() + OUT_SUBSTREAM_OPEN_TIMEOUT);
         }
 
         // Now wait for something interesting to happen before looping again.
@@ -283,6 +333,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             MessageSent,
             NewSubstream(TPlat::Stream, SubstreamDirection),
             ConnectionReset,
+            OutSubstreamOpenTimeout,
         }
 
         let wake_up_reason: WakeUpReason<TPlat> = {
@@ -342,10 +393,29 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 }
             };
 
+            // Future that is woken up when the oldest substream still being opened by the
+            // platform has run out of time to open.
+            let out_substream_open_timeout = {
+                let deadline = if connection_task.is_reset_called() {
+                    None
+                } else {
+                    pending_opening_out_substreams.front().cloned()
+                };
+                async {
+                    if let Some(deadline) = deadline {
+                        platform.sleep_until(deadline).await;
+                        WakeUpReason::OutSubstreamOpenTimeout
+                    } else {
+                        future::pending().await
+                    }
+                }
+            };
+
             coordinator_message
                 .or(socket_event)
                 .or(message_sent)
                 .or(next_substream)
+                .or(out_substream_open_timeout)
                 .await
         };
 
@@ -434,32 +504,6 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                     }
                 };
 
-                // Try pull message to send to the coordinator.
-
-                // Calling this method takes ownership of the task and returns that task if it has
-                // more work to do. If `None` is returned, then the entire task is gone and the
-                // connection must be abruptly closed, which is what happens when we return from
-                // this function.
-                let (task_update, message) = connection_task.pull_message_to_coordinator();
-                if let Some(task_update) = task_update {
-                    connection_task = task_update;
-                    debug_assert!(message_sending.is_none());
-                    if let Some(message) = message {
-                        message_sending.set(Some(
-                            connection_to_coordinator.send((connection_id, message)),
-                        ));
-                    }
-                } else {
-                    log!(
-                        &platform,
-                        Trace,
-                        "connections",
-                        "shutdown",
-                        address = address_string
-                    );
-                    return;
-                }
-
                 // Put back the stream in `when_substreams_rw_ready`.
                 if let SubstreamFate::Continue = substream_fate {
                     when_substreams_rw_ready.push({
@@ -491,6 +535,27 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 );
                 connection_task.reset();
             }
+            WakeUpReason::OutSubstreamOpenTimeout => {
+                // The platform has failed to open a substream in time, which only happens when
+                // the remote is gone. See `OUT_SUBSTREAM_OPEN_TIMEOUT`. Give up on the connection:
+                // the shutdown is reported to the coordinator, which re-dials the peer if it
+                // still wants it.
+                debug_assert!(!connection_task.is_reset_called());
+                log!(
+                    &platform,
+                    Debug,
+                    "connections",
+                    "substream-open-timeout",
+                    address = address_string,
+                    num_opening = pending_opening_out_substreams.len()
+                );
+                connection_task.reset();
+                // The substreams that were being opened will never be reported, and the ones
+                // that are open can't be used anymore. Dropping the latter resets them on the
+                // platform side.
+                pending_opening_out_substreams.clear();
+                when_substreams_rw_ready.clear();
+            }
             WakeUpReason::NewSubstream(substream, direction) => {
                 let outbound = match direction {
                     SubstreamDirection::Outbound => true,
@@ -509,7 +574,8 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 );
                 connection_task.add_substream(substream_id, outbound);
                 if outbound {
-                    pending_opening_out_substreams -= 1;
+                    let _deadline = pending_opening_out_substreams.pop_front();
+                    debug_assert!(_deadline.is_some());
                 }
 
                 when_substreams_rw_ready
