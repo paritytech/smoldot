@@ -1,0 +1,25 @@
+{
+  "name": "Paseo Bulletin Next",
+  "id": "next-bulletin-paseo",
+  "chainType": "Live",
+  "bootNodes": [
+    "/dns4/paseo-bulletin-next-collator-node-0.parity-testnet.parity.io/tcp/443/wss/p2p/12D3KooWDGdPBWpytPdNAXDT2KJWwmPXkxvxyQLGc7pRdFWeZnyB",
+    "/dns4/paseo-bulletin-next-collator-node-1.parity-testnet.parity.io/tcp/443/wss/p2p/12D3KooWC45NgktSLMPQafAhi8TMAtiiatnmNc3Qv6wA74u7YBVc",
+    "/dns4/paseo-bulletin-next-rpc-node-0.polkadot.io/tcp/443/wss/p2p/12D3KooWS4ptBbHGritdb1T7JPxKT2EN7FXvqq9rUp12jUvjnqQ1",
+    "/dns4/paseo-bulletin-next-rpc-node-1.polkadot.io/tcp/443/wss/p2p/12D3KooWKMc4jJsU7fdEsis4AsM8Assk5jFqhEUEa2ZSiWJGKpfv",
+    "/ip4/34.90.164.236/udp/31073/webrtc-direct/certhash/uEiBI7aDosdfsV44xJtRemIZa2RGdubIeDK50cIDiApwaGA/p2p/12D3KooWDGdPBWpytPdNAXDT2KJWwmPXkxvxyQLGc7pRdFWeZnyB",
+    "/ip4/34.147.71.71/udp/32369/webrtc-direct/certhash/uEiAjgeyKt1YL0wYKXj3XqGSBpXxmatoopnSY3HWgLaCnUQ/p2p/12D3KooWC45NgktSLMPQafAhi8TMAtiiatnmNc3Qv6wA74u7YBVc"
+  ],
+  "telemetryEndpoints": null,
+  "protocolId": null,
+  "properties": {
+    "tokenDecimals": 10,
+    "tokenSymbol": "PAS"
+  },
+  "relay_chain": "paseo",
+  "para_id": 1501,
+  "codeSubstitutes": {},
+  "genesis": {
+    "stateRootHash": "0xec731d2141c9f893c8467d28034b1006ace0336c708051516b59d6b628d10190"
+  }
+}
