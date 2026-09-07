@@ -531,7 +531,10 @@ pub enum Notification {
         /// they're not descendants of the newly-finalized block.
         ///
         /// This list contains all the siblings of the newly-finalized block and all their
-        /// descendants.
+        /// descendants that have earlier been reported in a [`BlockNotification`], either in
+        /// [`SubscribeAll::non_finalized_blocks_ancestry_order`] or in a
+        /// [`Notification::Block`]. Blocks that were discarded before their runtime was known
+        /// were never reported and are not in this list either.
         pruned_blocks: Vec<[u8; 32]>,
     },
 
@@ -1066,17 +1069,26 @@ async fn run_background<TPlat: PlatformRef>(
                     .runtimes
                     .retain(|_, runtime| runtime.strong_count() > 0);
 
+                // Subscribers only know about the blocks that have been reported to them, and
+                // they unpin the pruned blocks they are told about. A block that has been pruned
+                // before being reported must therefore not be forwarded.
+                let reported_pruned_blocks = pruned_blocks
+                    .iter()
+                    .filter(|b| b.reported)
+                    .map(|b| b.user_data.hash)
+                    .collect::<Vec<_>>();
+
                 let all_blocks_notif = Notification::Finalized {
                     best_block_hash_if_changed,
                     hash: finalized_block.hash,
-                    pruned_blocks: pruned_blocks.iter().map(|(_, b, _)| b.hash).collect(),
+                    pruned_blocks: reported_pruned_blocks.clone(),
                 };
 
                 let mut to_remove = Vec::new();
                 for (subscription_id, (sender, finalized_pinned_remaining)) in
                     all_blocks_subscriptions.iter_mut()
                 {
-                    let count_limit = pruned_blocks.len() + 1;
+                    let count_limit = reported_pruned_blocks.len() + 1;
 
                     if *finalized_pinned_remaining < count_limit {
                         to_remove.push(*subscription_id);
@@ -1091,8 +1103,8 @@ async fn run_background<TPlat: PlatformRef>(
                     *finalized_pinned_remaining -= count_limit;
 
                     // Mark the finalized and pruned blocks as finalized or non-canonical.
-                    for block in iter::once(&finalized_block.hash)
-                        .chain(pruned_blocks.iter().map(|(_, b, _)| &b.hash))
+                    for block in
+                        iter::once(&finalized_block.hash).chain(reported_pruned_blocks.iter())
                     {
                         if let Some(pin) = pinned_blocks.get_mut(&(*subscription_id, *block)) {
                             debug_assert!(pin.block_ignores_limit);
