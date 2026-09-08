@@ -208,9 +208,11 @@ pub async fn run_js_test(script: &str, env_vars: &[(&str, &str)]) -> Result<(), 
     async fn forward(stream: impl tokio::io::AsyncRead + Unpin, tag: &str) {
         use tokio::io::AsyncBufReadExt as _;
 
-        let mut lines = tokio::io::BufReader::new(stream).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            eprintln!("[{tag}] {line}");
+        // Split on bytes rather than `lines()`: a non-UTF-8 line would otherwise end the drain
+        // early, dropping the rest of the child's output.
+        let mut lines = tokio::io::BufReader::new(stream).split(b'\n');
+        while let Ok(Some(line)) = lines.next_segment().await {
+            eprintln!("[{tag}] {}", String::from_utf8_lossy(&line));
         }
     }
 
