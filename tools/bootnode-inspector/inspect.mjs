@@ -28,6 +28,9 @@
 // transport does not report socket errors (only its 4s handshake timeout
 // ends such a connection), so without the probe every TCP failure would look
 // the same.
+// tcp, ws and wss addresses are dialed with the Node.js build of smoldot.
+// webrtc-direct addresses are dialed with the browser build inside headless
+// Chromium (see browser.mjs), when Playwright is installed.
 // By default the check then waits for `chainHead_v1_follow` to report
 // `initialized` and records how long that took; `--handshake-only` stops at the
 // handshake.
@@ -37,6 +40,7 @@
 // and connected to each of their addresses.
 
 import { start } from "smoldot";
+import { createBrowserHost } from "./browser.mjs";
 import dns from "node:dns/promises";
 import fs from "node:fs";
 import net from "node:net";
@@ -48,6 +52,12 @@ Checks each bootnode of each given chain spec individually.
 A parachain spec (one with a "relay_chain" field) needs its relay chain spec
 passed as well.
 
+Requirements:
+  Node.js 18 or newer. tcp, ws and wss addresses are dialed with the Node
+  build of smoldot. webrtc-direct addresses need headless Chromium, which
+  comes from Playwright (optional dependency):
+    npm install playwright && npx playwright install chromium-headless-shell
+
 Options:
   --timeout <s>      Seconds to wait per bootnode (default 300, or 30 with --handshake-only)
   --concurrency <n>  Bootnodes checked at the same time (default 4)
@@ -56,6 +66,10 @@ Options:
   --discover <s>     Keep running <s> seconds after the handshake and list the
                      peers discovered through the bootnode, marking the ones
                      smoldot connected to
+  --host <h>         auto (default): Node for tcp/ws/wss, Chromium for
+                     webrtc-direct, WebRTC skipped if Chromium is missing;
+                     node: Node only, WebRTC skipped;
+                     browser: Chromium only, tcp skipped, exit 2 if missing
   --bootnode <addr>  Check this multiaddr (with /p2p/<peer id>) instead of the
                      spec's bootNodes; repeatable. Applies to the single spec
                      given, or to the parachain when a relay spec is given
@@ -73,6 +87,7 @@ function parseArgs(argv) {
     concurrency: 4,
     sync: true,
     discoverMs: 0,
+    host: "auto",
     bootnodes: [],
     json: false,
     verbose: false,
@@ -94,6 +109,13 @@ function parseArgs(argv) {
         opts.discoverMs = Number.parseFloat(argv[++i]) * 1000;
         if (!(opts.discoverMs > 0)) {
           process.stderr.write("--discover needs a positive number of seconds\n");
+          process.exit(2);
+        }
+        break;
+      case "--host":
+        opts.host = argv[++i];
+        if (!["auto", "node", "browser"].includes(opts.host)) {
+          process.stderr.write("--host must be auto, node or browser\n");
           process.exit(2);
         }
         break;
@@ -167,17 +189,36 @@ function stripPeerId(addr) {
   return addr.replace(/\/p2p\/[^/]+$/, "");
 }
 
-// Returns { host, port, family, transport } for the address types the Node.js
-// build of smoldot dials, or null for anything else (WebRTC, ...).
-function parseTcpAddress(addr) {
-  const m = stripPeerId(addr).match(
-    /^\/(dns|dns4|dns6|dnsaddr|ip4|ip6)\/([^/]+)\/tcp\/(\d+)(?:\/(ws|wss|tls\/ws))?$/,
-  );
-  if (!m) return null;
-  const [, kind, host, port, ws] = m;
-  const family = kind === "dns4" || kind === "ip4" ? 4 : kind === "dns6" || kind === "ip6" ? 6 : 0;
-  return { host, port: Number(port), family, transport: ws ? (ws === "ws" ? "ws" : "wss") : "tcp" };
+// Returns { host, port, family, transport } with transport one of tcp, ws,
+// wss, webrtc; or null for an address type smoldot cannot dial.
+function parseAddress(addr) {
+  const a = stripPeerId(addr);
+  const fam = (kind) => (kind === "dns4" || kind === "ip4" ? 4 : kind === "dns6" || kind === "ip6" ? 6 : 0);
+  let m = a.match(/^\/(dns|dns4|dns6|dnsaddr|ip4|ip6)\/([^/]+)\/tcp\/(\d+)(?:\/(ws|wss|tls\/ws))?$/);
+  if (m) {
+    const [, kind, host, port, ws] = m;
+    return { host, port: Number(port), family: fam(kind), transport: ws ? (ws === "ws" ? "ws" : "wss") : "tcp" };
+  }
+  m = a.match(/^\/(dns|dns4|dns6|ip4|ip6)\/([^/]+)\/udp\/(\d+)\/webrtc-direct\/certhash\/[^/]+$/);
+  if (m) {
+    const [, kind, host, port] = m;
+    return { host, port: Number(port), family: fam(kind), transport: "webrtc" };
+  }
+  return null;
 }
+
+// Which host dials this transport under the given --host setting, or null.
+function hostFor(transport, mode) {
+  if (mode === "node") return transport === "webrtc" ? null : "node";
+  if (mode === "browser") return transport === "tcp" ? null : "browser";
+  return transport === "webrtc" ? "browser" : "node";
+}
+
+const nodeHost = {
+  name: "node",
+  startClient: async ({ maxLogLevel, logCallback }) => start({ maxLogLevel, logCallback }),
+  close: async () => {},
+};
 
 function logParam(message, key) {
   const m = message.match(new RegExp(`(?:^|[;,] )${key}=(.*?)(?:, [a-z_]+=|$)`));
@@ -277,8 +318,9 @@ class Discovery {
   }
 }
 
-// Plain DNS lookup plus TCP connect, independent of smoldot.
-async function probeTcp({ host, port, family }) {
+// Plain DNS lookup plus TCP connect, independent of smoldot. WebRTC is UDP,
+// so only the DNS part applies there.
+async function probeTcp({ host, port, family, transport }) {
   const out = { dnsMs: null, ip: null, tcpMs: null, error: null };
   const t0 = Date.now();
   let ip = host;
@@ -293,6 +335,7 @@ async function probeTcp({ host, port, family }) {
     }
   }
   out.ip = ip;
+  if (transport === "webrtc") return out;
   await new Promise((resolve) => {
     const t1 = Date.now();
     const socket = net.createConnection({ host: ip, port });
@@ -310,13 +353,16 @@ async function probeTcp({ host, port, family }) {
 }
 
 // Runs one check: a fresh smoldot client whose target chain has a single bootnode.
-async function checkBootnode({ spec, address, opts, log }) {
+async function checkBootnode({ spec, address, opts, log, hosts }) {
   const target = stripPeerId(address);
-  const parsed = parseTcpAddress(address);
+  const parsed = parseAddress(address);
+  const hostName = parsed ? hostFor(parsed.transport, opts.host) : null;
+  const host = hostName === "browser" ? hosts.browser : hostName === "node" ? nodeHost : null;
   const result = {
     chain: spec.json.id,
     address,
     transport: parsed?.transport ?? null,
+    host: host?.name ?? null,
     ok: false,
     outcome: null,
     reason: null,
@@ -328,7 +374,17 @@ async function checkBootnode({ spec, address, opts, log }) {
   };
   if (!parsed) {
     result.outcome = "skipped";
-    result.reason = "address type not dialed by the Node.js build of smoldot";
+    result.reason = "address type smoldot cannot dial";
+    return result;
+  }
+  if (!hostName) {
+    result.outcome = "skipped";
+    result.reason = `${parsed.transport} not dialed with --host ${opts.host}`;
+    return result;
+  }
+  if (!host) {
+    result.outcome = "skipped";
+    result.reason = "headless Chromium not available: npm install playwright && npx playwright install chromium-headless-shell";
     return result;
   }
 
@@ -347,6 +403,7 @@ async function checkBootnode({ spec, address, opts, log }) {
     resolveDone();
   };
   let lastResetReason = null;
+  let webrtcResetTimer = null;
   const discovery = opts.discoverMs > 0 ? new Discovery() : null;
   let discoverDone = opts.discoverMs === 0;
   let discoverTimer = null;
@@ -357,7 +414,7 @@ async function checkBootnode({ spec, address, opts, log }) {
     finish("ok");
   };
 
-  const client = start({
+  const client = await host.startClient({
     maxLogLevel: 5,
     logCallback: (level, logTarget, message) => {
       if (logTarget !== "network" && logTarget !== "connections") return;
@@ -375,6 +432,7 @@ async function checkBootnode({ spec, address, opts, log }) {
         );
       } else if (message.startsWith("handshake-finished")) {
         if (result.handshakeMs != null) return;
+        if (webrtcResetTimer) clearTimeout(webrtcResetTimer);
         result.handshakeMs = Date.now() - t0;
         if (!discoverDone) {
           discoverTimer = setTimeout(() => {
@@ -385,6 +443,15 @@ async function checkBootnode({ spec, address, opts, log }) {
         maybeFinishOk();
       } else if (logTarget === "connections" && message.startsWith("reset")) {
         lastResetReason = logParam(message, "reason");
+        // A WebRTC attempt can be reset and retried within a few seconds, and
+        // smoldot is slow to report the shutdown; give a retry a chance first.
+        if (parsed.transport === "webrtc" && result.handshakeMs == null && !webrtcResetTimer) {
+          webrtcResetTimer = setTimeout(() => {
+            if (result.handshakeMs == null) {
+              finish("fail", lastResetReason ?? "WebRTC connection failed: UDP port unreachable or certhash no longer matches the node");
+            }
+          }, 8_000);
+        }
       } else if (message.startsWith("connection-shutdown")) {
         if (logParam(message, "handshake_finished") === "false") {
           finish("fail", lastResetReason ?? "handshake not completed");
@@ -450,6 +517,7 @@ async function checkBootnode({ spec, address, opts, log }) {
     await done;
     clearTimeout(timer);
     if (discoverTimer) clearTimeout(discoverTimer);
+    if (webrtcResetTimer) clearTimeout(webrtcResetTimer);
   } catch (e) {
     finish("fail", `error: ${e.message ?? e}`);
   } finally {
@@ -512,10 +580,23 @@ async function main() {
     targets[0].bootNodes = opts.bootnodes;
   }
 
+  const hosts = { browser: null };
+  const needsBrowser = [...specs.values()].some((spec) =>
+    spec.bootNodes.some((a) => hostFor(parseAddress(a)?.transport, opts.host) === "browser"),
+  );
+  if (needsBrowser) {
+    hosts.browser = await createBrowserHost();
+    if (!hosts.browser && opts.host === "browser") {
+      log("--host browser needs headless Chromium: npm install playwright && npx playwright install chromium-headless-shell");
+      process.exit(2);
+    }
+    if (!hosts.browser) log("Headless Chromium not available, WebRTC addresses will be skipped.");
+  }
+
   const jobs = [];
   for (const spec of specs.values()) {
     for (const address of spec.bootNodes) {
-      jobs.push(() => checkBootnode({ spec, address, opts, log }));
+      jobs.push(() => checkBootnode({ spec, address, opts, log, hosts }));
     }
   }
   if (jobs.length === 0) {
@@ -534,6 +615,7 @@ async function main() {
     const status = r.ok ? "OK  " : r.outcome === "skipped" ? "SKIP" : "FAIL";
     const parts = [`tcp=${fmtMs(r.tcpMs)}`, `handshake=${fmtMs(r.handshakeMs)}`];
     if (opts.sync) parts.push(`initialized=${fmtMs(r.initializedMs)}`);
+    if (r.host === "browser") parts.push("via=browser");
     const reason = r.reason ? `  (${r.reason})` : "";
     let out = `[${doneCount}/${total}] ${status} ${r.chain} ${r.address}  ${parts.join(" ")}${reason}\n`;
     if (r.discovered) {
@@ -556,6 +638,7 @@ async function main() {
     process.stdout.write(out);
   });
 
+  if (hosts.browser) await hosts.browser.close();
   const failed = results.filter((r) => r.outcome === "fail");
   if (opts.json) {
     process.stdout.write(

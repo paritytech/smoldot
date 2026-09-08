@@ -19,7 +19,13 @@ Needs Node.js 18 or newer.
 ```sh
 cd tools/bootnode-inspector
 npm install
+npx playwright install chromium-headless-shell   # only needed for WebRTC addresses
 ```
+
+tcp, ws and wss addresses are dialed with the Node.js build of smoldot.
+`webrtc-direct` addresses need the browser build, which the tool runs inside
+headless Chromium through Playwright. Without Chromium they are reported as
+skipped.
 
 ## Usage
 
@@ -32,6 +38,7 @@ node inspect.mjs [options] <chain-spec.json> [<chain-spec.json> ...]
 | `--timeout <s>`     | Seconds to wait per bootnode. Default 300, or 30 with `--handshake-only`. |
 | `--concurrency <n>` | Bootnodes checked at the same time. Default 4.                       |
 | `--handshake-only`  | Stop at the handshake, do not wait for a finalized block.            |
+| `--host <h>`        | `auto` (default): Node for tcp/ws/wss, Chromium for webrtc-direct. `node`: WebRTC skipped. `browser`: everything through Chromium, plain tcp skipped. |
 | `--discover <s>`    | Keep running `s` seconds after the handshake and list the peers found through the bootnode, marking the ones smoldot connected to. |
 | `--bootnode <addr>` | Check this multiaddr (ending in `/p2p/<peer id>`) instead of the spec's list. Repeatable. |
 | `--json`            | Print results as JSON.                                               |
@@ -84,16 +91,3 @@ A failing address looks like this:
 ```
 [2/2] FAIL paseo /dns/paseo-boot-ng.dwellir.com/tcp/443/wss/p2p/12D3KooWBLLFKDGBxCwq3QmU3YwWKXUx953WwprRshJQicYu4Cfr  tcp=- handshake=- initialized=-  (dns: ENOTFOUND)
 ```
-
-## Notes
-
-- The pass/fail decision reads smoldot's debug log lines, which are not a
-  stable API. The dependency is `latest`; if a new release changes the log
-  format the tool reports timeouts. Pin a version in `package.json` then.
-- smoldot may reach other peers through the bootnode, so the initialized time
-  measures the bootnode as an entry point, not alone.
-- The Node build of smoldot dials `/tcp`, `/ws` and `/wss`. Other address
-  types are reported as skipped.
-- The directory is standalone: copy it anywhere, run `npm install`, and pass
-  your own chain spec files. Public chain specs are in `demo-chain-specs/` at
-  the repository root.
