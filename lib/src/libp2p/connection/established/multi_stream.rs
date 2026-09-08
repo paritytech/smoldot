@@ -806,8 +806,9 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
-    /// notifications substream isn't in the appropriate state.
+    /// Panics if the [`SubstreamId`] doesn't come from a multi-stream connection, or if it refers
+    /// to a substream that still exists but isn't a notifications substream in the appropriate
+    /// state. An unknown [`SubstreamId`] is treated as a reset substream and doesn't panic.
     ///
     pub fn write_notification_unbounded(
         &mut self,
@@ -870,8 +871,9 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
-    /// notifications substream isn't in the appropriate state.
+    /// Panics if the [`SubstreamId`] doesn't come from a multi-stream connection, or if it refers
+    /// to a substream that still exists but isn't a notifications substream in the appropriate
+    /// state. An unknown [`SubstreamId`] is treated as a reset substream and doesn't panic.
     ///
     pub fn close_out_notifications_substream(&mut self, substream_id: SubstreamId) {
         let substream_id = match substream_id.0 {
