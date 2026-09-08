@@ -6,7 +6,9 @@
     "/dns/paseo-asset-hub-next-collator-node-0.parity-testnet.parity.io/tcp/443/wss/p2p/12D3KooWKT5DcVLoBbVDAM6N5ujDVknPfQWHk8SGJqJPyAM8Z4Y4",
     "/dns/paseo-asset-hub-next-collator-node-1.parity-testnet.parity.io/tcp/443/wss/p2p/12D3KooWFjpVdBnfJFntogWhinn15WW2n8Fd2DiAcqU6i9rg47Yg",
     "/ip4/34.7.179.66/udp/32208/webrtc-direct/certhash/uEiBsqkcr8pOaNjl6px_v1nBatWMfXB9C_sU8fDat3mZWfQ/p2p/12D3KooWK8TtC31jkC9u5EfHPx7MGRCdE1kFSFXW43qdDWqdKMum",
-    "/ip4/34.91.159.79/udp/32039/webrtc-direct/certhash/uEiB5itUMGibt92QYT7-bsTz7zMTR8v7GZlJJ0RUIbNd0HA/p2p/12D3KooWK2X3GytbTgeBwFJ3mHMkpkB3u7JPu7zyTuWiuqp99UHK"
+    "/ip4/34.91.159.79/udp/32039/webrtc-direct/certhash/uEiB5itUMGibt92QYT7-bsTz7zMTR8v7GZlJJ0RUIbNd0HA/p2p/12D3KooWK2X3GytbTgeBwFJ3mHMkpkB3u7JPu7zyTuWiuqp99UHK",
+    "/ip4/212.47.243.221/udp/32722/webrtc-direct/certhash/uEiDXCKDlo5yWmgjR-8YA6NOcxIpXl4luqKZ45Tf6k9pwcA/p2p/12D3KooWQS94VydqyueCzoonSHQ3HGbSTDkWFsndh6VcDj5d4uFb",
+    "/ip4/62.210.236.55/udp/31209/webrtc-direct/certhash/uEiCqoiSD8PeOZa8CXQ9UnB7o8WbIPUM82p6pXDKhqDi1oA/p2p/12D3KooWAp8x8ivveZ5Geb7GtnP38BXdi63YcxVmLSCwo9Ng62zR"
   ],
   "telemetryEndpoints": null,
   "protocolId": null,

@@ -8,7 +8,9 @@
     "/dns4/paseo-bulletin-next-rpc-node-0.polkadot.io/tcp/443/wss/p2p/12D3KooWS4ptBbHGritdb1T7JPxKT2EN7FXvqq9rUp12jUvjnqQ1",
     "/dns4/paseo-bulletin-next-rpc-node-1.polkadot.io/tcp/443/wss/p2p/12D3KooWKMc4jJsU7fdEsis4AsM8Assk5jFqhEUEa2ZSiWJGKpfv",
     "/ip4/34.90.164.236/udp/31073/webrtc-direct/certhash/uEiBI7aDosdfsV44xJtRemIZa2RGdubIeDK50cIDiApwaGA/p2p/12D3KooWDGdPBWpytPdNAXDT2KJWwmPXkxvxyQLGc7pRdFWeZnyB",
-    "/ip4/34.147.71.71/udp/32369/webrtc-direct/certhash/uEiAjgeyKt1YL0wYKXj3XqGSBpXxmatoopnSY3HWgLaCnUQ/p2p/12D3KooWC45NgktSLMPQafAhi8TMAtiiatnmNc3Qv6wA74u7YBVc"
+    "/ip4/34.147.71.71/udp/32369/webrtc-direct/certhash/uEiAjgeyKt1YL0wYKXj3XqGSBpXxmatoopnSY3HWgLaCnUQ/p2p/12D3KooWC45NgktSLMPQafAhi8TMAtiiatnmNc3Qv6wA74u7YBVc",
+    "/ip4/62.210.238.86/udp/32599/webrtc-direct/certhash/uEiDOyT5dNLrkatH1KTtS-EL841o1Gs81HFS209Uta5tFdQ/p2p/12D3KooWS4ptBbHGritdb1T7JPxKT2EN7FXvqq9rUp12jUvjnqQ1",
+    "/ip4/163.172.167.224/udp/31817/webrtc-direct/certhash/uEiDKa_BAYSN5bZNeEllF3t-gXXaoyL3NWuDamY9MsgNdEw/p2p/12D3KooWKMc4jJsU7fdEsis4AsM8Assk5jFqhEUEa2ZSiWJGKpfv"
   ],
   "telemetryEndpoints": null,
   "protocolId": null,
