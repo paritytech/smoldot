@@ -511,32 +511,33 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 }
             }
             WakeUpReason::MessageSent => {}
-            WakeUpReason::ConnectionReset => {
+            reason @ (WakeUpReason::ConnectionReset | WakeUpReason::OutSubstreamOpenTimeout) => {
                 debug_assert!(!connection_task.is_reset_called());
-                log!(
-                    &platform,
-                    Trace,
-                    "connections",
-                    "reset",
-                    address = address_string
-                );
+                if matches!(reason, WakeUpReason::OutSubstreamOpenTimeout) {
+                    // The remote is gone (see `OUT_SUBSTREAM_OPEN_TIMEOUT`) but the platform
+                    // hasn't noticed. Reset the connection ourselves: the coordinator is notified
+                    // and re-dials the peer if it still wants it.
+                    log!(
+                        &platform,
+                        Debug,
+                        "connections",
+                        "substream-open-timeout",
+                        address = address_string,
+                        num_opening = pending_opening_out_substreams.len()
+                    );
+                } else {
+                    log!(
+                        &platform,
+                        Trace,
+                        "connections",
+                        "reset",
+                        address = address_string
+                    );
+                }
                 connection_task.reset();
-            }
-            WakeUpReason::OutSubstreamOpenTimeout => {
-                // The remote is gone (see `OUT_SUBSTREAM_OPEN_TIMEOUT`). Reset the connection:
-                // the coordinator is notified and re-dials the peer if it still wants it.
-                debug_assert!(!connection_task.is_reset_called());
-                log!(
-                    &platform,
-                    Debug,
-                    "connections",
-                    "substream-open-timeout",
-                    address = address_string,
-                    num_opening = pending_opening_out_substreams.len()
-                );
-                connection_task.reset();
-                // Pending opens will never complete and open substreams are unusable. Dropping
-                // the latter resets them on the platform side.
+                // Either way the connection is dead: pending opens will never complete and open
+                // substreams are unusable. Dropping the latter resets them on the platform side,
+                // if it hasn't already done so itself.
                 pending_opening_out_substreams.clear();
                 when_substreams_rw_ready.clear();
             }
