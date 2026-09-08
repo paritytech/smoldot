@@ -564,6 +564,17 @@ function fmtMs(ms) {
   return ms == null ? "-" : `${ms}ms`;
 }
 
+// ANSI colors on a terminal only; NO_COLOR disables them.
+const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
+const paint = (code, text) => (useColor ? `\x1b[${code}m${text}\x1b[0m` : text);
+const green = (t) => paint(32, t);
+const red = (t) => paint(31, t);
+const yellow = (t) => paint(33, t);
+const statusLabel = (status) =>
+  status === "connected" || status === "ok" ? green("OK") :
+  status === "failed" || status === "fail" ? red("FAIL") :
+  status === "skipped" ? yellow("SKIP") : status;
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const specs = loadSpecs(opts.specs);
@@ -605,19 +616,34 @@ async function main() {
   }
 
   const total = jobs.length;
-  let doneCount = 0;
   log(
     `Checking ${total} bootnode address(es) across ${specs.size} chain(s), timeout ${opts.timeoutMs / 1000}s, concurrency ${opts.concurrency}${opts.sync ? ", waiting for chainHead initialized" : ""}`,
   );
-  const results = await runAll(jobs, opts.concurrency, (r) => {
-    doneCount++;
-    if (opts.json) return;
-    const status = r.ok ? "OK  " : r.outcome === "skipped" ? "SKIP" : "FAIL";
-    const parts = [`tcp=${fmtMs(r.tcpMs)}`, `handshake=${fmtMs(r.handshakeMs)}`];
-    if (opts.sync) parts.push(`initialized=${fmtMs(r.initializedMs)}`);
-    if (r.host === "browser") parts.push("via=browser");
+  // Print in spec order, grouped per chain, flushing as soon as every earlier
+  // job has finished; under concurrency results arrive out of order.
+  const pending = new Array(total);
+  let cursor = 0;
+  let group = null;
+  const hostsUsed = new Set(
+    [...specs.values()].flatMap((spec) => spec.bootNodes.map((a) => hostFor(parseAddress(a)?.transport, opts.host))).filter(Boolean),
+  );
+  const render = (r, idx) => {
+    const status = r.ok ? `${statusLabel("ok")}  ` : statusLabel(r.outcome);
+    // Fixed-width columns: tcp=1234ms, handshake=1234ms, initialized=123456ms.
+    const parts = [`tcp=${fmtMs(r.tcpMs)}`.padEnd(10), `handshake=${fmtMs(r.handshakeMs)}`.padEnd(17)];
+    if (opts.sync) parts.push(`initialized=${fmtMs(r.initializedMs)}`.padEnd(20));
+    if (hostsUsed.size > 1 || r.host === "browser") parts.push(r.host === "browser" ? "via=browser" : "via=node   ");
     const reason = r.reason ? `  (${r.reason})` : "";
-    let out = `[${doneCount}/${total}] ${status} ${r.chain} ${r.address}  ${parts.join(" ")}${reason}\n`;
+    let out = "";
+    if (!group || group.chain !== r.chain) {
+      const addrs = specs.get(r.chain).bootNodes;
+      const size = addrs.length;
+      group = { chain: r.chain, size, seen: 0, width: Math.max(...addrs.map((a) => a.length)) };
+      out += `${idx === 0 ? "" : "\n"}${r.chain} (${size} bootnode address${size === 1 ? "" : "es"})\n`;
+    }
+    group.seen++;
+    const num = `[${group.seen}/${group.size}]`.padEnd(`[${group.size}/${group.size}]`.length);
+    out += `  ${num} ${status} ${r.address.padEnd(group.width)}  ${parts.join(" ").trimEnd()}${reason}\n`;
     if (r.discovered) {
       const peers = r.discovered;
       const connectedPeers = peers.filter((p) => p.connected).length;
@@ -625,40 +651,32 @@ async function main() {
       const triedPeers = peers.filter((p) => p.status === "dialed").length;
       const untriedPeers = peers.length - connectedPeers - failedPeers - triedPeers;
       out += `    discovered ${peers.length} peer(s) through this bootnode: ${connectedPeers} connected, ${failedPeers} failed, ${triedPeers} still dialing, ${untriedPeers} not dialed\n`;
-      const mark = { connected: "OK", failed: "FAIL", dialed: "dialing", "not dialed": "not dialed" };
       const width = Math.max(0, ...peers.flatMap((p) => p.addresses.map((a) => a.multiaddr.length)));
       for (const p of peers) {
         out += `\n      ${p.peerId}\n`;
         for (const a of p.addresses) {
           const note = a.status === "failed" && a.reason ? `  ${a.reason}` : "";
-          out += `        ${a.multiaddr.padEnd(width)}  ${mark[a.status]}${note}\n`;
+          out += `        ${a.multiaddr.padEnd(width)}  ${statusLabel(a.status)}${note}\n`;
         }
       }
     }
     process.stdout.write(out);
+  };
+  const results = await runAll(jobs, opts.concurrency, (r, idx) => {
+    if (opts.json) return;
+    pending[idx] = r;
+    while (cursor < total && pending[cursor]) {
+      render(pending[cursor], cursor);
+      pending[cursor] = undefined;
+      cursor++;
+    }
   });
-
   if (hosts.browser) await hosts.browser.close();
   const failed = results.filter((r) => r.outcome === "fail");
   if (opts.json) {
     process.stdout.write(
       `${JSON.stringify({ checkedAt: new Date().toISOString(), sync: opts.sync, timeoutMs: opts.timeoutMs, results }, null, 2)}\n`,
     );
-  } else {
-    process.stdout.write("\n");
-    for (const spec of specs.values()) {
-      const mine = results.filter((r) => r.chain === spec.json.id);
-      if (mine.length === 0) continue;
-      const okCount = mine.filter((r) => r.ok).length;
-      const skipped = mine.filter((r) => r.outcome === "skipped").length;
-      process.stdout.write(
-        `${spec.json.id}: ${okCount}/${mine.length - skipped} bootnode addresses OK${skipped ? ` (${skipped} skipped)` : ""}\n`,
-      );
-    }
-    if (failed.length > 0) {
-      process.stdout.write("\nFailed:\n");
-      for (const r of failed) process.stdout.write(`  ${r.chain} ${r.address}  ${r.reason}\n`);
-    }
   }
   process.exit(failed.length === 0 ? 0 : 1);
 }
