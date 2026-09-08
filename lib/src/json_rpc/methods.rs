@@ -1403,11 +1403,7 @@ impl serde::Serialize for Block {
     where
         S: serde::Serializer,
     {
-        // The shape below must match `sp_runtime::generic::SignedBlock`, whose `justifications`
-        // field is a *sibling* of `block` and not one of its members. Both `SignedBlock` and the
-        // inner `Block` are annotated with `deny_unknown_fields`, so putting `justifications` in
-        // the wrong object makes the response impossible to decode for Substrate-based clients,
-        // even when there is no justification to report.
+        // The shape below must match `sp_runtime::generic::SignedBlock`.
         #[derive(serde::Serialize)]
         struct SerdeBlock<'a> {
             block: SerdeBlockInner<'a>,
