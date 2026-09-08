@@ -164,6 +164,11 @@ jobs:
         run: |
           set -euo pipefail
           npm ci
+          # Debian 11 LTS ended on 2026-08-31 and bullseye-security is no
+          # longer re-signed, so apt-get update inside the bullseye-based
+          # ci-unified image fails on its expired InRelease. Drop the source
+          # until the image moves to a supported Debian release.
+          sed -i '/bullseye-security/d' /etc/apt/sources.list
           npx playwright install --with-deps chromium
 
       # Pull binaries from polkadot-sdk's per-merge CI images (see
