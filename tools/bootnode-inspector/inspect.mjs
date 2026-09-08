@@ -189,6 +189,62 @@ function stripPeerId(addr) {
   return addr.replace(/\/p2p\/[^/]+$/, "");
 }
 
+// Formats an IPv6 address the way Rust's `Ipv6Addr` Display does (RFC 5952):
+// lowercase, no leading zeros, longest run of two or more zero groups
+// compressed to `::`, IPv4-mapped addresses as `::ffff:a.b.c.d`. smoldot
+// prints addresses in that form, so a spec written differently would never
+// match the log lines. Returns the input unchanged if it does not parse.
+function canonicalIpv6(ip) {
+  let s = ip.toLowerCase();
+  let v4 = null;
+  const dot = s.lastIndexOf(":");
+  if (s.includes(".") && dot >= 0) {
+    const tail = s.slice(dot + 1).split(".").map(Number);
+    if (tail.length !== 4 || tail.some((n) => !(n >= 0 && n <= 255))) return ip;
+    v4 = tail;
+    s = `${s.slice(0, dot + 1)}${((tail[0] << 8) | tail[1]).toString(16)}:${((tail[2] << 8) | tail[3]).toString(16)}`;
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return ip;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0 || (halves.length === 1 && missing !== 0)) return ip;
+  const groups = [...head, ...Array(missing).fill("0"), ...tail].map((g) => {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return NaN;
+    return parseInt(g, 16);
+  });
+  if (groups.some(Number.isNaN)) return ip;
+  if (v4 && groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff) {
+    return `::ffff:${v4.join(".")}`;
+  }
+  let bestStart = -1;
+  let bestLen = 1;
+  for (let i = 0; i < 8; ) {
+    if (groups[i] !== 0) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < 8 && groups[j] === 0) j++;
+    if (j - i > bestLen) {
+      bestStart = i;
+      bestLen = j - i;
+    }
+    i = j;
+  }
+  const hex = groups.map((g) => g.toString(16));
+  if (bestStart < 0) return hex.join(":");
+  return `${hex.slice(0, bestStart).join(":")}::${hex.slice(bestStart + bestLen).join(":")}`;
+}
+
+// Normalizes a multiaddr for comparison with smoldot's log output.
+function canonicalMultiaddr(addr) {
+  return addr
+    .replace(/^\/ip6\/([^/]+)/, (m, ip) => `/ip6/${canonicalIpv6(ip)}`)
+    .replace(/^\/(dns|dns4|dns6|dnsaddr)\/([^/]+)/, (m, kind, host) => `/${kind}/${host.toLowerCase()}`);
+}
+
 // Returns { host, port, family, transport } with transport one of tcp, ws,
 // wss, webrtc; or null for an address type smoldot cannot dial.
 function parseAddress(addr) {
@@ -253,10 +309,11 @@ class Discovery {
 
   addr(peerId, addr) {
     const p = this.peer(peerId);
-    let a = p.addresses.get(addr);
+    const key = canonicalMultiaddr(addr);
+    let a = p.addresses.get(key);
     if (!a) {
       a = { addr, status: "not dialed", reason: null };
-      p.addresses.set(addr, a);
+      p.addresses.set(key, a);
     }
     return a;
   }
@@ -354,7 +411,7 @@ async function probeTcp({ host, port, family, transport }) {
 
 // Runs one check: a fresh smoldot client whose target chain has a single bootnode.
 async function checkBootnode({ spec, address, opts, log, hosts }) {
-  const target = stripPeerId(address);
+  const target = canonicalMultiaddr(stripPeerId(address));
   const parsed = parseAddress(address);
   const hostName = parsed ? hostFor(parsed.transport, opts.host) : null;
   const host = hostName === "browser" ? hosts.browser : hostName === "node" ? nodeHost : null;
@@ -422,7 +479,7 @@ async function checkBootnode({ spec, address, opts, log, hosts }) {
       if (opts.verbose) log(`    ${Date.now() - t0}ms [${logTarget}] ${message}`);
       if (discovery && logTarget === "network") discovery.onLog(message);
       const addr = logParam(message, "remote_addr") ?? logParam(message, "address");
-      if (addr !== target) return;
+      if (addr == null || canonicalMultiaddr(addr) !== target) return;
       if (message.startsWith("connection-started")) {
         if (dialedAt == null) dialedAt = Date.now();
       } else if (message.startsWith("handshake-finished-peer-id-mismatch")) {
