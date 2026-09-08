@@ -1789,19 +1789,13 @@ fn warp_sync_can_proceed(
 
 /// Returns `true` if a justification verification error means the sender misbehaved.
 ///
-/// The following errors are benign and must not lead to a ban:
-///
-/// - `JustificationEngineMismatch`: the chain uses a finality engine smoldot doesn't recognize.
-///   This says nothing about the sender.
-/// - `UnknownTargetBlock`: the justification targets a block the local node hasn't downloaded
-///   yet. Expected right after a warp sync, when the non-finalized tree only contains the warp
-///   sync target.
-/// - `TooFarAhead`: a block between the local finalized block and the justification's target
-///   triggers an authorities change and must be finalized first. `AllForksSync` already treats
-///   this as "can't verify yet" for GrandPa commits.
-///
-/// The last two go away once the local node catches up. Banning would drop honest peers and
-/// slow the catch-up down.
+/// [`chain::blocks_tree::FinalityVerifyError::UnknownTargetBlock`] and
+/// [`chain::blocks_tree::FinalityVerifyError::TooFarAhead`] only mean that the justification
+/// can't be verified *yet*: the local node is lagging behind, typically right after a warp sync
+/// when the non-finalized tree only contains the warp sync target, and catches up on its own.
+/// `AllForksSync` treats the same errors as "pending" for GrandPa commits.
+/// [`all::JustificationVerifyError::JustificationEngineMismatch`] says nothing about the sender
+/// either. Banning for any of these would drop honest peers and slow the catch-up down.
 fn justification_error_warrants_ban(error: &all::JustificationVerifyError) -> bool {
     !matches!(
         error,
