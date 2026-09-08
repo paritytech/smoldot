@@ -3,3 +3,4 @@
 /e2e-tests/node_modules
 /benchmarks/target
 /benchmarks/js/node_modules
+/tools/bootnode-inspector/node_modules

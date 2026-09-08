@@ -1,0 +1,21 @@
+{
+  "name": "Paseo People Next",
+  "id": "next-people-paseo",
+  "chainType": "Live",
+  "bootNodes": [
+    "/dns/paseo-people-next-system-collator-node-0.parity-testnet.parity.io/tcp/443/wss/p2p/12D3KooWN5JKhxNAfij5EvbY2Kdr5oJvAVhL5WovmxaZ2Q6m69uP",
+    "/dns/paseo-people-next-system-collator-node-1.parity-testnet.parity.io/tcp/443/wss/p2p/12D3KooWGboxsnnd1uqRUZUf3vL9fFgqnDvXxHtQ7LQN3YmPXhhY"
+  ],
+  "telemetryEndpoints": null,
+  "protocolId": null,
+  "properties": {
+    "tokenDecimals": 10,
+    "tokenSymbol": "PAS"
+  },
+  "relay_chain": "paseo",
+  "para_id": 1502,
+  "codeSubstitutes": {},
+  "genesis": {
+    "stateRootHash": "0xfaf9d67ded8dc391ab069407c0658351cebd5dbcec79b499376f71228d6eb98e"
+  }
+}
