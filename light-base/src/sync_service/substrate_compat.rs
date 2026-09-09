@@ -1111,7 +1111,9 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
 
             WakeUpReason::ForegroundMessage(ToBackground::SubscribeSyncStatus { send_back }) => {
                 let (tx, rx) = async_channel::unbounded();
-                if task.bootstrap_complete {
+                if let Some(status) = task.last_sent_sync_status {
+                    let _ = tx.try_send(status);
+                } else if task.bootstrap_complete {
                     let _ = tx.try_send(SyncStatus::Ready);
                 }
                 task.sync_status_subscribers.push(tx);
