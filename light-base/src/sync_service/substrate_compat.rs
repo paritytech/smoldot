@@ -1898,9 +1898,6 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
 /// Emits [`SyncStatus::WarpSyncing`] with `at` as the proven-finalized height and the highest
 /// best block advertised by a peer as the target.
 fn emit_warp_syncing_status<TPlat: PlatformRef>(task: &mut Task<TPlat>, at: u64) {
-    if task.sync_status_subscribers.is_empty() {
-        return;
-    }
     let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
     let peers_best = sync
         .sources()
