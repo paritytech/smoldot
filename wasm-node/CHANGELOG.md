@@ -6,9 +6,19 @@
 
 - Add the `lifecycle_unstable_follow` and `lifecycle_unstable_unfollow` JSON-RPC functions. The subscription reports the lifecycle state of the chain: whether it is still connecting, warp syncing (with the current and target block heights), or ready, how many peers are connected, and whether the built-in watchdog considers it stalled (no peers, or no warp sync progress). The first notification is the current state, reported as syncing as soon as warp sync fragments are requested, and every later notification carries the whole new state, so an embedder can show what the light client is doing without parsing log output. The schema is unstable. ([#3301](https://github.com/paritytech/smoldot/issues/3301))
 
+## 3.5.0 - 2026-09-09
+
+### Changed
+
+- `statement_submit` now validates statements the way a full node does before broadcasting them, running the expiry, size and proof checks in the same order as polkadot-sdk's statement store. Statements that fail are answered with `{"status":"invalid","reason":...}` where the reason is `alreadyExpired`, `encodingTooLarge` or `noProof`, so a caller gets the same answer smoldot and a full node would give. A payload that does not decode, or a statement that no connected peer accepted, is now a JSON-RPC error with code `7001` (polkadot-sdk's statement-store error code) instead of a successful result. Broadcast success is counted on statements actually sent, so a gossip peer with no open statement substream no longer counts as a delivery. Note that a small opaque `expiry` value is now read as a UNIX timestamp and answered with `alreadyExpired`. ([#3344](https://github.com/paritytech/smoldot/pull/3344); fixes [#3349](https://github.com/paritytech/smoldot/issues/3349))
+
 ### Fixed
 
-- `chain_getBlock` no longer returns the `justifications` field nested inside the `block` object. The response type is `sp_runtime::generic::SignedBlock`, in which `justifications` is a sibling of `block`, and both that struct and the inner block are `deny_unknown_fields`, so the misplaced field made the response impossible to decode for Substrate-based JSON-RPC clients even when there was no justification to report.
+- `chain_getBlock` no longer returns the `justifications` field nested inside the `block` object. The response type is `sp_runtime::generic::SignedBlock`, in which `justifications` is a sibling of `block`, and both that struct and the inner block are `deny_unknown_fields`, so the misplaced field made the response impossible to decode for Substrate-based JSON-RPC clients even when there was no justification to report. ([#3363](https://github.com/paritytech/smoldot/pull/3363); related to [#3288](https://github.com/paritytech/smoldot/issues/3288))
+- WebRTC connections to a peer that restarted are now recovered. A restarted peer leaves the browser's `RTCPeerConnection` in the `connected` state with every data channel dead, so no reset was ever reported and the connection stayed up but unusable. Each outbound substream open now has a 20 second deadline; when it expires the connection is reset and the peer is dialed again. ([#3361](https://github.com/paritytech/smoldot/pull/3361))
+- Fix a panic in the connection task when a notifications substream close, or an outgoing notification, crosses a reset of that substream by the remote. ([#3361](https://github.com/paritytech/smoldot/pull/3361))
+- No longer ban a peer for sending a justification that targets a block too far ahead of the local finalized block. The justification is valid, the local node just has not caught up yet, so it is treated the same as an unknown target block. ([#3361](https://github.com/paritytech/smoldot/pull/3361))
+- Update the `arkworks` crates from 0.5 to 0.6, matching polkadot-sdk. A malformed input to the elliptic curve host functions whose length prefix claimed a huge number of elements made `arkworks` 0.5 preallocate and abort the process; 0.6 decodes element by element and returns a decode error instead. ([#3356](https://github.com/paritytech/smoldot/pull/3356))
 
 ## 3.4.1 - 2026-08-13
 

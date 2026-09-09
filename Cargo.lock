@@ -2674,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -2772,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -2807,7 +2807,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light-wasm"
-version = "3.4.1"
+version = "3.5.0"
 dependencies = [
  "async-lock",
  "async-task",
