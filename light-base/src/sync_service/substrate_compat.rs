@@ -443,23 +443,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             verified_height = fragment_number
                         );
 
-                        if !task.sync_status_subscribers.is_empty() {
-                            let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
-                            let peers_best = sync
-                                .sources()
-                                .map(|src| sync.source_best_block(src).0)
-                                .max()
-                                .unwrap_or(0);
-                            emit_sync_status(
-                                &mut task,
-                                SyncStatus::WarpSyncing {
-                                    at: fragment_number,
-                                    // Peers may advertise a best block below what has just
-                                    // been verified.
-                                    target: cmp::max(peers_best, fragment_number),
-                                },
-                            );
-                        }
+                        emit_warp_syncing_status(&mut task, fragment_number);
                     }
                     Err(err) => {
                         log!(
@@ -1398,6 +1382,19 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         grandpa_request.await.map(RequestOutcome::WarpSync),
                     )
                 }));
+
+                // Report the warp sync as soon as fragments are requested rather than once the
+                // first one verifies, so that peers never answering is visible as a stall.
+                // While `Deciding` the mode may still end up `AllForksOnly`; wait for the
+                // decision to avoid a spurious warp-syncing report.
+                if !matches!(task.mode, ModeState::Deciding) {
+                    let local_finalized = task
+                        .sync
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!())
+                        .finalized_block_number();
+                    emit_warp_syncing_status(&mut task, local_finalized);
+                }
             }
 
             WakeUpReason::StartRequest(
@@ -1894,6 +1891,28 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
         .as_mut()
         .unwrap_or_else(|| unreachable!())
         .set_warp_completion_suppressed(false);
+}
+
+/// Emits [`SyncStatus::WarpSyncing`] with `at` as the proven-finalized height and the highest
+/// best block advertised by a peer as the target.
+fn emit_warp_syncing_status<TPlat: PlatformRef>(task: &mut Task<TPlat>, at: u64) {
+    if task.sync_status_subscribers.is_empty() {
+        return;
+    }
+    let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
+    let peers_best = sync
+        .sources()
+        .map(|src| sync.source_best_block(src).0)
+        .max()
+        .unwrap_or(0);
+    emit_sync_status(
+        task,
+        SyncStatus::WarpSyncing {
+            at,
+            // Peers may advertise a best block below what has already been verified.
+            target: cmp::max(peers_best, at),
+        },
+    );
 }
 
 /// Sends `status` to every subscriber of [`Task::sync_status_subscribers`], unless it is the
