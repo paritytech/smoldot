@@ -422,11 +422,11 @@ pub fn verify_justification<'a>(
         list
     };
 
-    // Check that justification contains a number of signatures equal to at least 2/3rd of the
-    // number of authorities.
+    // Number of pre-commits required for the justification to be valid.
+    let threshold = (authorities_list.len() * 2 / 3) + 1;
+
     // Duplicate signatures are checked below.
-    // The logic of the check is `actual >= (expected * 2 / 3) + 1`.
-    if num_precommits < (authorities_list.len() * 2 / 3) + 1 {
+    if num_precommits < threshold {
         return Err(JustificationVerifyError::NotEnoughSignatures);
     }
 
@@ -491,11 +491,10 @@ pub fn verify_justification<'a>(
         .map_err(|_| JustificationVerifyError::BadSignature)?;
 
     // A pre-commit is signed over the block it targets, not over the block that the justification
-    // claims to finalize. For the justification to prove anything, every pre-commit must target
-    // that block or one of its descendants.
+    // claims to finalize. Only pre-commits that target that block or one of its descendants prove
+    // anything about it, and at least `threshold` of them are required.
     //
-    // For each header in `votes_ancestries`, the map contains the hash of its parent and its
-    // height.
+    // Pre-commits that can't be linked to that block are ignored rather than rejected.
     let votes_ancestries = {
         let mut map = hashbrown::HashMap::<[u8; 32], ([u8; 32], u64), _>::with_capacity_and_hasher(
             decoded_justification.votes_ancestries.len(),
@@ -514,9 +513,10 @@ pub fn verify_justification<'a>(
         map
     };
 
-    // Hashes of the headers found in `votes_ancestries` that at least one pre-commit has walked
-    // through.
-    let mut used_votes_ancestries = hashbrown::HashSet::<[u8; 32], _>::with_capacity_and_hasher(
+    // For each header of `votes_ancestries` that a pre-commit has walked through, whether the
+    // path from that header reaches the target of the justification. Pre-commits can
+    // stop as soon as they reach a header that has already been walked through.
+    let mut walked_headers = hashbrown::HashMap::<[u8; 32], bool, _>::with_capacity_and_hasher(
         votes_ancestries.len(),
         crate::util::SipHasherBuild::new({
             let mut seed = [0; 16];
@@ -525,42 +525,48 @@ pub fn verify_justification<'a>(
         }),
     );
 
+    // Headers walked through by the current pre-commit. Reused between pre-commits.
+    let mut current_path = Vec::new();
+
+    let mut num_ignored_precommits = 0;
     for precommit in decoded_justification.precommits.iter() {
         // Walk from the block the pre-commit targets down to the target of the justification.
         let mut current_hash = *precommit.target_hash;
         let mut current_number = precommit.target_number;
-        loop {
+        let reaches_target = loop {
             if current_hash == *decoded_justification.target_hash {
-                if current_number != decoded_justification.target_number {
-                    return Err(JustificationVerifyError::BadAncestry);
-                }
-                break;
+                break current_number == decoded_justification.target_number;
             }
 
             let Some((parent_hash, number)) = votes_ancestries.get(&current_hash) else {
-                return Err(JustificationVerifyError::BadAncestry);
+                break false;
             };
             if *number != current_number {
-                return Err(JustificationVerifyError::BadAncestry);
+                break false;
             }
 
-            // A header already present was walked through by an earlier pre-commit,
-            // nothing left to check.
-            if !used_votes_ancestries.insert(current_hash) {
-                break;
+            if let Some(reaches_target) = walked_headers.get(&current_hash) {
+                break *reaches_target;
             }
+            current_path.push(current_hash);
 
             current_hash = *parent_hash;
             current_number = match current_number.checked_sub(1) {
                 Some(n) => n,
-                None => return Err(JustificationVerifyError::BadAncestry),
+                None => break false,
             };
-        }
-    }
+        };
 
-    // Reject justifications that contain headers that no pre-commit has made use of.
-    if used_votes_ancestries.len() != votes_ancestries.len() {
-        return Err(JustificationVerifyError::UnusedAncestryEntry);
+        for header_hash in current_path.drain(..) {
+            walked_headers.insert(header_hash, reaches_target);
+        }
+
+        if !reaches_target {
+            num_ignored_precommits += 1;
+            if num_precommits - num_ignored_precommits < threshold {
+                return Err(JustificationVerifyError::BadAncestry);
+            }
+        }
     }
 
     // Note that the "ghost" of the pre-commits is intentionally not calculated. Doing so would
@@ -587,12 +593,9 @@ pub enum JustificationVerifyError {
     NotAuthority { authority_key: [u8; 32] },
     /// Justification doesn't contain enough authorities signatures to be valid.
     NotEnoughSignatures,
-    /// One of the pre-commits targets a block that is neither the block that the justification
-    /// claims to finalize nor one of its descendants, or the heights in the justification are
-    /// inconsistent with its `votes_ancestries`.
+    /// Not enough pre-commits target the block that the justification claims to finalize or one
+    /// of its descendants.
     BadAncestry,
-    /// The justification contains a header that isn't used by any of the pre-commits.
-    UnusedAncestryEntry,
 }
 
 #[cfg(test)]
@@ -882,8 +885,6 @@ mod tests {
         );
     }
 
-    /// A third pre-commit targets an already-walked header at a wrong height. The height must be
-    /// checked before the shortcut for already-walked headers is taken.
     #[test]
     fn shared_header_with_inconsistent_number() {
         let (keys, authorities) = authorities();
@@ -1018,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn unused_ancestry_entry() {
+    fn extra_ancestry_header_is_ignored() {
         let (keys, authorities) = authorities();
         let target_hash = [0xaa; 32];
         let child = header(target_hash, 11);
@@ -1035,8 +1036,111 @@ mod tests {
         );
 
         let result = verify(&justification, &authorities);
+        assert!(matches!(result, Ok(())), "{result:?}");
+    }
+
+    /// A pre-commit for an ancestor of the target doesn't prove anything about the target, but
+    /// Substrate accepts justifications that contain one, along with the headers linking the
+    /// other pre-commits down to it. Such a pre-commit is ignored, as are the extra headers.
+    #[test]
+    fn precommit_below_target_is_ignored() {
+        let (keys, authorities) = authorities();
+        let ancestor_hash = [0xaa; 32];
+        let target = header(ancestor_hash, 11);
+        let target_hash = target.hash(BLOCK_NUMBER_BYTES);
+        let child = header(target_hash, 12);
+        let child_hash = child.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            11,
+            &[
+                precommit(&keys[0], child_hash, 12),
+                precommit(&keys[1], child_hash, 12),
+                precommit(&keys[2], child_hash, 12),
+                precommit(&keys[3], ancestor_hash, 10),
+            ],
+            &[child, target],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(matches!(result, Ok(())), "{result:?}");
+    }
+
+    /// A pre-commit for a block unrelated to the target is ignored as long as enough other
+    /// pre-commits target the target or its descendants.
+    #[test]
+    fn precommit_on_other_fork_is_ignored() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[2], target_hash, 10),
+                precommit(&keys[3], [0xbb; 32], 10),
+            ],
+            &[],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(matches!(result, Ok(())), "{result:?}");
+    }
+
+    /// Pre-commits that don't target the target or its descendants are ignored, but the ones
+    /// that do must still reach the threshold.
+    #[test]
+    fn not_enough_precommits_on_target() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[2], [0xbb; 32], 10),
+                precommit(&keys[3], [0xbb; 32], 10),
+            ],
+            &[],
+        );
+
+        let result = verify(&justification, &authorities);
         assert!(
-            matches!(result, Err(JustificationVerifyError::UnusedAncestryEntry)),
+            matches!(result, Err(JustificationVerifyError::BadAncestry)),
+            "{result:?}"
+        );
+    }
+
+    /// Two pre-commits share a path that doesn't lead to the target. The second walk reuses the
+    /// outcome of the first one, which must still be a failure.
+    #[test]
+    fn dead_end_shared_by_two_precommits() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        // A block whose parent isn't the target, and whose parent's header isn't provided.
+        let orphan = header([0xbb; 32], 11);
+        let orphan_hash = orphan.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[2], orphan_hash, 11),
+                precommit(&keys[3], orphan_hash, 11),
+            ],
+            &[orphan],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::BadAncestry)),
             "{result:?}"
         );
     }
