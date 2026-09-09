@@ -1366,9 +1366,10 @@ fn start_services<TPlat: platform::PlatformRef>(
 
     // Drives `LifecycleState::has_peers` and `LifecycleState::health` by polling the network
     // service. Polling (rather than subscribing to network events) keeps this task from ever
-    // slowing down the networking. The poll is frequent during the first minutes after the
-    // chain is added, where an embedder is most likely to display the state, and relaxed
-    // afterwards or once the chain is running with peers.
+    // slowing down the networking. The poll is frequent during the first minutes after a
+    // subscriber appears, where an embedder is most likely to display the state, and relaxed
+    // afterwards or once the chain is running with peers. Nothing is polled while the state
+    // has no subscriber.
     platform.spawn_task("lifecycle-watchdog".into(), {
         let lifecycle_service = Arc::downgrade(&lifecycle_service);
         let network_service_chain = Arc::downgrade(&network_service_chain);
@@ -1376,12 +1377,28 @@ fn start_services<TPlat: platform::PlatformRef>(
         async move {
             const FAST_POLL_WINDOW: Duration = Duration::from_secs(120);
 
-            let started = platform.now();
+            let mut started = platform.now();
             let mut last_peer_seen = started.clone();
             // Warp sync height last observed, and when it was first observed.
             let mut last_progress: Option<(u64, TPlat::Instant)> = None;
 
             loop {
+                let wait = {
+                    let Some(lifecycle_service) = lifecycle_service.upgrade() else {
+                        return;
+                    };
+                    lifecycle_service.wait_for_subscriber()
+                };
+                if let Some(wait) = wait {
+                    wait.await;
+                    // The time spent without a subscriber was not observed, so the stall
+                    // clocks restart.
+                    started = platform.now();
+                    last_peer_seen = started.clone();
+                    last_progress = None;
+                    continue;
+                }
+
                 let has_peers = {
                     let Some(network_service_chain) = network_service_chain.upgrade() else {
                         return;

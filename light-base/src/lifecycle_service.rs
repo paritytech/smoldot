@@ -30,6 +30,7 @@
 
 use alloc::sync::{Arc, Weak};
 use async_lock::Mutex;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 
 /// Time without any connected peer after which the chain is reported as stalled.
@@ -110,6 +111,11 @@ impl Default for LifecycleState {
 pub struct LifecycleService {
     state: Mutex<LifecycleState>,
     changed: event_listener::Event,
+    /// Number of live [`Subscription`]s.
+    num_subscribers: AtomicUsize,
+    /// Notified when [`LifecycleService::num_subscribers`] goes from zero to one, and when the
+    /// service is dropped.
+    subscribed: event_listener::Event,
 }
 
 impl LifecycleService {
@@ -117,7 +123,21 @@ impl LifecycleService {
         Arc::new(LifecycleService {
             state: Mutex::new(LifecycleState::default()),
             changed: event_listener::Event::new(),
+            num_subscribers: AtomicUsize::new(0),
+            subscribed: event_listener::Event::new(),
         })
+    }
+
+    /// Returns `None` if at least one [`Subscription`] exists, otherwise a listener that
+    /// resolves once one is created or the service is dropped. Lets the tasks that maintain
+    /// the state stay idle while nobody is watching.
+    pub fn wait_for_subscriber(&self) -> Option<event_listener::EventListener> {
+        let listener = self.subscribed.listen();
+        if self.num_subscribers.load(Ordering::Acquire) > 0 {
+            None
+        } else {
+            Some(listener)
+        }
     }
 
     /// Returns the current state.
@@ -138,6 +158,9 @@ impl LifecycleService {
     /// Subscribes to state changes. The subscription holds only a weak reference, so it never
     /// keeps the chain alive.
     pub fn subscribe(self: &Arc<Self>) -> Subscription {
+        if self.num_subscribers.fetch_add(1, Ordering::AcqRel) == 0 {
+            self.subscribed.notify(usize::MAX);
+        }
         Subscription {
             service: Arc::downgrade(self),
             last_seen: None,
@@ -147,8 +170,10 @@ impl LifecycleService {
 
 impl Drop for LifecycleService {
     fn drop(&mut self) {
-        // Wake up subscribers waiting in `Subscription::next` so that they observe the end.
+        // Wake up subscribers waiting in `Subscription::next` and tasks waiting in
+        // `wait_for_subscriber` so that they observe the end.
         self.changed.notify(usize::MAX);
+        self.subscribed.notify(usize::MAX);
     }
 }
 
@@ -157,6 +182,14 @@ pub struct Subscription {
     service: Weak<LifecycleService>,
     /// Last state returned by [`Subscription::next`]. `None` before the first call.
     last_seen: Option<LifecycleState>,
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        if let Some(service) = self.service.upgrade() {
+            service.num_subscribers.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 }
 
 impl Subscription {
@@ -251,6 +284,33 @@ mod tests {
             assert!(seen_by_slow.has_peers);
             assert_eq!(seen_by_slow.phase, Phase::Ready);
             assert!(poll_once(slow.next()).await.is_none());
+        });
+    }
+
+    #[test]
+    fn wait_for_subscriber_tracks_live_subscriptions() {
+        block_on(async {
+            let svc = LifecycleService::new();
+            let listener = svc.wait_for_subscriber().unwrap();
+            assert!(poll_once(listener).await.is_none());
+
+            let listener = svc.wait_for_subscriber().unwrap();
+            let sub = svc.subscribe();
+            assert!(poll_once(listener).await.is_some());
+            assert!(svc.wait_for_subscriber().is_none());
+
+            drop(sub);
+            assert!(svc.wait_for_subscriber().is_some());
+        });
+    }
+
+    #[test]
+    fn wait_for_subscriber_wakes_when_service_is_dropped() {
+        block_on(async {
+            let svc = LifecycleService::new();
+            let listener = svc.wait_for_subscriber().unwrap();
+            drop(svc);
+            assert!(poll_once(listener).await.is_some());
         });
     }
 
