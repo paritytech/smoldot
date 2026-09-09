@@ -658,22 +658,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             sender,
                         );
 
-                        // Errors of type `JustificationEngineMismatch` indicate that the chain
-                        // uses a finality engine that smoldot doesn't recognize. This is a benign
-                        // error that shouldn't lead to a ban.
-                        //
-                        // Errors of type `UnknownTargetBlock` are expected during the catch-up
-                        // window that follows a warp sync: the non-finalized tree only contains
-                        // the warp-sync target block, so peers may send justifications for
-                        // higher blocks that the local node hasn't downloaded yet.
-                        // Banning these peers would slow down the catch-up.
-                        if !matches!(
-                            error,
-                            all::JustificationVerifyError::JustificationEngineMismatch |
-                            all::JustificationVerifyError::FinalityVerify(
-                                smoldot::chain::blocks_tree::FinalityVerifyError::UnknownTargetBlock { .. }
-                            )
-                        ) {
+                        if justification_error_warrants_ban(&error) {
                             log!(
                                 &task.platform,
                                 Warn,
@@ -1802,6 +1787,26 @@ fn warp_sync_can_proceed(
     }
 }
 
+/// Returns `true` if a justification verification error means the sender misbehaved.
+///
+/// [`chain::blocks_tree::FinalityVerifyError::UnknownTargetBlock`] and
+/// [`chain::blocks_tree::FinalityVerifyError::TooFarAhead`] only mean that the justification
+/// can't be verified *yet*: the local node is lagging behind, typically right after a warp sync
+/// when the non-finalized tree only contains the warp sync target, and catches up on its own.
+/// `AllForksSync` treats the same errors as "pending" for GrandPa commits.
+/// [`all::JustificationVerifyError::JustificationEngineMismatch`] says nothing about the sender
+/// either. Banning for any of these would drop honest peers and slow the catch-up down.
+fn justification_error_warrants_ban(error: &all::JustificationVerifyError) -> bool {
+    !matches!(
+        error,
+        all::JustificationVerifyError::JustificationEngineMismatch
+            | all::JustificationVerifyError::FinalityVerify(
+                chain::blocks_tree::FinalityVerifyError::UnknownTargetBlock { .. }
+                    | chain::blocks_tree::FinalityVerifyError::TooFarAhead { .. }
+            )
+    )
+}
+
 /// Responds to every queued `SubscribeAll` request. Each response allocates a fresh
 /// notification channel and pushes its sender into `task.all_notifications`.
 fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
@@ -2044,5 +2049,46 @@ mod tests {
             neighbor_packet_outcome(&ModeState::Deciding, &sync, MODE_DECISION_MIN_PACKETS - 1,),
             NeighborPacketOutcome::CommitAllForksOnly,
         );
+    }
+
+    /// Errors caused by the local node lagging behind, or by an unknown finality engine, must not
+    /// lead to a ban.
+    #[test]
+    fn catch_up_justification_errors_do_not_ban() {
+        assert!(!justification_error_warrants_ban(
+            &all::JustificationVerifyError::JustificationEngineMismatch
+        ));
+        assert!(!justification_error_warrants_ban(
+            &all::JustificationVerifyError::FinalityVerify(
+                chain::blocks_tree::FinalityVerifyError::UnknownTargetBlock {
+                    block_number: 2545,
+                    block_hash: [1; 32],
+                }
+            )
+        ));
+        assert!(!justification_error_warrants_ban(
+            &all::JustificationVerifyError::FinalityVerify(
+                chain::blocks_tree::FinalityVerifyError::TooFarAhead {
+                    justification_block_number: 2545,
+                    justification_block_hash: [1; 32],
+                    block_to_finalize_number: 2520,
+                }
+            )
+        ));
+    }
+
+    /// An invalid justification is the sender's fault and leads to a ban.
+    #[test]
+    fn invalid_justification_errors_ban() {
+        assert!(justification_error_warrants_ban(
+            &all::JustificationVerifyError::VerificationFailed(
+                smoldot::finality::verify::JustificationVerifyError::BadSignature
+            )
+        ));
+        assert!(justification_error_warrants_ban(
+            &all::JustificationVerifyError::FinalityVerify(
+                chain::blocks_tree::FinalityVerifyError::EqualFinalizedHeightButInequalHash
+            )
+        ));
     }
 }
