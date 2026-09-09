@@ -1177,8 +1177,8 @@ pub enum StatementEvent {
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleState {
     pub phase: LifecyclePhase,
-    /// `true` if at least one peer is currently connected on this chain.
-    pub has_peers: bool,
+    /// Number of peers currently connected on this chain.
+    pub num_peers: u32,
     pub health: LifecycleHealth,
 }
 
@@ -1626,12 +1626,12 @@ mod tests {
 
         let connecting = LifecycleState {
             phase: LifecyclePhase::Connecting,
-            has_peers: false,
+            num_peers: 0,
             health: LifecycleHealth::Ok,
         };
         assert_eq!(
             serde_json::to_string(&connecting).unwrap(),
-            r#"{"phase":{"kind":"connecting"},"hasPeers":false,"health":{"kind":"ok"}}"#
+            r#"{"phase":{"kind":"connecting"},"numPeers":0,"health":{"kind":"ok"}}"#
         );
 
         let syncing = LifecycleState {
@@ -1639,7 +1639,7 @@ mod tests {
                 at: 1200,
                 target: 29400,
             },
-            has_peers: true,
+            num_peers: 7,
             health: LifecycleHealth::Stalled {
                 reason: LifecycleStallReason::NoProgress,
             },
@@ -1647,7 +1647,7 @@ mod tests {
         let json = serde_json::to_string(&syncing).unwrap();
         assert_eq!(
             json,
-            r#"{"phase":{"kind":"syncing","at":1200,"target":29400},"hasPeers":true,"health":{"kind":"stalled","reason":"noProgress"}}"#
+            r#"{"phase":{"kind":"syncing","at":1200,"target":29400},"numPeers":7,"health":{"kind":"stalled","reason":"noProgress"}}"#
         );
         assert_eq!(
             serde_json::from_str::<LifecycleState>(&json).unwrap(),

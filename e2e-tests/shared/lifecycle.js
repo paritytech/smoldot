@@ -23,7 +23,7 @@
 // - the relay chain reports `syncing` with `at < target` before `ready` when
 //   EXPECT_WARP_SYNC is "true", and `at` never decreases
 // - the parachain never reports `syncing`
-// - at `ready`, `hasPeers` is true and `health` is `ok`
+// - at `ready`, `numPeers` is above zero and `health` is `ok`
 // - after `unfollow`, a new `follow` starts with a `ready` snapshot
 //
 // See <https://github.com/paritytech/smoldot/issues/3301>.
@@ -48,7 +48,7 @@ function describe(state) {
       : state.phase.kind;
   const health =
     state.health.kind === "stalled" ? `stalled(${state.health.reason})` : state.health.kind;
-  return `${phase} hasPeers=${state.hasPeers} health=${health}`;
+  return `${phase} numPeers=${state.numPeers} health=${health}`;
 }
 
 // Checks the recorded states of one chain and reports the results.
@@ -60,7 +60,7 @@ function checkStates(report, label, states, { expectWarpSync, allowSyncing }) {
 
   const last = states[states.length - 1];
   report(`${label}: reaches ready`, last.phase.kind === "ready", describe(last));
-  report(`${label}: has peers when ready`, last.hasPeers, describe(last));
+  report(`${label}: has peers when ready`, last.numPeers > 0, describe(last));
   report(`${label}: health is ok when ready`, last.health.kind === "ok", describe(last));
 
   const syncing = states.filter((s) => s.phase.kind === "syncing");
@@ -124,13 +124,13 @@ export default async function lifecycle(ctx) {
   }
 
   // Poll both chains in turn until each has reported `ready` with peers, or the deadline
-  // passes. `hasPeers` is sampled by smoldot about once per second, so on a fast local
+  // passes. `numPeers` is sampled by smoldot about once per second, so on a fast local
   // network `ready` can arrive before the first sample: allow a grace period for it.
   const deadline = Date.now() + overallTimeoutMs;
   const peersGraceMs = 10_000;
   const last = (c) => c.states[c.states.length - 1];
   const isReady = (c) => c.states.length > 0 && last(c).phase.kind === "ready";
-  const isSettled = (c) => isReady(c) && last(c).hasPeers;
+  const isSettled = (c) => isReady(c) && last(c).numPeers > 0;
   let allReadyAt = null;
   while (Date.now() < deadline && !chains.every(isSettled)) {
     if (chains.every(isReady)) {

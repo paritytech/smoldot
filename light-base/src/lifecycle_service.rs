@@ -92,8 +92,8 @@ pub enum Health {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LifecycleState {
     pub phase: Phase,
-    /// `true` if at least one peer is currently connected on this chain.
-    pub has_peers: bool,
+    /// Number of peers currently connected on this chain.
+    pub num_peers: u32,
     pub health: Health,
 }
 
@@ -101,7 +101,7 @@ impl Default for LifecycleState {
     fn default() -> Self {
         LifecycleState {
             phase: Phase::Connecting,
-            has_peers: false,
+            num_peers: 0,
             health: Health::Ok,
         }
     }
@@ -226,12 +226,12 @@ mod tests {
     fn first_next_returns_current_state() {
         block_on(async {
             let svc = LifecycleService::new();
-            svc.update(|s| s.has_peers = true).await;
+            svc.update(|s| s.num_peers = 3).await;
 
             let mut sub = svc.subscribe();
             let state = sub.next().await.unwrap();
 
-            assert!(state.has_peers);
+            assert_eq!(state.num_peers, 3);
             assert_eq!(state.phase, Phase::Connecting);
             assert!(poll_once(sub.next()).await.is_none());
         });
@@ -262,7 +262,7 @@ mod tests {
             let mut sub = svc.subscribe();
             sub.next().await.unwrap();
 
-            svc.update(|s| s.has_peers = false).await;
+            svc.update(|s| s.num_peers = 0).await;
 
             assert!(poll_once(sub.next()).await.is_none());
         });
@@ -277,13 +277,13 @@ mod tests {
             fast.next().await.unwrap();
             slow.next().await.unwrap();
 
-            svc.update(|s| s.has_peers = true).await;
-            assert!(fast.next().await.unwrap().has_peers);
+            svc.update(|s| s.num_peers = 3).await;
+            assert_eq!(fast.next().await.unwrap().num_peers, 3);
             svc.update(|s| s.phase = Phase::Ready).await;
             assert_eq!(fast.next().await.unwrap().phase, Phase::Ready);
 
             let seen_by_slow = slow.next().await.unwrap();
-            assert!(seen_by_slow.has_peers);
+            assert_eq!(seen_by_slow.num_peers, 3);
             assert_eq!(seen_by_slow.phase, Phase::Ready);
             assert!(poll_once(slow.next()).await.is_none());
         });

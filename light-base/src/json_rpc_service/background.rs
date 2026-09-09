@@ -581,7 +581,7 @@ fn lifecycle_state_to_json_rpc(
             }
             lifecycle_service::Phase::Ready => methods::LifecyclePhase::Ready,
         },
-        has_peers: state.has_peers,
+        num_peers: state.num_peers,
         health: match state.health {
             lifecycle_service::Health::Ok => methods::LifecycleHealth::Ok,
             lifecycle_service::Health::Stalled { reason } => methods::LifecycleHealth::Stalled {

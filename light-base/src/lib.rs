@@ -1364,7 +1364,7 @@ fn start_services<TPlat: platform::PlatformRef>(
         }
     });
 
-    // Drives `LifecycleState::has_peers` and `LifecycleState::health` by polling the network
+    // Drives `LifecycleState::num_peers` and `LifecycleState::health` by polling the network
     // service. Polling (rather than subscribing to network events) keeps this task from ever
     // slowing down the networking. The poll is frequent during the first minutes after a
     // subscriber appears, where an embedder is most likely to display the state, and relaxed
@@ -1399,12 +1399,14 @@ fn start_services<TPlat: platform::PlatformRef>(
                     continue;
                 }
 
-                let has_peers = {
+                let num_peers = {
                     let Some(network_service_chain) = network_service_chain.upgrade() else {
                         return;
                     };
-                    network_service_chain.peers_list().await.next().is_some()
+                    u32::try_from(network_service_chain.peers_list().await.count())
+                        .unwrap_or(u32::MAX)
                 };
+                let has_peers = num_peers > 0;
                 let Some(lifecycle_service) = lifecycle_service.upgrade() else {
                     return;
                 };
@@ -1437,7 +1439,7 @@ fn start_services<TPlat: platform::PlatformRef>(
 
                 lifecycle_service
                     .update(|s| {
-                        s.has_peers = has_peers;
+                        s.num_peers = num_peers;
                         s.health = health;
                     })
                     .await;
