@@ -7457,7 +7457,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "ark-bls12-381 0.6.0",
  "ark-ec 0.6.0",
@@ -7523,7 +7523,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "smoldot 2.2.0",
+ "smoldot 3.0.0",
  "tempfile",
  "tokio",
  "zombienet-sdk",
