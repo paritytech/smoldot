@@ -79,7 +79,8 @@ function checkStates(report, label, states, { expectWarpSync, allowSyncing }) {
     }
     report(`${label}: syncing height never decreases`, monotonic, `${syncing.length} syncing states`);
     const readyIndex = states.findIndex((s) => s.phase.kind === "ready");
-    const syncingAfterReady = states.slice(readyIndex + 1).some((s) => s.phase.kind === "syncing");
+    const syncingAfterReady =
+      readyIndex >= 0 && states.slice(readyIndex + 1).some((s) => s.phase.kind === "syncing");
     report(`${label}: no syncing after ready`, !syncingAfterReady);
   } else {
     report(`${label}: never reports syncing`, syncing.length === 0, `${syncing.length} syncing states`);

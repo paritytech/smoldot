@@ -3256,15 +3256,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 state,
                 subscription,
             }) => {
-                let Some(cancel) = me.lifecycle_subscriptions.get(&subscription_id).cloned() else {
-                    // Unfollowed in the meantime.
-                    continue;
-                };
-
-                let Some(state) = state else {
-                    // The chain is being removed. The JSON-RPC service goes away with it, so
-                    // there is nobody left to notify.
-                    me.lifecycle_subscriptions.remove(&subscription_id);
+                // `state` is `None` only after an unfollow, which removes the map entry
+                // first: the lifecycle service outlives this JSON-RPC service.
+                let (Some(cancel), Some(state)) = (
+                    me.lifecycle_subscriptions.get(&subscription_id).cloned(),
+                    state,
+                ) else {
                     continue;
                 };
 
