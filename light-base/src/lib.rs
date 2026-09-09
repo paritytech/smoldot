@@ -104,6 +104,7 @@ mod sync_service;
 mod transactions_service;
 mod util;
 
+pub mod lifecycle_service;
 pub mod network_service;
 pub mod platform;
 
@@ -291,6 +292,7 @@ struct ChainServices<TPlat: platform::PlatformRef> {
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
     bitswap_service: Arc<bitswap_service::BitswapService>,
+    lifecycle_service: Arc<lifecycle_service::LifecycleService>,
 }
 
 impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
@@ -301,6 +303,7 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
             runtime_service: self.runtime_service.clone(),
             transactions_service: self.transactions_service.clone(),
             bitswap_service: self.bitswap_service.clone(),
+            lifecycle_service: self.lifecycle_service.clone(),
         }
     }
 }
@@ -933,6 +936,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 transactions_service: services.transactions_service.clone(),
                 runtime_service: services.runtime_service.clone(),
                 bitswap_service: services.bitswap_service.clone(),
+                lifecycle_service: services.lifecycle_service.clone(),
                 chain_name: chain_spec.name().to_owned(),
                 chain_ty: chain_spec.chain_type().to_owned(),
                 chain_is_live: chain_spec.has_live_network(),
@@ -1061,6 +1065,24 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         json_rpc_sender.queue_rpc_request(json_rpc_request)
+    }
+
+    /// Returns a stream of typed lifecycle events for the given chain.
+    ///
+    /// The returned channel is pre-populated with a snapshot of the events already
+    /// emitted for this chain, so late subscribers see the full history. See
+    /// [`lifecycle_service::LifecycleEvent`] for the event schema.
+    ///
+    /// The event schema is unstable and versioned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    pub async fn lifecycle_events(&self, chain_id: ChainId) -> lifecycle_service::Subscription {
+        let key = &self.public_api_chains.get(chain_id.0).unwrap().key;
+        let chains_by_key = self.chains_by_key.as_ref().unwrap();
+        let running = chains_by_key.get(key).unwrap();
+        running.services.lifecycle_service.subscribe().await
     }
 }
 
@@ -1277,11 +1299,243 @@ fn start_services<TPlat: platform::PlatformRef>(
     // JSON-RPC requests by querying remote nodes for IPFS blocks.
     let bitswap_service = Arc::new(bitswap_service::BitswapService::new(
         bitswap_service::Config {
-            log_name,
+            log_name: log_name.clone(),
             platform: platform.clone(),
             network_service: network_service_chain.clone(),
         },
     ));
+
+    // Lifecycle events are a typed projection of what the sync and network
+    // services already publish. Small tasks watch those streams and emit into
+    // the broadcaster. A separate watchdog tracks stall heuristics.
+    let lifecycle_service = lifecycle_service::LifecycleService::new();
+
+    // Emits `Connecting`, then `FirstPeer` on the first `Connected` network
+    // event. Both are emitted from the same task so their order is guaranteed
+    // without relying on inter-task scheduling. The `NetworkServiceChain` Arc
+    // is dropped as soon as the subscription is created so this task doesn't
+    // keep the per-chain network background alive after `remove_chain`.
+    platform.spawn_task("lifecycle-connecting-first-peer".into(), {
+        let network_service_chain = network_service_chain.clone();
+        let lifecycle_service = lifecycle_service.clone();
+        async move {
+            lifecycle_service
+                .emit(lifecycle_service::LifecycleEvent::Connecting)
+                .await;
+
+            let events = network_service_chain.subscribe().await;
+            drop(network_service_chain);
+            while let Ok(event) = events.recv().await {
+                if matches!(event, network_service::Event::Connected { .. }) {
+                    lifecycle_service
+                        .emit(lifecycle_service::LifecycleEvent::FirstPeer)
+                        .await;
+                    return;
+                }
+            }
+        }
+    });
+
+    // Only a `Weak<SyncService>` is captured, so a stuck warp does not keep the chain
+    // alive after `remove_chain`.
+    platform.spawn_task("lifecycle-bootstrap".into(), {
+        let lifecycle_service = lifecycle_service.clone();
+        let sync_service = Arc::downgrade(&sync_service);
+        async move {
+            let Some(sync_service_arc) = sync_service.upgrade() else {
+                return;
+            };
+            let status_stream = sync_service_arc.subscribe_bootstrap_status().await;
+            drop(sync_service_arc);
+
+            let lifecycle_service_clone = lifecycle_service.clone();
+            let status_relay = async move {
+                while let Ok(status) = status_stream.recv().await {
+                    let event = match status {
+                        sync_service::BootstrapStatus::ModeCommitted { mode } => {
+                            lifecycle_service::LifecycleEvent::ModeDecision {
+                                mode: match mode {
+                                    sync_service::BootstrapMode::WarpSync => {
+                                        lifecycle_service::SyncMode::WarpSync
+                                    }
+                                    sync_service::BootstrapMode::AllForks => {
+                                        lifecycle_service::SyncMode::AllForks
+                                    }
+                                },
+                            }
+                        }
+                        sync_service::BootstrapStatus::WarpSyncProgress { at, target } => {
+                            lifecycle_service::LifecycleEvent::WarpSyncProgress { at, target }
+                        }
+                        sync_service::BootstrapStatus::WarpSyncFinished { finalized } => {
+                            lifecycle_service::LifecycleEvent::WarpSyncFinished { finalized }
+                        }
+                    };
+                    lifecycle_service_clone.emit(event).await;
+                }
+            };
+
+            // The first block on `new_blocks` means live-block streaming has started,
+            // which is our `BootstrapComplete` signal. The channel can close before a
+            // block arrives, so resubscribe on close.
+            let bootstrap_complete = async {
+                loop {
+                    let Some(sync_service_arc) = sync_service.upgrade() else {
+                        return;
+                    };
+                    let subscription = sync_service_arc.subscribe_all(16, false).await;
+                    drop(sync_service_arc);
+                    if subscription.new_blocks.recv().await.is_ok() {
+                        lifecycle_service
+                            .emit(lifecycle_service::LifecycleEvent::BootstrapComplete)
+                            .await;
+                        return;
+                    }
+                }
+            };
+
+            futures_lite::future::zip(status_relay, bootstrap_complete).await;
+        }
+    });
+
+    // No log-line projection sink here. The JSON-RPC background already logs
+    // every emitted event under the `json-rpc-<chain>` debug target, so a
+    // subscriber to `lifecycle_unstable_follow` produces the full log stream
+    // for free. Adding a parallel projection task would create an Arc cycle
+    // (the task keeps the service alive via its own clone, while its
+    // subscriber `Sender` is retained inside `LifecycleService::subscribers`),
+    // leaving state resident after chain removal. Migrating the existing
+    // sync/network debug lines onto the event-derived path is a follow-up
+    // sweep tracked in paritytech/smoldot#3301.
+
+    // Stall watchdog. A single polling loop tracks the stall heuristics and
+    // re-arms after each trip so a chain that recovers gets a matching
+    // `Recovered` event. The heuristics are approximate: the goal is a signal
+    // for a UI or a metrics exporter, not a proof of failure.
+    platform.spawn_task("lifecycle-watchdog".into(), {
+        // Held as `Weak` so the watchdog does not keep the chain alive after
+        // `remove_chain`. Each iteration upgrades and exits early if any of
+        // them has been dropped.
+        let lifecycle_service = Arc::downgrade(&lifecycle_service);
+        let sync_service = Arc::downgrade(&sync_service);
+        let network_service_chain = Arc::downgrade(&network_service_chain);
+        let platform = platform.clone();
+        async move {
+            const POLL_INTERVAL: Duration = Duration::from_secs(5);
+            const NO_PEERS_TIMEOUT: Duration = Duration::from_secs(30);
+            const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
+            const WARP_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(45);
+
+            let status_stream = {
+                let Some(sync_service_arc) = sync_service.upgrade() else {
+                    return;
+                };
+                sync_service_arc.subscribe_bootstrap_status().await
+            };
+
+            let started = platform.now();
+            // Seeded so `NoPeers` can only trip after the window elapses.
+            let mut last_peer_seen = started.clone();
+            let mut bootstrap_complete = false;
+            let mut last_warp_position: Option<u64> = None;
+            let mut last_warp_advance_seen = started.clone();
+            let mut last_stall_reason: Option<lifecycle_service::StallReason> = None;
+
+            loop {
+                // Polling prevents a `subscribe` channel drained on a 5s tick from
+                // back-pressuring the whole networking layer.
+                let Some(network_service_chain_arc) = network_service_chain.upgrade() else {
+                    return;
+                };
+                let peer_count = network_service_chain_arc.peers_list().await.count();
+                drop(network_service_chain_arc);
+                if peer_count > 0 {
+                    last_peer_seen = platform.now();
+                }
+
+                // Drain authoritative state-machine signals since the last tick.
+                while let Ok(status) = status_stream.try_recv() {
+                    match status {
+                        sync_service::BootstrapStatus::ModeCommitted { .. } => {
+                            bootstrap_complete = true;
+                            last_warp_position = None;
+                        }
+                        sync_service::BootstrapStatus::WarpSyncProgress { at, .. } => {
+                            if last_warp_position != Some(at) {
+                                last_warp_position = Some(at);
+                                last_warp_advance_seen = platform.now();
+                            }
+                        }
+                        sync_service::BootstrapStatus::WarpSyncFinished { .. } => {
+                            last_warp_position = None;
+                        }
+                    }
+                }
+
+                // `NoPeers` is checked first so a disconnected chain does not silently
+                // switch categories. When a bootstrap timeout and a stalled warp are
+                // both in play, `WarpNoProgress` is preferred because it is the finer
+                // signal.
+                let now = platform.now();
+                let no_peers = now.clone() - last_peer_seen.clone() >= NO_PEERS_TIMEOUT;
+                let bootstrap_stuck =
+                    !bootstrap_complete && now.clone() - started.clone() >= BOOTSTRAP_TIMEOUT;
+                let warp_stuck = !bootstrap_complete
+                    && last_warp_position.is_some()
+                    && now.clone() - last_warp_advance_seen.clone() >= WARP_NO_PROGRESS_TIMEOUT;
+                let active = if no_peers {
+                    Some(lifecycle_service::StallReason::NoPeers)
+                } else if warp_stuck {
+                    Some(lifecycle_service::StallReason::WarpNoProgress)
+                } else if bootstrap_stuck {
+                    Some(lifecycle_service::StallReason::BootstrapTimeout)
+                } else {
+                    None
+                };
+
+                match (last_stall_reason, active) {
+                    (None, Some(reason)) => {
+                        let Some(lifecycle_service_arc) = lifecycle_service.upgrade() else {
+                            return;
+                        };
+                        lifecycle_service_arc
+                            .emit(lifecycle_service::LifecycleEvent::Stalled { reason })
+                            .await;
+                        last_stall_reason = Some(reason);
+                    }
+                    (Some(prev), None) => {
+                        let Some(lifecycle_service_arc) = lifecycle_service.upgrade() else {
+                            return;
+                        };
+                        lifecycle_service_arc
+                            .emit(lifecycle_service::LifecycleEvent::Recovered { previously: prev })
+                            .await;
+                        last_stall_reason = None;
+                    }
+                    (Some(prev), Some(new)) if prev != new => {
+                        // Reason changed without an intervening healthy
+                        // interval. Emit a `Recovered` for the previous
+                        // reason and a fresh `Stalled` so consumers see an
+                        // explicit close-then-open pair.
+                        let Some(lifecycle_service_arc) = lifecycle_service.upgrade() else {
+                            return;
+                        };
+                        lifecycle_service_arc
+                            .emit(lifecycle_service::LifecycleEvent::Recovered { previously: prev })
+                            .await;
+                        lifecycle_service_arc
+                            .emit(lifecycle_service::LifecycleEvent::Stalled { reason: new })
+                            .await;
+                        last_stall_reason = Some(new);
+                    }
+                    // Still healthy, or still stalled for the same reason.
+                    _ => {}
+                }
+
+                platform.sleep(POLL_INTERVAL).await;
+            }
+        }
+    });
 
     ChainServices {
         network_service: network_service_chain,
@@ -1289,5 +1543,6 @@ fn start_services<TPlat: platform::PlatformRef>(
         sync_service,
         transactions_service,
         bitswap_service,
+        lifecycle_service,
     }
 }

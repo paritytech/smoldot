@@ -18,7 +18,7 @@
 use crate::{
     bitswap_service,
     json_rpc_service::StatementProtocolConfig,
-    log, network_service,
+    lifecycle_service, log, network_service,
     platform::PlatformRef,
     runtime_service, sync_service, transactions_service,
     util::{self, SipHasherBuild},
@@ -71,6 +71,9 @@ pub(super) struct Config<TPlat: PlatformRef> {
 
     /// Service that fulfills IPFS CID requests.
     pub bitswap_service: Arc<bitswap_service::BitswapService>,
+
+    /// Broadcaster of typed lifecycle events for the chain.
+    pub lifecycle_service: Arc<lifecycle_service::LifecycleService>,
 
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
@@ -136,6 +139,13 @@ struct Background<TPlat: PlatformRef> {
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
     /// See [`Config::bitswap_service`].
     bitswap_service: Arc<bitswap_service::BitswapService>,
+    /// See [`Config::lifecycle_service`].
+    lifecycle_service: Arc<lifecycle_service::LifecycleService>,
+
+    /// Active `lifecycle_unstable_follow` subscriptions. The value is notified when the
+    /// subscription is cancelled so the pump future exits.
+    lifecycle_subscriptions:
+        hashbrown::HashMap<String, Arc<event_listener::Event>, fnv::FnvBuildHasher>,
 
     /// Tasks that are spawned by the service and running in the background.
     background_tasks: stream::FuturesUnordered<Pin<Box<dyn Future<Output = Event<TPlat>> + Send>>>,
@@ -527,6 +537,21 @@ enum Event<TPlat: PlatformRef> {
         event: Option<(String, bitswap_service::BlockResult)>,
         events_rx: async_channel::Receiver<(String, bitswap_service::BlockResult)>,
     },
+    /// Result of [`lifecycle_service::LifecycleService::subscribe`], resolved off the
+    /// main dispatch loop so `lifecycle_unstable_follow` never blocks on the broadcaster
+    /// `Mutex`.
+    LifecycleFollowReady {
+        request_id_json: String,
+        subscription: lifecycle_service::Subscription,
+    },
+    /// One iteration of the `lifecycle_unstable_follow` events pump. `event` is `None`
+    /// when the broadcaster channel closes or the subscription is cancelled.
+    LifecycleFollowEvent {
+        subscription_id: String,
+        event: Option<lifecycle_service::LifecycleEvent>,
+        subscription: lifecycle_service::Subscription,
+        cancel: Arc<event_listener::Event>,
+    },
 }
 
 struct BitswapSubscription {
@@ -591,6 +616,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
         bitswap_service: config.bitswap_service.clone(),
+        lifecycle_service: config.lifecycle_service.clone(),
+        lifecycle_subscriptions: hashbrown::HashMap::with_hasher(Default::default()),
         background_tasks: stream::FuturesUnordered::new(),
         runtime_service_subscription: RuntimeServiceSubscription::NotCreated,
         all_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
@@ -825,6 +852,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.runtime_version_subscriptions.shrink_to_fit();
                 me.transactions_subscriptions.shrink_to_fit();
                 me.statement_subscriptions.shrink_to_fit();
+                me.bitswap_subscriptions.shrink_to_fit();
+                me.lifecycle_subscriptions.shrink_to_fit();
                 me.legacy_api_stale_storage_subscriptions.shrink_to_fit();
                 me.multistage_requests_to_advance.shrink_to_fit();
                 me.block_headers_pending.shrink_to_fit();
@@ -1014,7 +1043,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
                     | methods::MethodCall::bitswap_unstable_get { .. }
                     | methods::MethodCall::bitswap_unstable_stream { .. }
-                    | methods::MethodCall::bitswap_unstable_unstream { .. } => {}
+                    | methods::MethodCall::bitswap_unstable_unstream { .. }
+                    | methods::MethodCall::lifecycle_unstable_follow { .. }
+                    | methods::MethodCall::lifecycle_unstable_unfollow { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -3063,6 +3094,39 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::Response::statement_unsubscribeStatement(existed)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::lifecycle_unstable_follow {} => {
+                        // `LifecycleService::subscribe` takes an inner `Mutex` for the
+                        // duration of the call. Resolve it off-loop and finish setup in
+                        // the `LifecycleFollowReady` handler.
+                        me.background_tasks.push({
+                            let lifecycle_service = me.lifecycle_service.clone();
+                            let request_id_json = request_id_json.to_owned();
+                            Box::pin(async move {
+                                let subscription = lifecycle_service.subscribe().await;
+                                Event::LifecycleFollowReady {
+                                    request_id_json,
+                                    subscription,
+                                }
+                            })
+                        });
+                    }
+
+                    methods::MethodCall::lifecycle_unstable_unfollow { subscription } => {
+                        // Notifying wakes the pump, which drops the receiver and lets the
+                        // broadcaster prune the sender on its next emit. The call succeeds
+                        // whether the id is known.
+                        if let Some(cancel) = me.lifecycle_subscriptions.remove(&*subscription) {
+                            cancel.notify(usize::MAX);
+                        }
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::lifecycle_unstable_unfollow(())
                                     .to_json_response(request_id_json),
                             )
                             .await;
@@ -6136,6 +6200,171 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         .to_json_request_object_parameters(None);
                         let _ = me.responses_tx.send(notification).await;
                         me.bitswap_subscriptions.remove(&subscription_id);
+                    }
+                }
+            }
+
+            WakeUpReason::Event(Event::LifecycleFollowReady {
+                request_id_json,
+                subscription,
+            }) => {
+                // Off-loop setup resolved. Assign an id, record the subscription,
+                // acknowledge the caller, and arm the first pump iteration.
+                let subscription_id = {
+                    let mut bytes = [0u8; 32];
+                    me.randomness.fill_bytes(&mut bytes);
+                    bs58::encode(bytes).into_string()
+                };
+
+                let cancel = Arc::new(event_listener::Event::new());
+                let _prev_value = me
+                    .lifecycle_subscriptions
+                    .insert(subscription_id.clone(), cancel.clone());
+                debug_assert!(_prev_value.is_none());
+
+                let _ = me
+                    .responses_tx
+                    .send(
+                        methods::Response::lifecycle_unstable_follow(Cow::Borrowed(
+                            &subscription_id,
+                        ))
+                        .to_json_response(&request_id_json),
+                    )
+                    .await;
+
+                me.background_tasks.push(Box::pin(async move {
+                    let cancelled = cancel.listen();
+                    let event = futures_lite::future::or(subscription.recv(), async move {
+                        cancelled.await;
+                        None
+                    })
+                    .await;
+                    Event::LifecycleFollowEvent {
+                        subscription_id,
+                        event,
+                        subscription,
+                        cancel,
+                    }
+                }));
+            }
+
+            WakeUpReason::Event(Event::LifecycleFollowEvent {
+                subscription_id,
+                event,
+                subscription,
+                cancel,
+            }) => {
+                // Caller already unfollowed (or the id was never issued): drop the
+                // event and stop the pump.
+                if !me.lifecycle_subscriptions.contains_key(&subscription_id) {
+                    continue;
+                }
+
+                match event {
+                    Some(ev) => {
+                        let stall_reason_to_wire = |r: lifecycle_service::StallReason| match r {
+                            lifecycle_service::StallReason::NoPeers => {
+                                methods::LifecycleStallReason::NoPeers
+                            }
+                            lifecycle_service::StallReason::WarpNoProgress => {
+                                methods::LifecycleStallReason::WarpNoProgress
+                            }
+                            lifecycle_service::StallReason::BootstrapTimeout => {
+                                methods::LifecycleStallReason::BootstrapTimeout
+                            }
+                        };
+                        let result = match ev {
+                            lifecycle_service::LifecycleEvent::Connecting => {
+                                methods::LifecycleEvent::Connecting
+                            }
+                            lifecycle_service::LifecycleEvent::FirstPeer => {
+                                methods::LifecycleEvent::FirstPeer
+                            }
+                            lifecycle_service::LifecycleEvent::ModeDecision { mode } => {
+                                methods::LifecycleEvent::ModeDecision {
+                                    mode: match mode {
+                                        lifecycle_service::SyncMode::WarpSync => {
+                                            methods::LifecycleSyncMode::WarpSync
+                                        }
+                                        lifecycle_service::SyncMode::AllForks => {
+                                            methods::LifecycleSyncMode::AllForks
+                                        }
+                                    },
+                                }
+                            }
+                            lifecycle_service::LifecycleEvent::WarpSyncProgress { at, target } => {
+                                methods::LifecycleEvent::WarpSyncProgress { at, target }
+                            }
+                            lifecycle_service::LifecycleEvent::WarpSyncFinished { finalized } => {
+                                methods::LifecycleEvent::WarpSyncFinished { finalized }
+                            }
+                            lifecycle_service::LifecycleEvent::BootstrapComplete => {
+                                methods::LifecycleEvent::BootstrapComplete
+                            }
+                            lifecycle_service::LifecycleEvent::Stalled { reason } => {
+                                methods::LifecycleEvent::Stalled {
+                                    reason: stall_reason_to_wire(reason),
+                                }
+                            }
+                            lifecycle_service::LifecycleEvent::Recovered { previously } => {
+                                methods::LifecycleEvent::Recovered {
+                                    previously: stall_reason_to_wire(previously),
+                                }
+                            }
+                            lifecycle_service::LifecycleEvent::Stopped { reason } => {
+                                methods::LifecycleEvent::Stopped {
+                                    reason: match reason {
+                                        lifecycle_service::StopReason::Lagged => {
+                                            methods::LifecycleStopReason::Lagged
+                                        }
+                                        lifecycle_service::StopReason::ChainRemoved => {
+                                            methods::LifecycleStopReason::ChainRemoved
+                                        }
+                                    },
+                                }
+                            }
+                        };
+                        let notification =
+                            methods::ServerToClient::lifecycle_unstable_followEvent {
+                                subscription: Cow::Borrowed(&subscription_id),
+                                result,
+                            }
+                            .to_json_request_object_parameters(None);
+                        let _ = me.responses_tx.send(notification).await;
+
+                        // Re-arm the pump for the next event.
+                        me.background_tasks.push(Box::pin(async move {
+                            let cancelled = cancel.listen();
+                            let next = futures_lite::future::or(subscription.recv(), async move {
+                                cancelled.await;
+                                None
+                            })
+                            .await;
+                            Event::LifecycleFollowEvent {
+                                subscription_id,
+                                event: next,
+                                subscription,
+                                cancel,
+                            }
+                        }));
+                    }
+                    None => {
+                        // Broadcaster dropped this sender. `was_lagged` tells us whether
+                        // this subscriber was dropped for falling behind, or the chain
+                        // was removed.
+                        let reason = if subscription.was_lagged() {
+                            methods::LifecycleStopReason::Lagged
+                        } else {
+                            methods::LifecycleStopReason::ChainRemoved
+                        };
+                        let notification =
+                            methods::ServerToClient::lifecycle_unstable_followEvent {
+                                subscription: Cow::Borrowed(&subscription_id),
+                                result: methods::LifecycleEvent::Stopped { reason },
+                            }
+                            .to_json_request_object_parameters(None);
+                        let _ = me.responses_tx.send(notification).await;
+                        me.lifecycle_subscriptions.remove(&subscription_id);
                     }
                 }
             }

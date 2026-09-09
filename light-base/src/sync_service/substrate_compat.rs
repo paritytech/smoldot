@@ -16,8 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{
-    BlockNotification, ConfigSubstrateCompatibleRuntimeCodeHint, FinalizedBlockRuntime,
-    Notification, SubscribeAll, ToBackground,
+    BlockNotification, BootstrapMode, BootstrapStatus, ConfigSubstrateCompatibleRuntimeCodeHint,
+    FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground,
 };
 use crate::{log, network_service, platform::PlatformRef, util};
 
@@ -118,6 +118,9 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         .fuse(),
         mode: ModeState::Deciding,
         bootstrap_complete: false,
+        chosen_bootstrap_mode: None,
+        bootstrap_status_subscribers: Vec::new(),
+        last_reported_warp_progress: None,
         deciding_packets_seen: 0,
         mode_decision_deadline: future::Either::Left(Box::pin(
             platform.sleep(MODE_DECISION_TIMEOUT),
@@ -399,7 +402,21 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         &task.log_target,
                         "mode-decision; transition=Ready (WarpSyncFinished)",
                     );
+                    let finalized_height = task
+                        .sync
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!())
+                        .finalized_block_number();
                     drain_pending_subscriptions(&mut task);
+                    commit_bootstrap_mode(&mut task, BootstrapMode::WarpSync);
+                    if !task.bootstrap_complete {
+                        emit_bootstrap_status(
+                            &mut task.bootstrap_status_subscribers,
+                            BootstrapStatus::WarpSyncFinished {
+                                finalized: finalized_height,
+                            },
+                        );
+                    }
                     task.bootstrap_complete = true;
                     // Post-bootstrap re-warp is allowed; the `Stop` flows through
                     // `all_notifications.clear()` above.
@@ -438,6 +455,29 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             verified_hash = HashDisplay(&fragment_hash),
                             verified_height = fragment_number
                         );
+
+                        // `ModeCommitted` must precede any `WarpSyncProgress` on the stream.
+                        commit_bootstrap_mode(&mut task, BootstrapMode::WarpSync);
+
+                        let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
+                        let peer_best = sync
+                            .sources()
+                            .map(|src| sync.source_best_block(src).0)
+                            .max()
+                            .unwrap_or(0);
+                        // A peer sample can lag the fragments we already verified.
+                        let target = cmp::max(peer_best, fragment_number);
+                        let progress = (fragment_number, target);
+                        if task.last_reported_warp_progress != Some(progress) {
+                            task.last_reported_warp_progress = Some(progress);
+                            emit_bootstrap_status(
+                                &mut task.bootstrap_status_subscribers,
+                                BootstrapStatus::WarpSyncProgress {
+                                    at: fragment_number,
+                                    target,
+                                },
+                            );
+                        }
                     }
                     Err(err) => {
                         log!(
@@ -1131,6 +1171,18 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 ));
             }
 
+            WakeUpReason::ForegroundMessage(ToBackground::SubscribeBootstrapStatus {
+                send_back,
+            }) => {
+                // Unbounded so a slow subscriber does not deadlock the sync loop.
+                let (tx, rx) = async_channel::unbounded();
+                if let Some(mode) = task.chosen_bootstrap_mode {
+                    let _ = tx.try_send(BootstrapStatus::ModeCommitted { mode });
+                }
+                task.bootstrap_status_subscribers.push(tx);
+                let _ = send_back.send(rx);
+            }
+
             WakeUpReason::ForegroundClosed => {
                 // The channel with the frontend sync service has been closed.
                 // Closing the sync background task as a result.
@@ -1631,6 +1683,16 @@ struct Task<TPlat: PlatformRef> {
     /// Once `true`, warp may re-engage and any later completion is allowed to fire a `Stop`.
     bootstrap_complete: bool,
 
+    /// Bootstrap mode, once committed. `None` while the state machine is still
+    /// deciding.
+    chosen_bootstrap_mode: Option<BootstrapMode>,
+
+    /// Subscribers to the [`BootstrapStatus`] stream.
+    bootstrap_status_subscribers: Vec<async_channel::Sender<BootstrapStatus>>,
+
+    /// Deduplicates consecutive [`BootstrapStatus::WarpSyncProgress`] emissions.
+    last_reported_warp_progress: Option<(u64, u64)>,
+
     /// Below-gap packets observed while [`ModeState::Deciding`]; gates AllForksOnly commit.
     deciding_packets_seen: usize,
 
@@ -1846,11 +1908,33 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
     task.network_up_to_date_best = false;
 
     drain_pending_subscriptions(task);
+    commit_bootstrap_mode(task, BootstrapMode::AllForks);
     task.bootstrap_complete = true;
     task.sync
         .as_mut()
         .unwrap_or_else(|| unreachable!())
         .set_warp_completion_suppressed(false);
+}
+
+/// Idempotent. Only the first call takes effect so the reported mode always reflects
+/// the initial bootstrap.
+fn commit_bootstrap_mode<TPlat: PlatformRef>(task: &mut Task<TPlat>, mode: BootstrapMode) {
+    if task.chosen_bootstrap_mode.is_some() {
+        return;
+    }
+    task.chosen_bootstrap_mode = Some(mode);
+    emit_bootstrap_status(
+        &mut task.bootstrap_status_subscribers,
+        BootstrapStatus::ModeCommitted { mode },
+    );
+}
+
+/// Drops subscribers whose receiver is closed or full.
+fn emit_bootstrap_status(
+    subscribers: &mut Vec<async_channel::Sender<BootstrapStatus>>,
+    event: BootstrapStatus,
+) {
+    subscribers.retain(|sender| sender.try_send(event.clone()).is_ok());
 }
 
 #[cfg(test)]
@@ -2044,5 +2128,58 @@ mod tests {
             neighbor_packet_outcome(&ModeState::Deciding, &sync, MODE_DECISION_MIN_PACKETS - 1,),
             NeighborPacketOutcome::CommitAllForksOnly,
         );
+    }
+
+    #[test]
+    fn emit_bootstrap_status_delivers_to_all_open_subscribers() {
+        // Given
+        let mut subscribers = Vec::new();
+        let mut receivers = Vec::new();
+        for _ in 0..3 {
+            let (tx, rx) = async_channel::unbounded();
+            subscribers.push(tx);
+            receivers.push(rx);
+        }
+
+        // When
+        emit_bootstrap_status(
+            &mut subscribers,
+            BootstrapStatus::ModeCommitted {
+                mode: BootstrapMode::WarpSync,
+            },
+        );
+
+        // Then
+        assert_eq!(subscribers.len(), 3);
+        for rx in receivers {
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(BootstrapStatus::ModeCommitted {
+                    mode: BootstrapMode::WarpSync
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn emit_bootstrap_status_drops_closed_subscribers() {
+        // Given
+        let (tx_healthy, rx_healthy) = async_channel::unbounded();
+        let (tx_closed, rx_closed) = async_channel::unbounded::<BootstrapStatus>();
+        drop(rx_closed);
+        let mut subscribers = vec![tx_healthy, tx_closed];
+
+        // When
+        emit_bootstrap_status(
+            &mut subscribers,
+            BootstrapStatus::WarpSyncFinished { finalized: 42 },
+        );
+
+        // Then
+        assert_eq!(subscribers.len(), 1);
+        assert!(matches!(
+            rx_healthy.try_recv(),
+            Ok(BootstrapStatus::WarpSyncFinished { finalized: 42 })
+        ));
     }
 }
