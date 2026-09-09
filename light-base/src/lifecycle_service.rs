@@ -128,9 +128,11 @@ impl LifecycleService {
         })
     }
 
-    /// Returns `None` if at least one [`Subscription`] exists, otherwise a listener that
-    /// resolves once one is created or the service is dropped. Lets the tasks that maintain
-    /// the state stay idle while nobody is watching.
+    /// If no [`Subscription`] exists, returns a listener that resolves once one is created or
+    /// the service is dropped. Returns `None` if a subscription already exists and there is
+    /// nothing to wait for.
+    ///
+    /// Lets the tasks that maintain the state stay idle while nobody is watching.
     pub fn wait_for_subscriber(&self) -> Option<event_listener::EventListener> {
         let listener = self.subscribed.listen();
         if self.num_subscribers.load(Ordering::Acquire) > 0 {
