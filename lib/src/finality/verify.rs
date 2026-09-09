@@ -724,10 +724,18 @@ mod tests {
         justification: &[u8],
         authorities_list: &[[u8; 32]],
     ) -> Result<(), JustificationVerifyError> {
+        verify_with_set_id(justification, authorities_list, SET_ID)
+    }
+
+    fn verify_with_set_id(
+        justification: &[u8],
+        authorities_list: &[[u8; 32]],
+        authorities_set_id: u64,
+    ) -> Result<(), JustificationVerifyError> {
         verify_justification(JustificationVerifyConfig {
             justification,
             block_number_bytes: BLOCK_NUMBER_BYTES,
-            authorities_set_id: SET_ID,
+            authorities_set_id,
             authorities_list: authorities_list.iter().map(|a| &a[..]),
             randomness_seed: [0; 32],
         })
@@ -885,6 +893,8 @@ mod tests {
         );
     }
 
+    /// One pre-commit is signed over the right hash but a height that disagrees with the header.
+    /// It doesn't count, leaving too few pre-commits.
     #[test]
     fn shared_header_with_inconsistent_number() {
         let (keys, authorities) = authorities();
@@ -927,6 +937,34 @@ mod tests {
                 .map(|k| precommit(k, genuinely_signed_block, 10))
                 .collect::<Vec<_>>(),
             &[],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::BadAncestry)),
+            "{result:?}"
+        );
+    }
+
+    /// Same as [`precommits_cant_be_retargeted`], but the justification also carries the genuine
+    /// header of the signed block. Its parent isn't the fabricated block, so the pre-commits
+    /// still can't be linked to it.
+    #[test]
+    fn precommits_cant_be_retargeted_through_ancestry() {
+        let (keys, authorities) = authorities();
+        let real_parent = [0xaa; 32];
+        let fabricated_block = [0xbb; 32];
+        let signed_block = header(real_parent, 11);
+        let signed_block_hash = signed_block.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            fabricated_block,
+            10,
+            &keys[..3]
+                .iter()
+                .map(|k| precommit(k, signed_block_hash, 11))
+                .collect::<Vec<_>>(),
+            &[signed_block],
         );
 
         let result = verify(&justification, &authorities);
@@ -993,8 +1031,8 @@ mod tests {
         );
     }
 
-    /// A pre-commit that targets the same hash as the justification but a different height must
-    /// be rejected.
+    /// A pre-commit that targets the same hash as the justification but a different height
+    /// doesn't count, leaving too few pre-commits.
     #[test]
     fn precommit_target_height_mismatch() {
         let (keys, authorities) = authorities();
@@ -1018,6 +1056,33 @@ mod tests {
         );
     }
 
+    /// A block at height 0 has no ancestor, so a pre-commit for such a block can't be linked to a
+    /// justification target below it, even if a header claims to give it a parent.
+    #[test]
+    fn precommit_at_height_zero_cant_have_ancestors() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let block = header(target_hash, 0);
+        let block_hash = block.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            0,
+            &keys[..3]
+                .iter()
+                .map(|k| precommit(k, block_hash, 0))
+                .collect::<Vec<_>>(),
+            &[block],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::BadAncestry)),
+            "{result:?}"
+        );
+    }
+
+    /// Headers that no pre-commit needs are ignored.
     #[test]
     fn extra_ancestry_header_is_ignored() {
         let (keys, authorities) = authorities();
@@ -1074,14 +1139,16 @@ mod tests {
         let (keys, authorities) = authorities();
         let target_hash = [0xaa; 32];
 
+        // The ignored pre-commit comes first: the justification must not be rejected before the
+        // other pre-commits have been looked at.
         let justification = encode_justification(
             target_hash,
             10,
             &[
-                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[0], [0xbb; 32], 10),
                 precommit(&keys[1], target_hash, 10),
                 precommit(&keys[2], target_hash, 10),
-                precommit(&keys[3], [0xbb; 32], 10),
+                precommit(&keys[3], target_hash, 10),
             ],
             &[],
         );
@@ -1224,6 +1291,95 @@ mod tests {
         let result = verify(&justification, &authorities);
         assert!(
             matches!(result, Err(JustificationVerifyError::NotAuthority { .. })),
+            "{result:?}"
+        );
+    }
+
+    /// An authority appearing twice is rejected, even if the other pre-commits would be enough on
+    /// their own.
+    #[test]
+    fn duplicate_authority_detected() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let child = header(target_hash, 11);
+        let child_hash = child.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[2], target_hash, 10),
+                // Second pre-commit from `keys[0]`, this time for a child of the target.
+                precommit(&keys[0], child_hash, 11),
+            ],
+            &[child],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(
+                result,
+                Err(JustificationVerifyError::DuplicateSignature { authority_key })
+                    if authority_key == public_key(&keys[0])
+            ),
+            "{result:?}"
+        );
+    }
+
+    /// The set id is part of the signed message, so a justification can't be re-used against a
+    /// different set of authorities.
+    #[test]
+    fn wrong_set_id_rejected() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &keys[..3]
+                .iter()
+                .map(|k| precommit(k, target_hash, 10))
+                .collect::<Vec<_>>(),
+            &[],
+        );
+
+        let result = verify_with_set_id(&justification, &authorities, SET_ID + 1);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::BadSignature)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_justification_rejected() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &keys[..3]
+                .iter()
+                .map(|k| precommit(k, target_hash, 10))
+                .collect::<Vec<_>>(),
+            &[],
+        );
+
+        // Truncated.
+        let result = verify(&justification[..justification.len() - 1], &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::InvalidFormat)),
+            "{result:?}"
+        );
+
+        // Trailing byte.
+        let mut with_trailing_byte = justification.clone();
+        with_trailing_byte.push(0);
+        let result = verify(&with_trailing_byte, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::InvalidFormat)),
             "{result:?}"
         );
     }
