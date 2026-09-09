@@ -553,8 +553,10 @@ fn lifecycle_follow_task<TPlat: PlatformRef>(
     mut subscription: lifecycle_service::Subscription,
     cancel: Arc<event_listener::Event>,
 ) -> Pin<Box<dyn Future<Output = Event<TPlat>> + Send>> {
+    // Registered before the future is polled, so that a cancellation that happens in between
+    // is not missed.
+    let cancelled = cancel.listen();
     Box::pin(async move {
-        let cancelled = cancel.listen();
         let state = futures_lite::future::or(subscription.next(), async {
             cancelled.await;
             None
