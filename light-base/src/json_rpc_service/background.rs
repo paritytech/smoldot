@@ -850,10 +850,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.statement_events_rx = Some(me.network_service.subscribe_statements().await);
             }
 
-            WakeUpReason::NetworkStatementsReceived(statements) => {
+            WakeUpReason::NetworkStatementsReceived(mut statements) => {
                 if me.statement_subscriptions.is_empty() {
                     continue;
                 }
+
+                let now = me.platform.now_from_unix_epoch();
+                statements
+                    .retain(|(_, statement)| super::statement::is_deliverable(statement, now));
 
                 // The reverse `topic` -> `subscription` index inside `statement_subscriptions`
                 // keeps this proportional to the number of subscriptions sharing a topic with the
@@ -3044,10 +3048,25 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::statement_subscribeStatement(Cow::Owned(
-                                    subscription_id,
+                                methods::Response::statement_subscribeStatement(Cow::Borrowed(
+                                    &subscription_id,
                                 ))
                                 .to_json_response(request_id_json),
+                            )
+                            .await;
+
+                        // The initial batch is always empty, see `statement_subscribeStatement`.
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::statement_statement {
+                                    subscription: Cow::Owned(subscription_id),
+                                    result: methods::StatementEvent::NewStatements {
+                                        statements: Vec::new(),
+                                        remaining: Some(0),
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
                             )
                             .await;
                     }
