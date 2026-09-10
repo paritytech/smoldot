@@ -26,22 +26,27 @@
 //! reads slowly simply skips intermediate states. Nothing is buffered, so a slow subscriber
 //! can never fall behind or slow down syncing.
 //!
+//! [`start`] creates the service of a chain together with the two tasks that keep it up to
+//! date: one maps the sync service's status to the phase, the other polls the network service
+//! for the peer count and derives the stall verdict.
+//!
 //! The schema is unstable.
 
+use crate::{network_service, platform::PlatformRef, sync_service};
 use alloc::sync::{Arc, Weak};
 use async_lock::Mutex;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 
 /// Time without any connected peer after which the chain is reported as stalled.
-pub(crate) const NO_PEERS_TIMEOUT: Duration = Duration::from_secs(30);
+const NO_PEERS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Time without warp sync progress after which the chain is reported as stalled.
-pub(crate) const NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(45);
+const NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Decides the [`Health`] from how long the chain has had no peer and, if a warp sync is in
 /// progress, how long it has not advanced.
-pub(crate) fn health_verdict(no_peers_for: Duration, no_progress_for: Option<Duration>) -> Health {
+fn health_verdict(no_peers_for: Duration, no_progress_for: Option<Duration>) -> Health {
     if no_peers_for >= NO_PEERS_TIMEOUT {
         Health::Stalled {
             reason: StallReason::NoPeers,
@@ -105,6 +110,161 @@ impl Default for LifecycleState {
             health: Health::Ok,
         }
     }
+}
+
+/// Creates the [`LifecycleService`] of a chain and spawns the two tasks that keep it up to date.
+/// Both tasks hold only weak references so that they stop, rather than keep the chain alive,
+/// once the chain is removed.
+pub(crate) fn start<TPlat: PlatformRef>(
+    platform: &TPlat,
+    sync_service: &Arc<sync_service::SyncService<TPlat>>,
+    network_service_chain: &Arc<network_service::NetworkServiceChain<TPlat>>,
+) -> Arc<LifecycleService> {
+    let lifecycle_service = LifecycleService::new();
+
+    // Drives `LifecycleState::phase` from the sync service's own status: `Syncing` while a warp
+    // sync is in progress, `Ready` once the sync service serves the chain. Ends when the sync
+    // service is gone.
+    platform.spawn_task("lifecycle-phase".into(), {
+        let lifecycle_service = Arc::downgrade(&lifecycle_service);
+        let sync_service = Arc::downgrade(sync_service);
+        let platform = platform.clone();
+        async move {
+            // Warp sync fragments can verify at dozens per second. Every status is applied
+            // as soon as it is received, but after a progress update the task pauses for
+            // this interval and then applies only the newest status that arrived meanwhile,
+            // so that consumers see at most a couple of progress updates per second while
+            // still seeing the start of a warp sync and its end without delay.
+            const PROGRESS_BATCH_INTERVAL: Duration = Duration::from_millis(500);
+
+            let sync_status = {
+                let Some(sync_service) = sync_service.upgrade() else {
+                    return;
+                };
+                sync_service.subscribe_sync_status().await
+            };
+
+            let apply = |status: sync_service::SyncStatus| {
+                let lifecycle_service = lifecycle_service.clone();
+                async move {
+                    let lifecycle_service = lifecycle_service.upgrade()?;
+                    let phase = match status {
+                        sync_service::SyncStatus::WarpSyncing { at, target } => {
+                            Phase::Syncing { at, target }
+                        }
+                        sync_service::SyncStatus::Ready => Phase::Ready,
+                    };
+                    lifecycle_service.update(|s| s.phase = phase).await;
+                    Some(())
+                }
+            };
+
+            while let Ok(status) = sync_status.recv().await {
+                if apply(status).await.is_none() {
+                    return;
+                }
+                if matches!(status, sync_service::SyncStatus::WarpSyncing { .. }) {
+                    platform.sleep(PROGRESS_BATCH_INTERVAL).await;
+                    let mut newest = None;
+                    while let Ok(newer) = sync_status.try_recv() {
+                        newest = Some(newer);
+                    }
+                    if let Some(newest) = newest
+                        && apply(newest).await.is_none()
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+
+    // Drives `LifecycleState::num_peers` and `LifecycleState::health` by polling the network
+    // service. Polling (rather than subscribing to network events) keeps this task from ever
+    // slowing down the networking. The poll is frequent during the first minutes after a
+    // subscriber appears, where an embedder is most likely to display the state, and relaxed
+    // afterwards or once the chain is running with peers. Nothing is polled while the state
+    // has no subscriber.
+    platform.spawn_task("lifecycle-watchdog".into(), {
+        let lifecycle_service = Arc::downgrade(&lifecycle_service);
+        let network_service_chain = Arc::downgrade(network_service_chain);
+        let platform = platform.clone();
+        async move {
+            const FAST_POLL_WINDOW: Duration = Duration::from_secs(120);
+
+            let mut started = platform.now();
+            let mut last_peer_seen = started.clone();
+            // Warp sync height last observed, and when it was first observed.
+            let mut last_progress: Option<(u64, TPlat::Instant)> = None;
+
+            loop {
+                let wait = {
+                    let Some(lifecycle_service) = lifecycle_service.upgrade() else {
+                        return;
+                    };
+                    lifecycle_service.wait_for_subscriber()
+                };
+                if let Some(wait) = wait {
+                    wait.await;
+                    // The time spent without a subscriber was not observed, so the stall
+                    // clocks restart.
+                    started = platform.now();
+                    last_peer_seen = started.clone();
+                    last_progress = None;
+                    continue;
+                }
+
+                let num_peers = {
+                    let Some(network_service_chain) = network_service_chain.upgrade() else {
+                        return;
+                    };
+                    u32::try_from(network_service_chain.peers_list().await.count())
+                        .unwrap_or(u32::MAX)
+                };
+                let has_peers = num_peers > 0;
+                let Some(lifecycle_service) = lifecycle_service.upgrade() else {
+                    return;
+                };
+
+                let now = platform.now();
+                if has_peers {
+                    last_peer_seen = now.clone();
+                }
+
+                let state = lifecycle_service.current().await;
+                let no_progress_for = match (state.phase, &last_progress) {
+                    (Phase::Syncing { at, .. }, Some((seen_at, since))) if *seen_at == at => {
+                        Some(now.clone() - since.clone())
+                    }
+                    (Phase::Syncing { at, .. }, _) => {
+                        last_progress = Some((at, now.clone()));
+                        Some(Duration::ZERO)
+                    }
+                    _ => {
+                        last_progress = None;
+                        None
+                    }
+                };
+                let health = health_verdict(now.clone() - last_peer_seen.clone(), no_progress_for);
+
+                lifecycle_service
+                    .update(|s| {
+                        s.num_peers = num_peers;
+                        s.health = health;
+                    })
+                    .await;
+                drop(lifecycle_service);
+
+                let settled = has_peers && matches!(state.phase, Phase::Ready);
+                let fast = !settled && now - started.clone() < FAST_POLL_WINDOW;
+                platform
+                    .sleep(Duration::from_secs(if fast { 1 } else { 5 }))
+                    .await;
+            }
+        }
+    });
+
+    lifecycle_service
 }
 
 /// Holder of the [`LifecycleState`] of one chain.
