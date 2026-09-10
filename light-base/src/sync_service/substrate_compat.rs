@@ -1390,12 +1390,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 // While `Deciding` the mode may still end up `AllForksOnly`; wait for the
                 // decision to avoid a spurious warp-syncing report.
                 if !matches!(task.mode, ModeState::Deciding) {
-                    let local_finalized = task
-                        .sync
-                        .as_ref()
-                        .unwrap_or_else(|| unreachable!())
-                        .finalized_block_number();
-                    emit_warp_syncing_status(&mut task, local_finalized);
+                    let proven_finalized = warp_sync_finalized_number(
+                        task.sync.as_ref().unwrap_or_else(|| unreachable!()),
+                    );
+                    emit_warp_syncing_status(&mut task, proven_finalized);
                 }
             }
 
@@ -1893,6 +1891,24 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
         .as_mut()
         .unwrap_or_else(|| unreachable!())
         .set_warp_completion_suppressed(false);
+}
+
+/// Height of the highest block proven finalized by the warp sync in progress. Falls back to the
+/// finalized block of the chain when no warp sync is in progress.
+fn warp_sync_finalized_number(
+    sync: &all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>,
+) -> u64 {
+    match sync.status() {
+        all::Status::WarpSyncFragments {
+            finalized_block_number,
+            ..
+        }
+        | all::Status::WarpSyncChainInformation {
+            finalized_block_number,
+            ..
+        } => finalized_block_number,
+        all::Status::Sync => sync.finalized_block_number(),
+    }
 }
 
 /// Emits [`SyncStatus::WarpSyncing`] with `at` as the proven-finalized height and the highest
