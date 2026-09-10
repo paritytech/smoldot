@@ -543,6 +543,9 @@ define_methods! {
     sudo_network_unstable_watch() -> Cow<'a, str>,
     sudo_network_unstable_unwatch(subscription: Cow<'a, str>) -> (),
     chainHead_unstable_finalizedDatabase(#[rename = "maxSizeBytes"] max_size_bytes: Option<u64>) -> Cow<'a, str>,
+    /// Returns a snapshot of the node's internal metrics. See
+    /// <https://github.com/paritytech/smoldot/issues/3285>.
+    sudo_unstable_metrics() -> MetricsSnapshot,
 
 }
 
@@ -1074,6 +1077,40 @@ pub struct SystemHealth {
     pub is_syncing: bool,
     pub peers: u64,
     pub should_have_peers: bool,
+}
+
+/// Response of [`MethodCall::sudo_unstable_metrics`]. List of metric families.
+///
+/// The list of families and their labels is unstable and can change between smoldot versions.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MetricsSnapshot {
+    pub metrics: Vec<Metric>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Metric {
+    pub name: Cow<'static, str>,
+    #[serde(rename = "type")]
+    pub ty: MetricType,
+    pub entries: Vec<MetricEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum MetricType {
+    #[serde(rename = "counter")]
+    Counter,
+    #[serde(rename = "gauge")]
+    Gauge,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MetricEntry {
+    #[serde(
+        default,
+        skip_serializing_if = "alloc::collections::BTreeMap::is_empty"
+    )]
+    pub labels: alloc::collections::BTreeMap<Cow<'static, str>, Cow<'static, str>>,
+    pub value: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

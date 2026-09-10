@@ -72,6 +72,12 @@ pub(super) struct Config<TPlat: PlatformRef> {
     /// Service that fulfills IPFS CID requests.
     pub bitswap_service: Arc<bitswap_service::BitswapService>,
 
+    /// Metrics of the chain, returned by `sudo_unstable_metrics`.
+    pub chain_metrics: Arc<crate::metrics::ChainMetrics>,
+
+    /// Process-wide network metrics, returned by `sudo_unstable_metrics`.
+    pub network_metrics: Arc<crate::metrics::NetworkMetrics>,
+
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
     /// Type of chain, as found in the chain specification.
@@ -136,6 +142,10 @@ struct Background<TPlat: PlatformRef> {
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
     /// See [`Config::bitswap_service`].
     bitswap_service: Arc<bitswap_service::BitswapService>,
+    /// See [`Config::chain_metrics`].
+    chain_metrics: Arc<crate::metrics::ChainMetrics>,
+    /// See [`Config::network_metrics`].
+    network_metrics: Arc<crate::metrics::NetworkMetrics>,
 
     /// Tasks that are spawned by the service and running in the background.
     background_tasks: stream::FuturesUnordered<Pin<Box<dyn Future<Output = Event<TPlat>> + Send>>>,
@@ -591,6 +601,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
         bitswap_service: config.bitswap_service.clone(),
+        chain_metrics: config.chain_metrics.clone(),
+        network_metrics: config.network_metrics.clone(),
         background_tasks: stream::FuturesUnordered::new(),
         runtime_service_subscription: RuntimeServiceSubscription::NotCreated,
         all_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
@@ -1005,6 +1017,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::rpc_methods { .. }
                     | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
                     | methods::MethodCall::sudo_unstable_version { .. }
+                    | methods::MethodCall::sudo_unstable_metrics { .. }
                     | methods::MethodCall::transaction_v1_broadcast { .. }
                     | methods::MethodCall::transaction_v1_stop { .. }
                     | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. }
@@ -2879,6 +2892,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 methods::Response::sudo_unstable_version(
                                     format!("{} {}", me.system_name, me.system_version).into(),
                                 )
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::sudo_unstable_metrics {} => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::sudo_unstable_metrics(crate::metrics::snapshot(
+                                    &me.network_metrics,
+                                    &me.chain_metrics,
+                                ))
                                 .to_json_response(request_id_json),
                             )
                             .await;
