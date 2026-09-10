@@ -12,14 +12,14 @@ ZOMBIENET_SDK_DEFAULT_RUNNER_FOR_NATIVE=parity-zombienet-native-default
 ZOMBIENET_SDK_LARGE_RUNNER_FOR_NATIVE=parity-zombienet-native-large
 
 # polkadot-sdk master merge-commit (short sha) whose binaries the tests run
-# against. The tests need a build where WebRTC is available, so binaries
-# are extracted from the per-merge Docker images that polkadot-sdk's own
-# zombienet CI runs on:
+# against. Binaries are extracted from the per-merge Docker images that
+# polkadot-sdk's own zombienet CI runs on:
 #  docker.io/paritypr/{polkadot-debug,polkadot-parachain-debug}:master-<sha8>
 #
-# Pinned to polkadot-sdk#12870 ("network: Enable WebRTC by default on full
-# nodes"), the first master merge whose binaries serve `webrtc-direct`.
-POLKADOT_SDK_MASTER_SHA=04132847
+# Any master merge at or after polkadot-sdk#12870 (2026-08-28, WebRTC on by
+# default) qualifies. Current pin: the latest master merge with both images
+# published as of 2026-09-10 (polkadot-sdk#13049, 2026-09-09).
+POLKADOT_SDK_MASTER_SHA=9c4d3c48
 
 # Logging passed to the test process.
 RUST_LOG=info
