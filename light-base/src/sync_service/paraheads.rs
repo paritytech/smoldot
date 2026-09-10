@@ -1129,6 +1129,19 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 }
 
                 (
+                    WakeUpReason::ForegroundMessage(ToBackground::SubscribeSyncStatus {
+                        send_back,
+                    }),
+                    _,
+                ) => {
+                    // This task only ever receives `SubscribeAll` from `parachain.rs`, which
+                    // answers `SubscribeSyncStatus` itself. Answer `Ready` for completeness.
+                    let (tx, rx) = async_channel::unbounded();
+                    let _ = tx.try_send(super::SyncStatus::Ready);
+                    let _ = send_back.send(rx);
+                }
+
+                (
                     WakeUpReason::ForegroundMessage(ToBackground::SerializeChainInformation {
                         send_back,
                     }),
