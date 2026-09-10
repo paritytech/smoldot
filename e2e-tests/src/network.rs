@@ -35,22 +35,36 @@ use zombienet_sdk::{Arg, LocalFileSystem, Network, NetworkConfig, NetworkConfigB
 pub const PARA_ID: u32 = 1004;
 pub const PARA_CHAIN: &str = "people-westend-local";
 
-/// First UDP port handed out to a `webrtc-direct` listener.
-const WEBRTC_BASE_UDP_PORT: u16 = 30333;
+/// Ports already handed out by this process
+static WEBRTC_PORTS_TAKEN: std::sync::Mutex<std::collections::BTreeSet<u16>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
 
-/// Hands out `WEBRTC_BASE_UDP_PORT`s, one per [`webrtc_args`] call.
-static WEBRTC_PORT_COUNTER: std::sync::atomic::AtomicU16 =
-    std::sync::atomic::AtomicU16::new(WEBRTC_BASE_UDP_PORT);
+/// Asks the kernel for a free UDP port.
+fn free_loopback_udp_port() -> u16 {
+    loop {
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|s| s.local_addr())
+            .expect("bind an ephemeral loopback UDP port")
+            .port();
+        if WEBRTC_PORTS_TAKEN.lock().unwrap().insert(port) {
+            return port;
+        }
+    }
+}
 
-/// CLI args that make a node listen for WebRTC on a fixed UDP port.
+/// CLI args that make a node listen for WebRTC on a free UDP port.
 ///
 /// An explicit `webrtc-direct` listen address is honored regardless of role or flag.
 ///
-/// Call once per node: every call returns a distinct port because all nodes share
-/// loopback under the native provider, and two of them asking for the same port means the
-/// second fails to bind.
+/// The port itself comes from the kernel's ephemeral range, the same
+/// trick zombienet uses for its TCP ports, so concurrent runs on one machine don't
+/// collide the way a hardcoded base would.
+///
+/// Call once per node. Another process may grab the port between the probe releasing
+/// it and the node binding it; the node then fails to bind and the harness stops with
+/// `missing loopback TCP or WebRTC listen address`.
 pub fn webrtc_args() -> Vec<Arg> {
-    let port = WEBRTC_PORT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let port = free_loopback_udp_port();
     // The `=` form is deliberate: zombienet's port-rewrite scan only matches
     // `Arg::Option` pairs, so the pair form would steal the node's TCP slot.
     vec![
