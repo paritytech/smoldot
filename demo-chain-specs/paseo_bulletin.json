@@ -1,0 +1,27 @@
+{
+  "name": "Bulletin Paseo",
+  "id": "bulletin-paseo",
+  "chainType": "Live",
+  "bootNodes": [
+    "/dns/bulletin-paseo.faradaynodes.com/tcp/35503/p2p/12D3KooWRVrepgbKXa8qUq1NAR6ehqZr1tZZK8Y7NynaruNJy9gA",
+    "/dns/bulletin-paseo.faradaynodes.com/tcp/35507/wss/p2p/12D3KooWRVrepgbKXa8qUq1NAR6ehqZr1tZZK8Y7NynaruNJy9gA",
+    "/dns/paseo-bulletin-bootnode.bestvalidator.com/tcp/49043/p2p/12D3KooWGM3gLv9wwZicmEbh57jV1ZuCa23rYW3pXEp2B76UTZvk",
+    "/dns/paseo-bulletin-bootnode.bestvalidator.com/tcp/443/wss/p2p/12D3KooWGM3gLv9wwZicmEbh57jV1ZuCa23rYW3pXEp2B76UTZvk",
+    "/dns4/bulletin-paseo-02.tservices.es/tcp/30445/p2p/12D3KooWJcjp6CVna3m938rbkzUnjCQYwxPpdriYJnX5yXvHbjs1",
+    "/dns4/bulletin-paseo-02.tservices.es/tcp/30446/wss/p2p/12D3KooWJcjp6CVna3m938rbkzUnjCQYwxPpdriYJnX5yXvHbjs1",
+    "/dns/bullet.tunastaking.eu/tcp/30012/p2p/12D3KooWKsnkGenYY4Vp2t8AcchFazkWCB55q2sPCR5fQMvQK3Dc"
+  ],
+  "telemetryEndpoints": null,
+  "protocolId": "bl-pas",
+  "properties": {
+    "ss58Format": 42,
+    "tokenDecimals": 10,
+    "tokenSymbol": "PAS"
+  },
+  "relay_chain": "paseo",
+  "para_id": 1010,
+  "codeSubstitutes": {},
+  "genesis": {
+    "stateRootHash": "0xc098984b34f72df8ebd5e35573b04334284212af4e559b01b3911d4d472bf1d0"
+  }
+}
