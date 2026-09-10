@@ -87,3 +87,12 @@ test('multi-address TCP connection refused everywhere is reported with ECONNREFU
   t.true(reason.includes('ECONNREFUSED'), reason);
   t.true(Date.now() - started < 3000);
 });
+
+// Same as above, over WebSocket: the `ws` library wraps the identical NodeJS socket error.
+test('multi-address WebSocket connection refused everywhere is reported with ECONNREFUSED', async t => {
+  const port = await closedPort();
+  const started = Date.now();
+  const reason = await firstResetReason(`/dns/localhost/tcp/${port}/ws/p2p/${peerId}`, 3000);
+  t.true(reason.includes('ECONNREFUSED'), reason);
+  t.true(Date.now() - started < 3000);
+});

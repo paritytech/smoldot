@@ -69,6 +69,17 @@ export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
 }
 
 /**
+ * Human-readable reason for a socket error. An `AggregateError` (every address of a
+ * multi-address host failed) has an empty `message`; its causes are in `errors`.
+ */
+function errorReason(error: NodeJS.ErrnoException & { errors?: Error[] }): string {
+    return error.errors?.map((cause) => cause.message).filter(Boolean).join("; ")
+        || error.message
+        || error.code
+        || "Error";
+}
+
+/**
  * Tries to open a new connection using the given configuration.
  *
  * @see Connection
@@ -116,7 +127,7 @@ function connect(config: ConnectionConfig): Connection {
             socket.onerror = () => { };
         };
         socket.onerror = (event) => {
-            config.onConnectionReset(event.message);
+            config.onConnectionReset(errorReason(event.error));
             socket.onopen = () => { };
             socket.onclose = () => { };
             socket.onmessage = () => { };
@@ -172,14 +183,8 @@ function connect(config: ConnectionConfig): Connection {
             if (resetCalled) return;
             config.onWritableBytes(socket.writableHighWaterMark);
         });
-        socket.on('error', (error: NodeJS.ErrnoException & { errors?: Error[] }) => {
-            // An `AggregateError` (all addresses of a multi-address host failed) has an empty
-            // `message`; its causes are in `errors`.
-            lastError =
-                error.errors?.map((cause) => cause.message).filter(Boolean).join("; ")
-                || error.message
-                || error.code
-                || "Error";
+        socket.on('error', (error) => {
+            lastError = errorReason(error);
         });
         socket.on('close', (hasError) => {
             if (resetCalled) return;
