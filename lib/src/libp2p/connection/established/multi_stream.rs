@@ -801,10 +801,14 @@ where
     /// determined by calling [`MultiStream::notification_substream_queued_bytes`]) is below a
     /// certain threshold. If above, the notification should be silently discarded.
     ///
+    /// If the substream has already been reset by the remote, the notification is silently
+    /// discarded.
+    ///
     /// # Panic
     ///
-    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
-    /// notifications substream isn't in the appropriate state.
+    /// Panics if the [`SubstreamId`] doesn't come from a multi-stream connection, or if it refers
+    /// to a substream that still exists but isn't a notifications substream in the appropriate
+    /// state. An unknown [`SubstreamId`] is treated as a reset substream and doesn't panic.
     ///
     pub fn write_notification_unbounded(
         &mut self,
@@ -816,7 +820,11 @@ where
             _ => panic!(),
         };
 
-        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+        // The substream might have been reset by the remote, and thus removed from the state
+        // machine, while the `QueueNotification` message was in flight.
+        let Some(inner_substream_id) = self.out_in_substreams_map.get(&substream_id) else {
+            return;
+        };
 
         self.in_substreams
             .get_mut(inner_substream_id)
@@ -859,10 +867,13 @@ where
     /// This can be done even when in the negotiation phase, in other words before the remote has
     /// accepted/refused the substream.
     ///
+    /// If the substream has already been reset by the remote, this method has no effect.
+    ///
     /// # Panic
     ///
-    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
-    /// notifications substream isn't in the appropriate state.
+    /// Panics if the [`SubstreamId`] doesn't come from a multi-stream connection, or if it refers
+    /// to a substream that still exists but isn't a notifications substream in the appropriate
+    /// state. An unknown [`SubstreamId`] is treated as a reset substream and doesn't panic.
     ///
     pub fn close_out_notifications_substream(&mut self, substream_id: SubstreamId) {
         let substream_id = match substream_id.0 {
@@ -870,7 +881,11 @@ where
             _ => panic!(),
         };
 
-        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+        // The substream might have been reset by the remote, and thus removed from the state
+        // machine, while the `CloseOutNotifications` message was in flight.
+        let Some(inner_substream_id) = self.out_in_substreams_map.get(&substream_id) else {
+            return;
+        };
 
         self.in_substreams
             .get_mut(inner_substream_id)
