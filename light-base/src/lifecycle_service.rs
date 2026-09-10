@@ -26,7 +26,7 @@
 //! reads slowly simply skips intermediate states. Nothing is buffered, so a slow subscriber
 //! can never fall behind or slow down syncing.
 //!
-//! [`start`] creates the service of a chain together with the two tasks that keep it up to
+//! `start` creates the service of a chain together with the two tasks that keep it up to
 //! date: one maps the sync service's status to the phase, the other polls the network service
 //! for the peer count and derives the stall verdict.
 //!
