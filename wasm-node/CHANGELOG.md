@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- A `chainHead_v1_follow` subscription no longer loses one slot of its pinned-blocks budget for every block that is unpinned before it is finalized or pruned. The runtime service charged every subscriber for each newly finalized and pruned block regardless of whether the subscriber still had it pinned, and an already-unpinned block could never be unpinned again to get the slot back, so a client that unpins early was eventually stopped for exceeding its limit. Only blocks the subscriber still has pinned are now charged. ([#3366](https://github.com/paritytech/smoldot/pull/3366))
+
 ## 3.5.0 - 2026-09-09
 
 ### Changed

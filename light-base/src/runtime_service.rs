@@ -1088,7 +1088,13 @@ async fn run_background<TPlat: PlatformRef>(
                 for (subscription_id, (sender, finalized_pinned_remaining)) in
                     all_blocks_subscriptions.iter_mut()
                 {
-                    let count_limit = reported_pruned_blocks.len() + 1;
+                    // Only the blocks the subscriber still has pinned count towards its limit.
+                    // A block unpinned before being finalized or pruned has already been
+                    // released and must not be charged.
+                    let count_limit = iter::once(&finalized_block.hash)
+                        .chain(reported_pruned_blocks.iter())
+                        .filter(|block| pinned_blocks.contains_key(&(*subscription_id, **block)))
+                        .count();
 
                     if *finalized_pinned_remaining < count_limit {
                         to_remove.push(*subscription_id);
