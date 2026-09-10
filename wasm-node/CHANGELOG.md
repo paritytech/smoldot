@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- `statement_submit` answers 7001 for a statement with the removed `Proof::OnChain` proof, like a full node, instead of accepting it and broadcasting a statement every peer rejects. ([#3370](https://github.com/paritytech/smoldot/pull/3370))
+
 ## 3.5.0 - 2026-09-09
 
 ### Changed

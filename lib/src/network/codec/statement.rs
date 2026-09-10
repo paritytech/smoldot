@@ -48,7 +48,6 @@ const FIELD_DATA: u8 = 8;
 const PROOF_SR25519: u8 = 0;
 const PROOF_ED25519: u8 = 1;
 const PROOF_SECP256K1_ECDSA: u8 = 2;
-const PROOF_ON_CHAIN: u8 = 3;
 
 pub use super::affinity::AffinityFilter;
 
@@ -67,12 +66,6 @@ pub type DecryptionKey = [u8; 32];
 
 /// Channel identifier (32 bytes).
 pub type Channel = [u8; 32];
-
-/// Account identifier (32 bytes).
-pub type AccountId = [u8; 32];
-
-/// Block hash (32 bytes).
-pub type BlockHash = [u8; 32];
 
 /// A decoded statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,15 +114,6 @@ pub enum Proof {
         signature: [u8; 65],
         /// The signer's public key (33 bytes).
         signer: [u8; 33],
-    },
-    /// On-chain event proof.
-    OnChain {
-        /// Account identifier associated with the event.
-        who: AccountId,
-        /// Hash of block that contains the event.
-        block_hash: BlockHash,
-        /// Index of the event in the event list.
-        event_index: u64,
     },
 }
 
@@ -346,16 +330,6 @@ fn encode_proof_into(proof: &Proof, out: &mut Vec<u8>) {
             out.extend_from_slice(signature.as_slice());
             out.extend_from_slice(signer.as_slice());
         }
-        Proof::OnChain {
-            who,
-            block_hash,
-            event_index,
-        } => {
-            out.push(PROOF_ON_CHAIN);
-            out.extend_from_slice(who.as_slice());
-            out.extend_from_slice(block_hash.as_slice());
-            out.extend_from_slice(&event_index.to_le_bytes());
-        }
     }
 }
 
@@ -500,20 +474,6 @@ fn proof_parser(input: &[u8]) -> nom::IResult<&[u8], Proof> {
                         .expect("take(65) guarantees 65 bytes; qed"),
                     signer: <[u8; 33]>::try_from(signer)
                         .expect("take(33) guarantees 33 bytes; qed"),
-                },
-            ))
-        }
-        PROOF_ON_CHAIN => {
-            let (input, who) = nom::bytes::streaming::take(32u32)(input)?;
-            let (input, block_hash) = nom::bytes::streaming::take(32u32)(input)?;
-            let (input, event_index) = nom::number::streaming::le_u64(input)?;
-            Ok((
-                input,
-                Proof::OnChain {
-                    who: <[u8; 32]>::try_from(who).expect("take(32) guarantees 32 bytes; qed"),
-                    block_hash: <[u8; 32]>::try_from(block_hash)
-                        .expect("take(32) guarantees 32 bytes; qed"),
-                    event_index,
                 },
             ))
         }
@@ -724,12 +684,11 @@ mod tests {
         tag_255.extend_from_slice(&[0u8; 32]);
         assert!(decode_statement(&tag_255).is_err());
 
-        // Invalid proof variant byte (99 instead of 0-3)
+        // Invalid proof variant byte (99 instead of 0-2)
         let valid = encode_statement(&Statement {
-            proof: Some(Proof::OnChain {
-                who: [0u8; 32],
-                block_hash: [0u8; 32],
-                event_index: 0,
+            proof: Some(Proof::Sr25519 {
+                signature: [0u8; 64],
+                signer: [0u8; 32],
             }),
             decryption_key: None,
             expiry: 42,
@@ -779,10 +738,9 @@ mod tests {
 
         // Truncated proof payload
         let with_proof = encode_statement(&Statement {
-            proof: Some(Proof::OnChain {
-                who: [0u8; 32],
-                block_hash: [0u8; 32],
-                event_index: 0,
+            proof: Some(Proof::Sr25519 {
+                signature: [0u8; 64],
+                signer: [0u8; 32],
             }),
             decryption_key: None,
             expiry: 42,
@@ -799,12 +757,12 @@ mod tests {
     fn decode_encoded_statement() {
         // See "statement_encoding_matches_vec" in polkadot-sdk for the original statement fields
         let bytes = hex::decode(
-            "1c00032a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a181818\
-             1818181818181818181818181818181818181818181818181818181818420000000000000001\
-             dededededededededededededededededededededededededededededededede02e703000000\
-             00000003cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc0401\
-             0101010101010101010101010101010101010101010101010101010101010105020202020202\
-             020202020202020202020202020202020202020202020202020208083763",
+            "1c00002a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a\
+             2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a181818181818181818181818181818\
+             181818181818181818181818181818181801dedededededededededededededededededededededede\
+             dedededededededede02e70300000000000003cccccccccccccccccccccccccccccccccccccccccccc\
+             cccccccccccccccccccc04010101010101010101010101010101010101010101010101010101010101\
+             010105020202020202020202020202020202020202020202020202020202020202020208083763",
         )
         .unwrap();
 
@@ -813,10 +771,8 @@ mod tests {
 
         assert!(matches!(
             decoded.proof,
-            Some(Proof::OnChain { who, block_hash, event_index })
-            if who == [42u8; 32]
-                && block_hash == [24u8; 32]
-                && event_index == 66
+            Some(Proof::Sr25519 { signature, signer })
+            if signature == [42u8; 64] && signer == [24u8; 32]
         ));
         assert_eq!(decoded.decryption_key, Some([0xde; 32]));
         assert_eq!(decoded.topics.len(), 2);
@@ -909,10 +865,9 @@ mod tests {
     #[test]
     fn v2_statements_encoding_snapshot() {
         let statement = Statement {
-            proof: Some(Proof::OnChain {
-                who: [42u8; 32],
-                block_hash: [24u8; 32],
-                event_index: 66,
+            proof: Some(Proof::Sr25519 {
+                signature: [42u8; 64],
+                signer: [24u8; 32],
             }),
             decryption_key: Some([0xde; 32]),
             expiry: 999,
@@ -931,8 +886,8 @@ mod tests {
         assert_eq!(
             digest,
             [
-                44, 71, 235, 73, 238, 115, 6, 15, 128, 174, 159, 216, 166, 76, 26, 101, 28, 143,
-                88, 21, 22, 128, 169, 62, 180, 19, 164, 234, 174, 210, 81, 105
+                65, 131, 15, 21, 7, 78, 154, 134, 204, 207, 233, 243, 248, 134, 166, 118, 27, 121,
+                151, 198, 245, 124, 13, 120, 60, 75, 22, 220, 210, 184, 51, 11
             ],
             "blake2_256 digest must match polkadot-sdk snapshot"
         );
