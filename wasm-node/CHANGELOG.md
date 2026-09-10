@@ -4,7 +4,7 @@
 
 ### Changed
 
-- `statement_subscribeStatement` sends an empty `newStatements` batch with `remaining: 0` right after the subscription ID, as a full node does when its store holds nothing matching, and drops gossiped statements that are expired or carry no proof before matching them against subscriptions.
+- `statement_subscribeStatement` sends an empty `newStatements` batch with `remaining: 0` right after the subscription ID, as a full node does when its store holds nothing matching, and drops gossiped statements that are expired or carry no proof before matching them against subscriptions. ([#3371](https://github.com/paritytech/smoldot/pull/3371))
 
 ## 3.5.0 - 2026-09-09
 
