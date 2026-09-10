@@ -77,3 +77,13 @@ test('unresolvable TCP hostname is reported with ENOTFOUND before the handshake 
   t.true(reason.includes('ENOTFOUND'), reason);
   t.true(Date.now() - started < 3000);
 });
+
+// `localhost` usually resolves to both `::1` and `127.0.0.1`. When every address is refused,
+// NodeJS emits an `AggregateError` with an empty `message`; the reason must come from its causes.
+test('multi-address TCP connection refused everywhere is reported with ECONNREFUSED', async t => {
+  const port = await closedPort();
+  const started = Date.now();
+  const reason = await firstResetReason(`/dns/localhost/tcp/${port}/p2p/${peerId}`, 3000);
+  t.true(reason.includes('ECONNREFUSED'), reason);
+  t.true(Date.now() - started < 3000);
+});

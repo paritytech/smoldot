@@ -172,8 +172,14 @@ function connect(config: ConnectionConfig): Connection {
             if (resetCalled) return;
             config.onWritableBytes(socket.writableHighWaterMark);
         });
-        socket.on('error', (error) => {
-            lastError = error.message;
+        socket.on('error', (error: NodeJS.ErrnoException & { errors?: Error[] }) => {
+            // An `AggregateError` (all addresses of a multi-address host failed) has an empty
+            // `message`; its causes are in `errors`.
+            lastError =
+                error.errors?.map((cause) => cause.message).filter(Boolean).join("; ")
+                || error.message
+                || error.code
+                || "Error";
         });
         socket.on('close', (hasError) => {
             if (resetCalled) return;
