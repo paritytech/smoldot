@@ -59,10 +59,12 @@ const TE_MSM_OUT: &str = "2249b14249ac27169670ea1b845321590e6d96ca6c0c6065066e74
 
 /// The HWCD exceptional pair from the `sp-crypto-ec-utils` test suite: two
 /// valid on-curve points whose addition produces an all-zero projective
-/// point. `msm(pair, [2, 1])` internally computes their sum.
+/// point. `msm(pair, [1, 1])` puts both points in the same bucket and adds
+/// them directly, on arkworks 0.5 and 0.6 alike. Other scalar pairs (such
+/// as `[2, 1]`) only hit the exceptional addition on 0.5.
 const TE_MSM_DEGEN_BASES: &str = "0200000000000000e7fc6cc1a8091e8abc296c7c1872165322b5d3675c71b46914d117d7d2e7e11b276ba895632568ceafcaa1a02cc8854690d0bd1da9964890c3a8d31565c811130ffba9d9bec99ce24ce356f6f742e819660ec2c9a7f94a284ff427f5e3489d0b106734fcae75dc61df5200006251b0c0af510fafac7c4638a8d0b8fc4f93b936";
-/// Bandersnatch scalar field elements `[2, 1]`, encoded.
-const TE_MSM_DEGEN_SCALARS: &str = "020000000000000002000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000";
+/// Bandersnatch scalar field elements `[1, 1]`, encoded.
+const TE_MSM_DEGEN_SCALARS: &str = "020000000000000001000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000";
 
 /// BLS12-381 G1 generator, encoded (96 bytes).
 const G1_GEN: &str = "17f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1";
@@ -207,6 +209,40 @@ fn msm_length_mismatch_returns_error() {
     assert_eq!(
         elliptic_curves::bls12_381_msm_g1(&hex::decode(MSM_G1_BASES).unwrap(), &one_scalar, 96),
         Err(elliptic_curves::ERROR_LENGTH_MISMATCH)
+    );
+}
+
+#[test]
+fn huge_length_prefix_returns_decode_error() {
+    // Sequences are length-prefixed. This prefix claims 2^40 elements and no
+    // element bytes follow it. arkworks 0.5 handed that length to
+    // `Vec::with_capacity`, which aborted the process on the failed 8 TiB
+    // allocation before it ever noticed the buffer is empty. Every affected
+    // input shape must instead surface it as a decode error.
+    let huge = hex::decode("0000000000010000").unwrap();
+    assert_eq!(
+        elliptic_curves::bls12_381_mul_g1(&hex::decode(G1_GEN).unwrap(), &huge, 96),
+        Err(elliptic_curves::ERROR_DECODE)
+    );
+    assert_eq!(
+        elliptic_curves::bls12_381_msm_g1(&huge, &hex::decode(MSM_SCALARS).unwrap(), 96),
+        Err(elliptic_curves::ERROR_DECODE)
+    );
+    assert_eq!(
+        elliptic_curves::bls12_381_multi_miller_loop(
+            &huge,
+            &hex::decode(MSM_G2_BASES).unwrap(),
+            576
+        ),
+        Err(elliptic_curves::ERROR_DECODE)
+    );
+    assert_eq!(
+        elliptic_curves::ed_on_bls12_381_bandersnatch_msm(
+            &huge,
+            &hex::decode(TE_MSM_SCALARS).unwrap(),
+            64
+        ),
+        Err(elliptic_curves::ERROR_DECODE)
     );
 }
 

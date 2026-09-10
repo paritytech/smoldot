@@ -464,7 +464,8 @@ define_methods! {
     /// Returns, as an opaque string, the version of the client serving these JSON-RPC requests.
     system_version() -> Cow<'a, str>,
 
-    /// Broadcast a new statement to peers (light node has no local statement-store).
+    /// Validate a SCALE-encoded statement and broadcast it to peers (light node has no local
+    /// statement-store).
     statement_submit(encoded: HexString) -> StatementSubmitResult,
     /// Subscribe to statements matching the given filter. Returns subscription ID.
     statement_subscribeStatement(filter: TopicFilter) -> Cow<'a, str>,
@@ -1141,29 +1142,45 @@ pub enum SystemPeerRole {
 
 /// Result of submitting a statement.
 ///
-/// JSON format is compatible with polkadot-sdk's `SubmitResult`.
+/// JSON format is compatible with polkadot-sdk's `SubmitResult`, of which this carries the subset
+/// a light client can answer with. A client written against a full node never sees the rest:
+///
+/// - `rejected` for `channelPriorityTooLow`, `accountFull`, `storeFull` — each weighs the
+///   submission against a store's contents, which a light client keeps none of and cannot fetch.
+/// - `rejected` for `noAllowance`, `dataTooLarge` — the account's allowance is on chain, but
+///   reading chain state means a network round-trip in front of every submission.
+/// - `invalid` for `badProof` — telling a bad signature from a good one costs more CPU than a
+///   submission should. Only the presence of a proof is checked, so a badly-signed statement is
+///   answered `new` and left for its peers to reject.
+/// - `internalError` — reports a failing database, which a client without one cannot have.
+/// - `known`, `knownExpired` — reserved for a source that may not resubmit, and an RPC submission
+///   always may, so no store would change the answer.
+///
+/// A failure leaving no outcome to report — a payload that doesn't decode, or a statement that
+/// reached no peer — is answered with a JSON-RPC error carrying polkadot-sdk's statement-store
+/// error code.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum StatementSubmitResult {
     New,
-    Invalid { reason: InvalidReason },
-    InternalError { error: InternalError },
+    Invalid(InvalidReason),
 }
 
 /// Reason why a submitted statement was rejected as invalid.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "reason", rename_all = "camelCase")]
 pub enum InvalidReason {
-    /// The SCALE-encoded statement failed to decode.
-    #[serde(rename = "Invalid statement encoding")]
-    Encoding,
-}
-
-/// Reason why a submitted statement could not be processed internally.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum InternalError {
-    /// The statement is valid but there were no connected peers to broadcast it to.
-    #[serde(rename = "No connected peers")]
-    NoConnectedPeers,
+    /// The statement has no authenticity proof.
+    NoProof,
+    /// The encoded statement exceeds the maximum allowed size.
+    EncodingTooLarge {
+        /// Size in bytes of the submitted encoding.
+        submitted_size: usize,
+        /// Maximum allowed size in bytes.
+        max_size: usize,
+    },
+    /// The statement's expiry is not in the future.
+    AlreadyExpired,
 }
 
 /// Notification event for statement subscriptions.
@@ -1423,28 +1440,29 @@ impl serde::Serialize for Block {
     where
         S: serde::Serializer,
     {
+        // The shape below must match `sp_runtime::generic::SignedBlock`.
         #[derive(serde::Serialize)]
         struct SerdeBlock<'a> {
             block: SerdeBlockInner<'a>,
+            justifications: Option<Vec<Vec<Vec<u8>>>>,
         }
 
         #[derive(serde::Serialize)]
         struct SerdeBlockInner<'a> {
             extrinsics: &'a [HexString],
             header: &'a Header,
-            justifications: Option<Vec<Vec<Vec<u8>>>>,
         }
 
         SerdeBlock {
             block: SerdeBlockInner {
                 extrinsics: &self.extrinsics,
                 header: &self.header,
-                justifications: self.justifications.as_ref().map(|list| {
-                    list.iter()
-                        .map(|(e, j)| vec![e.to_vec(), j.clone()])
-                        .collect()
-                }),
             },
+            justifications: self.justifications.as_ref().map(|list| {
+                list.iter()
+                    .map(|(e, j)| vec![e.to_vec(), j.clone()])
+                    .collect()
+            }),
         }
         .serialize(serializer)
     }
@@ -1586,29 +1604,34 @@ mod tests {
 
     #[test]
     fn statement_submit_result_serialization() {
-        use super::{InternalError, InvalidReason, StatementSubmitResult};
+        use super::{InvalidReason, StatementSubmitResult};
 
         let new = StatementSubmitResult::New;
         assert_eq!(serde_json::to_string(&new).unwrap(), r#"{"status":"new"}"#);
 
-        let invalid = StatementSubmitResult::Invalid {
-            reason: InvalidReason::Encoding,
-        };
+        let no_proof = StatementSubmitResult::Invalid(InvalidReason::NoProof);
         assert_eq!(
-            serde_json::to_string(&invalid).unwrap(),
-            r#"{"status":"invalid","reason":"Invalid statement encoding"}"#
+            serde_json::to_string(&no_proof).unwrap(),
+            r#"{"status":"invalid","reason":"noProof"}"#
         );
 
-        let internal = StatementSubmitResult::InternalError {
-            error: InternalError::NoConnectedPeers,
-        };
+        let expired = StatementSubmitResult::Invalid(InvalidReason::AlreadyExpired);
         assert_eq!(
-            serde_json::to_string(&internal).unwrap(),
-            r#"{"status":"internalError","error":"No connected peers"}"#
+            serde_json::to_string(&expired).unwrap(),
+            r#"{"status":"invalid","reason":"alreadyExpired"}"#
+        );
+
+        let too_large = StatementSubmitResult::Invalid(InvalidReason::EncodingTooLarge {
+            submitted_size: 2_000_000,
+            max_size: 1_048_575,
+        });
+        assert_eq!(
+            serde_json::to_string(&too_large).unwrap(),
+            r#"{"status":"invalid","reason":"encodingTooLarge","submitted_size":2000000,"max_size":1048575}"#
         );
 
         // Round-trips: the typed fields deserialize back from their wire strings.
-        for value in [new, invalid, internal] {
+        for value in [new, no_proof, expired, too_large] {
             let json = serde_json::to_string(&value).unwrap();
             assert_eq!(
                 serde_json::from_str::<StatementSubmitResult>(&json).unwrap(),
@@ -1810,6 +1833,50 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&evt).unwrap(),
             r#"{"event":"streamDone"}"#
+        );
+    }
+
+    /// Builds a `chain_getBlock` response with an empty header and the given justifications.
+    fn block_response(justifications: Option<Vec<([u8; 4], Vec<u8>)>>) -> String {
+        serde_json::to_string(&super::Block {
+            extrinsics: Vec::new(),
+            header: super::Header {
+                parent_hash: super::HashHexString([0; 32]),
+                extrinsics_root: super::HashHexString([0; 32]),
+                state_root: super::HashHexString([0; 32]),
+                number: 0,
+                digest: super::HeaderDigest { logs: Vec::new() },
+            },
+            justifications,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn chain_get_block_justifications_are_a_sibling_of_block() {
+        // The wire type is `sp_runtime::generic::SignedBlock`, in which `justifications` sits
+        // next to `block` rather than inside it. Both that struct and the inner block are
+        // `deny_unknown_fields`, so the exact placement is what makes the response decodable;
+        // it is therefore pinned here with a literal JSON assertion.
+        assert_eq!(
+            block_response(None),
+            r#"{"block":{"extrinsics":[],"header":{"parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","extrinsicsRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","number":"0x0","digest":{"logs":[]}}},"justifications":null}"#
+        );
+    }
+
+    #[test]
+    fn chain_get_block_justification_encoding() {
+        // A justification is a `(ConsensusEngineId, Vec<u8>)` pair, both serialized as arrays of
+        // bytes, matching `sp_runtime::Justifications`.
+        let json = block_response(Some(vec![(*b"FRNK", vec![1, 2, 3])]));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            parsed["block"].get("justifications").is_none(),
+            "justifications must not be nested inside `block`"
+        );
+        assert_eq!(
+            parsed["justifications"],
+            serde_json::json!([[[70, 82, 78, 75], [1, 2, 3]]])
         );
     }
 }

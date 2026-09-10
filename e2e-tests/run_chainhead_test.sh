@@ -48,21 +48,21 @@ case "${network}" in
     relay_spec="${SPECS_DIR}/paseo.json"
     para_spec="${SPECS_DIR}/paseo_asset_hub_next.json"
     relay_rpc="https://paseo-rpc.n.dwellir.com"
-    para_rpc="" # TODO
+    para_rpc="https://paseo-asset-hub-next-rpc.polkadot.io"
     ;;
   polkadot)
     relay_spec="${SPECS_DIR}/polkadot.json"
-    relay_rpc=""  # TODO: set Polkadot relay RPC URL
+    relay_rpc="https://polkadot-rpc.n.dwellir.com"
     ;;
   polkadot-ah)
     relay_spec="${SPECS_DIR}/polkadot.json"
     para_spec="${SPECS_DIR}/polkadot_asset_hub.json"
-    relay_rpc=""  # TODO: set Polkadot relay RPC URL
-    para_rpc=""  # TODO: set Polkadot Asset Hub RPC URL
+    relay_rpc="https://polkadot-rpc.n.dwellir.com"
+    para_rpc="https://asset-hub-polkadot-rpc.n.dwellir.com"
     ;;
   kusama)
     relay_spec="${SPECS_DIR}/ksmcc3.json"
-    relay_rpc=""  # TODO: set Kusama relay RPC URL
+    relay_rpc="https://kusama-rpc.n.dwellir.com"
     ;;
   kusama-ah)
     relay_spec="${SPECS_DIR}/ksmcc3.json"
@@ -72,13 +72,13 @@ case "${network}" in
     ;;
   westend)
     relay_spec="${SPECS_DIR}/westend2.json"
-    relay_rpc=""  # TODO: set Westend relay RPC URL
+    relay_rpc="https://westend-rpc.n.dwellir.com"
     ;;
   westend-ah)
     relay_spec="${SPECS_DIR}/westend2.json"
     para_spec="${SPECS_DIR}/westend2_asset_hub.json"
-    relay_rpc=""  # TODO: set Westend relay RPC URL
-    para_rpc=""  # TODO: set Westend Asset Hub RPC URL
+    relay_rpc="https://westend-rpc.n.dwellir.com"
+    para_rpc="https://asset-hub-westend-rpc.n.dwellir.com"
     ;;
   *)
     echo "Unknown network: ${network}" >&2
