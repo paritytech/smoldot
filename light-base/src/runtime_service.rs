@@ -1088,13 +1088,20 @@ async fn run_background<TPlat: PlatformRef>(
                 for (subscription_id, (sender, finalized_pinned_remaining)) in
                     all_blocks_subscriptions.iter_mut()
                 {
-                    // Only the blocks the subscriber still has pinned count towards its limit.
-                    // A block unpinned before being finalized or pruned has already been
-                    // released and must not be charged.
-                    let count_limit = iter::once(&finalized_block.hash)
-                        .chain(reported_pruned_blocks.iter())
-                        .filter(|block| pinned_blocks.contains_key(&(*subscription_id, **block)))
-                        .count();
+                    // Mark the finalized and pruned blocks as finalized or non-canonical, and
+                    // count them. Only the blocks the subscriber still has pinned count towards
+                    // its limit: a block unpinned before being finalized or pruned has already
+                    // been released and must not be charged.
+                    let mut count_limit = 0;
+                    for block in
+                        iter::once(&finalized_block.hash).chain(reported_pruned_blocks.iter())
+                    {
+                        if let Some(pin) = pinned_blocks.get_mut(&(*subscription_id, *block)) {
+                            debug_assert!(pin.block_ignores_limit);
+                            pin.block_ignores_limit = false;
+                            count_limit += 1;
+                        }
+                    }
 
                     if *finalized_pinned_remaining < count_limit {
                         to_remove.push(*subscription_id);
@@ -1107,16 +1114,6 @@ async fn run_background<TPlat: PlatformRef>(
                     }
 
                     *finalized_pinned_remaining -= count_limit;
-
-                    // Mark the finalized and pruned blocks as finalized or non-canonical.
-                    for block in
-                        iter::once(&finalized_block.hash).chain(reported_pruned_blocks.iter())
-                    {
-                        if let Some(pin) = pinned_blocks.get_mut(&(*subscription_id, *block)) {
-                            debug_assert!(pin.block_ignores_limit);
-                            pin.block_ignores_limit = false;
-                        }
-                    }
                 }
                 for to_remove in to_remove {
                     all_blocks_subscriptions.remove(&to_remove);
