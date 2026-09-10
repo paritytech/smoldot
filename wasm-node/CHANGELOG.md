@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add the `lifecycle_unstable_follow` and `lifecycle_unstable_unfollow` JSON-RPC functions. The subscription reports the lifecycle state of the chain: whether it is still connecting, warp syncing (with the current and target block heights), or ready, how many peers are connected, and whether the built-in watchdog considers it stalled (no peers, or no warp sync progress). The first notification is the current state, reported as syncing as soon as warp sync fragments are requested, and every later notification carries the whole new state, so an embedder can show what the light client is doing without parsing log output. The schema is unstable. ([#3301](https://github.com/paritytech/smoldot/issues/3301))
+
 ## 3.5.0 - 2026-09-09
 
 ### Changed

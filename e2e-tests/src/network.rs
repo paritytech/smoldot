@@ -633,6 +633,51 @@ pub async fn run_chainhead_v1_follow(
     Ok(())
 }
 
+/// Runs the shared `lifecycle` body against a live network on the Node host.
+/// The relay chain is expected to warp sync (and therefore to report `syncing`
+/// progress) if the network's finalized tip is more than
+/// [`WARP_SYNC_MINIMUM_GAP`] blocks ahead of smoldot's starting point.
+pub async fn run_lifecycle(live: &LiveNetwork, cfg: &Scenario) -> Result<(), anyhow::Error> {
+    let relay_spec_str = live.relay_spec.to_str().expect("UTF-8 path");
+    let para_spec_str = live.para_spec.to_str().expect("UTF-8 path");
+
+    let smoldot_db_paths = cfg.smoldot_db().map(|db| {
+        (
+            db.relay_db_json.to_str().expect("UTF-8 path").to_owned(),
+            db.para_db_json.to_str().expect("UTF-8 path").to_owned(),
+        )
+    });
+
+    let expect_warp_sync = match cfg.snapshot() {
+        None => false,
+        Some(snapshot) => {
+            let start = match cfg.smoldot_db() {
+                Some(db) => parse_finalized_height_from_db(&db.relay_db_json)?,
+                None => parse_finalized_height_from_spec(&snapshot.smoldot_relay_spec)?,
+            };
+            live.expected_initial_finalized > start
+        }
+    };
+    let expect_warp_sync_str = if expect_warp_sync { "true" } else { "false" };
+
+    let mut env_vars: Vec<(&str, &str)> = vec![
+        ("RELAY_CHAIN_SPEC", relay_spec_str),
+        ("PARA_CHAIN_SPEC", para_spec_str),
+        ("EXPECT_WARP_SYNC", expect_warp_sync_str),
+    ];
+    if let Some((relay_db, para_db)) = smoldot_db_paths.as_ref() {
+        env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
+        env_vars.push(("SMOLDOT_DB_PARA", para_db.as_str()));
+    }
+
+    log::info!("running lifecycle test on Node host (expect_warp_sync={expect_warp_sync})");
+    crate::ensure_js_deps_installed();
+    crate::run_shared_test(crate::Host::Node, "lifecycle", &env_vars)
+        .await
+        .map_err(|e| anyhow!("lifecycle failed on Node host: {e}"))?;
+    Ok(())
+}
+
 /// Runs the shared `smoke` body against a single live network on both hosts in
 /// sequence: the Node host over TCP, then the Browser host in headless Chrome
 /// with `forbidTcp` (→ WebRTC). Both hosts execute the same `shared/smoke.js`
