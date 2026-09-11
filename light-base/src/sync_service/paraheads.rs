@@ -378,14 +378,14 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 // Must unpin the pruned blocks if they haven't already been unpinned.
                                 let mut pruned_blocks_hashes =
                                     Vec::with_capacity(pruned_blocks.len());
-                                for (_, hash, pruned_block_parahead) in pruned_blocks {
-                                    if pruned_block_parahead.is_none() {
+                                for pruned_block in pruned_blocks {
+                                    if pruned_block.async_op_user_data.is_none() {
                                         runtime_subscription
                                             .relay_chain_subscribe_all
-                                            .unpin_block(hash)
+                                            .unpin_block(pruned_block.user_data)
                                             .await;
                                     }
-                                    pruned_blocks_hashes.push(hash);
+                                    pruned_blocks_hashes.push(pruned_block.user_data);
                                 }
 
                                 log!(

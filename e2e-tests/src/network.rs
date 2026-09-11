@@ -600,6 +600,46 @@ pub async fn run_chainhead_v1_follow(
     with_runtime: bool,
     follow: FollowChain,
 ) -> Result<(), anyhow::Error> {
+    run_chainhead_v1_follow_with_env(live, cfg, with_runtime, follow, &[]).await
+}
+
+/// Number of `finalized` events the early-unpin test waits for. The runtime
+/// service allows 32 pinned finalized or pruned blocks per subscription, and
+/// the leak cost one slot per finalized event, so the subscription used to be
+/// stopped at the 32nd event.
+const UNPIN_EARLY_MIN_FINALIZED_EVENTS: u32 = 40;
+
+/// Follows the relay chain with runtime and unpins every block as soon as it
+/// is announced. Fails if the subscription is stopped before
+/// [`UNPIN_EARLY_MIN_FINALIZED_EVENTS`] `finalized` events arrive.
+pub async fn run_chainhead_v1_unpin_early(
+    live: &LiveNetwork,
+    cfg: &Scenario,
+) -> Result<(), anyhow::Error> {
+    let min_finalized = UNPIN_EARLY_MIN_FINALIZED_EVENTS.to_string();
+    run_chainhead_v1_follow_with_env(
+        live,
+        cfg,
+        true,
+        FollowChain::Relay,
+        &[
+            ("UNPIN_EARLY", "true"),
+            ("TEST_RESUBSCRIBE", "false"),
+            ("MIN_FINALIZED_EVENTS", min_finalized.as_str()),
+            ("PER_SUB_TIMEOUT_MS", "540000"),
+            ("OVERALL_TIMEOUT_MS", "600000"),
+        ],
+    )
+    .await
+}
+
+async fn run_chainhead_v1_follow_with_env(
+    live: &LiveNetwork,
+    cfg: &Scenario,
+    with_runtime: bool,
+    follow: FollowChain,
+    extra_env: &[(&str, &str)],
+) -> Result<(), anyhow::Error> {
     let relay_spec_str = live.relay_spec.to_str().expect("UTF-8 path");
     let para_spec_str = live.para_spec.to_str().expect("UTF-8 path");
 
@@ -651,6 +691,7 @@ pub async fn run_chainhead_v1_follow(
             env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
             env_vars.push(("SMOLDOT_DB_PARA", para_db.as_str()));
         }
+        env_vars.extend_from_slice(extra_env);
 
         log::info!(
             "running chainHead_v1_follow on {host:?} host (follow={followed}, with_runtime={with_runtime}, relay best/finalized=#{relay_best}/#{relay_finalized}, para best/finalized=#{para_best}/#{para_finalized})"
