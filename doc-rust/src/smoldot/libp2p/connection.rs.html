@@ -1,0 +1,87 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `lib/src/libp2p/connection.rs`."><title>connection.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="smoldot" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">smoldot/libp2p/</div>connection.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-2"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Smoldot
+<a href=#2 id=2 data-nosnippet>2</a>// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
+<a href=#3 id=3 data-nosnippet>3</a>// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+<a href=#4 id=4 data-nosnippet>4</a>
+<a href=#5 id=5 data-nosnippet>5</a>// This program is free software: you can redistribute it and/or modify
+<a href=#6 id=6 data-nosnippet>6</a>// it under the terms of the GNU General Public License as published by
+<a href=#7 id=7 data-nosnippet>7</a>// the Free Software Foundation, either version 3 of the License, or
+<a href=#8 id=8 data-nosnippet>8</a>// (at your option) any later version.
+<a href=#9 id=9 data-nosnippet>9</a>
+<a href=#10 id=10 data-nosnippet>10</a>// This program is distributed in the hope that it will be useful,
+<a href=#11 id=11 data-nosnippet>11</a>// but WITHOUT ANY WARRANTY; without even the implied warranty of
+<a href=#12 id=12 data-nosnippet>12</a>// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+<a href=#13 id=13 data-nosnippet>13</a>// GNU General Public License for more details.
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a>// You should have received a copy of the GNU General Public License
+<a href=#16 id=16 data-nosnippet>16</a>// along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+<a href=#17 id=17 data-nosnippet>17</a>
+<a href=#18 id=18 data-nosnippet>18</a></span><span class="doccomment">//! Module containing everything related to the processing of a single libp2p connection.
+<a href=#19 id=19 data-nosnippet>19</a>//!
+<a href=#20 id=20 data-nosnippet>20</a>//! # Overview
+<a href=#21 id=21 data-nosnippet>21</a>//!
+<a href=#22 id=22 data-nosnippet>22</a>//! Libp2p connections use TCP sockets provided by the operating system.
+<a href=#23 id=23 data-nosnippet>23</a>//!
+<a href=#24 id=24 data-nosnippet>24</a>//! &gt; **Note**: Explaining the TCP/IP protocol is out of scope of this documentation. See for
+<a href=#25 id=25 data-nosnippet>25</a>//! &gt;           example [the Wikipedia page](https://en.wikipedia.org/wiki/Transmission_Control_Protocol)
+<a href=#26 id=26 data-nosnippet>26</a>//! &gt;           for more information.
+<a href=#27 id=27 data-nosnippet>27</a>//!
+<a href=#28 id=28 data-nosnippet>28</a>//! Once a TCP connection has been established, the *handshake* phase starts. This handshake
+<a href=#29 id=29 data-nosnippet>29</a>//! is described in details in the documentation [`single_stream_handshake`] module.
+<a href=#30 id=30 data-nosnippet>30</a>//!
+<a href=#31 id=31 data-nosnippet>31</a>//! The handshake consists in negotiating with the remote an encryption layer, thanks to which all
+<a href=#32 id=32 data-nosnippet>32</a>//! communications are encrypted, and a multiplexing layer, thanks to which the stream of data can
+<a href=#33 id=33 data-nosnippet>33</a>//! be split into a multitude of **substreams**.
+<a href=#34 id=34 data-nosnippet>34</a>//!
+<a href=#35 id=35 data-nosnippet>35</a>//! After the handshake is over, the connection is now in the *established* phase. See the
+<a href=#36 id=36 data-nosnippet>36</a>//! documentation of the [`established`] module for more details.
+<a href=#37 id=37 data-nosnippet>37</a>//!
+<a href=#38 id=38 data-nosnippet>38</a>//! Once in the established phase, substreams can be opened either by the local endpoint or by the
+<a href=#39 id=39 data-nosnippet>39</a>//! remote endpoint. When a substream is opened, a protocol is first negotiated in order to
+<a href=#40 id=40 data-nosnippet>40</a>//! determine the purpose of this substream. Two kinds of protocols, and therefore two kinds of
+<a href=#41 id=41 data-nosnippet>41</a>//! substreams, are supported:
+<a href=#42 id=42 data-nosnippet>42</a>//!
+<a href=#43 id=43 data-nosnippet>43</a>//! - So-called "request-response" substreams. After the protocol is negotiated, the opening side
+<a href=#44 id=44 data-nosnippet>44</a>//! sends a single message containing a request, and the other endpoint sends back a single
+<a href=#45 id=45 data-nosnippet>45</a>//! message containing a response. The substream is then closed.
+<a href=#46 id=46 data-nosnippet>46</a>//! - So-called "notifications" substreams. After the protocol is negotiated, the opening side
+<a href=#47 id=47 data-nosnippet>47</a>//! sends a single handshake message. The other endpoint must then either immediately close the
+<a href=#48 id=48 data-nosnippet>48</a>//! substream to reject the handshake, or send back a handshake in order to accept it. After the
+<a href=#49 id=49 data-nosnippet>49</a>//! handshake is accepted, the opening side can send an unbounded number of individual messages.
+<a href=#50 id=50 data-nosnippet>50</a>//! Only the opening side is allowed to send messages on any given notifications substream.
+<a href=#51 id=51 data-nosnippet>51</a>//!
+<a href=#52 id=52 data-nosnippet>52</a>//! These two kinds of substreams serve as a base framework. The exact nature of these
+<a href=#53 id=53 data-nosnippet>53</a>//! request-responses and of these notifications is out of scope of this module.
+<a href=#54 id=54 data-nosnippet>54</a>//!
+<a href=#55 id=55 data-nosnippet>55</a>//! # Usage
+<a href=#56 id=56 data-nosnippet>56</a>//!
+<a href=#57 id=57 data-nosnippet>57</a>//! To connect to a libp2p node, start by establishing a TCP connection with the target. This can
+<a href=#58 id=58 data-nosnippet>58</a>//! be done either through an outgoing connection or connection incoming from a TCP listening
+<a href=#59 id=59 data-nosnippet>59</a>//! socket.
+<a href=#60 id=60 data-nosnippet>60</a>//!
+<a href=#61 id=61 data-nosnippet>61</a>//! &gt; **Note**: This module only contains *no_std*-friendly code, and creating TCP connections
+<a href=#62 id=62 data-nosnippet>62</a>//! &gt;           isn't handled by it.
+<a href=#63 id=63 data-nosnippet>63</a>//!
+<a href=#64 id=64 data-nosnippet>64</a>//! After a TCP connection is established, use
+<a href=#65 id=65 data-nosnippet>65</a>//! [`single_stream_handshake::HealthyHandshake::noise_yamux`] to initialize the state machine that
+<a href=#66 id=66 data-nosnippet>66</a>//! needs to be maintained in parallel of the connection. The data sent and received over the
+<a href=#67 id=67 data-nosnippet>67</a>//! socket must respectively be obtained or injected using
+<a href=#68 id=68 data-nosnippet>68</a>//! [`single_stream_handshake::HealthyHandshake::read_write`]. See the [`single_stream_handshake`]
+<a href=#69 id=69 data-nosnippet>69</a>//! module documentation for more details.
+<a href=#70 id=70 data-nosnippet>70</a>//!
+<a href=#71 id=71 data-nosnippet>71</a>//! Keep in mind that the [`single_stream_handshake`] module doesn't provide any timeout. Users
+<a href=#72 id=72 data-nosnippet>72</a>//! are strongly encouraged to add one, in order to detect situations where the remote is,
+<a href=#73 id=73 data-nosnippet>73</a>//! intentionally or not, unresponsive.
+<a href=#74 id=74 data-nosnippet>74</a>//!
+<a href=#75 id=75 data-nosnippet>75</a>//! After the handshake is successful, use [`established::ConnectionPrototype::into_connection`]
+<a href=#76 id=76 data-nosnippet>76</a>//! to obtain an [`established::SingleStream`]. Similar to the handshake, use
+<a href=#77 id=77 data-nosnippet>77</a>//! [`established::SingleStream::read_write`] to update the state machine.
+<a href=#78 id=78 data-nosnippet>78</a>//!
+<a href=#79 id=79 data-nosnippet>79</a>
+<a href=#80 id=80 data-nosnippet>80</a></span><span class="kw">pub use </span>noise::{NoiseKey, UnsignedNoiseKey};
+<a href=#81 id=81 data-nosnippet>81</a>
+<a href=#82 id=82 data-nosnippet>82</a><span class="kw">pub mod </span>established;
+<a href=#83 id=83 data-nosnippet>83</a><span class="kw">pub mod </span>multistream_select;
+<a href=#84 id=84 data-nosnippet>84</a><span class="kw">pub mod </span>noise;
+<a href=#85 id=85 data-nosnippet>85</a><span class="kw">pub mod </span>single_stream_handshake;
+<a href=#86 id=86 data-nosnippet>86</a><span class="kw">pub mod </span>webrtc_framing;
+<a href=#87 id=87 data-nosnippet>87</a><span class="kw">pub mod </span>yamux;</code></pre></div></section></main></body></html>
