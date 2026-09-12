@@ -171,16 +171,17 @@ pub fn bulletin_network_config(
         .with_relaychain(move |rc| {
             rc.with_chain(bulletin::RELAY_CHAIN)
                 .with_default_command(bulletin::RELAY_BINARY)
+                // The WebRTC listener is per node: one UDP port each.
                 .with_validator(|n| {
                     n.with_name("alice")
                         .bootnode(true)
-                        .with_args(crate::listener_args("alice"))
+                        .with_args(crate::webrtc_args())
                         .with_optional_db_snapshot(relay.clone())
                 })
                 .with_validator(|n| {
                     n.with_name("bob")
                         .bootnode(true)
-                        .with_args(crate::listener_args("bob"))
+                        .with_args(crate::webrtc_args())
                         .with_optional_db_snapshot(relay.clone())
                 })
         })
@@ -191,30 +192,28 @@ pub fn bulletin_network_config(
             }
             args.push(("--relay-chain-rpc-urls", "{{ZOMBIE:alice:ws_uri}}").into());
 
+            // Node-level `with_args` replaces the parachain `default_args`, so the shared
+            // args are repeated alongside each collator's own WebRTC port.
+            let collator_args = || [args.clone(), crate::webrtc_args()].concat();
+
             p.with_id(bulletin::PARA_ID)
                 .with_chain_spec_path(chain_spec_str.as_str())
                 .cumulus_based(true)
                 .with_default_args(args.clone())
                 .with_collator(|c| {
-                    // `with_args` overrides the parachain `with_default_args`,
-                    // so the defaults must be repeated per collator.
-                    let mut collator_args = args.clone();
-                    collator_args.extend(crate::listener_args("collator-1"));
                     c.with_name("collator-1")
                         .validator(true)
                         .bootnode(true)
                         .with_command(bulletin::PARA_BINARY)
-                        .with_args(collator_args)
+                        .with_args(collator_args())
                         .with_optional_db_snapshot(bulletin_full.clone())
                 })
                 .with_collator(|c| {
-                    let mut collator_args = args.clone();
-                    collator_args.extend(crate::listener_args("collator-2"));
                     c.with_name("collator-2")
                         .validator(true)
                         .bootnode(true)
                         .with_command(bulletin::PARA_BINARY)
-                        .with_args(collator_args)
+                        .with_args(collator_args())
                         .with_optional_db_snapshot(bulletin_partial.clone())
                 })
         })
