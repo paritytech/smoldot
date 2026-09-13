@@ -1,0 +1,21 @@
+{
+  "name": "statement-latency-bench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "statement-latency-bench": "./bench.js"
+  },
+  "scripts": {
+    "start": "node bench.js"
+  },
+  "dependencies": {
+    "@polkadot/keyring": "^13.0.2",
+    "@polkadot/util": "^13.0.2",
+    "@polkadot/util-crypto": "^13.0.2",
+    "smoldot": "file:../../wasm-node/javascript"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
