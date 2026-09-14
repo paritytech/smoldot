@@ -13,6 +13,10 @@ include.workspace = true
 name = "basic"
 required-features = ["std"]
 
+[[example]]
+name = "lifecycle"
+required-features = ["std"]
+
 [dependencies]
 async-channel = { version = "2.5.0", default-features = false }
 async-lock = { version = "3.0.0", default-features = false }

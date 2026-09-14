@@ -22,6 +22,11 @@
 // validates the spec invariants of every event, and on resubscribe (after
 // `stop` or explicit unfollow) reports a regression if the new initial
 // finalized number is below the previous subscription's last finalized number.
+//
+// With `UNPIN_EARLY=true` every block is unpinned as soon as it is announced,
+// before it is finalized or pruned, and a `stop` is a failure. This is the
+// pattern that used to leak one slot of the pinned-blocks budget per block
+// and stop the subscription once the budget ran out.
 
 import { createRpc } from "./rpc.js";
 import { decodeHeader } from "./codec.js";
@@ -45,6 +50,7 @@ export const envInputs = [
   "PARA_BEST_AT_LAUNCH",
   "PARA_FINALIZED_AT_LAUNCH",
   "INITIAL_LAG_TOLERANCE",
+  "UNPIN_EARLY",
 ];
 
 // Multiplexes a smoldot chain's JSON-RPC stream. One pump loop classifies each
@@ -184,6 +190,7 @@ class ChainHeadValidator {
     this.initialFinalizedNumber = null;
     this.initialized = false;
     this.stopped = false;
+    this.unpinned = new Set();
   }
 
   beginNewSubscription() {
@@ -396,7 +403,7 @@ async function fetchBlockHeader(mux, subId, hash) {
 }
 
 async function populateHeader(mux, subId, validator, hash, announcedParent) {
-  if (!hash || validator.heights.has(hash)) return;
+  if (!hash || validator.heights.has(hash) || validator.unpinned.has(hash)) return;
   const header = await fetchBlockHeader(mux, subId, hash);
   if (header == null) return;
   validator.setHeight(hash, header.number);
@@ -461,7 +468,14 @@ async function followSubscription(mux, withRuntime) {
   return subId;
 }
 
-async function runSubscription(log, mux, validator, subId, perSubDeadline, isDone) {
+async function unpin(mux, validator, subId, hashes) {
+  const toUnpin = hashes.filter((h) => !validator.unpinned.has(h));
+  if (toUnpin.length === 0) return;
+  for (const h of toUnpin) validator.unpinned.add(h);
+  await mux.request("chainHead_v1_unpin", [subId, toUnpin], 30_000);
+}
+
+async function runSubscription(log, mux, validator, subId, perSubDeadline, isDone, unpinEarly) {
   // First event must be `initialized`.
   const first = await mux.nextEvent(subId, perSubDeadline - Date.now());
   validator.onEvent(first);
@@ -490,6 +504,7 @@ async function runSubscription(log, mux, validator, subId, perSubDeadline, isDon
     switch (ev.event) {
       case "newBlock":
         await populateHeader(mux, subId, validator, ev.blockHash, ev.parentBlockHash);
+        if (unpinEarly) await unpin(mux, validator, subId, [ev.blockHash]);
         break;
       case "bestBlockChanged":
         await populateHeader(mux, subId, validator, ev.bestBlockHash, null);
@@ -497,6 +512,8 @@ async function runSubscription(log, mux, validator, subId, perSubDeadline, isDon
       case "finalized": {
         const f = ev.finalizedBlockHashes ?? [];
         await populateHeader(mux, subId, validator, f[f.length - 1], null);
+        // Blocks from `initialized` were not unpinned on announcement.
+        if (unpinEarly) await unpin(mux, validator, subId, [...f, ...(ev.prunedBlockHashes ?? [])]);
         break;
       }
       default:
@@ -525,6 +542,7 @@ export default async function chainheadV1Follow(ctx) {
   const paraBestAtLaunch = Number.parseInt(env.PARA_BEST_AT_LAUNCH ?? "0", 10);
   const paraFinalizedAtLaunch = Number.parseInt(env.PARA_FINALIZED_AT_LAUNCH ?? "0", 10);
   const initialLagTolerance = Number.parseInt(env.INITIAL_LAG_TOLERANCE ?? "50", 10);
+  const unpinEarly = (env.UNPIN_EARLY ?? "false") === "true";
   const relayOnly = !files.PARA_CHAIN_SPEC;
 
   if (!files.RELAY_CHAIN_SPEC) {
@@ -581,6 +599,7 @@ export default async function chainheadV1Follow(ctx) {
   const overallDeadline = Date.now() + overallTimeoutMs;
 
   // Phase 1: primary subscription. Auto-resubscribe on `stop` until thresholds met or budget gone.
+  // When unpinning early, a `stop` is the failure under test, so no resubscribe.
   validator.beginNewSubscription();
   let subId = await followSubscription(mux, withRuntime);
   report("chainHead_v1_follow accepted", true, `subId=${subId}`);
@@ -598,10 +617,19 @@ export default async function chainheadV1Follow(ctx) {
       subId,
       Math.min(Date.now() + perSubTimeoutMs, overallDeadline),
       () => validator.thresholdsMet(),
+      unpinEarly,
     );
-  } while (result.reason === "stop" && Date.now() < overallDeadline);
+  } while (result.reason === "stop" && !unpinEarly && Date.now() < overallDeadline);
 
-  const primaryOk = validator.thresholdsMet();
+  if (unpinEarly) {
+    report(
+      "no stop while unpinning every block early",
+      result.reason !== "stop",
+      `finalized=${validator.counters.finalized} unpinned=${validator.unpinned.size}`,
+    );
+  }
+
+  const primaryOk = validator.thresholdsMet() && !(unpinEarly && result.reason === "stop");
   report(
     "primary subscription thresholds met",
     primaryOk,
@@ -633,6 +661,7 @@ export default async function chainheadV1Follow(ctx) {
         phase2SubId,
         Math.min(Date.now() + perSubTimeoutMs, overallDeadline),
         () => validator.thresholdsMet(),
+        false,
       );
     } while (phase2Result.reason === "stop" && Date.now() < overallDeadline);
     const phase2Ok = validator.thresholdsMet();
