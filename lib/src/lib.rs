@@ -205,6 +205,7 @@ pub mod finality;
 pub mod header;
 pub mod identity;
 pub mod informant;
+pub mod jam;
 pub mod json_rpc;
 pub mod libp2p;
 pub mod network;
