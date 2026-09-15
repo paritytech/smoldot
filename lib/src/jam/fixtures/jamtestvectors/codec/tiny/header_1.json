@@ -1,0 +1,61 @@
+{
+    "parent": "0x5c743dbc514284b2ea57798787c5a155ef9d7ac1e9499ec65910a7a3d65897b7",
+    "parent_state_root": "0x2591ebd047489f1006361a4254731466a946174af02fe1d86681d254cfd4a00b",
+    "extrinsic_hash": "0x74a9e79d2618e0ce8720ff61811b10e045c02224a09299f04e404a9656e85c81",
+    "slot": 42,
+    "epoch_mark": null,
+    "tickets_mark": [
+        {
+            "id": "0x8c25c063c631c0d4cd0206159b3495deb761cc057e06192fe5497dc9b3744c7b",
+            "attempt": 0
+        },
+        {
+            "id": "0x2f24ea5c5cfc5631ea3b7799222ca555250b8591751fd1d59df4abeb690d66e6",
+            "attempt": 1
+        },
+        {
+            "id": "0x036479afe8e29f97741a1e3c2b59c217dc67d8a25f7ce12bf1febf6b4a5b2646",
+            "attempt": 2
+        },
+        {
+            "id": "0xa8a439a4aa6e18682c6a524feb2da2ebcead6f0fb0826707aef7b1d57e790e6e",
+            "attempt": 0
+        },
+        {
+            "id": "0x4fc10511323e4b3b82cf10ece1a1f6b8497dbdd9de032e6c6986d57303c31364",
+            "attempt": 1
+        },
+        {
+            "id": "0xd5ca7a57adaffc68011b46ec02ff8baad3f1539068f642b6af2cfcaca639d96e",
+            "attempt": 2
+        },
+        {
+            "id": "0x3ec31eb46e471951d21febf6a2842b8482b2ea40a61b37c4cbd4f136ef31d24f",
+            "attempt": 0
+        },
+        {
+            "id": "0xb5a35c5c1473de918f517142bacb78a968fcdd65fb5e935b2cfaf52c840cc3ad",
+            "attempt": 1
+        },
+        {
+            "id": "0x3559f53a0ad2e4462b2d1805ac28a665e2181fdc27e5acc6561fd6e713e7d498",
+            "attempt": 2
+        },
+        {
+            "id": "0x5ed4423732dbeb794c7a05fc899718a093ad9c832a1d3a89f34f525e55b87f53",
+            "attempt": 0
+        },
+        {
+            "id": "0xfdee093e7fd5cace92b7eb9f41d3ee7154aabcf84b797a6eb2e951ae11ed921c",
+            "attempt": 1
+        },
+        {
+            "id": "0xabf4869d2585e777feb713a7fd79ea49dbea2ca3eeb5e081c63ece4d6208c68c",
+            "attempt": 2
+        }
+    ],
+    "author_index": 3,
+    "entropy_source": "0xae85d6635e9ae539d0846b911ec86a27fe000f619b78bcac8a74b77e36f6dbcf49a52360f74a0233cea0775356ab0512fafff0683df08fae3cb848122e296cbc50fed22418ea55f19e55b3c75eb8b0ec71dcae0d79823d39920bf8d6a2256c5f",
+    "offenders_mark": [],
+    "seal": "0x31dc5b1e9423eccff9bccd6549eae8034162158000d5be9339919cc03d14046e6431c14cbb172b3aed702b9e9869904b1f39a6fe1f3e904b0fd536f13e8cac496682e1c81898e88e604904fa7c3e496f9a8771ef1102cc29d567c4aad283f7b0"
+}

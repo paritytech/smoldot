@@ -1,0 +1,23 @@
+{
+  "polkajam_base": "8ceedf46c4828137c8835e4227d7f3a62ada0463",
+  "workspace": "/tmp/d12-polkajam",
+  "local_instrumentation": true,
+  "command": [
+    "/tmp/d12-polkajam/target/release/polkajam-testnet",
+    "--num-ordinary-nodes",
+    "1",
+    "--num-proxy-nodes",
+    "0",
+    "--base-port",
+    "40000",
+    "--base-rpc-port",
+    "19800"
+  ],
+  "started_at_utc": "2026-09-22T14:36:41.160021+00:00",
+  "duration_seconds": 212.34,
+  "raw_capture_directory": "capture-run-s62ngf0i",
+  "header_count": 36,
+  "epoch_transition_count": 4,
+  "consensus_only_empty_guest_blobs": true,
+  "network_pid": 752681
+}
