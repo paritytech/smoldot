@@ -552,11 +552,11 @@ pub fn verify_justification<'a>(
             let Some((parent_hash, height)) = votes_ancestries.get(&current_hash) else {
                 return Err(JustificationVerifyError::BadAncestry);
             };
-            
+
             // Checked before the early exit below, as a known block can be claimed at any height.
             if *height != current_height {
                 return Err(JustificationVerifyError::BadAncestry);
-            } 
+            }
 
             match walked_blocks.entry(current_hash) {
                 hashbrown::hash_map::Entry::Occupied(_) => break,
@@ -593,7 +593,7 @@ pub fn verify_justification<'a>(
     }
 
     // The ghost is the highest block with at least `threshold`
-    // pre-commits on it or its descendants. 
+    // pre-commits on it or its descendants.
     let ghost = walked_blocks
         .iter()
         .filter(|(_, (_, _, num))| *num >= threshold)
