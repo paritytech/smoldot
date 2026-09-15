@@ -467,7 +467,14 @@ define_methods! {
     /// Validate a SCALE-encoded statement and broadcast it to peers (light node has no local
     /// statement-store).
     statement_submit(encoded: HexString) -> StatementSubmitResult,
-    /// Subscribe to statements matching the given filter. Returns subscription ID.
+    /// Subscribe to statements matching the given filter. Returns the subscription ID.
+    ///
+    /// Notifications arrive on `statement_statement` in polkadot-sdk's `StatementEvent` format. A
+    /// full node first replays the matching statements of its store in batches that carry
+    /// `remaining`. A light client has no store, so the first notification is always an empty
+    /// batch with `remaining: 0`. Statements that peers already hold arrive later as live
+    /// notifications without `remaining`, if a peer re-sends them. A delivered statement passed
+    /// the expiry and proof checks of `statement_submit`. Signatures are not verified.
     statement_subscribeStatement(filter: TopicFilter) -> Cow<'a, str>,
     /// Unsubscribe from statement notifications.
     statement_unsubscribeStatement(subscription: String) -> bool,
