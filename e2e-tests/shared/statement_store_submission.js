@@ -55,7 +55,14 @@ export default async function statementStoreSubmission(ctx) {
 
   let submitResult;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    submitResult = await rpc.sendRpcAndWait(para, "statement_submit", [statementHex]);
+    try {
+      submitResult = await rpc.sendRpcAndWait(para, "statement_submit", [statementHex]);
+    } catch (error) {
+      // A statement that reached no peer is answered with a JSON-RPC error. While gossip peers are
+      // still settling that is an expected answer, so it retries like any other non-`new` one.
+      if (!error.rpcError) throw error;
+      submitResult = error.rpcError;
+    }
 
     // Smoldot returns {"status":"new"} on success
     if (submitResult?.status === "new") break;

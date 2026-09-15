@@ -102,6 +102,9 @@ pub struct Config<TPlat: PlatformRef> {
     /// Service that fulfills IPFS CID requests.
     pub bitswap_service: Arc<bitswap_service::BitswapService>,
 
+    /// Lifecycle state of the chain, served by `lifecycle_unstable_follow`.
+    pub lifecycle_service: Arc<crate::lifecycle_service::LifecycleService>,
+
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
     /// Type of chain, as found in the chain specification.
@@ -156,6 +159,7 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
                 transactions_service: config.transactions_service,
                 runtime_service: config.runtime_service,
                 bitswap_service: config.bitswap_service,
+                lifecycle_service: config.lifecycle_service,
                 chain_name: config.chain_name,
                 chain_ty: config.chain_ty,
                 chain_properties_json: config.chain_properties_json,
