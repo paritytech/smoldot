@@ -523,10 +523,11 @@ pub fn verify_justification<'a>(
         .map(|precommit| (*precommit.target_hash, precommit.target_number))
         .ok_or(JustificationVerifyError::NotEnoughSignatures)?;
 
-    // For each block between a pre-commit and the base, the number of pre-commits that target it
-    // or one of its descendants. The base is left out: every pre-commit counts for it.
-    let mut cumulative_precommits =
-        hashbrown::HashMap::<[u8; 32], usize, _>::with_capacity_and_hasher(
+    // For each block between a pre-commit and the base store the hash of its parent,
+    // its height, and the number of pre-commits that target it or one of its descendants.
+    // The base is left out, as every pre-commit counts for it.
+    let mut walked_blocks =
+        hashbrown::HashMap::<[u8; 32], ([u8; 32], u64, usize), _>::with_capacity_and_hasher(
             votes_ancestries.len(),
             crate::util::SipHasherBuild::new({
                 let mut seed = [0; 16];
@@ -536,37 +537,67 @@ pub fn verify_justification<'a>(
         );
 
     for precommit in decoded_justification.precommits.iter() {
-        // Walk from the block the pre-commit targets down to the base.
+        // Walk from the block the pre-commit targets down to the base. A block that an earlier
+        // walk went through ends the walk, as the rest of the path is known to reach the base.
         let mut current_hash = *precommit.target_hash;
         let mut current_height = precommit.target_number;
-        while current_hash != base_hash {
+        loop {
+            if current_hash == base_hash {
+                if current_height != base_height {
+                    return Err(JustificationVerifyError::BadAncestry);
+                }
+                break;
+            }
+
             let Some((parent_hash, height)) = votes_ancestries.get(&current_hash) else {
                 return Err(JustificationVerifyError::BadAncestry);
             };
+            
+            // Checked before the early exit below, as a known block can be claimed at any height.
             if *height != current_height {
                 return Err(JustificationVerifyError::BadAncestry);
+            } 
+
+            match walked_blocks.entry(current_hash) {
+                hashbrown::hash_map::Entry::Occupied(_) => break,
+                hashbrown::hash_map::Entry::Vacant(entry) => {
+                    entry.insert((*parent_hash, *height, 0));
+                }
             }
-            *cumulative_precommits.entry(current_hash).or_insert(0) += 1;
+
             current_hash = *parent_hash;
             current_height = current_height
                 .checked_sub(1)
                 .ok_or(JustificationVerifyError::BadAncestry)?;
         }
-        if current_height != base_height {
-            return Err(JustificationVerifyError::BadAncestry);
+
+        // Votes for the base itself aren't tracked.
+        if let Some((_, _, num)) = walked_blocks.get_mut(precommit.target_hash) {
+            *num += 1;
+        }
+    }
+
+    // Push each block's votes down to its parent.
+    let mut blocks_by_height = walked_blocks
+        .iter()
+        .map(|(hash, (_, height, _))| (*height, *hash))
+        .collect::<Vec<_>>();
+    blocks_by_height.sort_unstable_by_key(|(height, _)| cmp::Reverse(*height));
+    for (_, hash) in blocks_by_height {
+        let Some(&(parent_hash, _, num)) = walked_blocks.get(&hash) else {
+            continue;
+        };
+        if let Some((_, _, parent_num)) = walked_blocks.get_mut(&parent_hash) {
+            *parent_num += num;
         }
     }
 
     // The ghost is the highest block with at least `threshold`
-    // pre-commits on it or its descendants.
-    let ghost = cumulative_precommits
+    // pre-commits on it or its descendants. 
+    let ghost = walked_blocks
         .iter()
-        .filter(|(_, num)| **num >= threshold)
-        .filter_map(|(hash, _)| {
-            votes_ancestries
-                .get(hash)
-                .map(|(_, height)| (*hash, *height))
-        })
+        .filter(|(_, (_, _, num))| *num >= threshold)
+        .map(|(hash, (_, height, _))| (*hash, *height))
         .max_by_key(|(_, height)| *height)
         .unwrap_or((base_hash, base_height));
     let target = (
@@ -578,7 +609,7 @@ pub fn verify_justification<'a>(
     }
 
     // Every header must have been walked through. The header of the base is never needed.
-    if cumulative_precommits.len() != votes_ancestries.len() {
+    if walked_blocks.len() != votes_ancestries.len() {
         return Err(JustificationVerifyError::UnusedAncestryEntry);
     }
 
@@ -995,6 +1026,34 @@ mod tests {
                 precommit(&keys[0], target_hash, 10),
                 precommit(&keys[1], child_hash, 11),
                 precommit(&keys[2], child_hash, 11),
+            ],
+            &[child],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::BadAncestry)),
+            "{result:?}"
+        );
+    }
+
+    /// A pre-commit claims a wrong height for a header that earlier pre-commits already walked
+    /// through. The height must be checked before the walk takes the early exit for known blocks.
+    #[test]
+    fn shared_header_with_inconsistent_number() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let child = header(target_hash, 11);
+        let child_hash = child.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], child_hash, 11),
+                precommit(&keys[2], child_hash, 11),
+                precommit(&keys[3], child_hash, 12),
             ],
             &[child],
         );
