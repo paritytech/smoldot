@@ -9,6 +9,7 @@
 ### Fixed
 
 - A `chainHead_v1_follow` subscription no longer loses one slot of its pinned-blocks budget for every block that is unpinned before it is finalized or pruned. The runtime service charged every subscriber for each newly finalized and pruned block regardless of whether the subscriber still had it pinned, and an already-unpinned block could never be unpinned again to get the slot back, so a client that unpins early was eventually stopped for exceeding its limit. Only blocks the subscriber still has pinned are now charged. ([#3366](https://github.com/paritytech/smoldot/pull/3366))
+- `statement_submit` answers 7001 for a statement with the removed `Proof::OnChain` proof, like a full node, instead of accepting it and broadcasting a statement every peer rejects. ([#3370](https://github.com/paritytech/smoldot/pull/3370))
 
 ## 3.5.0 - 2026-09-09
 
