@@ -136,7 +136,7 @@ where
         return Err(StatementSubmitError::InvalidEncoding);
     };
 
-    if now_from_unix_epoch.as_secs() >= statement.expiry >> 32 {
+    if is_expired(&statement, now_from_unix_epoch) {
         return Ok(StatementSubmitResult::Invalid(
             InvalidReason::AlreadyExpired,
         ));
@@ -163,6 +163,18 @@ where
     }
 
     Ok(StatementSubmitResult::New)
+}
+
+/// Whether a statement received from a peer may be delivered to subscriptions: the checks of
+/// `statement_submit` that need no store, expiry and presence of a proof.
+pub(super) fn is_deliverable(statement: &codec::Statement, now_from_unix_epoch: Duration) -> bool {
+    !is_expired(statement, now_from_unix_epoch) && statement.proof.is_some()
+}
+
+/// The most significant 32 bits of `expiry` hold a UNIX timestamp in seconds. A statement expiring
+/// exactly now is already expired, as in polkadot-sdk.
+fn is_expired(statement: &codec::Statement, now_from_unix_epoch: Duration) -> bool {
+    now_from_unix_epoch.as_secs() >= statement.expiry >> 32
 }
 
 pub(super) struct StatementSubscription {
@@ -505,6 +517,25 @@ mod tests {
             result,
             Ok(StatementSubmitResult::Invalid(InvalidReason::NoProof))
         );
+    }
+
+    fn decoded_statement(with_proof: bool, expiry: u64) -> codec::Statement {
+        codec::decode_statement(&encoded_statement(with_proof, expiry, None)).unwrap()
+    }
+
+    #[test]
+    fn is_deliverable_requires_proof_and_future_expiry() {
+        assert!(is_deliverable(&decoded_statement(true, FUTURE_EXPIRY), NOW));
+        assert!(!is_deliverable(
+            &decoded_statement(false, FUTURE_EXPIRY),
+            NOW
+        ));
+        assert!(!is_deliverable(&decoded_statement(true, 500 << 32), NOW));
+        // Expiring exactly now counts as expired, as in `validate_and_broadcast_statement`.
+        assert!(!is_deliverable(
+            &decoded_statement(true, NOW.as_secs() << 32),
+            NOW
+        ));
     }
 
     #[test]
