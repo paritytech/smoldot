@@ -27,21 +27,47 @@ use crate::{
     transactions_service::DropReasonKind,
 };
 use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap, vec::Vec};
-use core::{
-    fmt,
-    marker::PhantomData,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use core::{fmt, marker::PhantomData, sync::atomic::Ordering};
 use smoldot::json_rpc::methods;
 use strum::IntoEnumIterator;
 
-// 32-bit atomics so that the metrics also compile on targets without 64-bit
-// atomics (e.g. `thumbv7m-none-eabi`); durations are tracked in milliseconds
-// to make the range acceptable.
+// 64-bit atomics where the target has them (every realistic deployment target: wasm32,
+// x86-64, aarch64, 32-bit ARM/x86 with `std`), 32-bit saturating atomics as a fallback
+// for targets without them (e.g. `thumbv7m-none-eabi`). Durations are tracked in
+// milliseconds so that the 32-bit fallback still covers about 49 days.
+#[cfg(target_has_atomic = "64")]
+mod word {
+    pub type Atomic = core::sync::atomic::AtomicU64;
+    pub type Word = u64;
+
+    pub fn narrow(n: u64) -> Word {
+        n
+    }
+
+    pub fn widen(n: Word) -> u64 {
+        n
+    }
+}
+
+#[cfg(not(target_has_atomic = "64"))]
+mod word {
+    pub type Atomic = core::sync::atomic::AtomicU32;
+    pub type Word = u32;
+
+    pub fn narrow(n: u64) -> Word {
+        Word::try_from(n).unwrap_or(Word::MAX)
+    }
+
+    pub fn widen(n: Word) -> u64 {
+        u64::from(n)
+    }
+}
+
+use word::{narrow, widen};
 
 /// Monotonically increasing counter.
 #[derive(Debug, Default)]
-pub struct Counter(AtomicU32);
+pub struct Counter(word::Atomic);
 
 impl Counter {
     pub fn inc(&self) {
@@ -49,23 +75,21 @@ impl Counter {
     }
 
     pub fn add(&self, n: u64) {
-        self.0
-            .fetch_add(u32::try_from(n).unwrap_or(u32::MAX), Ordering::Relaxed);
+        self.0.fetch_add(narrow(n), Ordering::Relaxed);
     }
 
     pub fn get(&self) -> u64 {
-        u64::from(self.0.load(Ordering::Relaxed))
+        widen(self.0.load(Ordering::Relaxed))
     }
 }
 
 /// Value that can go up and down.
 #[derive(Debug, Default)]
-pub struct Gauge(AtomicU32);
+pub struct Gauge(word::Atomic);
 
 impl Gauge {
     pub fn set(&self, value: u64) {
-        self.0
-            .store(u32::try_from(value).unwrap_or(u32::MAX), Ordering::Relaxed);
+        self.0.store(narrow(value), Ordering::Relaxed);
     }
 
     pub fn inc(&self) {
@@ -81,7 +105,7 @@ impl Gauge {
     }
 
     pub fn get(&self) -> u64 {
-        u64::from(self.0.load(Ordering::Relaxed))
+        widen(self.0.load(Ordering::Relaxed))
     }
 }
 
