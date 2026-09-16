@@ -296,9 +296,10 @@ pub enum LogLevel {
 /// Established multistream connection information. See [`PlatformRef::connect_multistream`].
 #[derive(Debug)]
 pub struct MultiStreamWebRtcConnection<TConnection> {
-    /// Object representing the WebRTC connection.
+    /// Object representing the WebRTC or WebTransport connection.
     pub connection: TConnection,
     /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
+    /// Zero for WebTransport, which does not use a local DTLS certificate.
     pub local_tls_certificate_sha256: [u8; 32],
 }
 
@@ -352,6 +353,10 @@ pub enum ConnectionType {
     WebRtcIpv6,
     /// Libp2p-specific WebRTC flavour, with a domain name.
     WebRtcDns,
+    /// Raw WebTransport over HTTP/3, without a libp2p handshake or framing.
+    WebTransportIpv4,
+    /// Raw WebTransport over HTTP/3, without a libp2p handshake or framing.
+    WebTransportIpv6,
 }
 
 impl<'a> From<&'a Address<'a>> for ConnectionType {
@@ -394,6 +399,12 @@ impl<'a> From<&'a MultiStreamAddress<'a>> for ConnectionType {
                 ip: IpAddr::V6(_), ..
             } => ConnectionType::WebRtcIpv6,
             MultiStreamAddress::WebRtcDns { .. } => ConnectionType::WebRtcDns,
+            MultiStreamAddress::WebTransport {
+                ip: IpAddr::V4(_), ..
+            } => ConnectionType::WebTransportIpv4,
+            MultiStreamAddress::WebTransport {
+                ip: IpAddr::V6(_), ..
+            } => ConnectionType::WebTransportIpv6,
         }
     }
 }
@@ -463,8 +474,17 @@ pub enum DnsFamily {
 }
 
 /// Address passed to [`PlatformRef::connect_multistream`].
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MultiStreamAddress<'a> {
+    /// Raw bidirectional WebTransport streams. No handshake or framing is added.
+    WebTransport {
+        /// IP address to connect to.
+        ip: IpAddr,
+        /// UDP port to connect to.
+        port: u16,
+        /// Non-empty list of SHA-256 hashes of acceptable DER server certificates.
+        cert_hashes: Cow<'a, [[u8; 32]]>,
+    },
     /// Libp2p-specific WebRTC flavour.
     ///
     /// The implementation the [`PlatformRef`] trait is responsible for opening the SCTP

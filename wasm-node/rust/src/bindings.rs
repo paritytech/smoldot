@@ -208,6 +208,11 @@ unsafe extern "C" {
     /// - `18`: WebRTC connection, with a port, a domain name, and a remote certificate hash.
     ///   WebRTC requires a literal IP address, and the host is responsible for resolving the
     ///   domain name itself.
+    /// - `20`: Raw WebTransport/IPv4. After the port: nonzero u32 little-endian hash count,
+    ///   that many 32-byte SHA-256 DER certificate hashes, then the UTF-8 IP address.
+    /// - `21`: Raw WebTransport/IPv6, with the same layout as `20` (IP without brackets).
+    ///   WebTransport adds no libp2p handshake or framing. Hosts without WebTransport must
+    ///   reject the connection through `connection_reset`, not throw synchronously.
     ///
     /// > **Note**: While these numbers seem arbitrary, they actually loosely follow a certain
     /// >           scheme. The lowest 2 bits indicate the type of IP address, while the highest
@@ -262,6 +267,11 @@ unsafe extern "C" {
 
     /// Abruptly closes an existing substream of a multi-stream connection. The substream must
     /// currently be in the `Open` state.
+    /// For raw WebTransport, dropping a stream after remote FIN and `stream_send_close`
+    /// retires its identifier immediately, but the host must finish the queued writes and
+    /// local FIN without further callbacks. The JS adapter tracks the two FINs internally;
+    /// no additional ABI tag is used. A final connection drop likewise waits for these
+    /// retiring streams, with a bounded drain timeout, before releasing the host session.
     ///
     /// Must never be called if [`stream_reset`] has been called on that object in the past.
     ///
@@ -512,6 +522,8 @@ pub extern "C" fn timer_finished() {
 ///
 /// The buffer must contain a single 0 byte (indicating WebRTC), followed with the SHA-256 hash of
 /// the local node's TLS certificate.
+/// For WebTransport it must instead contain exactly one byte, `2`. There is no local
+/// certificate, Noise handshake, or transport-level framing.
 #[unsafe(no_mangle)]
 pub extern "C" fn connection_multi_stream_set_handshake_info(
     connection_id: u32,
@@ -525,6 +537,10 @@ pub extern "C" fn connection_multi_stream_set_handshake_info(
 
 /// Notify of a message being received on the stream. The connection associated with that stream
 /// (and, in the case of a multi-stream connection, the stream itself) must be in the `Open` state.
+///
+/// On WebTransport only, an empty message means remote FIN. Report it once, after all
+/// received bytes; never use empty messages for nonterminal chunks. Buffered data remains
+/// readable and the sending half stays open. Other transports ignore empty messages.
 ///
 /// Assign a so-called "buffer index" (a `u32`) representing the buffer containing the message,
 /// then provide this buffer index to the function. The Rust code will call [`buffer_size`] and

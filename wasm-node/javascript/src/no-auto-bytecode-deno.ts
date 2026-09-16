@@ -65,7 +65,20 @@ export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
  * @see Connection
  * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
-function connect(config: ConnectionConfig): Connection {
+export function connect(config: ConnectionConfig): Connection {
+    if (config.address.ty === 'webtransport') {
+        let cancelled = false;
+        queueMicrotask(() => {
+            if (!cancelled) {
+                cancelled = true;
+                config.onConnectionReset('WebTransport is not supported by the Deno transport');
+            }
+        });
+        return {
+            reset: () => { cancelled = true; },
+            send: () => {}, closeSend: () => {}, openOutSubstream: () => {},
+        };
+    }
     if (config.address.ty === "websocket") {
         const socket = new WebSocket(config.address.url);
         socket.binaryType = 'arraybuffer';

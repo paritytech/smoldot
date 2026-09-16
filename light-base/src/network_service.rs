@@ -3139,7 +3139,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 if platform::address_parse::multiaddr_to_address(&a)
                                     .ok()
                                     .map_or(false, |addr| {
-                                        task.platform.supports_connection_type((&addr).into())
+                                        is_libp2p_address(&addr)
+                                            && task
+                                                .platform
+                                                .supports_connection_type((&addr).into())
                                     })
                                 {
                                     valid_addrs.push(a)
@@ -3624,6 +3627,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let address = address_parse::multiaddr_to_address(&multiaddr)
                     .ok()
                     .filter(|addr| {
+                        // WebTransport carries raw application streams, not libp2p.
+                        // JAM connects directly through PlatformRef instead of this service.
+                        if !is_libp2p_address(addr) {
+                            return false;
+                        }
                         task.platform.supports_connection_type(match &addr {
                             address_parse::AddressOrMultiStreamAddress::Address(addr) => {
                                 From::from(addr)
@@ -3715,6 +3723,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 remote_certificate_sha256,
                                 ..
                             } => *remote_certificate_sha256,
+                            // Rejected by the filter above; never perform a Noise handshake.
+                            platform::MultiStreamAddress::WebTransport { .. } => continue,
                         };
 
                         // We need to know the local TLS certificate in order to insert the
@@ -3875,8 +3885,40 @@ fn pop_p2p_if_matches(
     }
 }
 
+fn is_libp2p_address(address: &address_parse::AddressOrMultiStreamAddress<'_>) -> bool {
+    !matches!(
+        address,
+        address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(
+            platform::MultiStreamAddress::WebTransport { .. }
+        )
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn webtransport_never_enters_libp2p() {
+        for ip in ["127.0.0.1", "::1"] {
+            let address = super::address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(
+                super::platform::MultiStreamAddress::WebTransport {
+                    ip: ip.parse().unwrap(),
+                    port: 40000,
+                    cert_hashes: alloc::borrow::Cow::Owned(alloc::vec![[7; 32]]),
+                },
+            );
+            assert!(!super::is_libp2p_address(&address));
+        }
+        let cert = [7; 32];
+        let webrtc_dns = super::address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(
+            super::platform::MultiStreamAddress::WebRtcDns {
+                hostname: "example.com",
+                family: super::platform::DnsFamily::Any,
+                port: 40000,
+                remote_certificate_sha256: &cert,
+            },
+        );
+        assert!(super::is_libp2p_address(&webrtc_dns));
+    }
     use super::{Role, dispatch_find_node_requests, pop_p2p_if_matches, service};
     use core::time::Duration;
     use rand_chacha::rand_core::SeedableRng as _;
