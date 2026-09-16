@@ -31,7 +31,7 @@
 // multistream-select negotiation) is issued on a later task than the `open`
 // event, so it lands inside that window and hits a genuinely non-open channel
 // through the real `send` path. Without the `readyState` guard in
-// `no-auto-bytecode-browser.ts` the browser throws and the client crashes;
+// `internals/browser-connect.ts` the browser throws and the client crashes;
 // with it the write is dropped, the delayed `close` event resets the stream,
 // and smoldot must recover and sync normally.
 //
@@ -43,7 +43,7 @@
 // exercised and not silently missed.
 //
 // Browser-only: the fault lives in browser-only code
-// (`no-auto-bytecode-browser.ts`) and Node has no `RTCDataChannel`. The
+// (`internals/browser-connect.ts`) and Node has no `RTCDataChannel`. The
 // globals it patches only exist inside the page, so they are touched inside
 // the function body (not at module top level), keeping the module importable
 // by the Node runner, which reads only the re-exports below.

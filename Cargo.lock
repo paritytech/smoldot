@@ -2431,7 +2431,6 @@ dependencies = [
  "futures-lite",
  "futures-util",
  "hashbrown 0.16.1",
- "nom",
  "pin-project",
  "slab",
  "smoldot",

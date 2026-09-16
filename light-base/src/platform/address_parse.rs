@@ -28,7 +28,8 @@ use core::{
 
 pub enum AddressOrMultiStreamAddress<'a> {
     Address(Address<'a>),
-    MultiStreamAddress(MultiStreamAddress<'a>),
+    /// Multiaddresses only describe WebRTC multistream addresses.
+    MultiStreamAddress(WebRtcAddress<'a>),
 }
 
 impl<'a> From<&'a AddressOrMultiStreamAddress<'a>> for ConnectionType {
@@ -40,7 +41,74 @@ impl<'a> From<&'a AddressOrMultiStreamAddress<'a>> for ConnectionType {
     }
 }
 
-/// Parses a [`Multiaddr`] into an [`Address`] or [`MultiStreamAddress`].
+/// WebRTC address parsed from a multiaddress. Converts into a [`MultiStreamAddress`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum WebRtcAddress<'a> {
+    /// See [`MultiStreamAddress::WebRtc`].
+    Ip {
+        ip: IpAddr,
+        port: u16,
+        remote_certificate_sha256: &'a [u8; 32],
+    },
+    /// See [`MultiStreamAddress::WebRtcDns`].
+    Dns {
+        hostname: &'a str,
+        family: DnsFamily,
+        port: u16,
+        remote_certificate_sha256: &'a [u8; 32],
+    },
+}
+
+impl<'a> WebRtcAddress<'a> {
+    /// Returns the SHA-256 hash of the certificate that the remote must present.
+    pub fn remote_certificate_sha256(&self) -> &'a [u8; 32] {
+        match *self {
+            WebRtcAddress::Ip {
+                remote_certificate_sha256,
+                ..
+            }
+            | WebRtcAddress::Dns {
+                remote_certificate_sha256,
+                ..
+            } => remote_certificate_sha256,
+        }
+    }
+}
+
+impl<'a> From<WebRtcAddress<'a>> for MultiStreamAddress<'a> {
+    fn from(address: WebRtcAddress<'a>) -> MultiStreamAddress<'a> {
+        match address {
+            WebRtcAddress::Ip {
+                ip,
+                port,
+                remote_certificate_sha256,
+            } => MultiStreamAddress::WebRtc {
+                ip,
+                port,
+                remote_certificate_sha256,
+            },
+            WebRtcAddress::Dns {
+                hostname,
+                family,
+                port,
+                remote_certificate_sha256,
+            } => MultiStreamAddress::WebRtcDns {
+                hostname,
+                family,
+                port,
+                remote_certificate_sha256,
+            },
+        }
+    }
+}
+
+impl From<&WebRtcAddress<'_>> for ConnectionType {
+    fn from(address: &WebRtcAddress<'_>) -> ConnectionType {
+        ConnectionType::from(&MultiStreamAddress::from(*address))
+    }
+}
+
+/// Parses a [`Multiaddr`] into an [`Address`] or [`WebRtcAddress`].
 pub fn multiaddr_to_address(
     multiaddr: &'_ Multiaddr,
 ) -> Result<AddressOrMultiStreamAddress<'_>, Error> {
@@ -121,7 +189,7 @@ pub fn multiaddr_to_address(
             Protocol::Udp(port),
             Some(Protocol::WebRtcDirect),
             Some(Protocol::Certhash(multihash)),
-        ) => AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtc {
+        ) => AddressOrMultiStreamAddress::MultiStreamAddress(WebRtcAddress::Ip {
             ip: IpAddr::V4(Ipv4Addr::from(ip)),
             port,
             remote_certificate_sha256: certhash_sha256(&multihash)?,
@@ -132,7 +200,7 @@ pub fn multiaddr_to_address(
             Protocol::Udp(port),
             Some(Protocol::WebRtcDirect),
             Some(Protocol::Certhash(multihash)),
-        ) => AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtc {
+        ) => AddressOrMultiStreamAddress::MultiStreamAddress(WebRtcAddress::Ip {
             ip: IpAddr::V6(Ipv6Addr::from(ip)),
             port,
             remote_certificate_sha256: certhash_sha256(&multihash)?,
@@ -142,7 +210,7 @@ pub fn multiaddr_to_address(
             Protocol::Udp(port),
             Some(Protocol::WebRtcDirect),
             Some(Protocol::Certhash(multihash)),
-        ) => AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtcDns {
+        ) => AddressOrMultiStreamAddress::MultiStreamAddress(WebRtcAddress::Dns {
             hostname: str::from_utf8(addr.into_bytes()).map_err(Error::NonUtf8DomainName)?,
             family: match dns {
                 Protocol::Dns(_) => DnsFamily::Any,
@@ -189,7 +257,7 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddressOrMultiStreamAddress, Error, multiaddr_to_address};
+    use super::{AddressOrMultiStreamAddress, Error, WebRtcAddress, multiaddr_to_address};
     use crate::platform::{ConnectionType, DnsFamily, MultiStreamAddress};
     use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use smoldot::libp2p::multiaddr::Multiaddr;
@@ -197,7 +265,7 @@ mod tests {
     /// SHA-256 certhash of a real `webrtc-direct` bootnode.
     const CERTHASH: &str = "uEiBsqkcr8pOaNjl6px_v1nBatWMfXB9C_sU8fDat3mZWfQ";
 
-    fn multistream(multiaddr: &Multiaddr) -> MultiStreamAddress<'_> {
+    fn webrtc(multiaddr: &Multiaddr) -> WebRtcAddress<'_> {
         match multiaddr_to_address(multiaddr).unwrap() {
             AddressOrMultiStreamAddress::MultiStreamAddress(addr) => addr,
             AddressOrMultiStreamAddress::Address(addr) => {
@@ -206,17 +274,8 @@ mod tests {
         }
     }
 
-    fn cert_of(addr: &MultiStreamAddress) -> [u8; 32] {
-        match addr {
-            MultiStreamAddress::WebRtc {
-                remote_certificate_sha256,
-                ..
-            }
-            | MultiStreamAddress::WebRtcDns {
-                remote_certificate_sha256,
-                ..
-            } => **remote_certificate_sha256,
-        }
+    fn multistream(multiaddr: &Multiaddr) -> MultiStreamAddress<'_> {
+        webrtc(multiaddr).into()
     }
 
     #[test]
@@ -249,7 +308,7 @@ mod tests {
         let ip4: Multiaddr = format!("/ip4/1.2.3.4/udp/30333/webrtc-direct/certhash/{CERTHASH}")
             .parse()
             .unwrap();
-        let expected_cert = cert_of(&multistream(&ip4));
+        let expected_cert = *webrtc(&ip4).remote_certificate_sha256();
 
         for (protocol, family) in [
             ("dns", DnsFamily::Any),

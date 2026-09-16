@@ -24,7 +24,7 @@ const REQUIRED_BLOCKS: u32 = 5;
 /// the browser delivering `RTCDataChannel`'s `open` event twice on the same
 /// channel must not crash smoldot. Runs the smoke body on the browser host
 /// (WebRTC) with a prepare extension that makes every `open` handler fire
-/// twice; without the guard in `no-auto-bytecode-browser.ts` the wasm panics
+/// twice; without the guard in `internals/browser-connect.ts` the wasm panics
 /// with "same stream_id used multiple times in connection_stream_opened" on
 /// the first substream. Browser-only: the Node host has no WebRTC.
 #[tokio::test(flavor = "multi_thread")]

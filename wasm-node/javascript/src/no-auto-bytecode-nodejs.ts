@@ -64,7 +64,8 @@ export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
         },
         connect: (config) => {
             return connect(config)
-        }
+        },
+        forbidWebTransport: true,
     })
 }
 

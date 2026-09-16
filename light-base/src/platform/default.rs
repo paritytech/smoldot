@@ -36,7 +36,7 @@
 //!
 
 use super::{
-    Address, ConnectionType, IpAddr, LogLevel, MultiStreamAddress, MultiStreamWebRtcConnection,
+    Address, ConnectionType, IpAddr, LogLevel, MultiStreamAddress, MultiStreamConnection,
     PlatformRef, SubstreamDirection, with_buffers,
 };
 
@@ -116,7 +116,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
     type MultiStream = std::convert::Infallible; // TODO: replace with `!` once stable: https://github.com/rust-lang/rust/issues/35121
     type Stream = Stream;
     type StreamConnectFuture = future::Ready<Self::Stream>;
-    type MultiStreamConnectFuture = future::Pending<MultiStreamWebRtcConnection<Self::MultiStream>>;
+    type MultiStreamConnectFuture = future::Pending<MultiStreamConnection<Self::MultiStream>>;
     type ReadWriteAccess<'a> = with_buffers::ReadWriteAccess<'a, Instant>;
     type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
     type StreamErrorRef<'a> = &'a io::Error;
