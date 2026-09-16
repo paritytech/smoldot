@@ -108,6 +108,9 @@ pub struct Config<TPlat: PlatformRef> {
     /// Process-wide network metrics, returned by `sudo_unstable_metrics`.
     pub network_metrics: Arc<crate::metrics::NetworkMetrics>,
 
+    /// Lifecycle state of the chain, served by `lifecycle_unstable_follow`.
+    pub lifecycle_service: Arc<crate::lifecycle_service::LifecycleService>,
+
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
     /// Type of chain, as found in the chain specification.
@@ -165,6 +168,7 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
                 bitswap_service: config.bitswap_service,
                 chain_metrics: config.chain_metrics,
                 network_metrics: config.network_metrics,
+                lifecycle_service: config.lifecycle_service,
                 chain_name: config.chain_name,
                 chain_ty: config.chain_ty,
                 chain_properties_json: config.chain_properties_json,

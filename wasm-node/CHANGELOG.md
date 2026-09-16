@@ -2,9 +2,19 @@
 
 ## Unreleased
 
+### Changed
+
+- `statement_subscribeStatement` sends an empty `newStatements` batch with `remaining: 0` right after the subscription ID, as a full node does when its store holds nothing matching, and drops gossiped statements that are expired or carry no proof before matching them against subscriptions. ([#3371](https://github.com/paritytech/smoldot/pull/3371))
+
 ### Added
 
 - Add the `sudo_unstable_metrics` JSON-RPC function, returning a snapshot of internal counters and gauges (network connections, per-protocol request outcomes and durations, peer bans, connected gossip peers, verified blocks and finality proofs, best/finalized block height, warp-sync progress and target height, runtime compilations, dropped transactions). The list of metrics and their labels is unstable and may change between versions. ([#3285](https://github.com/paritytech/smoldot/issues/3285))
+- Add the `lifecycle_unstable_follow` and `lifecycle_unstable_unfollow` JSON-RPC functions. The subscription reports the lifecycle state of the chain: whether it is still connecting, warp syncing (with the current and target block heights), or ready, how many peers are connected, and whether the built-in watchdog considers it stalled (no peers, or no warp sync progress). The first notification is the current state, reported as syncing as soon as warp sync fragments are requested, and every later notification carries the whole new state, so an embedder can show what the light client is doing without parsing log output. The schema is unstable. ([#3301](https://github.com/paritytech/smoldot/issues/3301))
+
+### Fixed
+
+- A `chainHead_v1_follow` subscription no longer loses one slot of its pinned-blocks budget for every block that is unpinned before it is finalized or pruned. The runtime service charged every subscriber for each newly finalized and pruned block regardless of whether the subscriber still had it pinned, and an already-unpinned block could never be unpinned again to get the slot back, so a client that unpins early was eventually stopped for exceeding its limit. Only blocks the subscriber still has pinned are now charged. ([#3366](https://github.com/paritytech/smoldot/pull/3366))
+- `statement_submit` answers 7001 for a statement with the removed `Proof::OnChain` proof, like a full node, instead of accepting it and broadcasting a statement every peer rejects. ([#3370](https://github.com/paritytech/smoldot/pull/3370))
 
 ## 3.5.0 - 2026-09-09
 
