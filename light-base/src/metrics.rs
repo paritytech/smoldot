@@ -32,9 +32,10 @@ use smoldot::json_rpc::methods;
 use strum::IntoEnumIterator;
 
 // 64-bit atomics where the target has them (every realistic deployment target: wasm32,
-// x86-64, aarch64, 32-bit ARM/x86 with `std`), 32-bit saturating atomics as a fallback
-// for targets without them (e.g. `thumbv7m-none-eabi`). Durations are tracked in
-// milliseconds so that the 32-bit fallback still covers about 49 days.
+// x86-64, aarch64, 32-bit ARM/x86 with `std`), 32-bit atomics as a fallback for targets
+// without them (e.g. `thumbv7m-none-eabi`). Values saturate at the maximum of the chosen
+// width instead of wrapping. Durations are tracked in milliseconds so that the 32-bit
+// fallback still covers about 49 days.
 #[cfg(target_has_atomic = "64")]
 mod word {
     pub type Atomic = core::sync::atomic::AtomicU64;
@@ -65,17 +66,24 @@ mod word {
 
 use word::{narrow, widen};
 
+/// Saturating add; `fetch_add` would wrap on overflow.
+fn saturating_add(atomic: &word::Atomic, n: u64) {
+    let _ = atomic.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        Some(v.saturating_add(narrow(n)))
+    });
+}
+
 /// Monotonically increasing counter.
 #[derive(Debug, Default)]
 pub struct Counter(word::Atomic);
 
 impl Counter {
     pub fn inc(&self) {
-        self.0.fetch_add(1, Ordering::Relaxed);
+        saturating_add(&self.0, 1);
     }
 
     pub fn add(&self, n: u64) {
-        self.0.fetch_add(narrow(n), Ordering::Relaxed);
+        saturating_add(&self.0, n);
     }
 
     pub fn get(&self) -> u64 {
@@ -93,7 +101,7 @@ impl Gauge {
     }
 
     pub fn inc(&self) {
-        self.0.fetch_add(1, Ordering::Relaxed);
+        saturating_add(&self.0, 1);
     }
 
     pub fn dec(&self) {
