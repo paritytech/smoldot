@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CommitVerify","CommitVerifyError","JustificationVerifyError"],"fn":["verify_commit","verify_justification"],"struct":["CommitVerifyConfig","CommitVerifyIsAuthority","CommitVerifyIsParent","JustificationVerifyConfig"]};

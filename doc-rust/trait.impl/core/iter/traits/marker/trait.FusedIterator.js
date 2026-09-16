@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["smoldot",[["impl&lt;'a, T: <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/convert/trait.AsRef.html\" title=\"trait core::convert::AsRef\">AsRef</a>&lt;[<a class=\"primitive\" href=\"https://doc.rust-lang.org/1.92.0/std/primitive.u8.html\">u8</a>]&gt;&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/iter/traits/marker/trait.FusedIterator.html\" title=\"trait core::iter::traits::marker::FusedIterator\">FusedIterator</a> for <a class=\"struct\" href=\"smoldot/trie/proof_decode/struct.EntryKeyIter.html\" title=\"struct smoldot::trie::proof_decode::EntryKeyIter\">EntryKeyIter</a>&lt;'a, T&gt;"],["impl&lt;'a, TChainId, TInstant&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/iter/traits/marker/trait.FusedIterator.html\" title=\"trait core::iter::traits::marker::FusedIterator\">FusedIterator</a> for <a class=\"struct\" href=\"smoldot/network/basic_peering_strategy/struct.UnassignSlotsAndBanIter.html\" title=\"struct smoldot::network::basic_peering_strategy::UnassignSlotsAndBanIter\">UnassignSlotsAndBanIter</a>&lt;'a, TChainId, TInstant&gt;<div class=\"where\">where\n    TInstant: <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/cmp/trait.PartialOrd.html\" title=\"trait core::cmp::PartialOrd\">PartialOrd</a> + <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> + <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/cmp/trait.Eq.html\" title=\"trait core::cmp::Eq\">Eq</a> + <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/clone/trait.Clone.html\" title=\"trait core::clone::Clone\">Clone</a>,</div>"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[1688]}
