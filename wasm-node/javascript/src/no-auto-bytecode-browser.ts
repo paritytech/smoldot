@@ -96,8 +96,10 @@ export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
  * @see Connection
  * @throws any If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
-function connect(config: ConnectionConfig): Connection {
-    if (config.address.ty === "websocket") {
+export function connect(config: ConnectionConfig): Connection {
+    if (config.address.ty === "webtransport") {
+        return connectWebTransport(config);
+    } else if (config.address.ty === "websocket") {
         // Even though the WHATWG specification (<https://websockets.spec.whatwg.org/#dom-websocket-websocket>)
         // doesn't mention it, `new WebSocket` can throw an exception if the URL is forbidden
         // for security reasons. We absord this exception as soon as it is thrown.
@@ -289,7 +291,9 @@ function connect(config: ConnectionConfig): Connection {
                     return;
                 isOpen.value = true;
                 config.onStreamOpened(streamId, direction);
-                config.onWritableBytes(65536, streamId);
+                // The callback may synchronously reject and remove this channel.
+                if (state.dataChannels.has(streamId))
+                    config.onWritableBytes(65536, streamId);
             };
 
             dataChannel.onerror = dataChannel.onclose = (event) => {
@@ -570,4 +574,214 @@ function connect(config: ConnectionConfig): Connection {
         // we don't support.
         throw new Error();
     }
+}
+
+/** Internal raw transport entry point, exported for the probe and unit tests. */
+export function connectWebTransport(config: ConnectionConfig): Connection {
+    if (config.address.ty !== 'webtransport')
+        throw new Error('Wrong connection type');
+    const address = config.address;
+    const windowBytes = 64 * 1024;
+    type Stream = {
+        reader: ReadableStreamBYOBReader,
+        writer: WritableStreamDefaultWriter<Uint8Array>,
+        live: boolean,
+        detached: boolean,
+        readDone: boolean,
+        writeClosing: boolean,
+        credit: number,
+        writes: Promise<void>,
+        finishRetirement?: () => void,
+    };
+    let live = true;
+    let sessionDetached = false;
+    let transport: WebTransport | undefined;
+    let incoming: ReadableStreamDefaultReader<WebTransportBidirectionalStream> | undefined;
+    let nextStreamId = 0;
+    let pendingOpens = 0;
+    const retirements = new Set<Promise<void>>();
+    const streams = new Map<number, Stream>();
+    const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+    const disposeStream = (id: number, stream: Stream) => {
+        stream.live = false;
+        streams.delete(id);
+        stream.finishRetirement?.();
+        stream.finishRetirement = undefined;
+        void stream.writer.abort().catch(() => {}).finally(() => stream.writer.releaseLock());
+        if (!stream.readDone)
+            void stream.reader.cancel().catch(() => {}).finally(() => stream.reader.releaseLock());
+    };
+    const stop = (reason?: string) => {
+        if (!live) return;
+        live = false;
+        for (const [id, stream] of streams)
+            disposeStream(id, stream);
+        if (incoming)
+            void incoming.cancel().catch(() => {}).finally(() => incoming?.releaseLock());
+        try { transport?.close(); } catch (_) { /* The session may already be closed. */ }
+        if (reason !== undefined && !sessionDetached)
+            config.onConnectionReset(reason);
+    };
+    const failStream = (id: number, stream: Stream, error: unknown) => {
+        if (!live || sessionDetached || !stream.live || stream.detached) return;
+        // Hold the admission slot until the worker has acknowledged the reset.
+        stream.live = false;
+        void stream.writer.abort().catch(() => {});
+        if (!stream.readDone) void stream.reader.cancel().catch(() => {});
+        void Promise.resolve(config.onStreamReset(id, message(error))).finally(() => {
+            disposeStream(id, stream);
+        }).catch(error => stop(message(error)));
+    };
+    const discard = (stream: WebTransportBidirectionalStream) => {
+        void stream.writable.abort().catch(() => {});
+        void stream.readable.cancel().catch(() => {});
+    };
+    const opened = async (raw: WebTransportBidirectionalStream, direction: 'inbound' | 'outbound') => {
+        if (!live || sessionDetached) { discard(raw); return; }
+        if (streams.size + pendingOpens >= 64) {
+            discard(raw); stop('WebTransport stream admission limit reached'); return;
+        }
+        if (nextStreamId > 0xffffffff) {
+            discard(raw);
+            stop('WebTransport stream identifier limit reached');
+            return;
+        }
+        const id = nextStreamId++;
+        const stream: Stream = {
+            reader: raw.readable.getReader({ mode: 'byob' }), writer: raw.writable.getWriter(),
+            live: true, detached: false, readDone: false, writeClosing: false,
+            credit: windowBytes, writes: Promise.resolve(),
+        };
+        streams.set(id, stream);
+        // STOP_SENDING can reject writer.closed even when no write is pending.
+        void stream.writer.closed.catch(error => failStream(id, stream, error));
+        await config.onStreamOpened(id, direction);
+        if (!live || sessionDetached || !stream.live || stream.detached) return;
+        config.onWritableBytes(windowBytes, id);
+        void (async () => {
+            while (live && stream.live) {
+                // WebTransportReceiveStream is a byte stream. BYOB bounds the native
+                // read as well as each worker message, regardless of peer write sizes.
+                const result = await stream.reader.read(new Uint8Array(65536));
+                if (!live || sessionDetached || !stream.live || stream.detached) return;
+                if (result.value && result.value.byteLength !== 0)
+                    await config.onMessage(result.value, id);
+                if (!live || sessionDetached || !stream.live || stream.detached) return;
+                if (result.done) {
+                    stream.readDone = true;
+                    stream.reader.releaseLock();
+                    await config.onMessage(new Uint8Array(0), id);
+                    return;
+                }
+            }
+        })().catch(error => failStream(id, stream, error));
+    };
+
+    // Deferring also makes constructor errors obey the asynchronous reset contract.
+    const ready = Promise.resolve().then(async () => {
+        if (!live) return;
+        config.onMultistreamHandshakeInfo({ handshake: 'webtransport' });
+        if (!live) return;
+        if (typeof WebTransport === 'undefined')
+            throw new Error('WebTransport is not available in this environment');
+        if (address.certHashes.length === 0 || address.certHashes.some(hash => hash.length !== 32))
+            throw new Error('WebTransport requires SHA-256 certificate hashes');
+        const host = address.ip.includes(':') ? '[' + address.ip + ']' : address.ip;
+        transport = new WebTransport('https://' + host + ':' + address.port + '/', {
+            serverCertificateHashes: address.certHashes.map(hash => ({ algorithm: 'sha-256', value: hash.slice().buffer })),
+        });
+        void transport.closed.then(() => stop('WebTransport session closed'), error => stop(message(error)));
+        await transport.ready;
+        if (!live) return;
+        incoming = transport.incomingBidirectionalStreams.getReader();
+        void (async () => {
+            while (live) {
+                const result = await incoming!.read();
+                if (result.done) {
+                    if (live) stop('WebTransport incoming streams closed');
+                    return;
+                }
+                await opened(result.value, 'inbound');
+            }
+        })().catch(error => stop(message(error)));
+    }).catch(error => stop(message(error)));
+
+    return {
+        reset: (streamId?: number, graceful = false) => {
+            if (graceful && streamId === undefined) {
+                sessionDetached = true;
+                // Rust has dropped its final handle. Detached writes still own the session
+                // until FIN completes, but must never call back into the removed Rust state.
+                void Promise.all([...retirements]).then(() => stop());
+                return;
+            }
+            if (graceful && streamId !== undefined) {
+                const stream = streams.get(streamId);
+                if (stream && stream.readDone && stream.writeClosing) {
+                    stream.detached = true;
+                    let complete!: () => void;
+                    const finished = new Promise<void>(resolve => { complete = resolve; });
+                    // A peer that never drains its receive window must not retain a
+                    // detached session forever. Normal FIN waits for all queued writes.
+                    const timeout = setTimeout(() => disposeStream(streamId, stream), 30000);
+                    stream.finishRetirement = () => {
+                        clearTimeout(timeout); retirements.delete(finished); complete();
+                    };
+                    void stream.writes.finally(() => {
+                        disposeStream(streamId, stream);
+                    }).catch(() => {});
+                    retirements.add(finished);
+                    return;
+                }
+            }
+            if (streamId === undefined) { stop(); return; }
+            const stream = streams.get(streamId);
+            if (stream) disposeStream(streamId, stream);
+        },
+        openOutSubstream: () => {
+            if (!live || sessionDetached) return;
+            if (streams.size + pendingOpens >= 64) { stop('WebTransport stream admission limit reached'); return; }
+            pendingOpens++;
+            void ready.then(async () => {
+                if (!live || !transport) return;
+                const stream = await transport.createBidirectionalStream();
+                pendingOpens--;
+                await opened(stream, 'outbound');
+            }).catch(error => stop(message(error)));
+        },
+        send: (data: Array<Uint8Array>, streamId?: number) => {
+            const stream = streamId === undefined ? undefined : streams.get(streamId);
+            if (!live || !stream || !stream.live || stream.writeClosing)
+                return;
+            const length = data.reduce((sum, bytes) => sum + bytes.length, 0);
+            if (length > stream.credit) {
+                failStream(streamId!, stream, new Error('WebTransport writable credit exceeded'));
+                return;
+            }
+            if (length === 0) return;
+            stream.credit -= length;
+            // Own the bytes across async writes (the caller may reuse Wasm memory).
+            const bytes = new Uint8Array(length);
+            let offset = 0;
+            for (const chunk of data) { bytes.set(chunk, offset); offset += chunk.length; }
+            stream.writes = stream.writes.then(async () => {
+                if (!live || !stream.live) return;
+                await stream.writer.ready;
+                if (!live || !stream.live) return;
+                await stream.writer.write(bytes);
+                if (!live || !stream.live || stream.writeClosing) return;
+                stream.credit += length;
+                config.onWritableBytes(length, streamId);
+            }).catch(error => failStream(streamId!, stream, error));
+        },
+        closeSend: (streamId?: number) => {
+            const stream = streamId === undefined ? undefined : streams.get(streamId);
+            if (!live || !stream || !stream.live || stream.writeClosing) return;
+            stream.writeClosing = true;
+            stream.writes = stream.writes.then(async () => {
+                if (live && stream.live) await stream.writer.close();
+            }).catch(error => failStream(streamId!, stream, error));
+        },
+    };
 }

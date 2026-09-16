@@ -15,6 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use alloc::{borrow::Cow, vec::Vec};
 use smoldot::libp2p::multiaddr::{Multiaddr, Protocol};
 
 use super::{Address, ConnectionType, MultiStreamAddress};
@@ -47,6 +48,38 @@ pub fn multiaddr_to_address(
     let proto2 = iter.next().ok_or(Error::UnknownCombination)?;
     let proto3 = iter.next();
     let proto4 = iter.next();
+
+    if let (Protocol::Udp(port), Some(Protocol::QuicV1), Some(Protocol::WebTransport)) =
+        (&proto2, &proto3, &proto4)
+    {
+        let ip = match proto1 {
+            Protocol::Ip4(ip) => IpAddr::V4(Ipv4Addr::from(ip)),
+            Protocol::Ip6(ip) => IpAddr::V6(Ipv6Addr::from(ip)),
+            _ => return Err(Error::UnknownCombination),
+        };
+        let mut cert_hashes = Vec::new();
+        for protocol in iter {
+            let Protocol::Certhash(hash) = protocol else {
+                return Err(Error::UnknownCombination);
+            };
+            if hash.hash_algorithm_code() != 0x12 {
+                return Err(Error::NonSha256Certhash);
+            }
+            cert_hashes.push(
+                <[u8; 32]>::try_from(hash.data_ref()).map_err(|_| Error::InvalidMultihashLength)?,
+            );
+        }
+        if cert_hashes.is_empty() {
+            return Err(Error::UnknownCombination);
+        }
+        return Ok(AddressOrMultiStreamAddress::MultiStreamAddress(
+            MultiStreamAddress::WebTransport {
+                ip,
+                port: *port,
+                cert_hashes: Cow::Owned(cert_hashes),
+            },
+        ));
+    }
 
     if iter.next().is_some() {
         return Err(Error::UnknownCombination);
@@ -175,4 +208,104 @@ pub enum Error {
 
     /// Multiaddr contains a multihash whose length doesn't match its hash algorithm.
     InvalidMultihashLength,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::{format, vec};
+    use smoldot::libp2p::multihash::Multihash;
+
+    fn pin(code: u8, len: u8) -> Protocol<Vec<u8>> {
+        let mut bytes = vec![code, len];
+        bytes.extend(core::iter::repeat_n(7, usize::from(len)));
+        Protocol::Certhash(Multihash::from_bytes(bytes).unwrap())
+    }
+
+    #[test]
+    fn webtransport_addresses() {
+        for host in ["/ip4/127.0.0.1", "/ip6/::1"] {
+            for count in [1, 3] {
+                let mut addr: Multiaddr = format!("{host}/udp/40000/quic-v1/webtransport")
+                    .parse()
+                    .unwrap();
+                for _ in 0..count {
+                    addr.push(pin(0x12, 32));
+                }
+                let text = addr.to_string();
+                assert_eq!(text.parse::<Multiaddr>().unwrap(), addr);
+                let AddressOrMultiStreamAddress::MultiStreamAddress(parsed) =
+                    multiaddr_to_address(&addr).unwrap()
+                else {
+                    panic!()
+                };
+                assert_eq!(
+                    ConnectionType::from(&parsed),
+                    if host.starts_with("/ip4") {
+                        ConnectionType::WebTransportIpv4
+                    } else {
+                        ConnectionType::WebTransportIpv6
+                    }
+                );
+                let MultiStreamAddress::WebTransport {
+                    port, cert_hashes, ..
+                } = parsed
+                else {
+                    panic!()
+                };
+                assert_eq!(port, 40000);
+                assert_eq!(cert_hashes.as_ref(), vec![[7; 32]; count]);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_webtransport_addresses() {
+        for prefix in [
+            "/ip4/127.0.0.1/udp/40000/quic-v1/webtransport",
+            "/ip6/::1/udp/40000/quic-v1/webtransport",
+        ] {
+            let addr: Multiaddr = prefix.parse().unwrap();
+            assert!(multiaddr_to_address(&addr).is_err());
+            for (code, len) in [(0x13, 32), (0x12, 31), (0x12, 33)] {
+                let mut invalid = addr.clone();
+                invalid.push(pin(code, len));
+                assert!(multiaddr_to_address(&invalid).is_err());
+            }
+            let mut trailing = addr.clone();
+            trailing.push(pin(0x12, 32));
+            trailing.push(Protocol::<Vec<u8>>::Ws);
+            assert!(multiaddr_to_address(&trailing).is_err());
+        }
+        for prefix in [
+            "/dns/localhost/udp/40000/quic-v1/webtransport",
+            "/ip4/127.0.0.1/tcp/40000/quic-v1/webtransport",
+            "/ip4/127.0.0.1/udp/40000/webtransport/quic-v1",
+        ] {
+            let mut addr: Multiaddr = prefix.parse().unwrap();
+            addr.push(pin(0x12, 32));
+            assert!(multiaddr_to_address(&addr).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_addresses() {
+        for text in [
+            "/ip4/127.0.0.1/tcp/80",
+            "/ip6/::1/tcp/80/ws",
+            "/dns/localhost/tcp/443/tls/ws",
+        ] {
+            assert!(multiaddr_to_address(&text.parse().unwrap()).is_ok());
+        }
+        let mut rtc: Multiaddr = "/ip4/127.0.0.1/udp/40000/webrtc-direct".parse().unwrap();
+        rtc.push(pin(0x12, 32));
+        assert!(matches!(
+            multiaddr_to_address(&rtc),
+            Ok(AddressOrMultiStreamAddress::MultiStreamAddress(
+                MultiStreamAddress::WebRtc { .. }
+            ))
+        ));
+        rtc.push(pin(0x12, 32));
+        assert!(multiaddr_to_address(&rtc).is_err());
+    }
 }

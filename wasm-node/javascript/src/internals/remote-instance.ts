@@ -79,14 +79,50 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
         jsonRpcResponses: new Map<number, string[]>(),
         connections: new Map<number, { ty: "single-stream" } | { ty: "multi-stream", liveStreams: Set<number> }>(),
     };
+    const webtransport = new Set<number>();
+    let nextDelivery = 0, outstandingBytes = 0;
+    const deliveries = new Map<number, { bytes: number, resolve: () => void }>();
+    const capacityWaiters = new Set<() => void>();
+    const wakeCapacity = () => {
+        for (const wake of capacityWaiters) wake();
+        capacityWaiters.clear();
+    };
+    const deliver = async (message: ClientToServer & { connectionId: number }, bytes = 0) => {
+        if (bytes > 65536) throw new Error('WebTransport delivery chunk exceeds limit');
+        // Acknowledgement means delivered (or discarded) by the worker, not consumed
+        // by the Rust protocol. Rust independently bounds retained receive data.
+        while (webtransport.has(message.connectionId) &&
+            (deliveries.size >= 256 || outstandingBytes + bytes > 4 * 1024 * 1024))
+            await new Promise<void>(resolve => capacityWaiters.add(resolve));
+        if (!webtransport.has(message.connectionId)) return;
+        const deliveryId = nextDelivery++;
+        await new Promise<void>(resolve => {
+            deliveries.set(deliveryId, { bytes, resolve });
+            outstandingBytes += bytes;
+            portToServer.postMessage({ ...message, deliveryId });
+        });
+    };
 
     portToServer.onmessage = (messageEvent) => {
         const message = messageEvent.data as ServerToClient;
 
         // Update some local state.
         switch (message.ty) {
+            case 'transport-delivered': {
+                const delivery = deliveries.get(message.deliveryId);
+                if (delivery) {
+                    deliveries.delete(message.deliveryId);
+                    outstandingBytes -= delivery.bytes;
+                    delivery.resolve();
+                    wakeCapacity();
+                }
+                return;
+            }
             case "wasm-panic":
             case "executor-shutdown": {
+                webtransport.clear();
+                for (const delivery of deliveries.values()) delivery.resolve();
+                deliveries.clear(); outstandingBytes = 0; wakeCapacity();
                 portToServer.close();
                 initialPort.close();
                 break;
@@ -101,12 +137,14 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
                 break;
             }
             case "new-connection": {
-                state.connections.set(message.connectionId, message.address.ty === "webrtc"
+                if (message.address.ty === 'webtransport') webtransport.add(message.connectionId);
+                state.connections.set(message.connectionId, message.address.ty === "webrtc" || message.address.ty === "webtransport"
                     ? { ty: "multi-stream", liveStreams: new Set() }
                     : { ty: "single-stream" });
                 break;
             }
             case "connection-reset": {
+                webtransport.delete(message.connectionId); wakeCapacity();
                 // The connection might have been reset locally in the past.
                 if (!state.connections.has(message.connectionId))
                     return;
@@ -128,6 +166,7 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
                 // ever sent for multi-stream connections.
                 if (connection.ty !== "multi-stream" || !connection.liveStreams.has(message.streamId))
                     return;
+                connection.liveStreams.delete(message.streamId);
                 break;
             }
             case "stream-send": {
@@ -199,6 +238,7 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
         },
 
         connectionReset(connectionId, message) {
+            webtransport.delete(connectionId); wakeCapacity();
             state.connections.delete(connectionId);
             const msg: ClientToServer = { ty: "connection-reset", connectionId, message };
             portToServer.postMessage(msg);
@@ -211,7 +251,9 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
 
         streamMessage(connectionId, message, streamId) {
             const msg: ClientToServer = { ty: "stream-message", connectionId, message, streamId };
+            if (webtransport.has(connectionId)) return deliver(msg, message.length);
             portToServer.postMessage(msg);
+            return;
         },
 
         streamOpened(connectionId, streamId, direction) {
@@ -220,7 +262,9 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
             if (connection.ty === "multi-stream")
                 connection.liveStreams.add(streamId);
             const msg: ClientToServer = { ty: "stream-opened", connectionId, streamId, direction };
+            if (webtransport.has(connectionId)) return deliver(msg);
             portToServer.postMessage(msg);
+            return;
         },
 
         streamWritableBytes(connectionId, numExtra, streamId) {
@@ -233,7 +277,9 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
             if (connection.ty === "multi-stream")
                 connection.liveStreams.delete(streamId);
             const msg: ClientToServer = { ty: "stream-reset", connectionId, streamId, message };
+            if (webtransport.has(connectionId)) return deliver(msg);
             portToServer.postMessage(msg);
+            return;
         },
     };
 }
@@ -318,7 +364,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 return;
             }
             case "new-connection": {
-                state.connections.set(event.connectionId, event.address.ty === "webrtc"
+                state.connections.set(event.connectionId, event.address.ty === "webrtc" || event.address.ty === "webtransport"
                     ? { ty: "multi-stream", liveStreams: new Set() }
                     : { ty: "single-stream" });
                 break;
@@ -354,9 +400,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
         ...config
     }, wasmModule, eventsCallback);
 
-    portToClient.onmessage = (messageEvent) => {
-        const message = messageEvent.data as ClientToServer;
-
+    const handleMessage = (message: ClientToServer) => {
         switch (message.ty) {
             case "add-chain": {
                 state.instance!.addChain(message.chainSpec, message.databaseContent, message.potentialRelayChains, message.disableJsonRpc, message.jsonRpcMaxPendingRequests, message.jsonRpcMaxSubscriptions, message.statementStoreMaxSeenStatements, message.statementStoreFalsePositiveRate, message.statementStoreAffinityUpdateIntervalMs);
@@ -390,6 +434,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 // The connection might have been reset locally in the past.
                 if (!state.connections.has(message.connectionId))
                     return;
+                state.connections.delete(message.connectionId);
                 state.instance!.connectionReset(message.connectionId, message.message);
                 break;
             }
@@ -451,6 +496,18 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
         }
     };
 
+    portToClient.onmessage = (messageEvent) => {
+        const message = messageEvent.data as ClientToServer;
+        try {
+            handleMessage(message);
+        } finally {
+            if (message.deliveryId !== undefined) {
+                const ack: ServerToClient = { ty: 'transport-delivered', deliveryId: message.deliveryId };
+                portToClient.postMessage(ack);
+            }
+        }
+    };
+
     return execFinishedPromise;
 }
 
@@ -467,17 +524,18 @@ type InitialMessage = {
 };
 
 type ServerToClient = Exclude<instance.Event, { ty: "json-rpc-responses-non-empty", chainId: number }> |
+{ ty: 'transport-delivered', deliveryId: number } |
 { ty: "json-rpc-response", chainId: number, response: string };
 
-type ClientToServer =
+type ClientToServer = { deliveryId?: number } & (
     { ty: "add-chain", chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number, statementStoreMaxSeenStatements: number, statementStoreFalsePositiveRate: number, statementStoreAffinityUpdateIntervalMs: number } |
     { ty: "remove-chain", chainId: number } |
     { ty: "request", chainId: number, request: string } |
     { ty: "accept-more-json-rpc-answers", chainId: number } |
     { ty: "shutdown" } |
     { ty: "connection-reset", connectionId: number, message: string } |
-    { ty: "connection-multistream-set-info", connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array } } |
+    { ty: "connection-multistream-set-info", connectionId: number, info: instance.MultistreamHandshakeInfo } |
     { ty: "stream-message", connectionId: number, streamId?: number, message: Uint8Array } |
     { ty: "stream-opened", connectionId: number, streamId: number, direction: "inbound" | "outbound" } |
     { ty: "stream-writable-bytes", connectionId: number, streamId?: number, numExtra: number } |
-    { ty: "stream-reset", connectionId: number, streamId: number, message: string };
+    { ty: "stream-reset", connectionId: number, streamId: number, message: string });

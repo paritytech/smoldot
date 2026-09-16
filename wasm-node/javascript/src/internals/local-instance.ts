@@ -67,16 +67,55 @@ export type Event =
     { ty: "wasm-panic", message: string, currentTask: string | null } |
     { ty: "executor-shutdown" } |
     { ty: "new-connection", connectionId: number, address: ParsedMultiaddr } |
-    { ty: "connection-reset", connectionId: number } |
+    { ty: "connection-reset", connectionId: number, graceful?: boolean } |
     { ty: "connection-stream-open", connectionId: number } |
-    { ty: "connection-stream-reset", connectionId: number, streamId: number } |
+    { ty: "connection-stream-reset", connectionId: number, streamId: number, graceful?: boolean } |
     { ty: "stream-send", connectionId: number, streamId?: number, data: Array<Uint8Array> } |
     { ty: "stream-send-close", connectionId: number, streamId?: number };
 
 export type ParsedMultiaddr =
+    { ty: "webtransport", ip: string, port: number, certHashes: Uint8Array[] } |
     { ty: "tcp", hostname: string, port: number } |
     { ty: "websocket", url: string } |
     { ty: "webrtc", targetPort: number, ipVersion: string, targetIp: string, remoteTlsCertificateSha256: Uint8Array };
+
+export type MultistreamHandshakeInfo =
+    { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array } |
+    { handshake: 'webtransport' };
+
+/** Internal ABI decoder, also used by the symmetric Rust/JS vector tests. */
+export function decodeWebTransportAddress(bytes: Uint8Array): Extract<ParsedMultiaddr, { ty: 'webtransport' }> {
+    if (bytes.length < 7 || (bytes[0] !== 18 && bytes[0] !== 19))
+        throw new Error('Invalid WebTransport address header');
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const count = view.getUint32(3, true);
+    const ipOffset = 7 + count * 32;
+    if (count === 0 || ipOffset >= bytes.length)
+        throw new Error('Invalid WebTransport certificate hashes');
+    const ip = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(ipOffset));
+    if (bytes[0] === 18) {
+        const parts = ip.split('.');
+        if (parts.length !== 4 || parts.some(part => !/^(0|[1-9][0-9]{0,2})$/.test(part) || Number(part) > 255))
+            throw new Error('Invalid WebTransport IPv4 address');
+    } else {
+        if (!ip.includes(':') || !/^[0-9a-fA-F:.]+$/.test(ip))
+            throw new Error('Invalid WebTransport IPv6 address');
+        // The URL parser validates IPv6 group lengths and compression.
+        new URL('https://[' + ip + ']/');
+    }
+    const certHashes = Array.from({ length: count }, (_, i) => bytes.slice(7 + i * 32, 39 + i * 32));
+    return { ty: 'webtransport', ip, port: view.getUint16(1, false), certHashes };
+}
+
+export function encodeMultistreamHandshakeInfo(info: MultistreamHandshakeInfo): Uint8Array {
+    if (info.handshake === 'webtransport')
+        return new Uint8Array([2]);
+    if (info.localTlsCertificateSha256.length !== 32)
+        throw new Error('Invalid WebRTC certificate hash');
+    const bytes = new Uint8Array(33);
+    bytes.set(info.localTlsCertificateSha256, 1);
+    return bytes;
+}
 
 export interface Instance {
     request: (request: string, chainId: number) => number,
@@ -101,12 +140,12 @@ export interface Instance {
      * all connections.
      */
     shutdownExecutor: () => void,
-    connectionMultiStreamSetHandshakeInfo: (connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array }) => void,
+    connectionMultiStreamSetHandshakeInfo: (connectionId: number, info: MultistreamHandshakeInfo) => void,
     connectionReset: (connectionId: number, message: string) => void,
     streamWritableBytes: (connectionId: number, numExtra: number, streamId?: number) => void,
-    streamMessage: (connectionId: number, message: Uint8Array, streamId?: number) => void,
-    streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound') => void,
-    streamReset: (connectionId: number, streamId: number, message: string) => void,
+    streamMessage: (connectionId: number, message: Uint8Array, streamId?: number) => void | Promise<void>,
+    streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound') => void | Promise<void>,
+    streamReset: (connectionId: number, streamId: number, message: string) => void | Promise<void>,
 }
 
 /**
@@ -122,6 +161,9 @@ export interface Instance {
  * isn't sanitized. In other words, you know what you're doing.
  */
 export async function startLocalInstance(config: Config, wasmModule: WebAssembly.Module, eventCallback: (event: Event) => void): Promise<Instance> {
+    // Drop after both FINs retires the host stream without cancelling queued writes.
+    // This is internal JS lifecycle metadata; the Wasm import/export ABI is unchanged.
+    const wt = new Map<number, { streams: Map<number, { readFin: boolean, writeFin: boolean }>, retiring: boolean }>();
     const state: {
         // Null before initialization and after a panic.
         instance: SmoldotWasmInstance | null,
@@ -295,6 +337,11 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                 case 17: {
                     return config.forbidWebRtc ? 0 : 1
                 }
+                case 18:
+                case 19:
+                    // The networking host can live on the other side of a worker boundary.
+                    // Unavailable host APIs are reported asynchronously by the transport.
+                    return 1;
                 default:
                     // Indicates a bug somewhere.
                     throw new Error("Invalid connection type passed to `connection_type_supported`");
@@ -312,6 +359,14 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 
             let address: ParsedMultiaddr;
             switch (buffer.readUInt8(mem, addrPtr)) {
+                case 18:
+                case 19: {
+                    if (addrPtr + addrLen > mem.length)
+                        throw new Error('Truncated WebTransport address');
+                    address = decodeWebTransportAddress(mem.subarray(addrPtr, addrPtr + addrLen));
+                    wt.set(connectionId, { streams: new Map(), retiring: false });
+                    break;
+                }
                 case 0:
                 case 1:
                 case 2: {
@@ -363,7 +418,10 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 
         // Must close and destroy the connection object.
         reset_connection: (connectionId: number) => {
-            eventCallback({ ty: "connection-reset", connectionId });
+            const state = wt.get(connectionId);
+            const graceful = !!state && state.retiring && state.streams.size === 0;
+            wt.delete(connectionId);
+            eventCallback({ ty: "connection-reset", connectionId, ...(graceful ? { graceful } : {}) });
         },
 
         // Opens a new substream on a multi-stream connection.
@@ -373,7 +431,12 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 
         // Closes a substream on a multi-stream connection.
         connection_stream_reset: (connectionId: number, streamId: number) => {
-            eventCallback({ ty: "connection-stream-reset", connectionId, streamId });
+            const state = wt.get(connectionId);
+            const stream = state?.streams.get(streamId);
+            const graceful = !!stream && stream.readFin && stream.writeFin;
+            state?.streams.delete(streamId);
+            if (state && graceful) state.retiring = true;
+            eventCallback({ ty: "connection-stream-reset", connectionId, streamId, ...(graceful ? { graceful } : {}) });
         },
 
         // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
@@ -397,6 +460,8 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         },
 
         stream_send_close: (connectionId: number, streamId: number) => {
+            const stream = wt.get(connectionId)?.streams.get(streamId);
+            if (stream) stream.writeFin = true;
             // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
             eventCallback({ ty: "stream-send-close", connectionId, streamId });
         },
@@ -611,19 +676,18 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             cb();
         },
 
-        connectionMultiStreamSetHandshakeInfo: (connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array }) => {
+        connectionMultiStreamSetHandshakeInfo: (connectionId: number, info: MultistreamHandshakeInfo) => {
             if (!state.instance)
                 return;
 
-            const handshakeTy = new Uint8Array(1 + info.localTlsCertificateSha256.length);
-            buffer.writeUInt8(handshakeTy, 0, 0);
-            handshakeTy.set(info.localTlsCertificateSha256, 1)
+            const handshakeTy = encodeMultistreamHandshakeInfo(info);
             state.bufferIndices[0] = handshakeTy;
             state.instance.exports.connection_multi_stream_set_handshake_info(connectionId, 0);
             delete state.bufferIndices[0]
         },
 
         connectionReset: (connectionId: number, message: string) => {
+            wt.delete(connectionId);
             if (!state.instance)
                 return;
             state.bufferIndices[0] = new TextEncoder().encode(message);
@@ -642,6 +706,8 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         },
 
         streamMessage: (connectionId: number, message: Uint8Array, streamId?: number) => {
+            const stream = wt.get(connectionId)?.streams.get(streamId!);
+            if (stream && message.length === 0) stream.readFin = true;
             if (!state.instance)
                 return;
             state.bufferIndices[0] = message;
@@ -650,6 +716,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         },
 
         streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound') => {
+            wt.get(connectionId)?.streams.set(streamId, { readFin: false, writeFin: false });
             if (!state.instance)
                 return;
             state.instance.exports.connection_stream_opened(
@@ -660,6 +727,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         },
 
         streamReset: (connectionId: number, streamId: number, message: string) => {
+            wt.get(connectionId)?.streams.delete(streamId);
             if (!state.instance)
                 return;
             state.bufferIndices[0] = new TextEncoder().encode(message);

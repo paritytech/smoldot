@@ -1,0 +1,87 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PolkaJam WebTransport probe</title>
+<h1>PolkaJam raw WebTransport probe</h1>
+<p>Serve this directory tree on localhost. Use current SHA-256 DER certificate pins, not expired fixture pins.</p>
+<p><label>IP <input id="ip" value="127.0.0.1"></label> <label>UDP port <input id="port" type="number" value="40000"></label></p>
+<p><label>Genesis hash (64 hex digits) <input id="genesis" size="70"></label></p>
+<p><label>Certificate pins (one 64-digit hex hash per line)<br><textarea id="pins" rows="3" cols="70"></textarea></label></p>
+<button id="start">Connect / restart</button> <button id="stop">Stop</button>
+<pre id="log"></pre>
+<script type="module">
+import { connectWebTransport } from '../dist/mjs/no-auto-bytecode-browser.js';
+import { fromHex, probe, frameReader } from './webtransport-probe.mjs';
+
+const field = id => document.getElementById(id);
+let connection, retry, watchdog, generation = 0;
+const log = text => {
+    field('log').textContent += new Date().toISOString() + ' ' + text + '\n';
+    // Bound the display during long announcement captures.
+    if (field('log').textContent.length > 100000)
+        field('log').textContent = field('log').textContent.slice(-80000);
+};
+function stop() {
+    generation++;
+    clearTimeout(retry); clearTimeout(watchdog);
+    connection?.reset(); connection = undefined;
+}
+field('stop').onclick = () => { stop(); log('Stopped'); };
+field('start').onclick = () => {
+    stop();
+    let address, bytes;
+    try {
+        bytes = probe(fromHex(field('genesis').value.trim()));
+        address = {
+            ty: 'webtransport', ip: field('ip').value.trim(), port: Number(field('port').value),
+            certHashes: field('pins').value.trim().split(/\s+/).map(fromHex),
+        };
+        if (!Number.isInteger(address.port) || address.port < 1 || address.port > 65535)
+            throw new Error('Invalid port');
+        const url = new URL('https://' + (address.ip.includes(':') ? '[' + address.ip + ']' : address.ip) + ':' + address.port + '/');
+        if (url.pathname !== '/' || url.username || url.password || url.search || url.hash)
+            throw new Error('Expected an IP address');
+    } catch (error) { log(String(error)); return; }
+    const run = generation;
+    const dial = () => {
+        if (run !== generation) return;
+        let selected, sent = false, frames = 0;
+        const consume = frameReader(frame => {
+            const hex = [...frame.slice(0, 48)].map(b => b.toString(16).padStart(2, '0')).join('');
+            log((frames++ === 0 ? 'Peer handshake' : 'Peer announcement') + ' frame: ' + frame.length + ' bytes; prefix ' + hex);
+        });
+        const reconnect = reason => {
+            if (run !== generation) return;
+            clearTimeout(watchdog); clearTimeout(retry);
+            connection?.reset(); connection = undefined;
+            log(reason + '; reconnecting in 2 seconds');
+            retry = setTimeout(dial, 2000);
+        };
+        log('Connecting to ' + address.ip + ':' + address.port);
+        connection = connectWebTransport({
+            address,
+            onMultistreamHandshakeInfo: () => {
+                clearTimeout(watchdog);
+                log('WebTransport ready; opening UP 0 stream'); connection.openOutSubstream();
+            },
+            onStreamOpened: (id, direction) => {
+                if (direction === 'outbound' && selected === undefined) selected = id;
+                else connection.reset(id);
+            },
+            onWritableBytes: (credit, id) => {
+                if (id === selected && !sent && credit >= bytes.length) {
+                    sent = true; connection.send([bytes], id); log('Sent kind 0 + framed 37-byte handshake');
+                }
+            },
+            onMessage: (data, id) => {
+                if (id !== selected) return;
+                if (data.length === 0) { reconnect('Peer FIN'); return; }
+                try { consume(data); } catch (error) { reconnect(String(error)); }
+            },
+            onStreamReset: (id, reason) => { if (id === selected) reconnect('Stream reset: ' + reason); },
+            onConnectionReset: reason => reconnect('Session closed: ' + reason),
+        });
+        watchdog = setTimeout(() => reconnect('Connection timeout'), 15000);
+    };
+    dial();
+};
+</script>
