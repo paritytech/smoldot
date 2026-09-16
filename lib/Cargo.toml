@@ -108,6 +108,7 @@ wasmtime = { version = "36.0.14", default-features = false, features = ["async",
 criterion = "0.5.1"
 futures-executor = { version = "0.3.28", default-features = false }
 rand = { version = "0.8.6", default-features = false, features = ["std", "std_rng"] }
+rstest = { version = "0.27", default-features = false }
 tempfile = "3.10.0"
 wat = "1.216.0"
 
