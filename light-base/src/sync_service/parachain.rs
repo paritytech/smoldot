@@ -193,6 +193,18 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         platform,
     };
 
+    // The gauges are otherwise only refreshed when the best or finalized block changes, which
+    // waits for the relay chain to be synced.
+    {
+        let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
+        task.metrics
+            .sync_best_block_height
+            .set(sync.best_block_number());
+        task.metrics
+            .sync_finalized_block_height
+            .set(sync.finalized_block_number());
+    }
+
     // Phase 5: Main sync loop.
     loop {
         // Yield at every loop in order to provide better tasks granularity.

@@ -143,6 +143,18 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         platform,
     };
 
+    // The gauges are otherwise only refreshed when the best or finalized block changes, which
+    // during a warp sync from a checkpoint can take a long time.
+    {
+        let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
+        task.metrics
+            .sync_best_block_height
+            .set(sync.best_block_number());
+        task.metrics
+            .sync_finalized_block_height
+            .set(sync.finalized_block_number());
+    }
+
     // Suppress warp completion during Deciding; lifted once the chosen mode drains.
     task.sync
         .as_mut()
