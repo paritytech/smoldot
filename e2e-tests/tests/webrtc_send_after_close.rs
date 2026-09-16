@@ -26,7 +26,7 @@ const REQUIRED_BLOCKS: u32 = 5;
 /// the browser host (WebRTC) with a fault injection that closes channels
 /// right after their `open` event and withholds the `close` event, so
 /// smoldot's next write lands on a non-open channel; without the `readyState`
-/// guard in `no-auto-bytecode-browser.ts` the browser throws an uncaught
+/// guard in `internals/browser-connect.ts` the browser throws an uncaught
 /// `InvalidStateError`. Browser-only: the Node host has no WebRTC.
 #[tokio::test(flavor = "multi_thread")]
 async fn webrtc_send_after_close() -> Result<(), anyhow::Error> {

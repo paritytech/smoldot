@@ -3786,6 +3786,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 remote_certificate_sha256,
                                 ..
                             } => *remote_certificate_sha256,
+                            // No multiaddr parses to a WebTransport address.
+                            platform::MultiStreamAddress::WebTransport { .. } => continue,
                         };
 
                         // We need to know the local TLS certificate in order to insert the

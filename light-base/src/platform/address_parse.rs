@@ -216,6 +216,9 @@ mod tests {
                 remote_certificate_sha256,
                 ..
             } => **remote_certificate_sha256,
+            MultiStreamAddress::WebTransport { .. } => {
+                panic!("expected a WebRTC address, got {addr:?}")
+            }
         }
     }
 

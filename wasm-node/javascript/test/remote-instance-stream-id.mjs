@@ -48,6 +48,45 @@ const WEBRTC_DNS_ADDRESS = {
 };
 const PAYLOAD = [new Uint8Array([1, 2, 3])];
 
+test("WebTransport worker bridge preserves half-close and filters reset stream zero", async (t) => {
+  const ctx = await setup();
+  t.teardown(ctx.close);
+  await withConnection(ctx, { ty: 'webtransport', ip: '127.0.0.1', port: 40000, certHashes: [new Uint8Array(32)] }, [0]);
+  ctx.instance.connectionMultiStreamSetHandshakeInfo(1, { handshake: 'webtransport' });
+  ctx.instance.streamMessage(1, new Uint8Array(0), 0);
+  ctx.serverPort.postMessage({ ty: 'stream-send', connectionId: 1, streamId: 0, data: PAYLOAD });
+  ctx.serverPort.postMessage({ ty: 'stream-send-close', connectionId: 1, streamId: 0 });
+  await ctx.flush();
+  t.true(reached(ctx, 'stream-send', 0));
+  t.true(reached(ctx, 'stream-send-close', 0));
+  ctx.events.length = 0;
+  ctx.instance.streamReset(1, 0, 'reset');
+  ctx.serverPort.postMessage({ ty: 'stream-send', connectionId: 1, streamId: 0, data: PAYLOAD });
+  ctx.serverPort.postMessage({ ty: 'stream-send-close', connectionId: 1, streamId: 0 });
+  await ctx.flush();
+  t.false(reached(ctx, 'stream-send', 0));
+  t.false(reached(ctx, 'stream-send-close', 0));
+});
+
+test("WebTransport worker bridge carries a reset's code as a number, and no code without one", async (t) => {
+  const ctx = await setup();
+  t.teardown(ctx.close);
+  const received = [];
+  ctx.serverPort.onmessage = ({ data }) => {
+    received.push(data);
+    if (data.deliveryId !== undefined)
+      ctx.serverPort.postMessage({ ty: 'transport-delivered', deliveryId: data.deliveryId });
+  };
+  await withConnection(ctx, { ty: 'webtransport', ip: '127.0.0.1', port: 40000, certHashes: [new Uint8Array(32)] }, [0, 1]);
+  await ctx.instance.streamReset(1, 0, 'Received RESET_STREAM.', 6);
+  await ctx.instance.streamReset(1, 1, 'Error in input stream');
+  const resets = received.filter((message) => message.ty === 'stream-reset');
+  t.deepEqual(resets.map(({ streamId, message, code }) => ({ streamId, message, code })), [
+    { streamId: 0, message: 'Received RESET_STREAM.', code: 6 },
+    { streamId: 1, message: 'Error in input stream', code: undefined },
+  ]);
+});
+
 /**
  * Connects a client to a hand-driven fake server.
  *

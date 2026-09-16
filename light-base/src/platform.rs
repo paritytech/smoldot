@@ -265,6 +265,19 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
         stream: Pin<&'a mut Self::Stream>,
     ) -> Result<Self::ReadWriteAccess<'a>, Self::StreamErrorRef<'a>>;
 
+    /// Returns the application error code with which the remote reset the stream, given an
+    /// error returned by [`PlatformRef::read_write_access`]. For WebTransport, this is the
+    /// stream error code of `RESET_STREAM` or `STOP_SENDING`.
+    ///
+    /// Returns `None` if the stream failed for another reason, if the transport has no such
+    /// codes, or if the platform doesn't know the code (some browsers don't report it).
+    ///
+    /// The default implementation always returns `None`.
+    fn stream_reset_code(&self, error: &Self::StreamErrorRef<'_>) -> Option<u32> {
+        let _ = error;
+        None
+    }
+
     /// Returns a future that becomes ready when [`PlatformRef::read_write_access`] should be
     /// called again on this stream.
     ///
@@ -296,9 +309,10 @@ pub enum LogLevel {
 /// Established multistream connection information. See [`PlatformRef::connect_multistream`].
 #[derive(Debug)]
 pub struct MultiStreamWebRtcConnection<TConnection> {
-    /// Object representing the WebRTC connection.
+    /// Object representing the WebRTC or WebTransport connection.
     pub connection: TConnection,
     /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
+    /// Zero for WebTransport, which does not use a local DTLS certificate.
     pub local_tls_certificate_sha256: [u8; 32],
 }
 
@@ -352,6 +366,10 @@ pub enum ConnectionType {
     WebRtcIpv6,
     /// Libp2p-specific WebRTC flavour, with a domain name.
     WebRtcDns,
+    /// Raw WebTransport over HTTP/3, without a libp2p handshake or framing.
+    WebTransportIpv4,
+    /// Raw WebTransport over HTTP/3, without a libp2p handshake or framing.
+    WebTransportIpv6,
 }
 
 impl<'a> From<&'a Address<'a>> for ConnectionType {
@@ -394,6 +412,12 @@ impl<'a> From<&'a MultiStreamAddress<'a>> for ConnectionType {
                 ip: IpAddr::V6(_), ..
             } => ConnectionType::WebRtcIpv6,
             MultiStreamAddress::WebRtcDns { .. } => ConnectionType::WebRtcDns,
+            MultiStreamAddress::WebTransport {
+                ip: IpAddr::V4(_), ..
+            } => ConnectionType::WebTransportIpv4,
+            MultiStreamAddress::WebTransport {
+                ip: IpAddr::V6(_), ..
+            } => ConnectionType::WebTransportIpv6,
         }
     }
 }
@@ -463,8 +487,17 @@ pub enum DnsFamily {
 }
 
 /// Address passed to [`PlatformRef::connect_multistream`].
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MultiStreamAddress<'a> {
+    /// Raw bidirectional WebTransport streams. No handshake or framing is added.
+    WebTransport {
+        /// IP address to connect to.
+        ip: IpAddr,
+        /// UDP port to connect to.
+        port: u16,
+        /// Non-empty list of SHA-256 hashes of acceptable DER server certificates.
+        cert_hashes: Cow<'a, [[u8; 32]]>,
+    },
     /// Libp2p-specific WebRTC flavour.
     ///
     /// The implementation the [`PlatformRef`] trait is responsible for opening the SCTP
