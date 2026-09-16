@@ -472,6 +472,8 @@ impl<'c, T> fmt::Debug for FinalityApply<'c, T> {
 pub enum JustificationVerifyError {
     /// Type of the justification doesn't match the finality mechanism used by the chain.
     ///
+    /// This says nothing about the validity of the justification itself.
+    ///
     /// > **Note**: If the chain's finality mechanism doesn't use justifications, this error is
     /// >           always returned.
     JustificationEngineMismatch,
@@ -523,6 +525,9 @@ pub enum FinalityVerifyError {
     /// The target block height is strictly inferior to the finalized block height.
     BelowFinalized,
     /// Finality proof targets a block that isn't in the chain.
+    ///
+    /// The block might simply not have been downloaded yet. The proof isn't necessarily invalid,
+    /// and can be verified again once the block is known.
     #[display("Justification targets a block (#{block_number}) that isn't in the chain.")]
     UnknownTargetBlock {
         /// Number of the block that isn't in the chain.
@@ -531,7 +536,11 @@ pub enum FinalityVerifyError {
         block_hash: [u8; 32],
     },
     /// There exists a block in-between the latest finalized block and the block targeted by the
-    /// justification that must first be finalized.
+    /// justification that must first be finalized, because it triggers a change of GrandPa
+    /// authorities.
+    ///
+    /// The proof isn't necessarily invalid, and can be verified again once that block has been
+    /// finalized.
     #[display(
         "There exists a block in-between the latest finalized block and the block \
         targeted by the justification that must first be finalized"

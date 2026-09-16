@@ -87,7 +87,10 @@ export function createRpc(client) {
       if (msg === undefined) break;
       if (msg.id === id) {
         if (msg.error) {
-          throw new Error(`RPC error for ${method}: ${JSON.stringify(msg.error)}`);
+          const error = new Error(`RPC error for ${method}: ${JSON.stringify(msg.error)}`);
+          // Carried alongside the message so a body can act on the code rather than parse it.
+          error.rpcError = msg.error;
+          throw error;
         }
         return msg.result;
       }

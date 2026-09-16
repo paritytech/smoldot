@@ -69,6 +69,17 @@ export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
 }
 
 /**
+ * Human-readable reason for a socket error. An `AggregateError` (every address of a
+ * multi-address host failed) has an empty `message`; its causes are in `errors`.
+ */
+function errorReason(error: NodeJS.ErrnoException & { errors?: Error[] }): string {
+    return error.errors?.map((cause) => cause.message).filter(Boolean).join("; ")
+        || error.message
+        || error.code
+        || "Error";
+}
+
+/**
  * Tries to open a new connection using the given configuration.
  *
  * @see Connection
@@ -116,7 +127,7 @@ function connect(config: ConnectionConfig): Connection {
             socket.onerror = () => { };
         };
         socket.onerror = (event) => {
-            config.onConnectionReset(event.message);
+            config.onConnectionReset(errorReason(event.error));
             socket.onopen = () => { };
             socket.onclose = () => { };
             socket.onmessage = () => { };
@@ -159,28 +170,34 @@ function connect(config: ConnectionConfig): Connection {
         // Number of bytes queued using `socket.write` and where `write` has returned false.
         const drainingBytes = { num: 0 };
 
+        // Set by `reset()`. Events that arrive after that must be ignored. This can't be
+        // `socket.destroyed`: NodeJS marks the socket destroyed before emitting `close`, so
+        // that check would swallow every close, including remote ones.
+        let resetCalled = false;
+        // Message of the last `error` event, reported through the `close` event that follows it.
+        let lastError: string | null = null;
+
         socket.setNoDelay();
 
         socket.on('connect', () => {
-            if (socket.destroyed) return;
+            if (resetCalled) return;
             config.onWritableBytes(socket.writableHighWaterMark);
         });
-        socket.on('close', (hasError) => {
-            if (socket.destroyed) return;
-            // NodeJS doesn't provide a reason why the closing happened, but only
-            // whether it was caused by an error.
-            const message = hasError ? "Error" : "Closed gracefully";
-            config.onConnectionReset(message);
+        socket.on('error', (error) => {
+            lastError = errorReason(error);
         });
-        socket.on('error', () => { });
+        socket.on('close', (hasError) => {
+            if (resetCalled) return;
+            config.onConnectionReset(lastError ?? (hasError ? "Error" : "Closed gracefully"));
+        });
         socket.on('data', (message) => {
-            if (socket.destroyed) return;
+            if (resetCalled) return;
             config.onMessage(new Uint8Array(message.buffer));
         });
         socket.on('drain', () => {
             // The bytes queued using `socket.write` and where `write` has returned false have now
             // been sent. Notify the API that it can write more data.
-            if (socket.destroyed) return;
+            if (resetCalled) return;
             const val = drainingBytes.num;
             drainingBytes.num = 0;
             config.onWritableBytes(val);
@@ -188,6 +205,7 @@ function connect(config: ConnectionConfig): Connection {
 
         return {
             reset: (): void => {
+                resetCalled = true;
                 socket.destroy();
             },
             send: (data: Array<Uint8Array>): void => {
