@@ -9,10 +9,8 @@ use super::codec::{DecodeError, Decoder};
 pub struct Params {
     /// E: slots per epoch (`epoch_period` in PolkaJam).
     pub epoch_len: u32,
-    /// V: maximum validator count (`max_val_count` in PolkaJam).
+    /// Upper bound on validator-set sizes: three times `core_count` (GP 0.8.0).
     pub max_validators: u16,
-    /// N: attempts per validator (`tickets_attempts_number` in PolkaJam).
-    pub ticket_entries: u8,
     /// P: seconds per slot (`slot_period_sec` in PolkaJam).
     pub slot_seconds: u32,
     /// Y: first slot outside the ticket submission period.
@@ -40,21 +38,24 @@ pub struct Params {
     pub max_authorizer_code_size: u32,
     pub max_input: u32,
     pub max_service_code_size: u32,
-    pub basic_piece_len: u32,
     pub max_imports: u32,
-    pub segment_piece_count: u32,
     pub max_report_elective_data: u32,
     pub transfer_memo_size: u32,
     pub max_exports: u32,
 }
 
 impl Params {
+    /// GP 0.8.0 Safrole permits independent set sizes in {6, 9, ..., 3C}.
+    pub(crate) fn is_valid_validator_count(&self, count: usize) -> bool {
+        count >= 6 && count <= usize::from(self.max_validators) && count.is_multiple_of(3)
+    }
+
     /// Decodes PolkaJam's encoded `ProtocolParameters`.
     ///
     /// Fields follow `jam-types/src/simple.rs::ProtocolParameters` in declaration
     /// order, using fixed-width little-endian integers (not compact integers).
-    /// The six contract fields retain their JAM names above. The on-wire `u16`
-    /// attempt count must fit in `ticket_entries`; trailing bytes are rejected.
+    /// GP 0.8.0 has 29 fields (122 bytes); legacy blobs and trailing bytes are
+    /// rejected. Validator counts are bounded by three times the core count.
     /// This parses the representation, not all protocol consistency constraints.
     pub fn from_protocol_parameters(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut input = Decoder::new(bytes);
@@ -73,30 +74,32 @@ impl Params {
         let max_dependencies = input.u16()?;
         let max_tickets_per_ext = input.u16()?;
         let max_lookup_anchor_age = input.u32()?;
-        let ticket_entries =
-            u8::try_from(input.u16()?).map_err(|_| DecodeError::InvalidParameters)?;
         let auth_window = input.u16()?;
         let slot_seconds = u32::from(input.u16()?);
         let auth_queue_len = input.u16()?;
         let rotation_period = input.u16()?;
         let max_extrinsics = input.u16()?;
         let availability_timeout = input.u16()?;
-        let max_validators = input.u16()?;
         let max_authorizer_code_size = input.u32()?;
         let max_input = input.u32()?;
         let max_service_code_size = input.u32()?;
-        let basic_piece_len = input.u32()?;
         let max_imports = input.u32()?;
-        let segment_piece_count = input.u32()?;
         let max_report_elective_data = input.u32()?;
         let transfer_memo_size = input.u32()?;
         let max_exports = input.u32()?;
         let epoch_tail_start = input.u32()?;
         input.finish()?;
+        // PolkaJam simple.rs: MAX_CORE_COUNT and MAX_EPOCH_PERIOD. The latter
+        // keeps ceil(2E / validator_count) representable as a one-byte attempt.
+        if !(2..=341).contains(&core_count) || epoch_len > 765 {
+            return Err(DecodeError::InvalidParameters);
+        }
+        let max_validators = core_count
+            .checked_mul(3)
+            .ok_or(DecodeError::InvalidParameters)?;
         Ok(Self {
             epoch_len,
             max_validators,
-            ticket_entries,
             slot_seconds,
             epoch_tail_start,
             max_tickets_per_ext,
@@ -121,9 +124,7 @@ impl Params {
             max_authorizer_code_size,
             max_input,
             max_service_code_size,
-            basic_piece_len,
             max_imports,
-            segment_piece_count,
             max_report_elective_data,
             transfer_memo_size,
             max_exports,
@@ -136,18 +137,21 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
 
-    #[test]
-    fn field_order_widths_and_total_consumption() {
-        // Distinct values catch swapped fields even when official defaults agree.
+    fn distinct_fields() -> Vec<u8> {
         let widths = [
-            8, 8, 8, 2, 4, 4, 8, 8, 8, 8, 2, 2, 2, 2, 4, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4,
-            4, 4, 4, 4,
+            8, 8, 8, 2, 4, 4, 8, 8, 8, 8, 2, 2, 2, 2, 4, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4,
         ];
         let mut bytes = Vec::new();
         for (index, width) in widths.into_iter().enumerate() {
             bytes.extend_from_slice(&u64::try_from(index + 1).unwrap().to_le_bytes()[..width]);
         }
-        assert_eq!(bytes.len(), 134);
+        bytes
+    }
+
+    #[test]
+    fn field_order_widths_and_total_consumption() {
+        let mut bytes = distinct_fields();
+        assert_eq!(bytes.len(), 122);
         let expected = Params {
             deposit_per_item: 1,
             deposit_per_byte: 2,
@@ -164,24 +168,21 @@ mod tests {
             max_dependencies: 13,
             max_tickets_per_ext: 14,
             max_lookup_anchor_age: 15,
-            ticket_entries: 16,
-            auth_window: 17,
-            slot_seconds: 18,
-            auth_queue_len: 19,
-            rotation_period: 20,
-            max_extrinsics: 21,
-            availability_timeout: 22,
-            max_validators: 23,
-            max_authorizer_code_size: 24,
-            max_input: 25,
-            max_service_code_size: 26,
-            basic_piece_len: 27,
-            max_imports: 28,
-            segment_piece_count: 29,
-            max_report_elective_data: 30,
-            transfer_memo_size: 31,
-            max_exports: 32,
-            epoch_tail_start: 33,
+            auth_window: 16,
+            slot_seconds: 17,
+            auth_queue_len: 18,
+            rotation_period: 19,
+            max_extrinsics: 20,
+            availability_timeout: 21,
+            max_authorizer_code_size: 22,
+            max_input: 23,
+            max_service_code_size: 24,
+            max_imports: 25,
+            max_report_elective_data: 26,
+            transfer_memo_size: 27,
+            max_exports: 28,
+            epoch_tail_start: 29,
+            max_validators: 12,
         };
         assert_eq!(Params::from_protocol_parameters(&bytes), Ok(expected));
         for end in 0..bytes.len() {
@@ -192,20 +193,43 @@ mod tests {
             Params::from_protocol_parameters(&bytes),
             Err(DecodeError::TrailingBytes)
         );
-        bytes.pop();
-        bytes[..8].copy_from_slice(&u64::MAX.to_le_bytes());
-        bytes[24..26].copy_from_slice(&u16::MAX.to_le_bytes());
-        bytes[30..34].copy_from_slice(&u32::MAX.to_le_bytes());
-        bytes[78..80].copy_from_slice(&255_u16.to_le_bytes());
-        let decoded = Params::from_protocol_parameters(&bytes).unwrap();
-        assert_eq!(decoded.deposit_per_item, u64::MAX);
-        assert_eq!(decoded.core_count, u16::MAX);
-        assert_eq!(decoded.epoch_len, u32::MAX);
-        assert_eq!(decoded.ticket_entries, 255);
-        bytes[78..80].copy_from_slice(&256_u16.to_le_bytes());
+    }
+
+    #[test]
+    fn parameter_shape_bounds() {
+        for cores in [0_u16, 1, 2, 341, 342, u16::MAX] {
+            for epoch in [0_u32, 765, 766, u32::MAX] {
+                let mut bytes = distinct_fields();
+                bytes[24..26].copy_from_slice(&cores.to_le_bytes());
+                bytes[30..34].copy_from_slice(&epoch.to_le_bytes());
+                let result = Params::from_protocol_parameters(&bytes);
+                if (2..=341).contains(&cores) && epoch <= 765 {
+                    assert_eq!(
+                        result.unwrap().max_validators,
+                        cores.checked_mul(3).unwrap()
+                    );
+                } else {
+                    assert_eq!(result, Err(DecodeError::InvalidParameters));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_gray_paper_0_7_2_parameters() {
+        // Independent old declaration order: N, V, We and Wp were stored.
+        let widths = [
+            8, 8, 8, 2, 4, 4, 8, 8, 8, 8, 2, 2, 2, 2, 4, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4,
+            4, 4, 4, 4,
+        ];
+        let mut legacy = Vec::new();
+        for (index, width) in widths.into_iter().enumerate() {
+            legacy.extend_from_slice(&u64::try_from(index + 1).unwrap().to_le_bytes()[..width]);
+        }
+        assert_eq!(legacy.len(), 134);
         assert_eq!(
-            Params::from_protocol_parameters(&bytes),
-            Err(DecodeError::InvalidParameters)
+            Params::from_protocol_parameters(&legacy),
+            Err(DecodeError::TrailingBytes)
         );
     }
 }

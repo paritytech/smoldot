@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-//! JAM headers, network messages, and genesis light state.
+//! JAM Gray Paper 0.8.0 headers, network messages, and genesis light state.
 
 use alloc::vec::Vec;
 
@@ -24,6 +24,7 @@ pub struct EpochMark {
     pub tickets_entropy: Hash,
     /// Pending keys for the following epoch, not the active set on entry to the
     /// epoch carrying this mark (Gray Paper Safrole validator rotation).
+    /// At most `Params::max_validators` pairs, with a natural-number count prefix.
     pub validators: Vec<(BandersnatchPublic, Ed25519Public)>,
 }
 
@@ -51,9 +52,9 @@ pub struct Header {
     pub slot: u32,
     pub epoch_mark: Option<EpochMark>,
     pub tickets_mark: Option<TicketsMark>,
-    pub offenders_mark: Vec<Ed25519Public>,
     pub author_index: u16,
     pub entropy_source: BandersnatchSignature,
+    pub offenders_mark: Vec<Ed25519Public>,
     pub seal: BandersnatchSignature,
 }
 
@@ -88,8 +89,9 @@ pub struct BlockRequest {
     pub max_blocks: u32,
 }
 
-/// An individually delimited block from CE128. The body is opaque; only the
-/// header is decoded. A multi-block response does not provide such delimiters.
+/// A block from CE128. The header is decoded and the extrinsic body stays
+/// opaque. `Block::decode_sequence` finds boundaries structurally in a response
+/// that has neither a block count nor individual block lengths.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
     pub header: Header,
@@ -105,6 +107,7 @@ pub enum SealingSequence {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SafroleState {
+    /// At most `Params::max_validators` keys, with a natural-number count prefix.
     pub pending_validators: Vec<ValidatorKey>,
     pub epoch_root: [u8; 144],
     pub sealing: SealingSequence,
@@ -117,6 +120,7 @@ pub type Entropy = [Hash; 4];
 pub struct GenesisLightState {
     pub safrole: SafroleState,
     pub entropy: Entropy,
+    /// At most `Params::max_validators` keys, with a natural-number count prefix.
     pub active_validators: Vec<ValidatorKey>,
     pub slot: u32,
 }

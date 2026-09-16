@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-//! Gray Paper appendix C serialization and JAMNP-S message payloads.
+//! Gray Paper 0.8.0 appendix C serialization and JAMNP-S message payloads.
 //!
 //! Decoders consume the entire input, reject non-canonical discriminators, and
 //! check lengths against both the chain parameters and the available bytes before
 //! allocating. Cryptographic and consensus validity are deliberately not checked.
 //! Encoders serialize caller-owned values; callers must respect the documented
 //! list lengths (in particular, an epoch's worth of sealing tickets or keys).
+//! Epoch-mark and pending/active validator lists carry natural-number length
+//! prefixes, bounded by `max_validators`. Consensus validates the actual set sizes.
 
 use super::{
     params::Params,
@@ -308,7 +310,7 @@ impl EpochMark {
     }
 
     /// Encodes a present mark without validating its validator count. The caller
-    /// must supply at most `params.max_validators` validator pairs.
+    /// must supply at most `params.max_validators` pairs. A count is encoded.
     pub fn encode(&self, _params: &Params) -> Vec<u8> {
         let mut out = Vec::new();
         write_epoch_mark(self, &mut out);
@@ -356,9 +358,9 @@ fn read_header(params: &Params, input: &mut Decoder<'_>) -> Result<Header, Decod
         slot,
         epoch_mark,
         tickets_mark,
-        offenders_mark,
         author_index,
         entropy_source,
+        offenders_mark,
         seal,
     })
 }
@@ -429,7 +431,7 @@ fn read_validators(
     input.list(len, 336, read_validator)
 }
 
-/// Decodes C(8), including its natural-number length discriminator.
+/// Decodes C(8): a counted sequence of at most `max_validators` keys.
 pub fn decode_active_validators(
     params: &Params,
     bytes: &[u8],
@@ -437,8 +439,8 @@ pub fn decode_active_validators(
     complete(bytes, |input| read_validators(params, input))
 }
 
-/// Encodes C(8) without validating its length. The caller must supply at most
-/// `Params::max_validators` keys.
+/// Encodes C(8) with a count prefix, without validating its length. The caller
+/// must supply at most `Params::max_validators` keys.
 pub fn encode_active_validators(validators: &[ValidatorKey]) -> Vec<u8> {
     let mut out = Vec::new();
     write_length(validators.len(), &mut out);
@@ -537,8 +539,8 @@ impl SafroleState {
         })
     }
 
-    /// Encodes C(4) without validating lengths. Pending validators must not
-    /// exceed `params.max_validators`, sealing must have `params.epoch_len`
+    /// Encodes C(4) without validating lengths. Pending validators must have
+    /// at most `params.max_validators` entries, sealing must have `params.epoch_len`
     /// entries, and the ticket accumulator must not exceed `params.epoch_len`.
     pub fn encode(&self, _params: &Params) -> Vec<u8> {
         let mut out = encode_active_validators(&self.pending_validators);
@@ -699,6 +701,124 @@ impl BlockRequest {
     }
 }
 
+/// Skips an extrinsic prefix without allocating or checking its commitment.
+/// GP 0.8.0 serialization.tex:133-175, 202-252, 304-313. Returns bytes consumed.
+/// Counts are checked before iteration and every advance is bounded by input.
+pub(crate) fn skip_extrinsic(params: &Params, bytes: &[u8]) -> Result<usize, DecodeError> {
+    let mut input = Decoder::new(bytes);
+    fn fixed(input: &mut Decoder<'_>, max: usize, width: usize) -> Result<(), DecodeError> {
+        let count = input.length(max)?;
+        input.take(count.checked_mul(width).ok_or(DecodeError::LengthLimit)?)?;
+        Ok(())
+    }
+    fn blob(input: &mut Decoder<'_>) -> Result<(), DecodeError> {
+        let len = input.length(input.bytes.len())?;
+        input.take(len)?;
+        Ok(())
+    }
+    fn boolean(input: &mut Decoder<'_>) -> Result<(), DecodeError> {
+        match input.byte()? {
+            0 | 1 => Ok(()),
+            tag => Err(DecodeError::InvalidDiscriminant(tag)),
+        }
+    }
+    let validators = usize::from(params.max_validators);
+    fixed(&mut input, usize::from(params.max_tickets_per_ext), 785)?;
+    let preimages = input.length(input.bytes.len() / 5)?;
+    for _ in 0..preimages {
+        input.take(4)?;
+        blob(&mut input)?;
+    }
+    let guarantees = input.length(usize::from(params.core_count))?;
+    for _ in 0..guarantees {
+        // Availability specification (including GP 0.8's erasure shards),
+        // followed by refinement context's five hashes and two fixed slots.
+        input.take(104 + 168)?;
+        fixed(&mut input, usize::from(params.max_dependencies), 32)?;
+        input.natural()?; // core index
+        input.take(32)?; // authorizer
+        input.natural()?; // authorization gas
+        blob(&mut input)?; // authorization output
+        fixed(&mut input, usize::from(params.max_dependencies), 64)?;
+        let results = input.length(usize::from(params.max_work_items))?;
+        for _ in 0..results {
+            input.take(4 + 32 + 32 + 8)?;
+            match input.byte()? {
+                0 => blob(&mut input)?,
+                1..=6 => {}
+                tag => return Err(DecodeError::InvalidDiscriminant(tag)),
+            }
+            for _ in 0..5 {
+                input.natural()?;
+            }
+        }
+        input.take(4)?; // guarantee slot
+        fixed(&mut input, 3, 2 + 64)?; // three guarantors per core
+    }
+    fixed(
+        &mut input,
+        validators,
+        32 + usize::from(params.core_count).div_ceil(8) + 2 + 64,
+    )?;
+    // Disputes is a tuple of three separately counted lists. Do not impose
+    // PolkaJam's local 16-entry cap on GP encodings; input bounds the outer list.
+    let verdicts = input.length(input.bytes.len() / 37)?;
+    for _ in 0..verdicts {
+        input.take(32 + 4)?;
+        let votes = input.length(validators)?;
+        for _ in 0..votes {
+            boolean(&mut input)?;
+            input.take(2 + 64)?;
+        }
+    }
+    let max_culprits = input.bytes.len() / 128;
+    fixed(&mut input, max_culprits, 32 + 32 + 64)?;
+    let faults = input.length(input.bytes.len() / 129)?;
+    for _ in 0..faults {
+        input.take(32)?;
+        boolean(&mut input)?;
+        input.take(32 + 64)?;
+    }
+    Ok(bytes.len() - input.bytes.len())
+}
+
+impl Block {
+    /// Decodes a complete CE128 block sequence, with no count or block lengths.
+    /// Extrinsics are delimited structurally and retained as opaque bodies;
+    /// neither their commitments nor consensus validity are checked. Limits
+    /// bound the number of blocks and the aggregate bytes copied into bodies.
+    /// Any malformed block rejects the entire response, including prior blocks.
+    pub fn decode_sequence(
+        params: &Params,
+        bytes: &[u8],
+        max_body_bytes: usize,
+        max_blocks: usize,
+    ) -> Result<Vec<Self>, DecodeError> {
+        let mut input = Decoder::new(bytes);
+        let mut blocks = Vec::new();
+        let mut body_budget = max_body_bytes;
+        while !input.bytes.is_empty() {
+            if blocks.len() >= max_blocks {
+                return Err(DecodeError::LengthLimit);
+            }
+            let header = read_header(params, &mut input)?;
+            let len = skip_extrinsic(params, input.bytes)?;
+            body_budget = body_budget
+                .checked_sub(len)
+                .ok_or(DecodeError::LengthLimit)?;
+            let mut body = Vec::new();
+            body.try_reserve_exact(len)
+                .map_err(|_| DecodeError::AllocationFailed)?;
+            body.extend_from_slice(input.take(len)?);
+            blocks
+                .try_reserve(1)
+                .map_err(|_| DecodeError::AllocationFailed)?;
+            blocks.push(Self { header, body });
+        }
+        Ok(blocks)
+    }
+}
+
 impl Block {
     /// Decodes one already-delimited block, keeping the remaining body opaque.
     ///
@@ -706,6 +826,7 @@ impl Block {
     /// With an opaque body, only a response to a single-block request supplies
     /// this boundary. Do not pass a multi-block response to this method: its
     /// remaining blocks would become part of the first block's opaque body.
+    /// Use `decode_sequence` for structurally delimited CE128 responses.
     /// Framing and FIN checks belong to the caller.
     ///
     /// `max_body_bytes` is a local resource limit, not `Params::max_input` (which
@@ -744,10 +865,15 @@ mod tests {
 
     fn params() -> Params {
         // No global production parameters. Individual tests adjust their own copy.
-        let mut params = Params::from_protocol_parameters(&[0; 134]).unwrap();
+        let mut params = Params::from_protocol_parameters(&{
+            let mut bytes = [0; 122];
+            bytes[24] = 2;
+            bytes
+        })
+        .unwrap();
         params.epoch_len = 12;
         params.max_validators = 6;
-        params.ticket_entries = 3;
+
         params.slot_seconds = 6;
         params.epoch_tail_start = 10;
         params.max_tickets_per_ext = 3;
@@ -850,8 +976,7 @@ mod tests {
                     h.epoch_mark = Some(EpochMark {
                         entropy: [10; 32],
                         tickets_entropy: [11; 32],
-                        // Current GP permits a set smaller than the maximum.
-                        validators: vec![([12; 32], [13; 32]); 3],
+                        validators: vec![([12; 32], [13; 32]); 6],
                     });
                 }
                 if tickets {
@@ -864,7 +989,8 @@ mod tests {
                 assert_eq!(&encoded[96..100], &[1, 2, 3, 4]);
                 assert_eq!(encoded[100], u8::from(epoch));
                 if epoch {
-                    assert_eq!(encoded[165], 3);
+                    assert_eq!(encoded[165], 6);
+                    assert_eq!(&encoded[166..230], [[12; 32], [13; 32]].concat());
                 }
                 let unsigned = h.encode_unsigned(&params);
                 assert_eq!(&encoded[..encoded.len() - 96], unsigned);
@@ -1002,7 +1128,7 @@ mod tests {
             SealingSequence::Keys(vec![[17; 32]; 12]),
         ] {
             let safrole = SafroleState {
-                pending_validators: vec![key.clone(); 3],
+                pending_validators: vec![key.clone(); 6],
                 epoch_root: [18; 144],
                 sealing,
                 ticket_accumulator: vec![ticket(); 5],
@@ -1063,22 +1189,22 @@ mod tests {
     }
 
     #[test]
-    fn malicious_counts_and_all_trailing_bytes() {
+    fn malformed_counts_fixed_payloads_and_trailing_bytes() {
         let mut params = params();
         let huge = encode_natural(u64::MAX);
         assert_eq!(
-            decode_active_validators(&params, &huge),
-            Err(DecodeError::LengthLimit)
+            decode_active_validators(&params, &[vec![6], vec![0; 336]].concat()),
+            Err(DecodeError::UnexpectedEnd)
         );
         assert_eq!(
             decode_tickets_extrinsic(&params, &huge),
             Err(DecodeError::LengthLimit)
         );
-        let mut epoch = vec![0; 64];
-        epoch.extend_from_slice(&huge);
+        // Count declares six pairs, but only one is present.
+        let epoch = [vec![0; 64], vec![6], vec![0; 64]].concat();
         assert_eq!(
             EpochMark::decode(&params, &epoch),
-            Err(DecodeError::LengthLimit)
+            Err(DecodeError::UnexpectedEnd)
         );
         let mut handshake = vec![0; 36];
         handshake.extend_from_slice(&huge);
@@ -1104,11 +1230,78 @@ mod tests {
         check(&|b| ValidatorKey::decode(b).is_ok(), validator().encode());
         check(&|b| decode_entropy(b).is_ok(), vec![0; 128]);
         check(&|b| decode_slot(b).is_ok(), vec![0; 4]);
-        check(&|b| decode_active_validators(&params, b).is_ok(), vec![0]);
+        check(
+            &|b| decode_active_validators(&params, b).is_ok(),
+            encode_active_validators(&vec![validator(); 6]),
+        );
         check(&|b| decode_tickets_extrinsic(&params, b).is_ok(), vec![0]);
         check(&|b| Final::decode(b).is_ok(), vec![0; 36]);
         check(&|b| Handshake::decode(b, 64).is_ok(), vec![0; 37]);
         check(&|b| BlockRequest::decode(b).is_ok(), vec![0; 37]);
+    }
+
+    #[test]
+    fn validator_counts_use_canonical_naturals_at_each_changed_wire_location() {
+        let mut params = params();
+        params.max_validators = 1023;
+        params.core_count = 341;
+        for count in [6, 9, 126, 129, 1023] {
+            let mark = EpochMark {
+                entropy: [1; 32],
+                tickets_entropy: [2; 32],
+                validators: vec![([3; 32], [4; 32]); count],
+            };
+            let keys = vec![validator(); count];
+            let state = SafroleState {
+                pending_validators: keys.clone(),
+                epoch_root: [5; 144],
+                sealing: SealingSequence::Keys(vec![[6; 32]; 12]),
+                ticket_accumulator: vec![],
+            };
+            let prefix = encode_natural(u64::try_from(count).unwrap());
+            let mark_bytes = mark.encode(&params);
+            let active_bytes = encode_active_validators(&keys);
+            let state_bytes = state.encode(&params);
+            assert_eq!(&mark_bytes[64..64 + prefix.len()], prefix);
+            assert!(active_bytes.starts_with(&prefix));
+            assert!(state_bytes.starts_with(&prefix));
+            assert_eq!(EpochMark::decode(&params, &mark_bytes), Ok(mark));
+            assert_eq!(decode_active_validators(&params, &active_bytes), Ok(keys));
+            assert_eq!(SafroleState::decode(&params, &state_bytes), Ok(state));
+            if count == 6 {
+                let mut bad_mark = mark_bytes;
+                bad_mark.splice(64..65, [0x80, 6]);
+                let mut bad_active = active_bytes;
+                bad_active.splice(0..1, [0x80, 6]);
+                let mut bad_state = state_bytes;
+                bad_state.splice(0..1, [0x80, 6]);
+                assert_eq!(
+                    EpochMark::decode(&params, &bad_mark),
+                    Err(DecodeError::NonCanonicalNatural)
+                );
+                assert_eq!(
+                    decode_active_validators(&params, &bad_active),
+                    Err(DecodeError::NonCanonicalNatural)
+                );
+                assert_eq!(
+                    SafroleState::decode(&params, &bad_state),
+                    Err(DecodeError::NonCanonicalNatural)
+                );
+            }
+        }
+        let oversized = encode_natural(1024);
+        assert_eq!(
+            decode_active_validators(&params, &oversized),
+            Err(DecodeError::LengthLimit)
+        );
+        assert_eq!(
+            SafroleState::decode(&params, &oversized),
+            Err(DecodeError::LengthLimit)
+        );
+        assert_eq!(
+            EpochMark::decode(&params, &[vec![0; 64], oversized].concat()),
+            Err(DecodeError::LengthLimit)
+        );
     }
 
     #[test]
@@ -1123,7 +1316,7 @@ mod tests {
             sealing: SealingSequence::Keys(vec![[0; 32]; 3]),
             ticket_accumulator: vec![ticket(); 3],
         };
-        for count in [0, 2, 3] {
+        for count in [0, 1, 2, 3] {
             let mark = EpochMark {
                 entropy: [0; 32],
                 tickets_entropy: [0; 32],
@@ -1136,7 +1329,9 @@ mod tests {
             );
             let active = encode_active_validators(&vec![validator(); count]);
             assert_eq!(decode_active_validators(&params, &active).is_ok(), expected);
-            assert!(decode_active_validators(&params, &active[..active.len() - 1]).is_err());
+            if let Some((_, truncated)) = active.split_last() {
+                assert!(decode_active_validators(&params, truncated).is_err());
+            }
             state.pending_validators = vec![validator(); count];
             assert_eq!(
                 SafroleState::decode(&params, &state.encode(&params)).is_ok(),
@@ -1150,7 +1345,10 @@ mod tests {
                 count
             ];
             let bytes = encode_tickets_extrinsic(&envelopes);
-            assert_eq!(decode_tickets_extrinsic(&params, &bytes).is_ok(), expected);
+            assert_eq!(
+                decode_tickets_extrinsic(&params, &bytes).is_ok(),
+                count <= 2
+            );
             assert!(decode_tickets_extrinsic(&params, &bytes[..bytes.len() - 1]).is_err());
         }
         state.pending_validators = vec![validator(); 2];
@@ -1392,70 +1590,60 @@ mod tests {
         out
     }
 
-    /// Explicit, test-only migration of the old fixed-validator epoch mark.
-    /// Never auto-detect or rewrite an incoming production header.
-    fn current_gp_header(params: &Params, legacy: &[u8], has_epoch: bool) -> Vec<u8> {
-        if !has_epoch {
-            return legacy.to_vec();
-        }
-        [
-            legacy[..165].to_vec(),
-            encode_natural(u64::from(params.max_validators)),
-            legacy[165..].to_vec(),
-        ]
-        .concat()
-    }
-
-    fn check_vector_header(params: &Params, expected: &Header, legacy: &[u8]) -> bool {
-        let has_epoch = expected.epoch_mark.is_some();
-        let bytes = current_gp_header(params, legacy, has_epoch);
-        assert_eq!(Header::decode(params, &bytes).unwrap(), *expected);
+    fn check_vector_header(params: &Params, expected: &Header, bytes: &[u8]) {
+        assert_eq!(Header::decode(params, bytes).unwrap(), *expected);
         assert_eq!(expected.encode(params), bytes);
-        let independent_hash = blake2_rfc::blake2b::blake2b(32, &[], &bytes);
+        let independent_hash = blake2_rfc::blake2b::blake2b(32, &[], bytes);
         assert_eq!(
             expected.hash(params).as_slice(),
             independent_hash.as_bytes()
         );
-        if has_epoch {
-            assert!(
-                Header::decode(params, legacy).is_err(),
-                "legacy epoch format must not be silently guessed"
-            );
-        } else {
-            assert_eq!(expected.encode(params), legacy);
-        }
-        has_epoch
     }
 
     #[test]
-    #[ignore = "requires external w3f/jamtestvectors (JAM_TEST_VECTORS); includes explicit GP-version migration"]
-    fn public_codec_vectors() {
+    #[ignore = "requires external GP 0.7.1 w3f/jamtestvectors (JAM_TEST_VECTORS)"]
+    fn legacy_public_codec_vectors() {
         let root = vector_root();
-        let mut migrated = 0;
-        for (name, validators, slots, expected_hash) in [
+        for (name, validators, slots, expected_hashes) in [
             (
                 "tiny",
                 6,
                 12,
-                "b2cf4b091da8755d5685fc41737c4626fd4a538b7552cd38710491da9a00733d",
+                [
+                    "61aca4292501065b86ad0411fdb5fdbfa6621292892d99b7a1eb531b2e1a7ac3",
+                    "b2cf4b091da8755d5685fc41737c4626fd4a538b7552cd38710491da9a00733d",
+                ],
             ),
             (
                 "full",
                 1023,
                 600,
-                "f9477ceee92965c35ea593a3542b1b8d18d8361d7e3f4537c120d00a4a29f90d",
+                [
+                    "7c628a886e62e2009ccb3eea777156b9b27a1a51bb106ae7c53b776ecca0794c",
+                    "f9477ceee92965c35ea593a3542b1b8d18d8361d7e3f4537c120d00a4a29f90d",
+                ],
             ),
         ] {
             let mut params = params();
             params.max_validators = validators;
             params.epoch_len = slots;
             let dir = root.join("codec").join(name);
-            for index in 0..=1 {
+            for (index, expected_hash) in expected_hashes.into_iter().enumerate() {
                 let expected = json_header(&load_json(&dir.join(format!("header_{index}.json"))));
                 let bytes = std::fs::read(dir.join(format!("header_{index}.bin"))).unwrap();
-                migrated += usize::from(check_vector_header(&params, &expected, &bytes));
-                if index == 1 {
+                assert_eq!(
+                    hex::encode(blake2_rfc::blake2b::blake2b(32, &[], &bytes).as_bytes()),
+                    expected_hash
+                );
+                if expected.epoch_mark.is_some() {
+                    // This pinned corpus predates the validator-count prefix.
+                    // Do not insert bytes and pretend its old signatures/hashes are 0.8.
+                    assert!(Header::decode(&params, &bytes).is_err());
+                } else {
+                    check_vector_header(&params, &expected, &bytes);
                     assert_eq!(hex::encode(expected.hash(&params)), expected_hash);
+                }
+                if index == 1 {
                     let tickets = expected.tickets_mark.as_ref().unwrap();
                     assert_eq!(
                         decode_tickets_mark(&params, &encode_tickets_mark(tickets)),
@@ -1480,22 +1668,18 @@ mod tests {
             );
             assert_eq!(encode_tickets_extrinsic(&tickets), bytes);
             let block_json = load_json(&dir.join("block.json"));
-            let expected = json_header(&block_json["header"]);
+            assert!(json_header(&block_json["header"]).epoch_mark.is_some());
             let header_bytes = std::fs::read(dir.join("header_0.bin")).unwrap();
             let block_bytes = std::fs::read(dir.join("block.bin")).unwrap();
             assert_eq!(&block_bytes[..header_bytes.len()], header_bytes);
-            let corrected = current_gp_header(&params, &block_bytes, true);
-            let block = Block::decode(&params, &corrected, block_bytes.len()).unwrap();
-            assert_eq!(block.header, expected);
             assert_eq!(
-                block.body,
+                &block_bytes[header_bytes.len()..],
                 std::fs::read(dir.join("extrinsic.bin")).unwrap()
             );
-            assert_eq!(block.encode(&params), corrected);
+            assert!(Block::decode(&params, &block_bytes, block_bytes.len()).is_err());
         }
-        assert_eq!(migrated, 2);
         std::println!(
-            "4 standalone headers checked: 2 unchanged, 2 migrated; 2 ticket extrinsics and 2 block containers checked"
+            "legacy vectors: 4 original hashes checked; 2 non-epoch headers and 2 ticket extrinsics unchanged; 2 epoch headers and 2 old block containers rejected"
         );
     }
 
@@ -1534,14 +1718,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires external w3f/jamtestvectors; audits every trace header, including GP-version divergences"]
-    fn public_trace_headers_and_all_ticket_bodies() {
+    #[ignore = "requires external GP 0.7.1 w3f/jamtestvectors; audits every original trace header"]
+    fn legacy_public_trace_headers_and_all_ticket_bodies() {
         let root = vector_root();
         let params = params();
         let mut headers = 0;
-        let mut migrated = 0;
+        let mut epoch_marks = 0;
         let mut tickets = 0;
-        let mut hashes = alloc::collections::BTreeMap::new();
+        let mut hashes = alloc::collections::BTreeSet::new();
         let mut parents = Vec::new();
         for path in json_files(&root.join("traces")) {
             let json = load_json(&path);
@@ -1556,15 +1740,28 @@ mod tests {
             if !genesis {
                 skip_raw_state(&mut input);
             }
-            let extra = if expected.epoch_mark.is_some() {
-                encode_natural(u64::from(params.max_validators)).len()
+            // Compute only the old field boundary; never change the captured bytes.
+            let prefix_len = expected.epoch_mark.as_ref().map_or(0, |mark| {
+                encode_natural(u64::try_from(mark.validators.len()).unwrap()).len()
+            });
+            let bytes = input
+                .take(expected.encode(&params).len() - prefix_len)
+                .unwrap();
+            if expected.epoch_mark.is_some() {
+                assert!(
+                    Header::decode(&params, bytes).is_err(),
+                    "{}",
+                    path.display()
+                );
+                epoch_marks += 1;
             } else {
-                0
-            };
-            let legacy = input.take(expected.encode(&params).len() - extra).unwrap();
-            migrated += usize::from(check_vector_header(&params, &expected, legacy));
-            let raw_hash = blake2_rfc::blake2b::blake2b(32, &[], legacy);
-            hashes.insert(raw_hash.as_bytes().to_vec(), expected.epoch_mark.is_some());
+                check_vector_header(&params, &expected, bytes);
+            }
+            let hash: Hash = blake2_rfc::blake2b::blake2b(32, &[], bytes)
+                .as_bytes()
+                .try_into()
+                .unwrap();
+            hashes.insert(hash);
             if !genesis {
                 parents.push(expected.parent);
             }
@@ -1573,7 +1770,7 @@ mod tests {
         }
         for parent in &parents {
             assert!(
-                hashes.contains_key(parent.as_slice()),
+                hashes.contains(parent),
                 "trace parent must name a supplied header"
             );
         }
@@ -1583,22 +1780,19 @@ mod tests {
             }
         }
         assert_eq!(headers, 1008);
-        assert!(migrated > 0);
+        assert!(epoch_marks > 0);
         assert!(tickets > 600);
         std::println!(
-            "{headers} trace headers: {} unchanged, {migrated} require epoch-count migration; {} parent hash links checked; {tickets} ticket bodies checked",
-            headers - migrated,
+            "{headers} original trace headers audited ({epoch_marks} legacy epoch headers rejected); {} original parent hash links checked; {tickets} ticket bodies checked",
             parents.len()
         );
     }
 
     #[test]
-    #[ignore = "strict compatibility gate: known failure against GP 0.7.1 fixed-validator vectors"]
-    fn public_unmodified_epoch_header_compatibility_gate() {
+    #[ignore = "requires external GP 0.7.1 w3f/jamtestvectors for legacy epoch-header rejection"]
+    fn legacy_public_epoch_header_is_rejected() {
         let bytes = std::fs::read(vector_root().join("codec/tiny/header_0.bin")).unwrap();
-        let header = Header::decode(&params(), &bytes)
-            .expect("unmodified GP 0.7.1 epoch header compatibility");
-        assert_eq!(header.encode(&params()), bytes);
+        assert!(Header::decode(&params(), &bytes).is_err());
     }
 
     fn a5_fixture_root() -> std::path::PathBuf {
@@ -1612,7 +1806,7 @@ mod tests {
     #[derive(Default)]
     struct A5Coverage {
         headers: usize,
-        migrated: usize,
+        epoch_marks: usize,
         states: usize,
         handshakes: usize,
         announcements: usize,
@@ -1624,18 +1818,11 @@ mod tests {
     }
 
     fn audit_a5_header(params: &Params, bytes: &[u8], expected_hash: Hash) -> Header {
-        let has_epoch = bytes[100] == 1;
         let raw_hash = blake2_rfc::blake2b::blake2b(32, &[], bytes);
         assert_eq!(raw_hash.as_bytes(), expected_hash);
-        let corrected = current_gp_header(params, bytes, has_epoch);
-        let header = Header::decode(params, &corrected).unwrap();
-        assert_eq!(header.encode(params), corrected);
-        if has_epoch {
-            assert!(Header::decode(params, bytes).is_err());
-            assert_ne!(header.hash(params), expected_hash);
-        } else {
-            assert_eq!(header.hash(params), expected_hash);
-        }
+        let header = Header::decode(params, bytes).unwrap();
+        assert_eq!(header.encode(params), bytes);
+        assert_eq!(header.hash(params), expected_hash);
         header
     }
 
@@ -1649,11 +1836,6 @@ mod tests {
                 let key = json_array(&v["key_hex"]);
                 assert_eq!(state_key(index), key);
                 let bytes = json_bytes(&v["value_hex"]);
-                let bytes = if index == 4 || index == 8 {
-                    [encode_natural(u64::from(params.max_validators)), bytes].concat()
-                } else {
-                    bytes
-                };
                 (key, bytes)
             })
             .collect();
@@ -1764,7 +1946,7 @@ mod tests {
                     let hash = json_array(&value["header_hash"]);
                     let header = audit_a5_header(params, &bytes, hash);
                     coverage.headers += 1;
-                    coverage.migrated += usize::from(header.epoch_mark.is_some());
+                    coverage.epoch_marks += usize::from(header.epoch_mark.is_some());
                     coverage.hashes.insert(hash);
                     if header.parent != [0; 32] {
                         coverage.parents.push(header.parent);
@@ -1784,10 +1966,7 @@ mod tests {
                     if object.contains_key("seal_aux_hex") {
                         let aux = json_bytes(&value["seal_aux_hex"]);
                         assert_eq!(aux, bytes[..bytes.len() - 96]);
-                        assert_eq!(
-                            header.encode_unsigned(params),
-                            current_gp_header(params, &aux, header.epoch_mark.is_some())
-                        );
+                        assert_eq!(header.encode_unsigned(params), aux);
                         assert_eq!(header.seal, json_array(&value["seal_signature_hex"]));
                         assert_eq!(
                             header.entropy_source,
@@ -1819,11 +1998,9 @@ mod tests {
                         &payload[..payload.len() - 36],
                         json_array(&value["announcement_header_hash"]),
                     );
-                    let corrected =
-                        current_gp_header(params, &payload, header.epoch_mark.is_some());
-                    let announcement = Announcement::decode(params, &corrected).unwrap();
+                    let announcement = Announcement::decode(params, &payload).unwrap();
                     assert_eq!(announcement.header, header);
-                    assert_eq!(announcement.encode(params), corrected);
+                    assert_eq!(announcement.encode(params), payload);
                     coverage.announcements += 1;
                 }
                 if object.contains_key("request_frame_hex") {
@@ -1838,16 +2015,9 @@ mod tests {
                         "opaque-body fixture must be a single-block request"
                     );
                     let payload = a5_frame_payload(&value["response_frame_hex"]);
-                    let has_epoch = payload[100] == 1;
-                    let corrected = current_gp_header(params, &payload, has_epoch);
-                    let block = Block::decode(params, &corrected, payload.len()).unwrap();
-                    assert_eq!(block.encode(params), corrected);
-                    let extra = if has_epoch {
-                        encode_natural(u64::from(params.max_validators)).len()
-                    } else {
-                        0
-                    };
-                    let raw_header_len = block.header.encode(params).len() - extra;
+                    let block = Block::decode(params, &payload, payload.len()).unwrap();
+                    assert_eq!(block.encode(params), payload);
+                    let raw_header_len = block.header.encode(params).len();
                     assert_eq!(value["block_hashes"].as_array().unwrap().len(), 1);
                     let hash = json_array(&value["block_hashes"][0]);
                     assert_eq!(
@@ -1884,7 +2054,12 @@ mod tests {
         let params =
             Params::from_protocol_parameters(&json_bytes(&spec["protocol_parameters"])).unwrap();
         let mut coverage = A5Coverage::default();
-        let files = json_files(&root);
+        // D14 has its own sequence/reset audit and an explicitly synthetic
+        // signing corpus; neither uses the historical A5 record schema.
+        let files: Vec<_> = json_files(&root)
+            .into_iter()
+            .filter(|path| !path.starts_with(root.join("d14")))
+            .collect();
         for path in &files {
             let json = load_json(path);
             audit_a5_value(&params, &json, &mut coverage);
@@ -1901,15 +2076,14 @@ mod tests {
         );
         assert!(published >= 36);
         assert!(coverage.headers >= published);
-        assert!(coverage.migrated > 0 && coverage.headers > coverage.migrated);
+        assert!(coverage.epoch_marks > 0 && coverage.headers > coverage.epoch_marks);
         assert!(coverage.states > 0 && coverage.tickets > 0);
         assert!(coverage.handshakes > 0 && coverage.responses > 0);
         std::println!(
-            "A5: {} JSON files, {published} published live headers; {} header records ({} unchanged, {} migrated), {} unique hashes, {} parent links, {} state snapshots, {} ticket bodies, {} parameter blobs, {} handshakes, {} announcements, {} single-block CE128 exchanges",
+            "A5: {} JSON files, {published} published live headers; {} native header records unchanged ({} epoch marks), {} unique hashes, {} parent links, {} native state snapshots, {} ticket bodies, {} parameter blobs, {} handshakes, {} announcements, {} single-block CE128 exchanges",
             files.len(),
             coverage.headers,
-            coverage.headers - coverage.migrated,
-            coverage.migrated,
+            coverage.epoch_marks,
             coverage.hashes.len(),
             coverage.parents.len(),
             coverage.states,
@@ -1932,7 +2106,6 @@ mod tests {
         let expected = Params {
             epoch_len: 12,
             max_validators: 6,
-            ticket_entries: 3,
             slot_seconds: 6,
             epoch_tail_start: 10,
             max_tickets_per_ext: 3,
@@ -1957,15 +2130,13 @@ mod tests {
             max_authorizer_code_size: 64_000,
             max_input: 13_791_360,
             max_service_code_size: 4_000_000,
-            basic_piece_len: 4,
             max_imports: 3072,
-            segment_piece_count: 1026,
             max_report_elective_data: 48 * 1024,
             transfer_memo_size: 128,
             max_exports: 3072,
         };
         assert_eq!(params, expected);
-        assert_eq!(blob.len(), 134);
+        assert_eq!(blob.len(), 122);
         for end in 0..blob.len() {
             assert!(Params::from_protocol_parameters(&blob[..end]).is_err());
         }
@@ -1975,22 +2146,24 @@ mod tests {
             Params::from_protocol_parameters(&trailing),
             Err(DecodeError::TrailingBytes)
         );
-        let mut invalid_attempts = blob;
-        invalid_attempts[78..80].copy_from_slice(&256_u16.to_le_bytes());
+        let mut invalid_cores = blob;
+        invalid_cores[24..26].copy_from_slice(&342_u16.to_le_bytes());
         assert_eq!(
-            Params::from_protocol_parameters(&invalid_attempts),
+            Params::from_protocol_parameters(&invalid_cores),
             Err(DecodeError::InvalidParameters)
         );
 
-        let legacy_header = json_bytes(&spec["genesis_header"]);
-        assert!(Header::decode(&params, &legacy_header).is_err());
-        let corrected = current_gp_header(&params, &legacy_header, true);
-        let genesis = Header::decode(&params, &corrected).unwrap();
-        assert_eq!(genesis.encode(&params), corrected);
+        let bytes = json_bytes(&spec["genesis_header"]);
+        let genesis = Header::decode(&params, &bytes).unwrap();
+        assert_eq!(genesis.encode(&params), bytes);
+        // Compare with the native node's exported hash, independent of our encoder.
+        let native = load_json(&path.parent().unwrap().join("genesis-state.json"));
+        assert_eq!(genesis.hash(&params), json_array(&native["header_hash"]));
+        assert_eq!(bytes, json_bytes(&native["header_hex"]));
         assert_eq!(genesis.slot, 0);
         assert_eq!(genesis.author_index, u16::MAX);
 
-        let mut items: Vec<([u8; 31], Vec<u8>)> = spec["genesis_state"]
+        let items: Vec<([u8; 31], Vec<u8>)> = spec["genesis_state"]
             .as_object()
             .unwrap()
             .iter()
@@ -2001,23 +2174,6 @@ mod tests {
                 )
             })
             .collect();
-        assert!(
-            GenesisLightState::from_state_items(
-                &params,
-                items.iter().map(|(key, value)| (key, value.as_slice()))
-            )
-            .is_err()
-        );
-        // PolkaJam's fixed validator lists in C(4) and C(8) also lack GP count prefixes.
-        for (key, value) in &mut items {
-            if *key == state_key(4) || *key == state_key(8) {
-                *value = [
-                    encode_natural(u64::from(params.max_validators)),
-                    value.clone(),
-                ]
-                .concat();
-            }
-        }
         let state = GenesisLightState::from_state_items(
             &params,
             items.iter().map(|(key, value)| (key, value.as_slice())),
@@ -2041,7 +2197,397 @@ mod tests {
             }
         }
         std::println!(
-            "A5: all 33 parameters checked; unmodified genesis header/C(4)/C(8) incompatible; explicitly migrated state round-trips"
+            "A5: all 29 protocol parameters and derived validator maximum checked; native genesis header hash and all four state items round-trip unchanged"
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "codec/fixtures.rs"]
+pub(crate) mod fixtures;
+
+#[cfg(test)]
+mod sequence_tests {
+    use super::*;
+    use alloc::vec;
+    use fixtures::{Ce128, Corruption, captured_ce128};
+    use rstest::rstest;
+
+    fn params() -> Params {
+        let mut bytes = [0; 122];
+        bytes[24] = 2;
+        let mut p = Params::from_protocol_parameters(&bytes).unwrap();
+        p.epoch_len = 12;
+        p.max_tickets_per_ext = 3;
+        p.max_work_items = 16;
+        p.max_dependencies = 8;
+        p
+    }
+
+    fn header() -> Header {
+        Header {
+            parent: [0; 32],
+            prior_state_root: [1; 32],
+            extrinsic_hash: [2; 32],
+            slot: 1,
+            epoch_mark: None,
+            tickets_mark: None,
+            author_index: 0,
+            entropy_source: [0; 96],
+            offenders_mark: vec![],
+            seal: [0; 96],
+        }
+    }
+
+    /// Every component populated, including both result variants and disputes.
+    fn all_components() -> Vec<u8> {
+        let mut bytes = vec![1]; // ticket
+        bytes.extend([0; 785]);
+        bytes.push(1); // preimage
+        bytes.extend([0; 4]);
+        bytes.extend([3, 10, 11, 12]);
+        bytes.push(1); // guarantee
+        bytes.extend([0; 104 + 168]); // availability spec and context
+        bytes.push(1);
+        bytes.extend([0; 32]); // prerequisite
+        bytes.push(0);
+        bytes.extend([0; 32]); // core and authorizer
+        bytes.extend(encode_natural(129)); // authorization gas
+        bytes.extend([2, 21, 22]); // authorization output
+        bytes.push(1);
+        bytes.extend([0; 64]); // segment-root lookup
+        bytes.push(2); // results
+        for tag in [0, 6] {
+            bytes.extend([0; 76]);
+            bytes.push(tag);
+            if tag == 0 {
+                bytes.extend([2, 31, 32]);
+            }
+            for value in [0, 127, 128, 10000, u64::MAX] {
+                bytes.extend(encode_natural(value));
+            }
+        }
+        bytes.extend([0; 4]);
+        bytes.push(3);
+        bytes.extend([0; 3 * 66]); // slot and signatures
+        bytes.push(1);
+        bytes.extend([0; 32 + 1 + 2 + 64]); // assurance, ceil(2/8) bits
+        bytes.push(1);
+        bytes.extend([0; 36]);
+        bytes.push(1); // verdict and vote
+        bytes.push(1);
+        bytes.extend([0; 66]);
+        bytes.push(1);
+        bytes.extend([0; 128]); // culprit
+        bytes.push(1);
+        bytes.extend([0; 32]);
+        bytes.push(0);
+        bytes.extend([0; 96]); // fault
+        bytes
+    }
+
+    #[test]
+    fn every_extrinsic_component_delimits_and_truncations_reject() {
+        let p = params();
+        let body = all_components();
+        assert_eq!(skip_extrinsic(&p, &body), Ok(body.len()));
+        for end in 0..body.len() {
+            assert!(skip_extrinsic(&p, &body[..end]).is_err(), "prefix {end}");
+        }
+        let first = Block {
+            header: header(),
+            body: body.clone(),
+        };
+        let mut second = first.clone();
+        second.header.parent = first.header.hash(&p);
+        second.header.slot += 1;
+        let bytes = [first.encode(&p), second.encode(&p)].concat();
+        assert_eq!(
+            Block::decode_sequence(&p, &bytes, body.len() * 2, 2),
+            Ok(vec![first.clone(), second])
+        );
+        assert_eq!(
+            Block::decode_sequence(&p, &bytes, body.len() * 2 - 1, 2),
+            Err(DecodeError::LengthLimit)
+        );
+        assert_eq!(
+            Block::decode_sequence(&p, &bytes, bytes.len(), 1),
+            Err(DecodeError::LengthLimit)
+        );
+        assert_eq!(
+            Block::decode_sequence(&p, &bytes[..bytes.len() - 1], bytes.len(), 2),
+            Err(DecodeError::UnexpectedEnd)
+        );
+        let mut malformed = bytes.clone();
+        malformed[first.encode(&p).len() + first.header.encode(&p).len()] = 4;
+        assert_eq!(
+            Block::decode_sequence(&p, &malformed, malformed.len(), 2),
+            Err(DecodeError::LengthLimit)
+        );
+        assert!(Block::decode_sequence(&p, &[], 0, 0).unwrap().is_empty());
+        let mut bad_bool = body.clone();
+        let fault_vote = bad_bool.len() - 97;
+        bad_bool[fault_vote] = 2;
+        assert_eq!(
+            skip_extrinsic(&p, &bad_bool),
+            Err(DecodeError::InvalidDiscriminant(2))
+        );
+    }
+
+    #[test]
+    fn skipper_random_and_mutated_structural_inputs_are_total() {
+        let p = params();
+        let original = all_components();
+        let mut seed = 0xdead_beef_u64;
+        for iteration in 0..4096 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let mut bytes = if iteration % 2 == 0 {
+                original.clone()
+            } else {
+                vec![0; iteration % 2048]
+            };
+            if !bytes.is_empty() {
+                let index = usize::try_from(seed % u64::try_from(bytes.len()).unwrap()).unwrap();
+                bytes[index] = seed.to_le_bytes()[3];
+            }
+            if let Ok(consumed) = skip_extrinsic(&p, &bytes) {
+                assert!(consumed <= bytes.len());
+            }
+        }
+    }
+
+    #[rstest]
+    fn captured_ce128_boundaries_hashes_and_extrinsic_skip(captured_ce128: Ce128) {
+        let capture = captured_ce128;
+        let blocks = Block::decode_sequence(
+            &capture.params,
+            capture.payload(),
+            capture.payload().len(),
+            64,
+        )
+        .unwrap();
+        assert_eq!(blocks.len(), capture.blocks.len());
+        assert_eq!(blocks.len(), 5);
+        let mut offset = 0;
+        for (block, expected) in blocks.iter().zip(&capture.blocks) {
+            assert_eq!(expected.start, offset);
+            assert_eq!(
+                block.header.encode(&capture.params),
+                capture.payload()[expected.start..expected.body_start]
+            );
+            assert_eq!(
+                block.body,
+                capture.payload()[expected.body_start..expected.end]
+            );
+            // The skipper must stop at this body even with later blocks in its input.
+            assert_eq!(
+                skip_extrinsic(&capture.params, &capture.payload()[expected.body_start..]),
+                Ok(expected.end - expected.body_start)
+            );
+            assert_eq!(
+                hex::encode(block.header.hash(&capture.params)),
+                expected.header_hash
+            );
+            assert_eq!(hex::encode(block.header.parent), expected.parent_hash);
+            assert_eq!(block.header.slot, expected.slot);
+            assert_eq!(block.body[0], expected.ticket_count);
+            offset = expected.end;
+        }
+        assert_eq!(offset, capture.payload().len());
+        // Three captured ring-VRF ticket proofs, not an all-empty extrinsic.
+        assert_eq!(blocks[4].body[0], 3);
+        assert_eq!(blocks[4].body.len(), 1 + 3 * 785 + 6);
+        assert_eq!(
+            blocks
+                .iter()
+                .flat_map(|b| b.encode(&capture.params))
+                .collect::<Vec<_>>(),
+            capture.payload()
+        );
+    }
+
+    #[rstest]
+    #[case::exact_budget(0, 5, Ok(5))]
+    #[case::body_budget_exceeded(1, 5, Err(DecodeError::LengthLimit))]
+    #[case::block_count_exceeded(0, 4, Err(DecodeError::LengthLimit))]
+    fn captured_ce128_limits(
+        captured_ce128: Ce128,
+        #[case] missing_body_bytes: usize,
+        #[case] max_blocks: usize,
+        #[case] expected: Result<usize, DecodeError>,
+    ) {
+        let capture = captured_ce128;
+        let body_bytes: usize = capture.blocks.iter().map(|b| b.end - b.body_start).sum();
+        assert_eq!(
+            Block::decode_sequence(
+                &capture.params,
+                capture.payload(),
+                body_bytes - missing_body_bytes,
+                max_blocks
+            )
+            .map(|blocks| blocks.len()),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::truncated(Corruption::Truncated, DecodeError::UnexpectedEnd)]
+    #[case::too_many_tickets(Corruption::TooManyTickets, DecodeError::LengthLimit)]
+    fn captured_ce128_rejects_malformed_extrinsics(
+        captured_ce128: Ce128,
+        #[values(0, 1, 2, 3, 4)] block: usize,
+        #[case] corruption: Corruption,
+        #[case] expected: DecodeError,
+    ) {
+        let capture = captured_ce128;
+        let payload = capture.corrupted_payload(block, corruption);
+        // Valid preceding blocks must not escape as a successful prefix.
+        assert_eq!(
+            Block::decode_sequence(&capture.params, &payload, capture.payload().len(), 64),
+            Err(expected)
+        );
+    }
+
+    #[rstest]
+    fn captured_ce128_mutations_round_trip(captured_ce128: Ce128) {
+        let capture = captured_ce128;
+        for iteration in 0..4096usize {
+            let mut mutated = capture.payload().to_vec();
+            let index = iteration.wrapping_mul(7919) % mutated.len();
+            mutated[index] ^= 0xff;
+            if let Ok(blocks) = Block::decode_sequence(&capture.params, &mutated, mutated.len(), 64)
+            {
+                assert_eq!(
+                    blocks
+                        .iter()
+                        .flat_map(|b| b.encode(&capture.params))
+                        .collect::<Vec<_>>(),
+                    mutated
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires external D14 CE128 oracle capture; JAM_A5_FIXTURES or planning checkout"]
+    fn external_captured_64_block_sequence_and_mutations() {
+        let root = std::env::var_os("JAM_A5_FIXTURES")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                "/home/sebastian/work/repos/jam-light-client-planning/fixtures".into()
+            });
+        let spec: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("chain-spec.polkajam.json")).unwrap())
+                .unwrap();
+        let decode_hex = |value: &serde_json::Value| {
+            hex::decode(value.as_str().unwrap().trim_start_matches("0x")).unwrap()
+        };
+        let p =
+            &Params::from_protocol_parameters(&decode_hex(&spec["protocol_parameters"])).unwrap();
+        let genesis = Header::decode(p, &decode_hex(&spec["genesis_header"])).unwrap();
+        let capture: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("d14/ce128.json")).unwrap()).unwrap();
+        for (name, expected) in [
+            ("ascending-single-genesis", 1),
+            ("ascending-64-genesis", 64),
+            ("descending-two", 2),
+        ] {
+            let exchange = capture["exchanges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["name"] == name)
+                .unwrap();
+            let frame = hex::decode(exchange["response_frame_hex"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                usize::try_from(u32::from_le_bytes(frame[..4].try_into().unwrap())).unwrap(),
+                frame.len() - 4
+            );
+            let bytes = &frame[4..];
+            let blocks = Block::decode_sequence(p, bytes, bytes.len(), 64).unwrap();
+            assert_eq!(blocks.len(), expected);
+            for pair in blocks.windows(2) {
+                if name == "descending-two" {
+                    assert_eq!(pair[0].header.parent, pair[1].header.hash(p));
+                } else {
+                    assert_eq!(pair[1].header.parent, pair[0].header.hash(p));
+                }
+            }
+            assert_eq!(
+                blocks.iter().flat_map(|b| b.encode(p)).collect::<Vec<_>>(),
+                bytes
+            );
+            if expected == 64 {
+                let prefix: usize = blocks.iter().take(31).map(|b| b.encode(p).len()).sum();
+                let end = prefix + blocks[31].encode(p).len();
+                assert_eq!(
+                    Block::decode_sequence(p, &bytes[..end - 1], bytes.len(), 64),
+                    Err(DecodeError::UnexpectedEnd)
+                );
+                let mut bad = bytes.to_vec();
+                bad[prefix + blocks[31].header.encode(p).len()] = 4;
+                assert_eq!(
+                    Block::decode_sequence(p, &bad, bad.len(), 64),
+                    Err(DecodeError::LengthLimit)
+                );
+                for iteration in 0..4096usize {
+                    let mut bad = bytes.to_vec();
+                    let index = iteration.wrapping_mul(7919) % bad.len();
+                    bad[index] ^= 0xff;
+                    if let Ok(decoded) = Block::decode_sequence(p, &bad, bad.len(), 64) {
+                        assert_eq!(
+                            decoded.iter().flat_map(|b| b.encode(p)).collect::<Vec<_>>(),
+                            bad
+                        );
+                    }
+                }
+                std::println!(
+                    "D14 captured: blocks=64 chained=true mutated_inputs=4096 block_32_truncation=UnexpectedEnd block_32_bad_count=LengthLimit"
+                );
+            }
+        }
+        let early = capture["exchanges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "ascending-64-early-stop")
+            .unwrap();
+        let bytes = hex::decode(early["response_frame_hex"].as_str().unwrap()).unwrap();
+        let blocks = Block::decode_sequence(p, &bytes[4..], bytes.len(), 64).unwrap();
+        assert!(!blocks.is_empty() && blocks.len() < 64);
+        for name in ["unknown-hash", "tip-no-data"] {
+            let exchange = capture["exchanges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["name"] == name)
+                .unwrap();
+            assert_eq!(exchange["reset"], true);
+            assert_eq!(exchange["source"], "stream");
+            assert!(exchange.get("response_frame_hex").is_none());
+        }
+        let early: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("d14/ce128-early-genesis.json")).unwrap(),
+        )
+        .unwrap();
+        let exchange = &early["exchanges"][0];
+        let request = hex::decode(exchange["request_frame_hex"].as_str().unwrap()).unwrap();
+        let request = BlockRequest::decode(&request[4..]).unwrap();
+        assert_eq!(request.hash, genesis.hash(p));
+        assert_eq!(request.max_blocks, 64);
+        assert_eq!(request.direction, Direction::AscendingExclusive);
+        let frame = hex::decode(exchange["response_frame_hex"].as_str().unwrap()).unwrap();
+        let blocks = Block::decode_sequence(p, &frame[4..], frame.len(), 64).unwrap();
+        assert!(!blocks.is_empty() && blocks.len() < 64);
+        assert_eq!(blocks[0].header.parent, request.hash);
+        for pair in blocks.windows(2) {
+            assert_eq!(pair[1].header.parent, pair[0].header.hash(p));
+        }
+        std::println!(
+            "D14 captured early stop from genesis: requested=64 decoded={}",
+            blocks.len()
         );
     }
 }
