@@ -2,18 +2,23 @@
 
 ## Unreleased
 
-### Changed
-
-- `statement_subscribeStatement` sends an empty `newStatements` batch with `remaining: 0` right after the subscription ID, as a full node does when its store holds nothing matching, and drops gossiped statements that are expired or carry no proof before matching them against subscriptions. ([#3371](https://github.com/paritytech/smoldot/pull/3371))
+## 3.6.0 - 2026-09-16
 
 ### Added
 
-- Add the `lifecycle_unstable_follow` and `lifecycle_unstable_unfollow` JSON-RPC functions. The subscription reports the lifecycle state of the chain: whether it is still connecting, warp syncing (with the current and target block heights), or ready, how many peers are connected, and whether the built-in watchdog considers it stalled (no peers, or no warp sync progress). The first notification is the current state, reported as syncing as soon as warp sync fragments are requested, and every later notification carries the whole new state, so an embedder can show what the light client is doing without parsing log output. The schema is unstable. ([#3301](https://github.com/paritytech/smoldot/issues/3301))
+- Add the `lifecycle_unstable_follow` and `lifecycle_unstable_unfollow` JSON-RPC functions. The subscription reports the lifecycle state of the chain: whether it is still connecting, warp syncing (with the current and target block heights), or ready, how many peers are connected, and whether the built-in watchdog considers it stalled (no peers, or no warp sync progress). The first notification is the current state, reported as syncing as soon as warp sync fragments are requested, and every later notification carries the whole new state, so an embedder can show what the light client is doing without parsing log output. The schema is unstable. ([#3353](https://github.com/paritytech/smoldot/pull/3353); fixes [#3301](https://github.com/paritytech/smoldot/issues/3301))
+
+### Changed
+
+- `statement_subscribeStatement` sends an empty `newStatements` batch with `remaining: 0` right after the subscription ID, as a full node does when its store holds nothing matching, and drops gossiped statements that are expired or carry no proof before matching them against subscriptions. ([#3371](https://github.com/paritytech/smoldot/pull/3371); related to [#3349](https://github.com/paritytech/smoldot/issues/3349))
+- GRANDPA justifications are now checked for vote ancestry, not only for signatures and the two-thirds threshold. A pre-commit is signed over the block it targets, which can be a descendant of the block the justification finalizes, so the verifier now walks `votes_ancestries` from each pre-commit's target down to the justification's target. A justification is rejected when a pre-commit does not descend from the target, when the block with a two-thirds majority of votes is not the target, or when `votes_ancestries` carries a header that no pre-commit needed. ([#3355](https://github.com/paritytech/smoldot/pull/3355))
 
 ### Fixed
 
+- No longer panic in the legacy JSON-RPC API (`chain_subscribe*` and `state_subscribe*` subscriptions) when a block is pruned before the runtime service ever announced it. The runtime service listed such blocks among the pruned blocks of a finalization, so subscribers unpinned a block they never held, and the same hashes leaked into the `prunedBlockHashes` of `chainHead_v1_follow`. Only blocks that were announced are now reported as pruned. ([#3366](https://github.com/paritytech/smoldot/pull/3366); fixes [#3367](https://github.com/paritytech/smoldot/issues/3367))
 - A `chainHead_v1_follow` subscription no longer loses one slot of its pinned-blocks budget for every block that is unpinned before it is finalized or pruned. The runtime service charged every subscriber for each newly finalized and pruned block regardless of whether the subscriber still had it pinned, and an already-unpinned block could never be unpinned again to get the slot back, so a client that unpins early was eventually stopped for exceeding its limit. Only blocks the subscriber still has pinned are now charged. ([#3366](https://github.com/paritytech/smoldot/pull/3366))
-- `statement_submit` answers 7001 for a statement with the removed `Proof::OnChain` proof, like a full node, instead of accepting it and broadcasting a statement every peer rejects. ([#3370](https://github.com/paritytech/smoldot/pull/3370))
+- On NodeJS, TCP connection failures and remote closes are now reported to smoldot as soon as they happen, with the socket error as the reason (for example `connect ECONNREFUSED 127.0.0.1:30333` or `getaddrinfo ENOTFOUND host`), so the peer is banned and retried right away. The `close` handler returned early on every close because NodeJS marks a socket destroyed before emitting `close`, and the `error` handler discarded the message, so a refused port or an unresolvable name was only noticed by the 4 second handshake timeout, with no reason logged. WebSocket connections were not affected. ([#3364](https://github.com/paritytech/smoldot/pull/3364))
+- `statement_submit` answers 7001 for a statement with the removed `Proof::OnChain` proof, like a full node, instead of accepting it and broadcasting a statement every peer rejects. ([#3370](https://github.com/paritytech/smoldot/pull/3370); related to [#3349](https://github.com/paritytech/smoldot/issues/3349))
 
 ## 3.5.0 - 2026-09-09
 
