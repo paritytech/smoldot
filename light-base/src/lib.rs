@@ -104,6 +104,7 @@ mod sync_service;
 mod transactions_service;
 mod util;
 
+pub mod jam_webtransport_cert;
 pub mod lifecycle_service;
 pub mod network_service;
 pub mod platform;
