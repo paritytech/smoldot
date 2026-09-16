@@ -284,6 +284,8 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             smoldot_light::platform::ConnectionType::WebSocketDns { secure: true, .. } => 14,
             smoldot_light::platform::ConnectionType::WebRtcIpv4 => 16,
             smoldot_light::platform::ConnectionType::WebRtcIpv6 => 17,
+            smoldot_light::platform::ConnectionType::WebTransportIpv4 => 18,
+            smoldot_light::platform::ConnectionType::WebTransportIpv6 => 19,
         };
 
         bindings::connection_type_supported(ty) != 0
@@ -366,6 +368,8 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             connection_id,
             Connection {
                 inner: ConnectionInner::SingleStreamMsNoiseYamux,
+                webtransport: false,
+                accept_substreams: false,
                 something_happened: event_listener::Event::new(),
             },
         );
@@ -374,7 +378,9 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         let _prev_value = lock.streams.insert(
             (connection_id, None),
             Stream {
+                retained_bytes: 0,
                 reset: None,
+                read_closed: false,
                 messages_queue: VecDeque::with_capacity(8),
                 messages_queue_total_size: 0,
                 something_happened: event_listener::Event::new(),
@@ -387,6 +393,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             connection_id,
             stream_id: None,
             read_buffer: Vec::new(),
+            read_closed: false,
             inner_expected_incoming_bytes: Some(1),
             is_reset: None,
             writable_bytes: 0,
@@ -405,6 +412,10 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         let connection_id = lock.next_connection_id;
         lock.next_connection_id += 1;
 
+        let webtransport = matches!(
+            address,
+            smoldot_light::platform::MultiStreamAddress::WebTransport { .. }
+        );
         let encoded_address: Vec<u8> = match address {
             smoldot_light::platform::MultiStreamAddress::WebRtc {
                 ip: IpAddr::V4(ip),
@@ -424,26 +435,40 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 .chain(remote_certificate_sha256.iter().copied())
                 .chain(ip.to_string().bytes())
                 .collect(),
+            smoldot_light::platform::MultiStreamAddress::WebTransport {
+                ip,
+                port,
+                cert_hashes,
+            } => encode_webtransport_address(ip, port, &cert_hashes).unwrap_or_default(),
         };
 
-        bindings::connection_new(
-            connection_id,
-            u32::try_from(encoded_address.as_ptr().addr()).unwrap(),
-            u32::try_from(encoded_address.len()).unwrap(),
-        );
+        if !encoded_address.is_empty() {
+            bindings::connection_new(
+                connection_id,
+                u32::try_from(encoded_address.as_ptr().addr()).unwrap(),
+                u32::try_from(encoded_address.len()).unwrap(),
+            );
+        }
 
         let _prev_value = lock.connections.insert(
             connection_id,
             Connection {
-                inner: ConnectionInner::MultiStreamUnknownHandshake {
-                    opened_substreams_to_pick_up: VecDeque::with_capacity(0),
-                    connection_handles_alive: 1,
+                webtransport,
+                accept_substreams: true,
+                inner: if encoded_address.is_empty() {
+                    ConnectionInner::Reset {
+                        _message: "WebTransport requires a non-empty certificate hash list".into(),
+                        connection_handles_alive: 1,
+                    }
+                } else {
+                    initial_multistream_state(webtransport)
                 },
                 something_happened: event_listener::Event::new(),
             },
         );
         debug_assert!(_prev_value.is_none());
 
+        let connection_handle = MultiStreamWrapper(connection_id);
         Box::pin(async move {
             // Wait until the connection state is no longer "unknown handshake".
             let mut lock = loop {
@@ -476,14 +501,14 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     local_tls_certificate_sha256,
                     ..
                 } => smoldot_light::platform::MultiStreamWebRtcConnection {
-                    connection: MultiStreamWrapper(connection_id),
+                    connection: connection_handle,
                     local_tls_certificate_sha256: *local_tls_certificate_sha256,
                 },
                 ConnectionInner::Reset { .. } => {
                     // If the connection was already reset, we proceed anyway but provide a fake
                     // certificate hash. This has absolutely no consequence.
                     smoldot_light::platform::MultiStreamWebRtcConnection {
-                        connection: MultiStreamWrapper(connection_id),
+                        connection: connection_handle,
                         local_tls_certificate_sha256: [0; 32],
                     }
                 }
@@ -498,7 +523,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         let connection_id = *connection_id;
 
         Box::pin(async move {
-            let (stream_id, direction) = loop {
+            let (stream_id, direction, write_closable) = loop {
                 let something_happened = {
                     let mut lock = STATE.try_lock().unwrap();
                     let connection = lock.connections.get_mut(&connection_id).unwrap();
@@ -519,7 +544,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                                 opened_substreams_to_pick_up.pop_front()
                             {
                                 *connection_handles_alive += 1;
-                                break (substream, direction);
+                                break (substream, direction, connection.webtransport);
                             }
                         }
                         ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
@@ -538,10 +563,11 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     connection_id,
                     stream_id: Some(stream_id),
                     read_buffer: Vec::new(),
+                    read_closed: false,
                     inner_expected_incoming_bytes: Some(1),
                     is_reset: None,
                     writable_bytes: 0,
-                    write_closable: false, // Note: this is currently hardcoded for WebRTC.
+                    write_closable,
                     write_closed: false,
                     when_wake_up: None,
                 },
@@ -591,30 +617,18 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
                     if let Some(msg) = &stream_inner.reset {
                         stream.is_reset = Some(msg.clone());
+                        stream_inner.retained_bytes = stream_inner
+                            .retained_bytes
+                            .saturating_sub(stream.read_buffer.len());
+                        stream.read_buffer = Vec::new();
                         return;
                     }
 
-                    let mut shall_return = false;
-
-                    // Move the buffers from `STATE` into `read_buffer`.
-                    if !stream_inner.messages_queue.is_empty() {
-                        stream
-                            .read_buffer
-                            .reserve(stream_inner.messages_queue_total_size);
-
-                        while let Some(msg) = stream_inner.messages_queue.pop_front() {
-                            stream_inner.messages_queue_total_size -= msg.len();
-                            // TODO: could be optimized by reworking the bindings
-                            stream.read_buffer.extend_from_slice(&msg);
-                            if stream
-                                .inner_expected_incoming_bytes
-                                .map_or(false, |expected| expected <= stream.read_buffer.len())
-                            {
-                                shall_return = true;
-                                break;
-                            }
-                        }
-                    }
+                    let mut shall_return = stream_inner.update_read_buffer(
+                        &mut stream.read_buffer,
+                        stream.inner_expected_incoming_bytes,
+                        &mut stream.read_closed,
+                    );
 
                     if stream_inner.writable_bytes_extra != 0 {
                         // As documented, the number of writable bytes must never become
@@ -670,7 +684,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             read_write: read_write::ReadWrite {
                 now: Duration::from_micros(bindings::monotonic_clock_us()),
                 incoming_buffer: mem::take(&mut stream.read_buffer),
-                expected_incoming_bytes: Some(0),
+                expected_incoming_bytes: if stream.read_closed { None } else { Some(0) },
                 read_bytes: 0,
                 write_buffers: Vec::new(),
                 write_bytes_queued: 0,
@@ -714,6 +728,10 @@ impl<'a> Drop for ReadWriteAccess<'a> {
             .get_mut(&(self.stream.connection_id, self.stream.stream_id))
             .unwrap();
 
+        stream_inner.retained_bytes = stream_inner
+            .retained_bytes
+            .saturating_sub(self.read_write.read_bytes);
+
         if (self.read_write.read_bytes != 0
             && self
                 .read_write
@@ -733,6 +751,9 @@ impl<'a> Drop for ReadWriteAccess<'a> {
             .map(Delay::new_at_monotonic_clock);
 
         self.stream.read_buffer = mem::take(&mut self.read_write.incoming_buffer);
+        if self.stream.stream_id.is_some() && self.stream.write_closable {
+            self.stream.read_buffer.shrink_to_fit();
+        }
 
         self.stream.inner_expected_incoming_bytes = self.read_write.expected_incoming_bytes;
 
@@ -781,6 +802,7 @@ pub(crate) struct StreamWrapper {
     connection_id: u32,
     stream_id: Option<u32>,
     read_buffer: Vec<u8>,
+    read_closed: bool,
     inner_expected_incoming_bytes: Option<usize>,
     /// `Some` if the remote has reset the stream and `update_stream` has since then been called.
     /// Contains the error message.
@@ -847,11 +869,38 @@ impl Drop for StreamWrapper {
 
 pub(crate) struct MultiStreamWrapper(u32);
 
+fn encode_webtransport_address(ip: IpAddr, port: u16, hashes: &[[u8; 32]]) -> Option<Vec<u8>> {
+    if hashes.is_empty() {
+        return None;
+    }
+    let count = u32::try_from(hashes.len()).ok()?;
+    Some(
+        iter::once(if ip.is_ipv4() { 18 } else { 19 })
+            .chain(port.to_be_bytes())
+            .chain(count.to_le_bytes())
+            .chain(hashes.iter().flatten().copied())
+            .chain(ip.to_string().bytes())
+            .collect(),
+    )
+}
+
 impl Drop for MultiStreamWrapper {
     fn drop(&mut self) {
         let mut lock = STATE.try_lock().unwrap();
 
         let connection = lock.connections.get_mut(&self.0).unwrap();
+        connection.accept_substreams = false;
+        let pending = match &mut connection.inner {
+            ConnectionInner::MultiStreamWebRtc {
+                opened_substreams_to_pick_up,
+                ..
+            }
+            | ConnectionInner::MultiStreamUnknownHandshake {
+                opened_substreams_to_pick_up,
+                ..
+            } => mem::take(opened_substreams_to_pick_up),
+            _ => VecDeque::new(),
+        };
         let (remove_connection, reset_connection) = match &mut connection.inner {
             ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
                 unreachable!()
@@ -868,14 +917,42 @@ impl Drop for MultiStreamWrapper {
                 let v = *connection_handles_alive == 0;
                 (v, v)
             }
-            ConnectionInner::Reset { .. } => (true, false),
+            ConnectionInner::Reset {
+                connection_handles_alive,
+                ..
+            } => {
+                *connection_handles_alive -= 1;
+                (*connection_handles_alive == 0, false)
+            }
         };
+
+        remove_pending_streams(&mut lock.streams, self.0, pending, |stream_id| {
+            bindings::connection_stream_reset(self.0, stream_id);
+        });
 
         if remove_connection {
             lock.connections.remove(&self.0).unwrap();
         }
         if reset_connection {
             bindings::reset_connection(self.0);
+        }
+    }
+}
+
+fn remove_pending_streams(
+    streams: &mut BTreeMap<(u32, Option<u32>), Stream>,
+    connection_id: u32,
+    pending: VecDeque<(u32, SubstreamDirection)>,
+    mut reset: impl FnMut(u32),
+) {
+    // Notify the host even when the connection is about to be dropped. Otherwise an
+    // unclaimed stream still looks live there and prevents graceful retirement of
+    // another stream's queued response and FIN.
+    for (stream_id, _) in pending {
+        if let Some(stream) = streams.remove(&(connection_id, Some(stream_id)))
+            && stream.reset.is_none()
+        {
+            reset(stream_id);
         }
     }
 }
@@ -913,10 +990,29 @@ struct NetworkState {
 }
 
 struct Connection {
+    /// Cleared when the connection handle is dropped, even if stream handles remain.
+    accept_substreams: bool,
+    /// Raw WebTransport streams support independent read and write FIN.
+    webtransport: bool,
     /// Type of connection and extra fields that depend on the type.
     inner: ConnectionInner,
     /// Event notified whenever one of the fields above is modified.
     something_happened: event_listener::Event,
+}
+
+fn initial_multistream_state(webtransport: bool) -> ConnectionInner {
+    if webtransport {
+        ConnectionInner::MultiStreamWebRtc {
+            opened_substreams_to_pick_up: VecDeque::new(),
+            connection_handles_alive: 1,
+            local_tls_certificate_sha256: [0; 32],
+        }
+    } else {
+        ConnectionInner::MultiStreamUnknownHandshake {
+            opened_substreams_to_pick_up: VecDeque::new(),
+            connection_handles_alive: 1,
+        }
+    }
 }
 
 enum ConnectionInner {
@@ -953,6 +1049,10 @@ enum ConnectionInner {
 }
 
 struct Stream {
+    /// Includes bytes moved into StreamWrapper until the protocol consumes them.
+    retained_bytes: usize,
+    /// Remote FIN received. Queued bytes remain readable before EOF.
+    read_closed: bool,
     /// `Some` if [`bindings::stream_reset`] has been called. Contains the error message.
     reset: Option<String>,
     /// Sum of the writable bytes reported through [`bindings::stream_writable_bytes`] that
@@ -968,23 +1068,80 @@ struct Stream {
     something_happened: event_listener::Event,
 }
 
+fn webtransport_receive_available<'a>(
+    streams: impl Iterator<Item = &'a Stream>,
+    incoming: usize,
+) -> bool {
+    let (bytes, events) = streams.fold((0usize, 0usize), |(bytes, events), stream| {
+        (
+            bytes.saturating_add(stream.retained_bytes),
+            events.saturating_add(stream.messages_queue.len()),
+        )
+    });
+    incoming <= 65536 && incoming <= (4 * 1024 * 1024usize).saturating_sub(bytes) && events < 4096
+}
+
+impl Stream {
+    fn discard_received(&mut self) {
+        self.retained_bytes = self
+            .retained_bytes
+            .saturating_sub(self.messages_queue_total_size);
+        self.messages_queue = VecDeque::new();
+        self.messages_queue_total_size = 0;
+    }
+    fn update_read_buffer(
+        &mut self,
+        buffer: &mut Vec<u8>,
+        expected: Option<usize>,
+        closed: &mut bool,
+    ) -> bool {
+        let mut wake = false;
+        buffer.reserve(self.messages_queue_total_size);
+        while let Some(msg) = self.messages_queue.pop_front() {
+            self.messages_queue_total_size -= msg.len();
+            buffer.extend_from_slice(&msg);
+            if expected.is_some_and(|expected| expected <= buffer.len()) {
+                wake = true;
+                break;
+            }
+        }
+        // EOF must follow all queued data, even if the consumer requested fewer bytes.
+        if self.read_closed && self.messages_queue.is_empty() && !*closed {
+            *closed = true;
+            wake = true;
+        }
+        wake
+    }
+}
+
 pub(crate) fn connection_multi_stream_set_handshake_info(
     connection_id: u32,
     handshake_ty: Box<[u8]>,
 ) {
-    let (_, local_tls_certificate_sha256) = nom::Parser::parse(
-        &mut nom::sequence::preceded(
-            nom::bytes::streaming::tag::<_, _, nom::error::Error<&[u8]>>(&[0][..]),
-            nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
-                <&[u8; 32]>::try_from(b).unwrap()
-            }),
-        ),
-        &handshake_ty[..],
-    )
-    .expect("invalid handshake type provided to connection_multi_stream_set_handshake_info");
+    let Some((webtransport, local_tls_certificate_sha256)) =
+        decode_multistream_metadata(&handshake_ty)
+    else {
+        connection_reset(
+            connection_id,
+            Box::from(&b"Invalid multistream metadata"[..]),
+        );
+        return;
+    };
 
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
+    if connection.webtransport != webtransport {
+        drop(lock);
+        connection_reset(
+            connection_id,
+            Box::from(&b"Mismatched multistream metadata"[..]),
+        );
+        return;
+    }
+    if webtransport && matches!(connection.inner, ConnectionInner::MultiStreamWebRtc { .. }) {
+        // WT has no peer-dependent handshake metadata and is usable immediately.
+        return;
+    }
 
     let (opened_substreams_to_pick_up, connection_handles_alive) = match &mut connection.inner {
         ConnectionInner::MultiStreamUnknownHandshake {
@@ -1000,9 +1157,24 @@ pub(crate) fn connection_multi_stream_set_handshake_info(
     connection.inner = ConnectionInner::MultiStreamWebRtc {
         opened_substreams_to_pick_up,
         connection_handles_alive,
-        local_tls_certificate_sha256: *local_tls_certificate_sha256,
+        local_tls_certificate_sha256,
     };
     connection.something_happened.notify(usize::MAX);
+}
+
+fn decode_multistream_metadata(bytes: &[u8]) -> Option<(bool, [u8; 32])> {
+    if bytes == [2] {
+        return Some((true, [0; 32]));
+    }
+    let (_, hash) = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::sequence::preceded(
+            nom::bytes::complete::tag::<_, _, nom::error::Error<&[u8]>>(&[0][..]),
+            nom::bytes::complete::take(32usize),
+        )),
+        bytes,
+    )
+    .ok()?;
+    Some((false, hash.try_into().ok()?))
 }
 
 pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u32) {
@@ -1035,6 +1207,7 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Box<[u
     let mut lock = STATE.try_lock().unwrap();
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
+    let webtransport = connection.webtransport;
 
     // For single stream connections, the docs of this function mentions that `stream_id` can be
     // any value.
@@ -1045,6 +1218,14 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Box<[u
         ConnectionInner::Reset { .. } => unreachable!(),
     };
 
+    let over_budget = webtransport
+        && !message.is_empty()
+        && !webtransport_receive_available(
+            lock.streams
+                .range((connection_id, Some(u32::MIN))..=(connection_id, Some(u32::MAX)))
+                .map(|(_, stream)| stream),
+            message.len(),
+        );
     let stream = lock
         .streams
         .get_mut(&(connection_id, actual_stream_id))
@@ -1053,8 +1234,16 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Box<[u
 
     TOTAL_BYTES_RECEIVED.fetch_add(u64::try_from(message.len()).unwrap(), Ordering::Relaxed);
 
-    // Ignore empty message to avoid all sorts of problems.
+    // Only raw WebTransport reserves an empty message for a remote FIN.
     if message.is_empty() {
+        if webtransport {
+            stream.read_closed = true;
+            stream.something_happened.notify(usize::MAX);
+        }
+        return;
+    }
+
+    if webtransport && stream.read_closed {
         return;
     }
 
@@ -1081,20 +1270,51 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Box<[u
     //
     // See <https://github.com/smol-dot/smoldot/issues/109>.
     // TODO: do this properly eventually ^
-    if stream.messages_queue_total_size >= 25 * 1024 * 1024 {
+    if stream.messages_queue_total_size >= 25 * 1024 * 1024 || over_budget {
+        if webtransport {
+            stream.reset = Some("WebTransport receive buffer limit exceeded".into());
+            stream.discard_received();
+            stream.something_happened.notify(usize::MAX);
+            bindings::connection_stream_reset(connection_id, stream_id);
+        }
         return;
     }
 
     stream.messages_queue_total_size += message.len();
+    stream.retained_bytes += message.len();
     stream.messages_queue.push_back(message);
     stream.something_happened.notify(usize::MAX);
 }
 
 pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
     let mut lock = STATE.try_lock().unwrap();
+    if lock
+        .connections
+        .get(&connection_id)
+        .is_some_and(|connection| connection.webtransport)
+        && lock
+            .streams
+            .range((connection_id, Some(u32::MIN))..=(connection_id, Some(u32::MAX)))
+            .count()
+            >= 64
+    {
+        drop(lock);
+        bindings::reset_connection(connection_id);
+        connection_reset(
+            connection_id,
+            Box::from(&b"WebTransport stream admission limit reached"[..]),
+        );
+        return;
+    }
     let lock = &mut *lock;
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
+    if !connection.accept_substreams {
+        // Existing streams can outlive the connection handle, but there is no receiver
+        // for newly opened streams anymore.
+        bindings::connection_stream_reset(connection_id, stream_id);
+        return;
+    }
     if let ConnectionInner::MultiStreamWebRtc {
         opened_substreams_to_pick_up,
         ..
@@ -1103,7 +1323,9 @@ pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbo
         let _prev_value = lock.streams.insert(
             (connection_id, Some(stream_id)),
             Stream {
+                retained_bytes: 0,
                 reset: None,
+                read_closed: false,
                 messages_queue: VecDeque::with_capacity(8),
                 messages_queue_total_size: 0,
                 something_happened: event_listener::Event::new(),
@@ -1138,6 +1360,18 @@ pub(crate) fn connection_reset(connection_id: u32, message: Box<[u8]>) {
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
+    let pending = match &mut connection.inner {
+        ConnectionInner::MultiStreamWebRtc {
+            opened_substreams_to_pick_up,
+            ..
+        }
+        | ConnectionInner::MultiStreamUnknownHandshake {
+            opened_substreams_to_pick_up,
+            ..
+        } => mem::take(opened_substreams_to_pick_up),
+        _ => VecDeque::new(),
+    };
+
     let connection_handles_alive = match &connection.inner {
         ConnectionInner::SingleStreamMsNoiseYamux { .. } => 1, // TODO: I believe that this is correct but a bit confusing; might be helpful to refactor with an enum or something
         ConnectionInner::MultiStreamWebRtc {
@@ -1158,15 +1392,21 @@ pub(crate) fn connection_reset(connection_id: u32, message: Box<[u8]>) {
 
     connection.something_happened.notify(usize::MAX);
 
+    for (stream_id, _) in pending {
+        lock.streams.remove(&(connection_id, Some(stream_id)));
+    }
+
     for ((_, _), stream) in lock
         .streams
         .range_mut((connection_id, Some(u32::MIN))..=(connection_id, Some(u32::MAX)))
     {
         stream.reset = Some(message.clone());
+        stream.discard_received();
         stream.something_happened.notify(usize::MAX);
     }
     if let Some(stream) = lock.streams.get_mut(&(connection_id, None)) {
         stream.reset = Some(message);
+        stream.discard_received();
         stream.something_happened.notify(usize::MAX);
     }
 }
@@ -1184,5 +1424,152 @@ pub(crate) fn stream_reset(connection_id: u32, stream_id: u32, message: Box<[u8]
         .get_mut(&(connection_id, Some(stream_id)))
         .unwrap();
     stream.reset = Some(message);
+    stream.discard_received();
     stream.something_happened.notify(usize::MAX);
+}
+
+#[cfg(test)]
+mod webtransport_tests {
+    use super::*;
+
+    #[test]
+    fn address_abi_vectors() {
+        // Mirrored by JavaScript's ABI tests, including both endian conventions.
+        for (ip, tag) in [("127.0.0.1", 18), ("::1", 19)] {
+            let encoded =
+                encode_webtransport_address(ip.parse().unwrap(), 40000, &[[7; 32], [9; 32]])
+                    .unwrap();
+            let mut expected = vec![tag, 0x9c, 0x40, 2, 0, 0, 0];
+            expected.extend([7; 32]);
+            expected.extend([9; 32]);
+            expected.extend(ip.bytes());
+            assert_eq!(encoded, expected);
+        }
+        assert!(encode_webtransport_address("::1".parse().unwrap(), 40000, &[]).is_none());
+    }
+
+    #[test]
+    fn metadata_abi_vectors() {
+        assert_eq!(decode_multistream_metadata(&[2]), Some((true, [0; 32])));
+        let mut rtc = vec![0];
+        rtc.extend([7; 32]);
+        assert_eq!(decode_multistream_metadata(&rtc), Some((false, [7; 32])));
+        for invalid in [vec![], vec![0], vec![1], vec![2, 0], vec![0; 34]] {
+            assert_eq!(decode_multistream_metadata(&invalid), None);
+        }
+    }
+
+    #[test]
+    fn buffered_bytes_precede_fin_and_fin_wakes_once() {
+        let mut stream = Stream {
+            retained_bytes: 6,
+            read_closed: true,
+            reset: None,
+            writable_bytes_extra: 42,
+            messages_queue: VecDeque::from([Box::from(&b"abc"[..]), Box::from(&b"def"[..])]),
+            messages_queue_total_size: 6,
+            something_happened: event_listener::Event::new(),
+        };
+        let mut buffer = Vec::new();
+        let mut eof = false;
+        assert!(stream.update_read_buffer(&mut buffer, Some(1), &mut eof));
+        assert_eq!(buffer, b"abc");
+        assert!(!eof);
+        assert!(stream.update_read_buffer(&mut buffer, Some(100), &mut eof));
+        assert_eq!(buffer, b"abcdef");
+        assert!(eof);
+        assert_eq!(stream.messages_queue_total_size, 0);
+        assert_eq!(stream.writable_bytes_extra, 42);
+        assert!(stream.reset.is_none());
+        assert!(!stream.update_read_buffer(&mut buffer, Some(100), &mut eof));
+    }
+
+    fn empty_stream() -> Stream {
+        Stream {
+            retained_bytes: 0,
+            read_closed: false,
+            reset: None,
+            writable_bytes_extra: 0,
+            messages_queue: VecDeque::new(),
+            messages_queue_total_size: 0,
+            something_happened: event_listener::Event::new(),
+        }
+    }
+
+    #[test]
+    fn webtransport_does_not_wait_for_network_metadata() {
+        assert!(
+            matches!(initial_multistream_state(true), ConnectionInner::MultiStreamWebRtc { local_tls_certificate_sha256, .. } if local_tls_certificate_sha256 == [0; 32])
+        );
+        assert!(matches!(
+            initial_multistream_state(false),
+            ConnectionInner::MultiStreamUnknownHandshake { .. }
+        ));
+    }
+
+    #[test]
+    fn aggregate_receive_budget_includes_wrapper_buffers() {
+        let mut streams = [empty_stream(), empty_stream()];
+        streams[0].retained_bytes = 2 * 1024 * 1024;
+        streams[1].retained_bytes = 2 * 1024 * 1024;
+        assert!(!webtransport_receive_available(streams.iter(), 1));
+        streams[0].retained_bytes -= 65536;
+        assert!(webtransport_receive_available(streams.iter(), 65536));
+        assert!(!webtransport_receive_available(streams.iter(), 65537));
+    }
+
+    #[test]
+    fn queued_event_budget_and_reset_churn_release_payloads() {
+        let mut stream = empty_stream();
+        for _ in 0..4096 {
+            stream.messages_queue.push_back(Box::from(&b"x"[..]));
+        }
+        stream.retained_bytes = 4096;
+        stream.messages_queue_total_size = 4096;
+        assert!(!webtransport_receive_available(
+            core::iter::once(&stream),
+            1
+        ));
+        let mut buffer = Vec::new();
+        stream.update_read_buffer(&mut buffer, Some(8192), &mut false);
+        assert_eq!(stream.retained_bytes, 4096);
+        assert!(webtransport_receive_available(core::iter::once(&stream), 1));
+        stream.retained_bytes = 0; // Simulate consumption of the wrapper buffer.
+        for _ in 0..10000 {
+            stream.messages_queue.push_back(Box::from(&b"payload"[..]));
+            stream.messages_queue_total_size = 7;
+            stream.retained_bytes = 7;
+            stream.discard_received();
+            assert_eq!(stream.retained_bytes, 0);
+            assert_eq!(stream.messages_queue_total_size, 0);
+            assert_eq!(stream.messages_queue.capacity(), 0);
+        }
+    }
+
+    #[test]
+    fn unclaimed_streams_are_reset_before_final_connection_drop() {
+        for final_connection_drop in [false, true] {
+            let mut already_reset = empty_stream();
+            already_reset.reset = Some("peer reset".into());
+            let mut streams = BTreeMap::from([
+                ((7, Some(1)), empty_stream()),
+                ((7, Some(2)), already_reset),
+                ((7, Some(3)), empty_stream()),
+            ]);
+            let pending = VecDeque::from([
+                (1, SubstreamDirection::Inbound),
+                (2, SubstreamDirection::Inbound),
+            ]);
+            let mut emitted = Vec::new();
+            remove_pending_streams(&mut streams, 7, pending, |id| emitted.push(Some(id)));
+            if final_connection_drop {
+                emitted.push(None);
+                assert_eq!(emitted, vec![Some(1), None]);
+            } else {
+                assert_eq!(emitted, vec![Some(1)]);
+            }
+            assert_eq!(streams.len(), 1);
+            assert!(streams.contains_key(&(7, Some(3))));
+        }
+    }
 }

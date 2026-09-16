@@ -207,6 +207,8 @@ pub enum Protocol<T = Vec<u8>> {
     Ip6([u8; 16]),
     P2p(Multihash<T>), // TODO: put directly a PeerId? unclear
     Quic,
+    QuicV1,
+    WebTransport,
     Tcp(u16),
     Tls,
     Udp(u16),
@@ -294,6 +296,8 @@ impl<'a> Protocol<Cow<'a, [u8]>> {
                 ))
             }
             "webrtc-direct" => Ok(Protocol::WebRtcDirect),
+            "quic-v1" => Ok(Protocol::QuicV1),
+            "webtransport" => Ok(Protocol::WebTransport),
             "certhash" => {
                 let s = iter.next().ok_or(ParseError::UnexpectedEof)?;
                 // See <https://github.com/multiformats/multibase#multibase-table>
@@ -330,6 +334,8 @@ impl<T: AsRef<[u8]>> Protocol<T> {
             Protocol::Ip6(_) => 41,
             Protocol::P2p(_) => 421,
             Protocol::Quic => 460,
+            Protocol::QuicV1 => 461,
+            Protocol::WebTransport => 465,
             Protocol::Tcp(_) => 6,
             Protocol::Tls => 448,
             Protocol::Udp(_) => 273,
@@ -404,6 +410,8 @@ impl<T: AsRef<[u8]>> fmt::Display for Protocol<T> {
                 write!(f, "/p2p/{}", bs58::encode(multihash.as_ref()).into_string())
             }
             Protocol::Quic => write!(f, "/quic"),
+            Protocol::QuicV1 => write!(f, "/quic-v1"),
+            Protocol::WebTransport => write!(f, "/webtransport"),
             Protocol::Tcp(port) => write!(f, "/tcp/{port}"),
             Protocol::Tls => write!(f, "/tls"),
             Protocol::Udp(port) => write!(f, "/udp/{port}"),
@@ -574,6 +582,8 @@ fn protocol<'a, T: From<&'a [u8]> + AsRef<[u8]>, E: nom::error::ParseError<&'a [
                 ),
                 448 => Ok((bytes, Protocol::Tls)),
                 460 => Ok((bytes, Protocol::Quic)),
+                461 => Ok((bytes, Protocol::QuicV1)),
+                465 => Ok((bytes, Protocol::WebTransport)),
                 477 => Ok((bytes, Protocol::Ws)),
                 478 => Ok((bytes, Protocol::Wss)),
                 // TODO: unclear what the /memory payload is, see https://github.com/multiformats/multiaddr/issues/127
@@ -638,6 +648,8 @@ mod tests {
         check_valid("/dnsaddr/./tcp/55");
         check_valid("/memory/1234567890");
         check_valid("/webrtc-direct");
+        check_valid("/ip4/127.0.0.1/udp/40000/quic-v1/webtransport");
+        check_valid("/ip6/::1/udp/40000/quic-v1/webtransport");
         // TODO: example valid /certhash
 
         check_invalid("/");
@@ -649,7 +661,17 @@ mod tests {
         check_invalid("/tcp/65536");
         check_invalid("/p2p/blablabla");
         check_invalid("/webrtc-direct/2");
+        check_invalid("/webtransport/2");
         check_invalid("/certhash");
         check_invalid("/certhash/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN");
+    }
+
+    #[test]
+    fn webtransport_codes() {
+        let addr: Multiaddr = "/quic-v1/webtransport".parse().unwrap();
+        assert_eq!(addr.as_ref(), &[0xcd, 0x03, 0xd1, 0x03]);
+        assert_eq!(Multiaddr::from_bytes(addr.as_ref().to_vec()).unwrap(), addr);
+        assert!(Multiaddr::from_bytes(vec![0xcd]).is_err());
+        assert!(Multiaddr::from_bytes(vec![0xcd, 3, 0xd1]).is_err());
     }
 }

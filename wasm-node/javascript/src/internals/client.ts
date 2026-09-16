@@ -76,7 +76,9 @@ export interface Connection {
      * must be called again. If only a substream is shut down, the `onStreamReset` and `onMessage`
      * callbacks must not be called again with that substream.
      */
-    reset(streamId?: number): void;
+    // `graceful` is reserved for internal WT retirement after both FINs: suppress
+    // callbacks immediately, but let queued writes/FIN finish before releasing resources.
+    reset(streamId?: number, graceful?: boolean): void;
 
     /**
      * Queues data to be sent on the given connection.
@@ -144,12 +146,7 @@ export interface ConnectionConfig {
      *
      * Must only be called once per connection.
      */
-    onMultistreamHandshakeInfo: (info:
-        {
-            handshake: 'webrtc',
-            localTlsCertificateSha256: Uint8Array,
-        }
-    ) => void;
+    onMultistreamHandshakeInfo: (info: instance.MultistreamHandshakeInfo) => void;
 
     /**
      * Callback called when the connection transitions to the `Reset` state.
@@ -163,7 +160,7 @@ export interface ConnectionConfig {
      *
      * This function must only be called for connections of type "multi-stream".
      */
-    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound') => void;
+    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound') => void | Promise<void>;
 
     /**
      * Callback called when a stream transitions to the `Reset` state.
@@ -172,7 +169,7 @@ export interface ConnectionConfig {
      *
      * This function must only be called for connections of type "multi-stream".
      */
-    onStreamReset: (streamId: number, message: string) => void;
+    onStreamReset: (streamId: number, message: string) => void | Promise<void>;
 
     /**
      * Callback called when some data sent using {@link Connection.send} has effectively been
@@ -192,13 +189,16 @@ export interface ConnectionConfig {
 
     /**
      * Callback called when a message sent by the remote has been received.
+     * On WebTransport only, an empty message means remote FIN, after all preceding
+     * bytes. The sending half remains open; empty nonterminal chunks are not reported.
      *
      * Can only happen while the connection is in the `Open` state.
      *
      * The `streamId` parameter must be provided if and only if the connection is of type
      * "multi-stream".
      */
-    onMessage: (message: Uint8Array, streamId?: number) => void;
+    // A returned promise acknowledges delivery to the instance, not consumption by Rust.
+    onMessage: (message: Uint8Array, streamId?: number) => void | Promise<void>;
 }
 
 // This function is similar to the `start` function found in `index.ts`, except with an extra
@@ -351,12 +351,12 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                     onMessage(message, streamId) {
                         if (state.instance.status !== "ready")
                             throw new Error();
-                        state.instance.instance.streamMessage(connectionId, message, streamId);
+                        return state.instance.instance.streamMessage(connectionId, message, streamId);
                     },
                     onStreamOpened(streamId, direction) {
                         if (state.instance.status !== "ready")
                             throw new Error();
-                        state.instance.instance.streamOpened(connectionId, streamId, direction);
+                        return state.instance.instance.streamOpened(connectionId, streamId, direction);
                     },
                     onMultistreamHandshakeInfo(info) {
                         if (state.instance.status !== "ready")
@@ -371,14 +371,14 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                     onStreamReset(streamId, message) {
                         if (state.instance.status !== "ready")
                             throw new Error();
-                        state.instance.instance.streamReset(connectionId, streamId, message);
+                        return state.instance.instance.streamReset(connectionId, streamId, message);
                     },
                 }));
                 break;
             }
             case "connection-reset": {
                 const connection = state.connections.get(event.connectionId)!;
-                connection.reset();
+                connection.reset(undefined, event.graceful);
                 state.connections.delete(event.connectionId);
                 break;
             }
@@ -389,7 +389,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             }
             case "connection-stream-reset": {
                 const connection = state.connections.get(event.connectionId)!;
-                connection.reset(event.streamId);
+                connection.reset(event.streamId, event.graceful);
                 break;
             }
             case "stream-send": {
