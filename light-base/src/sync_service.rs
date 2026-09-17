@@ -44,6 +44,7 @@ use smoldot::{
     trie::{self, Nibble, minimize_proof, prefix_proof, proof_decode},
 };
 
+pub(crate) mod jam;
 mod parachain;
 mod paraheads;
 mod substrate_compat;
@@ -1323,7 +1324,9 @@ impl StorageQueryNetworkError {
 
 /// Return value of [`SyncService::subscribe_all`].
 pub struct SubscribeAll {
-    /// SCALE-encoded header of the finalized block at the time of the subscription.
+    /// SCALE-encoded header of the finalized block at the time of the subscription. In
+    /// general, the chain's canonical header encoding: a JAM chain puts its Gray Paper
+    /// encoding here.
     pub finalized_block_scale_encoded_header: Vec<u8>,
 
     /// Runtime of the finalized block, if known.
@@ -1419,7 +1422,8 @@ pub struct BlockNotification {
     /// True if this block is considered as the best block of the chain.
     pub is_new_best: bool,
 
-    /// SCALE-encoded header of the block.
+    /// SCALE-encoded header of the block. In general, the chain's canonical header encoding:
+    /// a JAM chain puts its Gray Paper encoding here.
     pub scale_encoded_header: Vec<u8>,
 
     /// BLAKE2 hash of the header of the parent of this block.
