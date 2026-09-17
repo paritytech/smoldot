@@ -15,6 +15,7 @@ pub(crate) struct Ce128 {
     #[serde(rename = "response_frame_hex", deserialize_with = "hex_bytes")]
     pub wire: Vec<u8>,
     pub blocks: Vec<BlockBoundary>,
+    pub resets: Vec<Reset>,
 }
 
 #[derive(Deserialize)]
@@ -26,6 +27,18 @@ pub(crate) struct BlockBoundary {
     pub parent_hash: String,
     pub slot: u32,
     pub ticket_count: u8,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Reset {
+    pub name: String,
+    #[serde(rename = "request_frame_hex", deserialize_with = "hex_bytes")]
+    pub request_frame: Vec<u8>,
+    pub reset: bool,
+    pub source: String,
+    #[serde(rename = "streamErrorCode")]
+    pub stream_error_code: u32,
+    pub response_frame_hex: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
