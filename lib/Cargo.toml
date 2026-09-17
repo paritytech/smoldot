@@ -22,6 +22,10 @@ wasmtime = [
     "dep:wasmtime",
     "std"   # TODO: unfortunately doesn't compile without `std`, but could be fixed
 ]
+# Test support only: enable it from `[dev-dependencies]`, never from `[dependencies]`.
+# Exposes `jam::verify::VerifiedHeader::assume_verified`, which builds a verified header
+# without cryptographic verification.
+jam-test-support = []
 
 [dependencies]
 # This section contains only no_std-compatible crates. See below for std-only crates.
