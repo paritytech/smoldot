@@ -80,6 +80,11 @@ impl VerifiedHeader {
         &self.post_state
     }
 
+    /// Allocated size of the canonical bytes, for the tree's memory accounting.
+    pub(super) fn encoded_capacity(&self) -> usize {
+        self.encoded.capacity()
+    }
+
     /// Test support: a header that skips verification, as if [`verify_header`]
     /// had returned it, with the canonical bytes, parent, hash, slot, epoch
     /// change and post state given. Not sealed with a ticket and not an anchor.

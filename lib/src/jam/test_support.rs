@@ -5,6 +5,7 @@
 use super::{
     codec::DecodeError,
     params::Params,
+    tree::{HeaderTree, Insert, InsertError, VerifySuccess},
     types::{Hash, Header},
 };
 use alloc::vec::Vec;
@@ -121,4 +122,16 @@ pub(crate) fn assert_strict<T, E: From<DecodeError> + PartialEq + Debug>(
         Some(E::from(DecodeError::TrailingBytes))
     );
     decode(bytes).unwrap()
+}
+
+/// Verifies `header` as a child of the retained parent it names, then inserts it.
+pub(crate) fn verify_and_insert(
+    tree: &mut HeaderTree,
+    header: Header,
+    now: u64,
+) -> Result<Insert, InsertError> {
+    match tree.verify(header.parent, header, now)? {
+        VerifySuccess::AlreadyKnown => Ok(Insert::AlreadyKnown),
+        VerifySuccess::Verified(verified) => tree.insert_verified(verified),
+    }
 }
