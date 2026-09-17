@@ -69,7 +69,14 @@
     "build": "node prepare.mjs --release && rm -rf ./dist && npm run buildModules",
     "start": "node prepare.mjs --debug && rm -rf ./dist && npm run buildModules && node demo/demo.mjs",
     "test": "node prepare.mjs --debug && rm -rf ./dist && npm run buildModules && deno run ./dist/mjs/index-deno.js && ava --timeout=2m --concurrency 2 --no-worker-threads",
+    "test:jam": "node test/jam/run.mjs",
     "doc": "node prepare.mjs --debug && typedoc --basePath ./src --out ./dist/doc --treatWarningsAsErrors ./src/index-browser.ts"
+  },
+  "ava": {
+    "files": [
+      "test/**/*.mjs",
+      "!test/jam/**"
+    ]
   },
   "dependencies": {
     "ws": "^8.8.1"
@@ -79,7 +86,9 @@
     "@types/pako": "^2.0.0",
     "@types/ws": "^8.5.3",
     "ava": "^6.0.0",
+    "blakejs": "^1.2.1",
     "dtslint": "^4.0.6",
+    "playwright": "^1.49.0",
     "typedoc": "^0.25.4",
     "typescript": "^5.3.2"
   }
