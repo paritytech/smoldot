@@ -30,7 +30,7 @@
 //! In the situation where an attacker finds a JSON-RPC request that takes a long time to be
 //! processed and continuously submits this same expensive request over and over again, the queue
 //! of pending requests will start growing and use more and more memory. For this reason, if this
-//! queue grows past [`Config::max_pending_requests`] items, [`Frontend::queue_rpc_request`]
+//! queue grows past the configured pending-request limit, [`Frontend::queue_rpc_request`]
 //! will instead return an error.
 //!
 
@@ -58,7 +58,7 @@ use futures_lite::StreamExt as _;
 pub use statement::StatementProtocolConfig;
 
 /// Configuration for [`service()`].
-pub struct Config<TPlat: PlatformRef> {
+pub struct SubstrateConfig<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
@@ -129,12 +129,50 @@ pub struct Config<TPlat: PlatformRef> {
     pub statement_protocol_config: Option<StatementProtocolConfig>,
 }
 
-/// Creates a new JSON-RPC service with the given configuration.
-///
-/// Returns a handler that allows sending requests and receiving responses.
-///
-/// Destroying the [`Frontend`] automatically shuts down the service.
+/// Backend-specific configuration for [`service`].
+pub enum Config<TPlat: PlatformRef> {
+    Substrate(Box<SubstrateConfig<TPlat>>),
+    Jam(JamConfig<TPlat>),
+}
+
+/// Header-only backend: no Substrate service handles are required or accepted.
+pub struct JamConfig<TPlat: PlatformRef> {
+    pub platform: TPlat,
+    pub log_name: String,
+    pub sync_service: Arc<sync_service::SyncService<TPlat>>,
+    pub max_pending_requests: NonZero<u32>,
+    pub max_subscriptions: u32,
+}
+
+/// Creates a JSON-RPC service. Dropping all frontends shuts it down.
 pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
+    match config {
+        Config::Substrate(config) => substrate_service(*config),
+        Config::Jam(config) => {
+            let log_target = format!("json-rpc-{}", config.log_name);
+            let (requests_tx, requests_rx) = async_channel::bounded(
+                usize::try_from(config.max_pending_requests.get())
+                    .unwrap_or(32)
+                    .min(32),
+            );
+            let (responses_tx, responses_rx) = async_channel::bounded(16);
+            let frontend = Frontend {
+                platform: config.platform.clone(),
+                log_target: log_target.clone(),
+                requests_tx,
+                responses_rx: Arc::new(async_lock::Mutex::new(Box::pin(responses_rx))),
+                max_request_bytes: Some(64 * 1024),
+            };
+            config.platform.clone().spawn_task(
+                Cow::Owned(log_target),
+                background::run_jam(config, requests_rx, responses_tx),
+            );
+            frontend
+        }
+    }
+}
+
+fn substrate_service<TPlat: PlatformRef>(config: SubstrateConfig<TPlat>) -> Frontend<TPlat> {
     let log_target = format!("json-rpc-{}", config.log_name);
 
     let (requests_tx, requests_rx) = async_channel::unbounded(); // TODO: capacity?
@@ -145,6 +183,7 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
         log_target: log_target.clone(),
         responses_rx: Arc::new(async_lock::Mutex::new(Box::pin(responses_rx))),
         requests_tx,
+        max_request_bytes: None,
     };
 
     let platform = config.platform.clone();
@@ -185,7 +224,8 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
 /// Destroying all the [`Frontend`]s automatically shuts down the associated service.
 #[derive(Clone)]
 pub struct Frontend<TPlat> {
-    /// See [`Config::platform`].
+    max_request_bytes: Option<usize>,
+    /// Platform supplied in the backend configuration.
     platform: TPlat,
 
     /// How to send requests to the background task.
@@ -202,10 +242,16 @@ pub struct Frontend<TPlat> {
 impl<TPlat: PlatformRef> Frontend<TPlat> {
     /// Queues the given JSON-RPC request to be processed in the background.
     ///
-    /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
+    /// An error is returned if the configured pending-request limit is exceeded, which can happen
     /// if the requests take a long time to process or if [`Frontend::next_json_rpc_response`]
     /// isn't called often enough.
     pub fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
+        if self
+            .max_request_bytes
+            .is_some_and(|max| json_rpc_request.len() > max)
+        {
+            return Err(HandleRpcError::TooManyPendingRequests { json_rpc_request });
+        }
         let log_friendly_request =
             crate::util::truncated_str(json_rpc_request.chars().filter(|c| !c.is_control()), 250)
                 .to_string();
