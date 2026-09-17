@@ -44,6 +44,7 @@ use smoldot::{
     trie::{self, Nibble, minimize_proof, prefix_proof, proof_decode},
 };
 
+pub(crate) mod jam;
 mod parachain;
 mod paraheads;
 mod substrate_compat;
@@ -151,12 +152,27 @@ pub struct SyncService<TPlat: PlatformRef> {
     platform: TPlat,
 
     /// See [`Config::network_service`].
-    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+    network_service: Option<Arc<network_service::NetworkServiceChain<TPlat>>>,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
 }
 
 impl<TPlat: PlatformRef> SyncService<TPlat> {
+    /// Starts header-only JAM synchronization without any Substrate services.
+    pub(crate) fn new_jam(platform: TPlat, log_name: String, config: jam::Config) -> Self {
+        let (to_background, from_foreground) = async_channel::bounded(16);
+        platform.spawn_task(
+            format!("jam-sync-{log_name}").into(),
+            jam::run(platform.clone(), log_name, config, from_foreground),
+        );
+        Self {
+            to_background,
+            platform,
+            network_service: None,
+            block_number_bytes: 4,
+        }
+    }
+
     pub fn new(config: Config<TPlat>) -> Self {
         let (to_background, from_foreground) = async_channel::bounded(16);
         let from_foreground = Box::pin(from_foreground);
@@ -199,7 +215,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         SyncService {
             to_background,
             platform: config.platform,
-            network_service: config.network_service,
+            network_service: Some(config.network_service),
             block_number_bytes: config.block_number_bytes,
         }
     }
@@ -355,6 +371,9 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         timeout_per_request: Duration,
         _max_parallel: NonZero<u32>,
     ) -> Result<codec::BlockData, ()> {
+        let Some(network_service) = self.network_service.as_ref() else {
+            return Err(());
+        };
         // TODO: better error?
         let request_config = codec::BlocksRequestConfig {
             start: codec::BlocksRequestConfigStart::Hash(hash),
@@ -370,15 +389,14 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             .await
             .take(usize::try_from(total_attempts).unwrap_or(usize::MAX))
         {
-            let mut result = match self
-                .network_service
+            let mut result = match network_service
                 .clone()
                 .blocks_request(target.clone(), request_config.clone(), timeout_per_request)
                 .await
             {
                 Ok(b) if !b.is_empty() => b,
                 Ok(_) | Err(_) => {
-                    self.network_service
+                    network_service
                         .ban_and_disconnect(
                             target,
                             network_service::BanSeverity::Low,
@@ -404,6 +422,9 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         timeout_per_request: Duration,
         _max_parallel: NonZero<u32>,
     ) -> Result<codec::BlockData, ()> {
+        let Some(network_service) = self.network_service.as_ref() else {
+            return Err(());
+        };
         // TODO: better error?
         let request_config = codec::BlocksRequestConfig {
             start: codec::BlocksRequestConfigStart::Hash(hash),
@@ -414,14 +435,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
 
         // TODO: handle max_parallel
         // TODO: better peers selection ; don't just take the first
-        for target in self
-            .network_service
+        for target in network_service
             .peers_list()
             .await
             .take(usize::try_from(total_attempts).unwrap_or(usize::MAX))
         {
-            let mut result = match self
-                .network_service
+            let mut result = match network_service
                 .clone()
                 .blocks_request(target, request_config.clone(), timeout_per_request)
                 .await
@@ -827,10 +846,14 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                 keys
             };
 
+            let Some(network_service) = self.sync_service.network_service.as_ref() else {
+                return StorageQueryProgress::Error(StorageQueryError {
+                    errors: self.outcome_errors,
+                });
+            };
             let result: Result<_, StorageQueryNetworkError> =
                 if let Some(child_trie) = &self.child_trie {
-                    self.sync_service
-                        .network_service
+                    network_service
                         .clone()
                         .child_storage_proof_request(
                             target.clone(),
@@ -844,8 +867,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         .await
                         .map_err(StorageQueryNetworkError::ChildStorageProof)
                 } else {
-                    self.sync_service
-                        .network_service
+                    network_service
                         .clone()
                         .storage_proof_request(
                             target.clone(),
@@ -873,8 +895,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         };
 
                     if !err.is_request_too_large() || self.response_nodes_cap == 1 {
-                        self.sync_service
-                            .network_service
+                        network_service
                             .ban_and_disconnect(
                                 target,
                                 network_service::BanSeverity::Low,
@@ -899,8 +920,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
             }) {
                 Ok(d) => d,
                 Err(err) => {
-                    self.sync_service
-                        .network_service
+                    network_service
                         .ban_and_disconnect(
                             target,
                             network_service::BanSeverity::High,
@@ -925,8 +945,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         Err(_) => {
                             // The stored child root isn't a 32-byte hash, which means a corrupt
                             // proof. Ban the peer and count the failure.
-                            self.sync_service
-                                .network_service
+                            network_service
                                 .ban_and_disconnect(
                                     target,
                                     network_service::BanSeverity::High,
