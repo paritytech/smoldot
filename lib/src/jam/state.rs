@@ -108,6 +108,11 @@ impl LightState {
     pub(super) fn epoch_mut(&mut self) -> &mut EpochState {
         Arc::make_mut(&mut self.epoch)
     }
+    #[cfg(test)]
+    pub(super) fn set_entropy(&mut self, entropy: [Hash; 4]) {
+        self.eta0 = entropy[0];
+        self.epoch_mut().history = [entropy[1], entropy[2], entropy[3]];
+    }
     /// Accumulator followed by the three epoch snapshots.
     pub fn entropy(&self) -> [Hash; 4] {
         [
@@ -130,6 +135,29 @@ impl LightState {
     }
     pub(super) fn set_pending_tickets(&mut self, tickets: &[Ticket]) {
         self.pending_tickets = Some(Arc::from(tickets));
+    }
+    pub(super) fn epoch_allocation(&self) -> (usize, usize) {
+        let sealing = match &self.epoch.sealing {
+            SealingSequence::Keys(v) => v.capacity() * core::mem::size_of::<BandersnatchPublic>(),
+            SealingSequence::Tickets(v) => v.capacity() * core::mem::size_of::<Ticket>(),
+        };
+        (
+            Arc::as_ptr(&self.epoch) as usize,
+            core::mem::size_of::<EpochState>()
+                + 2 * core::mem::size_of::<usize>()
+                + (self.epoch.active.capacity() + self.epoch.pending.capacity())
+                    * core::mem::size_of::<ValidatorPair>()
+                + sealing,
+        )
+    }
+    pub(super) fn tickets_allocation(&self) -> Option<(usize, usize)> {
+        self.pending_tickets.as_ref().map(|v| {
+            (
+                v.as_ptr() as usize,
+                (core::mem::size_of_val(v.as_ref()) + 2 * core::mem::size_of::<usize>())
+                    .next_multiple_of(core::mem::align_of::<usize>()),
+            )
+        })
     }
     /// Bootstraps from trusted genesis or checkpoint state items: `active ← C(8)`,
     /// `pending ← C(4).pending_validators`, `sealing ← C(4).sealing`,
@@ -402,6 +430,8 @@ mod tests {
             parent.pending_tickets.as_ref().unwrap(),
             child.pending_tickets.as_ref().unwrap()
         ));
+        assert_eq!(parent.epoch_allocation(), child.epoch_allocation());
+        assert_eq!(parent.tickets_allocation(), child.tickets_allocation());
         child
             .enter_epoch(&params, true, &parent.epoch().pending)
             .unwrap();

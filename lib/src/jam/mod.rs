@@ -4,5 +4,6 @@ pub mod crypto;
 pub mod net;
 pub mod params;
 pub mod state;
+pub mod tree;
 pub mod types;
 pub mod verify;
