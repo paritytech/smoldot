@@ -215,13 +215,24 @@ fn remove_event_generated_when_branch_root_destroyed() {
     }
 }
 
-/// Exhaustive small-scope enumeration: all subsets of a small key universe as the base trie,
-/// times all none/insert/erase diff assignments over the same universe. Too slow for CI; run
-/// manually with `--ignored --release`.
+/// Unlike `fuzzing`, this test tries every case instead of random ones.
+///
+/// The world is seven short keys: the empty key, two one-byte keys and four two-byte keys.
+/// Every subset of these keys is used as a base trie (2^7 = 128 tries), and every assignment
+/// of nothing/insert/erase to these keys is used as a diff (3^7 = 2187 diffs). Each pair is run
+/// through the calculator and its root hash and insert/remove events are checked. About 560k
+/// cases in total. If a remove-event bug fits in a trie this small, this test finds it.
+///
+/// Ignored because it takes about 20 s in debug mode on 24 cores. Run by hand when changing
+/// the re-walk logic:
+/// `cargo test -p smoldot --lib --release -- exhaustive_small_scope --ignored`.
 #[test]
 #[ignore]
 fn exhaustive_small_scope() {
+    // Two alphabets: one where the bytes differ in the low nibble, one in the high nibble, so
+    // that forks happen at both nibble positions.
     for alphabet in [[0x00u8, 0x01], [0x00, 0x10]] {
+        // keys = ["", [a], [a,a], [a,b], [b], [b,a], [b,b]], as a full binary trie of depth 2.
         let mut keys: Vec<Vec<u8>> = vec![vec![]];
         for &a in &alphabet {
             keys.push(vec![a]);
@@ -232,11 +243,14 @@ fn exhaustive_small_scope() {
         let n = keys.len();
         assert_eq!(n, 7);
 
+        // Spread the 128 base tries over 16 threads.
         std::thread::scope(|scope| {
             for chunk in (0u32..1 << n).collect::<Vec<_>>().chunks(16) {
                 let keys = &keys;
                 let chunk = chunk.to_vec();
                 scope.spawn(move || {
+                    // `base_mask` is a 7-bit number: bit `i` set means key `i` is in the base
+                    // trie. Counting 0..128 covers every subset once.
                     for base_mask in chunk {
                         let base_keys: Vec<Vec<u8>> = (0..n)
                             .filter(|i| base_mask & (1 << i) != 0)
@@ -244,8 +258,12 @@ fn exhaustive_small_scope() {
                             .collect();
                         let before_proto = build_trie(&base_keys);
 
+                        // `diff_code` is a 7-digit number in base 3: digit `i` says what the
+                        // diff does to key `i` (0 = nothing, 1 = insert, 2 = erase). Counting
+                        // 0..3^7 covers every diff once.
                         for diff_code in 0..3u32.pow(u32::try_from(n).unwrap()) {
                             let mut diff = TrieDiff::empty();
+                            // `after_proto` is the expected trie after the diff, built by hand.
                             let mut after_proto = before_proto.clone();
                             let mut c = diff_code;
                             for key in keys.iter().take(n) {
@@ -294,6 +312,8 @@ fn exhaustive_small_scope() {
                                 c /= 3;
                             }
 
+                            // Run once answering Merkle value requests and once refusing them,
+                            // since the calculator takes different paths in each case.
                             for pmv in [false, true] {
                                 let mut before = before_proto.clone();
                                 let mut after = after_proto.clone();
