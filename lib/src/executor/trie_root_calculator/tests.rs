@@ -222,12 +222,7 @@ fn remove_event_generated_when_branch_root_destroyed() {
 /// of nothing/insert/erase to these keys is used as a diff (3^7 = 2187 diffs). Each pair is run
 /// through the calculator and its root hash and insert/remove events are checked. About 560k
 /// cases in total. If a remove-event bug fits in a trie this small, this test finds it.
-///
-/// Ignored because it takes about 20 s in debug mode on 24 cores. Run by hand when changing
-/// the re-walk logic:
-/// `cargo test -p smoldot --lib --release -- exhaustive_small_scope --ignored`.
 #[test]
-#[ignore]
 fn exhaustive_small_scope() {
     // Two alphabets: one where the bytes differ in the low nibble, one in the high nibble, so
     // that forks happen at both nibble positions.
