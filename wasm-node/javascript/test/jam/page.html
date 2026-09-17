@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>smoldot JAM end-to-end driver</title>
+</head>
+<body>
+<script type="module">
+    // The browser bundle is served from /dist/** by the Playwright route in e2e.mjs.
+    import * as smoldot from '/dist/mjs/index-browser.js';
+    window.__smoldot = smoldot;
+    await import('/jam/page.mjs');
+    window.__ready = true;
+</script>
+</body>
+</html>

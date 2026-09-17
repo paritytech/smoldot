@@ -191,10 +191,134 @@ jobs:
       - run: exit 1
         if: ${{ steps.js-version.outputs.version != steps.rust-version.outputs.version }}
 
+  # JAM browser end-to-end test (M11b). Path-filtered because it is
+  # comparatively expensive; `jam-e2e-gate` keeps it a mandatory check without
+  # skipping `all-ci` on pull requests that do not touch JAM paths.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      jam: ${{ steps.filter.outputs.jam }}
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dorny/paths-filter@v4
+      id: filter
+      with:
+        filters: |
+          jam:
+            - 'wasm-node/**'
+            - 'light-base/**'
+            - 'lib/src/jam/**'
+
+  jam-e2e:
+    needs: changes
+    if: needs.changes.outputs.jam == 'true'
+    runs-on: ubuntu-latest
+    # Target: under 15 minutes with warm caches; the first cold-cache run also
+    # builds the pinned PolkaJam binaries and is the slow case.
+    timeout-minutes: 15
+    env:
+      POLKAJAM_COMMIT: 8ceedf46c4828137c8835e4227d7f3a62ada0463
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@1.93.0
+      with:
+        targets: wasm32-unknown-unknown
+    - uses: actions/setup-node@v6.1.0
+      with:
+        node-version: '22'
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: jam-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+    - name: Cache smoldot wasm target
+      uses: actions/cache@v4
+      with:
+        path: target/wasm32-unknown-unknown
+        key: jam-wasm-target-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+    - name: Cache JAM binaries
+      id: jam-binaries
+      uses: actions/cache@v4
+      with:
+        path: |
+          .polkajam-src/target/release/polkajam
+        key: jam-polkajam-${{ runner.os }}-rust-1.93.0-${{ env.POLKAJAM_COMMIT }}-fixed-spec-v1
+    # The test run itself never builds anything: it takes the prebuilt node
+    # from POLKAJAM_BIN_DIR, so sources are needed only on a cache miss.
+    - name: Checkout PolkaJam at the pinned commit
+      if: steps.jam-binaries.outputs.cache-hit != 'true'
+      run: |
+        git init .polkajam-src
+        git -C .polkajam-src remote add origin https://github.com/paritytech/polkajam
+        git -C .polkajam-src fetch --depth=1 origin "$POLKAJAM_COMMIT"
+        git -C .polkajam-src checkout --detach FETCH_HEAD
+    - name: Build PolkaJam
+      if: steps.jam-binaries.outputs.cache-hit != 'true'
+      env:
+        SKIP_PVM_BUILDS: '1'
+        RUSTC_BOOTSTRAP: '1'
+        RUSTFLAGS: '-Zcrate-attr=feature(array_windows,substr_range)'
+      run: |
+        cargo build --locked --release --manifest-path .polkajam-src/Cargo.toml \
+          -p polkajam
+    - name: Cache wasm-node node_modules
+      uses: actions/cache@v4
+      with:
+        path: wasm-node/javascript/node_modules
+        key: jam-node-modules-${{ hashFiles('wasm-node/javascript/package-lock.json') }}
+    - name: Cache Playwright browsers
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: jam-playwright-${{ hashFiles('wasm-node/javascript/package-lock.json') }}
+    - name: Install JS dependencies
+      working-directory: wasm-node/javascript
+      run: npm ci
+    - name: Install Chromium
+      working-directory: wasm-node/javascript
+      run: npx playwright install --with-deps chromium
+    - name: Build smoldot browser bundle (debug)
+      working-directory: wasm-node/javascript
+      run: |
+        node prepare.mjs --debug
+        rm -rf dist
+        npm run buildModules
+    - name: Run JAM browser end-to-end test
+      working-directory: wasm-node/javascript
+      env:
+        POLKAJAM_BIN_DIR: ${{ github.workspace }}/.polkajam-src/target/release
+      run: npm run test:jam
+    - name: Upload JAM e2e evidence on failure
+      if: failure()
+      uses: actions/upload-artifact@v6
+      with:
+        name: jam-e2e-logs-${{ github.sha }}
+        path: |
+          /tmp/jam-e2e-*/**
+          .polkajam-src/*.log
+        if-no-files-found: ignore
+        retention-days: 7
+
+  jam-e2e-gate:
+    # Always runs so `all-ci` is not skipped on pull requests that do not touch
+    # JAM paths; fails only when a required jam-e2e run did not succeed.
+    needs: [changes, jam-e2e]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+    - run: |
+        if [ "${{ needs.changes.outputs.jam }}" = "true" ] && [ "${{ needs.jam-e2e.result }}" != "success" ]; then
+          echo "jam-e2e was required but its result is '${{ needs.jam-e2e.result }}'"
+          exit 1
+        fi
+        echo "jam-e2e not required or successful"
+
   all-ci:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [test-64bits, test-32bits, wasm-node-check, check-features, check-no-std, check-rustdoc-links, fmt, clippy, cargo-deny, cargo-spellcheck, wasm-node-versions-match]
+    needs: [test-64bits, test-32bits, wasm-node-check, check-features, check-no-std, check-rustdoc-links, fmt, clippy, cargo-deny, cargo-spellcheck, wasm-node-versions-match, jam-e2e-gate]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success
