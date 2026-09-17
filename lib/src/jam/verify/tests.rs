@@ -323,6 +323,17 @@ fn genesis(params: &Params, sets: &Sets) -> VerifiedHeader {
 
 // Positive synthetic chains.
 
+impl crate::jam::tree::HeaderTree {
+    // Expose the signing harness without making the verifier's test module public.
+    pub(crate) fn signed_child_fixture() -> (Params, VerifiedHeader, Header, u64) {
+        let params = tiny_params();
+        let sets = sets();
+        let root = genesis(&params, &sets);
+        let child = seal(&params, &root, draft(1), &sets.active);
+        (params, root, child, NOW)
+    }
+}
+
 #[test]
 fn epoch_change_activates_pending_set_not_the_mark() {
     let params = tiny_params();
