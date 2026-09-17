@@ -45,6 +45,11 @@ pub struct Params {
 }
 
 impl Params {
+    /// GP 0.8.0 Safrole permits independent set sizes in {6, 9, ..., 3C}.
+    pub(crate) fn is_valid_validator_count(&self, count: usize) -> bool {
+        count >= 6 && count <= usize::from(self.max_validators) && count.is_multiple_of(3)
+    }
+
     /// Decodes PolkaJam's encoded `ProtocolParameters`.
     ///
     /// Fields are fixed-width little-endian integers (not compact integers) in
