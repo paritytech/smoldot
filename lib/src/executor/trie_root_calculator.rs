@@ -83,6 +83,7 @@ pub struct Config {
 pub fn trie_root_calculator(config: Config) -> InProgress {
     Box::new(Inner {
         stack: Vec::with_capacity(config.max_trie_recalculation_depth_hint),
+        rewalk_start_stack_len: None,
         diff: config.diff,
         diff_trie_entries_version: config.diff_trie_entries_version,
     })
@@ -192,6 +193,7 @@ impl ClosestDescendant {
                 (None, Some(base_trie_key)) => (base_trie_key.skip(iter_key_len).collect(), false),
                 (None, None) => {
                     // If neither the base trie nor the diff contain any descendant, then skip ahead.
+                    self.inner.maybe_finish_rewalk();
                     return if let Some(parent_node) = self.inner.stack.last_mut() {
                         // If the element has a parent, indicate that the current iterated node
                         // doesn't exist and continue the algorithm.
@@ -288,17 +290,18 @@ impl StorageValue {
                 // Trie node no longer exists after the diff has been applied.
                 // This path is only reached if the trie node has a parent, as otherwise the trie
                 // node is the trie root and thus necessarily exists.
-                InProgress::TrieNodeRemoveEvent(TrieNodeRemoveEvent {
+                let event = TrieNodeRemoveEvent {
                     inner: self.0,
                     calculated_elem,
                     ty: TrieNodeRemoveEventTy::NoChildrenLeft,
-                })
+                };
+                event.report_unless_rewalking()
             }
 
             (_, None, 1, _parent_node) if !calculated_elem.children_partial_key_changed => {
                 // Trie node doesn't exists after the diff has been applied because it has exactly
                 // one child.
-                // Since `children_partial_key_changed` is `true`, we know that the node existed
+                // Since `children_partial_key_changed` is `false`, we know that the node existed
                 // and generate a `TrieNodeRemoveEvent`.
                 // Unfortunately, the child Merkle value is wrong as its partial key has changed
                 // and has to be recalculated.
@@ -306,11 +309,12 @@ impl StorageValue {
                 // To handle this situation, we back jump to `ClosestDescendant` but this time
                 // make sure to skip over `calculated_elem`.
                 // This isn't done here but in `TrieNodeRemoveEvent::resume`.
-                InProgress::TrieNodeRemoveEvent(TrieNodeRemoveEvent {
+                let event = TrieNodeRemoveEvent {
                     inner: self.0,
                     calculated_elem,
                     ty: TrieNodeRemoveEventTy::ReplacedWithSingleChild,
-                })
+                };
+                event.report_unless_rewalking()
             }
 
             (_, None, 1, _parent_node) => {
@@ -335,10 +339,24 @@ impl StorageValue {
                 })
             }
 
+            (None, None, 0, None) if !calculated_elem.children_partial_key_changed => {
+                // Root node of the trie was a branch node without any storage value, and all of
+                // its children were deleted by the diff. The trie is now empty.
+                // Since `children_partial_key_changed` is `false`, we know that this branch node
+                // existed in the base trie, and thus its destruction must be reported like for
+                // any other node.
+                InProgress::TrieNodeRemoveEvent(TrieNodeRemoveEvent {
+                    inner: self.0,
+                    calculated_elem,
+                    ty: TrieNodeRemoveEventTy::NoChildrenLeft,
+                })
+            }
+
             (None, None, 0, None) => {
-                // Trie is empty.
+                // Trie is empty, and the node being calculated didn't exist in the base trie.
                 // This case is handled separately in order to not generate
-                // a `TrieNodeInsertUpdateEvent` for a node that doesn't actually exist.
+                // a `TrieNodeInsertUpdateEvent` or a `TrieNodeRemoveEvent` for a node that
+                // doesn't actually exist.
                 InProgress::Finished {
                     trie_root_hash: trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
                 }
@@ -445,6 +463,8 @@ impl ClosestDescendantMerkleValue {
         // bug somewhere in the API user's code.
         debug_assert!(merkle_value.len() == 32 || trie::trie_node::decode(merkle_value).is_ok());
 
+        self.inner.maybe_finish_rewalk();
+
         if let Some(parent_node) = self.inner.stack.last_mut() {
             // If the element has a parent, add the Merkle value to its children and resume the
             // algorithm.
@@ -525,6 +545,7 @@ impl TrieNodeInsertUpdateEvent {
 
     /// Resume the computation.
     pub fn resume(mut self) -> InProgress {
+        self.inner.maybe_finish_rewalk();
         if let Some(parent_node) = self.inner.stack.last_mut() {
             parent_node.children.push(Some(self.merkle_value));
             self.inner.next()
@@ -559,6 +580,16 @@ enum TrieNodeRemoveEventTy {
 }
 
 impl TrieNodeRemoveEvent {
+    /// Returns the event to the API user, unless a re-walk is in progress. In that case the
+    /// removal was already reported during the first walk, and the calculation simply continues.
+    fn report_unless_rewalking(self) -> InProgress {
+        if self.inner.rewalk_start_stack_len.is_some() {
+            self.resume()
+        } else {
+            InProgress::TrieNodeRemoveEvent(self)
+        }
+    }
+
     /// Returns the key of the trie node that was removed.
     pub fn key(&self) -> impl Iterator<Item = impl AsRef<[Nibble]>> {
         self.inner
@@ -579,6 +610,7 @@ impl TrieNodeRemoveEvent {
     pub fn resume(mut self) -> InProgress {
         match self.ty {
             TrieNodeRemoveEventTy::NoChildrenLeft => {
+                self.inner.maybe_finish_rewalk();
                 if let Some(parent_node) = self.inner.stack.last_mut() {
                     parent_node.children.push(None);
                     self.inner.next()
@@ -589,6 +621,14 @@ impl TrieNodeRemoveEvent {
                 }
             }
             TrieNodeRemoveEventTy::ReplacedWithSingleChild => {
+                // The subtree of the single child is walked again below. Removals in that
+                // subtree were already reported during the first walk, so reporting is turned
+                // off until the re-walk is over. An outer re-walk already in progress covers
+                // this one, so it is left untouched.
+                if self.inner.rewalk_start_stack_len.is_none() {
+                    self.inner.rewalk_start_stack_len = Some(self.inner.stack.len());
+                }
+
                 let child_index = self
                     .calculated_elem
                     .children
@@ -633,6 +673,18 @@ struct Inner {
     /// the top of the stack whose entry is past the end of `children`.
     stack: Vec<InProgressNode>,
 
+    /// Depth of [`Inner::stack`] when the current re-walk started, or `None` if no re-walk is
+    /// in progress.
+    ///
+    /// A re-walk happens when a node is removed because it has a single child left (see
+    /// [`TrieNodeRemoveEventTy::ReplacedWithSingleChild`]): the subtree of that child is walked
+    /// a second time to recalculate its Merkle value. Removals in that subtree were already
+    /// reported during the first walk, so they are not reported again while this is `Some`.
+    ///
+    /// The re-walk is over once the stack shrinks back to this depth. See
+    /// [`Inner::maybe_finish_rewalk`].
+    rewalk_start_stack_len: Option<usize>,
+
     /// Same value as [`Config::diff`].
     diff: TrieDiff,
 
@@ -655,6 +707,17 @@ struct InProgressNode {
 }
 
 impl Inner {
+    /// Clears [`Inner::rewalk_start_stack_len`] if the stack is back at the depth where the
+    /// re-walk started, meaning that the re-walk is over.
+    ///
+    /// Must be called every time the calculation of a node finishes, right before its result is
+    /// pushed to the children of its parent.
+    fn maybe_finish_rewalk(&mut self) {
+        if self.rewalk_start_stack_len == Some(self.stack.len()) {
+            self.rewalk_start_stack_len = None;
+        }
+    }
+
     /// Analyzes the content of the [`Inner`] and progresses the algorithm.
     fn next(self: Box<Self>) -> InProgress {
         if self.stack.last().map_or(false, |n| n.children.len() == 16) {
