@@ -152,6 +152,7 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
         responses_rx: Arc::new(async_lock::Mutex::new(Box::pin(responses_rx))),
         requests_tx,
         metrics: config.chain_metrics.clone(),
+        max_request_bytes: None,
     };
 
     let platform = config.platform.clone();
@@ -186,6 +187,45 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
     frontend
 }
 
+/// Configuration for [`service_jam()`]: a header-only backend, without Substrate service handles.
+pub struct JamConfig<TPlat: PlatformRef> {
+    pub platform: TPlat,
+    pub log_name: String,
+    pub sync_service: Arc<sync_service::jam::JamSyncService>,
+    pub max_pending_requests: NonZero<u32>,
+    /// Maximum number of simultaneous `jamHead_unstable_follow` subscriptions.
+    pub max_subscriptions: u32,
+    /// Returned by `chainSpec_v1_chainName`: the chain specification's `id`.
+    pub chain_name: String,
+    /// Returned by `chainSpec_v1_genesisHash`: the hash of the genesis header.
+    pub genesis_block_hash: [u8; 32],
+}
+
+/// Creates a JSON-RPC service for a JAM chain. Destroying all the [`Frontend`]s shuts it down.
+pub fn service_jam<TPlat: PlatformRef>(config: JamConfig<TPlat>) -> Frontend<TPlat> {
+    let log_target = format!("json-rpc-{}", config.log_name);
+    let (requests_tx, requests_rx) = async_channel::bounded(
+        usize::try_from(config.max_pending_requests.get())
+            .unwrap_or(32)
+            .min(32),
+    );
+    let (responses_tx, responses_rx) = async_channel::bounded(16);
+    let frontend = Frontend {
+        platform: config.platform.clone(),
+        log_target: log_target.clone(),
+        requests_tx,
+        responses_rx: Arc::new(async_lock::Mutex::new(Box::pin(responses_rx))),
+        max_request_bytes: Some(64 * 1024),
+        // JAM serves no `sudo_unstable_metrics`; this counter is never read.
+        metrics: Arc::new(crate::metrics::ChainMetrics::default()),
+    };
+    config.platform.clone().spawn_task(
+        Cow::Owned(log_target),
+        background::run_jam(config, requests_rx, responses_tx),
+    );
+    frontend
+}
+
 /// Handle that allows sending JSON-RPC requests on the service.
 ///
 /// The [`Frontend`] can be cloned, in which case the clone will refer to the same JSON-RPC
@@ -194,6 +234,8 @@ pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
 /// Destroying all the [`Frontend`]s automatically shuts down the associated service.
 #[derive(Clone)]
 pub struct Frontend<TPlat> {
+    /// Requests longer than this are refused with [`HandleRpcError::RequestTooLarge`].
+    max_request_bytes: Option<usize>,
     /// See [`Config::platform`].
     platform: TPlat,
 
@@ -218,6 +260,12 @@ impl<TPlat: PlatformRef> Frontend<TPlat> {
     /// if the requests take a long time to process or if [`Frontend::next_json_rpc_response`]
     /// isn't called often enough.
     pub fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
+        if self
+            .max_request_bytes
+            .is_some_and(|max| json_rpc_request.len() > max)
+        {
+            return Err(HandleRpcError::RequestTooLarge { json_rpc_request });
+        }
         let log_friendly_request =
             crate::util::truncated_str(json_rpc_request.chars().filter(|c| !c.is_control()), 250)
                 .to_string();
@@ -272,6 +320,12 @@ pub enum HandleRpcError {
         "The JSON-RPC service cannot process this request, as too many requests are already being processed."
     )]
     TooManyPendingRequests {
+        /// Request that was being queued.
+        json_rpc_request: String,
+    },
+    /// The request is larger than the JSON-RPC service of this chain accepts.
+    #[display("The JSON-RPC request is larger than this chain accepts.")]
+    RequestTooLarge {
         /// Request that was being queued.
         json_rpc_request: String,
     },

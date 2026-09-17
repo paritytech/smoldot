@@ -248,7 +248,9 @@ fn json_rpc_send(json_rpc_request: Box<[u8]>, chain_id: u32) -> u32 {
         .json_rpc_request(json_rpc_request, client_chain_id)
     {
         Ok(()) => 0,
-        Err(HandleRpcError::TooManyPendingRequests { .. }) => 1,
+        // The JavaScript API has no error of its own for an oversized request.
+        Err(HandleRpcError::TooManyPendingRequests { .. })
+        | Err(HandleRpcError::RequestTooLarge { .. }) => 1,
     }
 }
 

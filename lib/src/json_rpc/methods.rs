@@ -559,6 +559,46 @@ define_methods! {
     /// See <https://github.com/paritytech/smoldot/issues/3301>.
     lifecycle_unstable_follow() -> Cow<'a, str>,
     lifecycle_unstable_unfollow(subscription: Cow<'a, str>) -> (),
+
+    // The functions below are served by JAM chains instead of `chainHead_v1_*`, whose header
+    // bytes and hashes are SCALE ones. Smoldot-specific, unstable.
+    /// Follows the head of a JAM chain: its finalized, non-finalized and best blocks. Returns
+    /// the subscription id; events arrive as `jamHead_unstable_followEvent`, see
+    /// [`JamHeadFollowEvent`].
+    ///
+    /// Same rules as `chainHead_v1_follow` with `withRuntime: false`, which this method has no
+    /// parameter for because a JAM chain has no runtime: `initialized` comes first, then one
+    /// `newBlock` per non-finalized block with every parent reported before its child, then
+    /// `bestBlockChanged`, then live events. Every reported block is pinned, finalized ones
+    /// included, until `jamHead_unstable_unpin`. The server may end the subscription at any
+    /// moment with `stop`, for example when it cannot report every block or when the client
+    /// holds too many pins; the client must then follow again.
+    ///
+    /// Error `-32800` if the client already has as many follow subscriptions as the server
+    /// allows.
+    jamHead_unstable_follow() -> Cow<'a, str>,
+    /// Returns the `0x`-prefixed hexadecimal canonical (Gray Paper) encoding of the header of a
+    /// pinned block, or `null` if `followSubscription` is invalid or stale.
+    ///
+    /// Error `-32801` if the block was never reported or has been unpinned.
+    jamHead_unstable_header(
+        #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
+        hash: HashHexString
+    ) -> Option<HexString>,
+    /// Unpins one block or a list of blocks, all or none. Ignored if `followSubscription` is
+    /// invalid or stale.
+    ///
+    /// Error `-32801` if one of the blocks was never reported or has been unpinned, `-32804`
+    /// if a hash appears twice in the list.
+    jamHead_unstable_unpin(
+        #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
+        #[rename = "hashOrHashes"] hash_or_hashes: HashHexStringSingleOrArray
+    ) -> (),
+    /// Stops a `jamHead_unstable_follow` subscription and unpins its blocks. Ignored if
+    /// `followSubscription` is invalid or has already sent `stop`.
+    jamHead_unstable_unfollow(
+        #[rename = "followSubscription"] follow_subscription: Cow<'a, str>
+    ) -> (),
 }
 
 define_methods! {
@@ -585,6 +625,9 @@ define_methods! {
 
     // Notification of `lifecycle_unstable_follow`. Carries the full current state.
     lifecycle_unstable_followEvent(subscription: Cow<'a, str>, result: LifecycleState) -> (),
+
+    // Notification of `jamHead_unstable_follow`.
+    jamHead_unstable_followEvent(subscription: Cow<'a, str>, result: JamHeadFollowEvent) -> (),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1259,6 +1302,42 @@ pub enum LifecycleStallReason {
     NoProgress,
 }
 
+/// Event of a `jamHead_unstable_follow` subscription, sent as `jamHead_unstable_followEvent`.
+///
+/// The events of `chainHead_v1_follow` with `withRuntime: false`, in the same order and with
+/// the same meaning, except that `newBlock` also carries the slot. Block hashes are JAM
+/// header hashes: BLAKE2b-256 of the canonical header encoding. Unstable.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(
+    tag = "event",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum JamHeadFollowEvent {
+    /// Always the first event, sent once. The last hash is the current finalized block.
+    Initialized {
+        finalized_block_hashes: Vec<HashHexString>,
+    },
+    /// A block whose parent is the current finalized block or was reported earlier.
+    NewBlock {
+        block_hash: HashHexString,
+        parent_block_hash: HashHexString,
+        /// Time slot of the block's header.
+        slot: u32,
+    },
+    /// The best block is now this block, which was reported earlier.
+    BestBlockChanged { best_block_hash: HashHexString },
+    /// These blocks are finalized, oldest first: the last one is the new finalized block.
+    /// `prunedBlockHashes` are reported blocks that can no longer be finalized. They all stay
+    /// pinned until unpinned.
+    Finalized {
+        finalized_block_hashes: Vec<HashHexString>,
+        pruned_block_hashes: Vec<HashHexString>,
+    },
+    /// The subscription is over. No event follows.
+    Stop,
+}
+
 /// Filter for subscribing to statements based on topics.
 ///
 /// JSON format is compatible with polkadot-sdk's `TopicFilter`:
@@ -1698,6 +1777,82 @@ mod tests {
             serde_json::from_str::<LifecycleState>(&json).unwrap(),
             syncing
         );
+    }
+
+    #[test]
+    fn jam_head_follow_events_serialization() {
+        use super::{HashHexString, JamHeadFollowEvent, ServerToClient};
+
+        let hash = |byte| HashHexString([byte; 32]);
+        let hex = |byte: u8| format!("0x{}", hex::encode([byte; 32]));
+        for (event, json) in [
+            (
+                JamHeadFollowEvent::Initialized {
+                    finalized_block_hashes: vec![hash(1)],
+                },
+                serde_json::json!({"event":"initialized","finalizedBlockHashes":[hex(1)]}),
+            ),
+            (
+                JamHeadFollowEvent::NewBlock {
+                    block_hash: hash(2),
+                    parent_block_hash: hash(1),
+                    slot: 7,
+                },
+                serde_json::json!({"event":"newBlock","blockHash":hex(2),"parentBlockHash":hex(1),"slot":7}),
+            ),
+            (
+                JamHeadFollowEvent::BestBlockChanged {
+                    best_block_hash: hash(2),
+                },
+                serde_json::json!({"event":"bestBlockChanged","bestBlockHash":hex(2)}),
+            ),
+            (
+                JamHeadFollowEvent::Finalized {
+                    finalized_block_hashes: vec![hash(2)],
+                    pruned_block_hashes: vec![hash(3)],
+                },
+                serde_json::json!({"event":"finalized","finalizedBlockHashes":[hex(2)],"prunedBlockHashes":[hex(3)]}),
+            ),
+            (
+                JamHeadFollowEvent::Stop,
+                serde_json::json!({"event":"stop"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&event).unwrap(), json);
+            let notification = ServerToClient::jamHead_unstable_followEvent {
+                subscription: "s".into(),
+                result: event,
+            }
+            .to_json_request_object_parameters(None);
+            let ServerToClient::jamHead_unstable_followEvent { result, .. } =
+                super::parse_notification(&notification).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(serde_json::to_value(&result).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn jam_head_follow_takes_no_parameter() {
+        for params in ["", r#","params":[]"#] {
+            let request =
+                format!(r#"{{"jsonrpc":"2.0","id":2,"method":"jamHead_unstable_follow"{params}}}"#);
+            let (_, call) = super::parse_jsonrpc_client_to_server(&request).unwrap();
+            assert!(matches!(
+                call,
+                super::MethodCall::jamHead_unstable_follow {}
+            ));
+        }
+        assert!(matches!(
+            super::parse_jsonrpc_client_to_server(
+                r#"{"jsonrpc":"2.0","id":2,"method":"jamHead_unstable_follow","params":[false]}"#
+            ),
+            Err(super::ParseClientToServerError::Method {
+                error: super::MethodError::TooManyParameters { .. },
+                ..
+            })
+        ));
     }
 
     #[test]

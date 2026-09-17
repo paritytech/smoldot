@@ -50,6 +50,10 @@ use smoldot::{
     trie::{minimize_proof, proof_decode},
 };
 
+mod jam;
+
+pub(super) use jam::run_jam;
+
 /// Configuration for a JSON-RPC service.
 pub(super) struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
@@ -1094,6 +1098,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
                     | methods::MethodCall::sudo_unstable_version { .. }
                     | methods::MethodCall::sudo_unstable_metrics { .. }
+                    | methods::MethodCall::jamHead_unstable_follow { .. }
+                    | methods::MethodCall::jamHead_unstable_header { .. }
+                    | methods::MethodCall::jamHead_unstable_unpin { .. }
+                    | methods::MethodCall::jamHead_unstable_unfollow { .. }
                     | methods::MethodCall::transaction_v1_broadcast { .. }
                     | methods::MethodCall::transaction_v1_stop { .. }
                     | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. }
@@ -1600,6 +1608,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .send(
                                 methods::Response::rpc_methods(methods::RpcMethods {
                                     methods: methods::MethodCall::method_names()
+                                        .filter(|n| !n.starts_with("jamHead_"))
                                         .map(|n| n.into())
                                         .collect(),
                                 })
@@ -3246,6 +3255,21 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 methods::Response::lifecycle_unstable_unfollow(())
                                     .to_json_response(request_id_json),
                             )
+                            .await;
+                    }
+
+                    // Served by JAM chains only.
+                    methods::MethodCall::jamHead_unstable_follow { .. }
+                    | methods::MethodCall::jamHead_unstable_header { .. }
+                    | methods::MethodCall::jamHead_unstable_unpin { .. }
+                    | methods::MethodCall::jamHead_unstable_unfollow { .. } => {
+                        let _ = me
+                            .responses_tx
+                            .send(parse::build_error_response(
+                                request_id_json,
+                                json_rpc::parse::ErrorResponse::MethodNotFound,
+                                None,
+                            ))
                             .await;
                     }
 

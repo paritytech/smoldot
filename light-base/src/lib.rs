@@ -111,6 +111,7 @@ pub mod network_service;
 pub mod platform;
 
 pub use json_rpc_service::{HandleRpcError, StatementProtocolConfig};
+pub use sync_service::jam::ConfigError as JamConfigError;
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
@@ -279,6 +280,8 @@ struct PublicApiChain<TPlat: PlatformRef, TChain> {
 /// [`ChainServices`], which has security consequences.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ChainKey {
+    /// Separates JAM and includes its trusted state, parameters and transport configuration.
+    jam_spec_hash: Option<[u8; 32]>,
     /// Hash of the genesis block of the chain.
     genesis_block_hash: [u8; 32],
 
@@ -295,7 +298,7 @@ struct ChainKey {
 struct RunningChain<TPlat: platform::PlatformRef> {
     /// Services that are dedicated to this chain. Wrapped within a `MaybeDone` because the
     /// initialization is performed asynchronously.
-    services: ChainServices<TPlat>,
+    services: ChainBackend<TPlat>,
 
     /// Name of this chain in the logs. This is not necessarily the same as the identifier of the
     /// chain in its chain specification.
@@ -315,6 +318,11 @@ struct ChainServices<TPlat: platform::PlatformRef> {
     chain_metrics: Arc<metrics::ChainMetrics>,
     network_metrics: Arc<metrics::NetworkMetrics>,
     lifecycle_service: Arc<lifecycle_service::LifecycleService>,
+}
+
+enum ChainBackend<TPlat: platform::PlatformRef> {
+    Substrate(ChainServices<TPlat>),
+    Jam(Arc<sync_service::jam::JamSyncService>),
 }
 
 impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
@@ -401,6 +409,9 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         &mut self,
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
     ) -> Result<AddChainSuccess<TPlat>, AddChainError> {
+        if smoldot::jam::chain_spec::looks_like_jam_spec(config.specification.as_bytes()) {
+            return self.add_jam_chain(config);
+        }
         // `chains_by_key` is created lazily whenever needed.
         let chains_by_key = self.chains_by_key.get_or_insert_with(|| {
             HashMap::with_hasher(util::SipHasherBuild::new({
@@ -571,9 +582,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             let chain = config
                 .potential_relay_chains
                 .filter(|c| {
-                    self.public_api_chains
-                        .get(c.0)
-                        .map_or(false, |chain| chain.chain_spec_chain_id == relay_chain_id)
+                    self.public_api_chains.get(c.0).map_or(false, |chain| {
+                        chain.key.jam_spec_hash.is_none()
+                            && chain.chain_spec_chain_id == relay_chain_id
+                    })
                 })
                 .exactly_one();
 
@@ -638,6 +650,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // identical chains to be de-duplicated, but security issues would arise if two chains
         // were considered identical while they're in reality not identical.
         let new_chain_key = ChainKey {
+            jam_spec_hash: None,
             genesis_block_hash,
             relay_chain: relay_chain_id.map(|(ck, _)| {
                 (
@@ -652,15 +665,14 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         //
         // This could in principle be done later on, but doing so raises borrow checker errors.
         let relay_chain: Option<(ChainServices<_>, u32, String)> =
-            relay_chain_id.map(|(relay_chain, para_id)| {
+            relay_chain_id.and_then(|(relay_chain, para_id)| {
                 let relay_chain = &chains_by_key
                     .get(&self.public_api_chains.get(relay_chain.0).unwrap().key)
                     .unwrap();
-                (
-                    relay_chain.services.clone(),
-                    para_id,
-                    relay_chain.log_name.clone(),
-                )
+                let ChainBackend::Substrate(services) = &relay_chain.services else {
+                    return None;
+                };
+                Some((services.clone(), para_id, relay_chain.log_name.clone()))
             });
 
         // Determinate the name under which the chain will be identified in the logs.
@@ -887,13 +899,18 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 }
 
                 let entry = entry.insert(RunningChain {
-                    services,
+                    services: ChainBackend::Substrate(services),
                     log_name,
                     num_references: NonZero::<u32>::new(1).unwrap(),
                 });
 
                 (&mut entry.services, &entry.log_name)
             }
+        };
+
+        let ChainBackend::Substrate(services) = services else {
+            // `jam_spec_hash` keeps the keys of the two chain kinds apart.
+            unreachable!()
         };
 
         if !invalid_bootstrap_nodes_sanitized.is_empty() {
@@ -995,6 +1012,105 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             json_rpc_responses: json_rpc_frontend.map(|f| JsonRpcResponses {
                 inner: Some(f),
                 public_api_chain_destroyed,
+            }),
+        })
+    }
+
+    fn add_jam_chain(
+        &mut self,
+        config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
+    ) -> Result<AddChainSuccess<TPlat>, AddChainError> {
+        if config.specification.len() > 16 * 1024 * 1024 {
+            return Err(AddChainError::Jam(JamConfigError::SpecTooLarge));
+        }
+        let spec = smoldot::jam::chain_spec::JamChainSpec::from_json_bytes(
+            config.specification.as_bytes(),
+        )
+        .map_err(|e| AddChainError::Jam(JamConfigError::Spec(e)))?;
+        let jam_config = sync_service::jam::Config::from_spec(&spec).map_err(AddChainError::Jam)?;
+        let key = ChainKey {
+            jam_spec_hash: Some(smoldot::jam::crypto::blake2b_256(
+                config.specification.as_bytes(),
+            )),
+            genesis_block_hash: spec.genesis_header().hash(spec.params()),
+            relay_chain: None,
+            fork_id: None,
+        };
+        let log_name = format!(
+            "jam-{}-{}",
+            spec.id()
+                .chars()
+                .filter(|c| c.is_ascii_graphic())
+                .take(64)
+                .collect::<String>(),
+            self.public_api_chains.vacant_key()
+        );
+        let chains = self.chains_by_key.get_or_insert_with(|| {
+            HashMap::with_hasher(util::SipHasherBuild::new({
+                let mut seed = [0; 16];
+                self.platform.fill_random_bytes(&mut seed);
+                seed
+            }))
+        });
+        let service = match chains.entry(key.clone()) {
+            Entry::Occupied(mut entry) => {
+                let ChainBackend::Jam(service) = &entry.get().services else {
+                    // `jam_spec_hash` keeps the keys of the two chain kinds apart.
+                    unreachable!()
+                };
+                let service = service.clone();
+                entry.get_mut().num_references = entry
+                    .get()
+                    .num_references
+                    .checked_add(1)
+                    .ok_or(AddChainError::Jam(JamConfigError::TooManyReferences))?;
+                service
+            }
+            Entry::Vacant(entry) => {
+                let service = Arc::new(sync_service::jam::JamSyncService::new(
+                    self.platform.clone(),
+                    log_name.clone(),
+                    jam_config,
+                ));
+                entry.insert(RunningChain {
+                    services: ChainBackend::Jam(service.clone()),
+                    log_name: log_name.clone(),
+                    num_references: NonZero::<u32>::MIN,
+                });
+                service
+            }
+        };
+        let frontend = match config.json_rpc {
+            AddChainConfigJsonRpc::Disabled => None,
+            AddChainConfigJsonRpc::Enabled {
+                max_pending_requests,
+                max_subscriptions,
+            } => Some(json_rpc_service::service_jam(json_rpc_service::JamConfig {
+                platform: self.platform.clone(),
+                log_name,
+                sync_service: service,
+                max_pending_requests,
+                max_subscriptions,
+                chain_name: spec.id().to_owned(),
+                genesis_block_hash: key.genesis_block_hash,
+            })),
+        };
+        let destroyed = event_listener::Event::new();
+        let listener = destroyed.listen();
+        let entry = self.public_api_chains.vacant_entry();
+        let chain_id = ChainId(entry.key());
+        entry.insert(PublicApiChain {
+            user_data: config.user_data,
+            key,
+            chain_spec_chain_id: spec.id().to_owned(),
+            json_rpc_frontend: frontend.clone(),
+            public_api_chain_destroyed_event: destroyed,
+        });
+        Ok(AddChainSuccess {
+            chain_id,
+            json_rpc_responses: frontend.map(|f| JsonRpcResponses {
+                inner: Some(f),
+                public_api_chain_destroyed: listener,
             }),
         })
     }
@@ -1107,7 +1223,11 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     pub fn lifecycle_state(&self, chain_id: ChainId) -> lifecycle_service::Subscription {
         let key = &self.public_api_chains.get(chain_id.0).unwrap().key;
         let running = self.chains_by_key.as_ref().unwrap().get(key).unwrap();
-        running.services.lifecycle_service.subscribe()
+        match &running.services {
+            ChainBackend::Substrate(services) => services.lifecycle_service.subscribe(),
+            // JAM has no lifecycle API yet. Return an ended subscription, not fabricated state.
+            ChainBackend::Jam(_) => lifecycle_service::LifecycleService::new().subscribe(),
+        }
     }
 }
 
@@ -1128,6 +1248,9 @@ impl<TPlat: platform::PlatformRef, TChain> ops::IndexMut<ChainId> for Client<TPl
 /// Error potentially returned by [`Client::add_chain`].
 #[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum AddChainError {
+    /// JAM parsing, trusted-state validation or local resource limits failed.
+    #[display("Invalid JAM configuration: {_0}")]
+    Jam(JamConfigError),
     /// Failed to decode the specification of the chain.
     #[display("Failed to decode chain specification: {_0}")]
     ChainSpecParseError(chain_spec::ParseError),
