@@ -467,6 +467,15 @@ impl GenesisLightState {
         params: &Params,
         items: impl Iterator<Item = (&'a [u8; 31], &'a [u8])>,
     ) -> Result<Self, DecodeError> {
+        Self::from_indexed_state_items(params, items).map_err(|(_, error)| error)
+    }
+
+    /// [`Self::from_state_items`], also returning the index (4, 6, 8 or 11) of
+    /// the item that is missing, duplicated or malformed.
+    pub fn from_indexed_state_items<'a>(
+        params: &Params,
+        items: impl Iterator<Item = (&'a [u8; 31], &'a [u8])>,
+    ) -> Result<Self, (u8, DecodeError)> {
         let mut safrole = None;
         let mut entropy = None;
         let mut active_validators = None;
@@ -474,31 +483,32 @@ impl GenesisLightState {
         for (key, bytes) in items {
             if *key == state_key(4) {
                 if safrole.is_some() {
-                    return Err(DecodeError::DuplicateStateItem(4));
+                    return Err((4, DecodeError::DuplicateStateItem(4)));
                 }
-                safrole = Some(SafroleState::decode(params, bytes)?);
+                safrole = Some(SafroleState::decode(params, bytes).map_err(|e| (4, e))?);
             } else if *key == state_key(6) {
                 if entropy.is_some() {
-                    return Err(DecodeError::DuplicateStateItem(6));
+                    return Err((6, DecodeError::DuplicateStateItem(6)));
                 }
-                entropy = Some(decode_entropy(bytes)?);
+                entropy = Some(decode_entropy(bytes).map_err(|e| (6, e))?);
             } else if *key == state_key(8) {
                 if active_validators.is_some() {
-                    return Err(DecodeError::DuplicateStateItem(8));
+                    return Err((8, DecodeError::DuplicateStateItem(8)));
                 }
-                active_validators = Some(decode_active_validators(params, bytes)?);
+                active_validators =
+                    Some(decode_active_validators(params, bytes).map_err(|e| (8, e))?);
             } else if *key == state_key(11) {
                 if slot.is_some() {
-                    return Err(DecodeError::DuplicateStateItem(11));
+                    return Err((11, DecodeError::DuplicateStateItem(11)));
                 }
-                slot = Some(decode_slot(bytes)?);
+                slot = Some(decode_slot(bytes).map_err(|e| (11, e))?);
             }
         }
         Ok(Self {
-            safrole: safrole.ok_or(DecodeError::MissingStateItem(4))?,
-            entropy: entropy.ok_or(DecodeError::MissingStateItem(6))?,
-            active_validators: active_validators.ok_or(DecodeError::MissingStateItem(8))?,
-            slot: slot.ok_or(DecodeError::MissingStateItem(11))?,
+            safrole: safrole.ok_or((4, DecodeError::MissingStateItem(4)))?,
+            entropy: entropy.ok_or((6, DecodeError::MissingStateItem(6)))?,
+            active_validators: active_validators.ok_or((8, DecodeError::MissingStateItem(8)))?,
+            slot: slot.ok_or((11, DecodeError::MissingStateItem(11)))?,
         })
     }
 }

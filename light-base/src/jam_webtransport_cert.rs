@@ -18,6 +18,7 @@
 use alloc::{format, string::String, vec, vec::Vec};
 use p256::elliptic_curve::sec1::ToEncodedPoint as _;
 use sha2::Digest as _;
+use smoldot::jam::chain_spec;
 
 const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 const PERIOD_SECS: u64 = 10 * 24 * 3600;
@@ -61,32 +62,21 @@ impl P256PeerId {
         if !s.is_ascii() {
             return Err(P256PeerIdParseError::BadCharacter);
         }
-        let bytes = s.as_bytes();
-        if bytes.len() != 53 {
+        if s.len() != 53 {
             return Err(P256PeerIdParseError::BadLength);
         }
-        let y_odd = match bytes[0] {
+        let y_odd = match s.as_bytes()[0] {
             b'o' => true,
             b'v' => false,
             _ => return Err(P256PeerIdParseError::BadPrefix),
         };
-        let mut x = [0; 32];
-        for (symbol, &byte) in bytes[1..].iter().enumerate() {
-            let value = match byte {
-                b'a'..=b'z' => byte - b'a',
-                b'2'..=b'7' => byte - b'2' + 26,
-                _ => return Err(P256PeerIdParseError::BadCharacter),
-            };
-            if symbol == 51 && value > 1 {
-                return Err(P256PeerIdParseError::NonZeroTrailingBits);
+        let x = chain_spec::decode_identity(s).map_err(|error| match error {
+            chain_spec::BootNodeError::PeerIdLength => P256PeerIdParseError::BadLength,
+            chain_spec::BootNodeError::PeerIdTrailingBits => {
+                P256PeerIdParseError::NonZeroTrailingBits
             }
-            for bit in 0..5 {
-                let position = symbol * 5 + bit;
-                if position < 256 {
-                    x[position / 8] |= ((value >> bit) & 1) << (position % 8);
-                }
-            }
-        }
+            _ => P256PeerIdParseError::BadCharacter,
+        })?;
         let mut compressed = [0; 33];
         compressed[0] = if y_odd { 3 } else { 2 };
         compressed[1..].copy_from_slice(&x);
