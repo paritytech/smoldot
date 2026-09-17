@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>C1 JAM light client</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+            --space: 1rem;
+            --small: .5rem;
+            --page-width: 64rem;
+            --panel-height: 24rem;
+            --border: 1px solid GrayText;
+            --body-size: 1rem;
+            --title-size: 2rem;
+            --heading-size: 1.25rem;
+        }
+        * { box-sizing: border-box; }
+        body { max-width: var(--page-width); margin: auto; padding: var(--space); font: var(--body-size)/1.5 sans-serif; }
+        h1 { font-size: var(--title-size); }
+        h2 { font-size: var(--heading-size); }
+        .warning, pre { border: var(--border); padding: var(--space); }
+        .controls { display: flex; flex-wrap: wrap; gap: var(--small); margin-block: var(--space); }
+        input, button { font: inherit; padding: var(--small); max-width: 100%; }
+        input[type="url"] { width: 100%; }
+        label { display: block; margin-block: var(--small); }
+        pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: var(--panel-height); overflow: auto; }
+    </style>
+</head>
+<body>
+    <h1>C1 JAM light client</h1>
+    <p class="warning"><strong>Trusted anchor only. No live finality.</strong>
+        The spec's genesis/checkpoint is a trusted starting point, not proof of trust.
+        An initialized finalized hash refers only to that anchor. New blocks are not
+        finalized. This demo does not verify header hashes or execute a runtime.</p>
+    <label for="spec-url">JAM JSON spec URL (used when no file is selected)</label>
+    <input id="spec-url" type="url" value="/fixtures/chain-spec.polkajam.json">
+    <label for="spec-file">Or select a JSON spec file</label>
+    <input id="spec-file" type="file" accept=".json,application/json">
+    <label><input id="dev-bootnode" type="checkbox"> Add public dev node0 P-256 bootnode at 127.0.0.1:40000 (local A5 network only)</label>
+    <p><code>withRuntime: false</code> is required and cannot be enabled here.</p>
+    <div class="controls">
+        <button id="start" type="button">Start</button>
+        <button id="stop" type="button" disabled>Stop</button>
+        <button id="header" type="button" disabled>Header: latest new block</button>
+        <button id="unpin" type="button" disabled>Unpin: latest new block</button>
+        <button id="unfollow" type="button" disabled>Unfollow</button>
+    </div>
+    <p id="status" role="status">Stopped</p>
+    <h2>Latest new block's canonical header bytes</h2>
+    <p>Returned verbatim by <code>chainHead_v1_header</code>; not a claim of canonical-chain membership or finality.</p>
+    <pre id="header-output" tabindex="0">No header requested.</pre>
+    <h2>Follow events and JSON-RPC</h2>
+    <p>Last 100 entries, each capped at 4,096 characters. At most 16 locally tracked pins; older pins are automatically released.</p>
+    <pre id="events" tabindex="0" aria-label="Follow events and JSON-RPC responses"></pre>
+    <h2>Client logs</h2>
+    <pre id="logs" tabindex="0" aria-label="Client logs"></pre>
+    <script type="module" src="./jam.mjs"></script>
+</body>
+</html>

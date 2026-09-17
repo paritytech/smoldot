@@ -51,6 +51,416 @@ use smoldot::{
 };
 
 /// Configuration for a JSON-RPC service.
+const JAM_PIN_BYTES: usize = 4 * 1024 * 1024;
+use alloc::collections::BTreeMap;
+
+struct JamFollow {
+    headers: hashbrown::HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
+    notifications: async_channel::Receiver<sync_service::Notification>,
+}
+
+/// The header-only adapter hashes opaque canonical bytes, not decoded Substrate headers.
+fn pin_header(
+    headers: &mut hashbrown::HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
+    encoded: Vec<u8>,
+) -> [u8; 32] {
+    let hash = header::hash_from_scale_encoded_header(&encoded);
+    headers.insert(hash, encoded);
+    hash
+}
+
+fn follow_event(subscription: &str, result: methods::FollowEvent<'_>) -> String {
+    methods::ServerToClient::chainHead_v1_followEvent {
+        subscription: Cow::Borrowed(subscription),
+        result,
+    }
+    .to_json_request_object_parameters(None)
+}
+
+async fn jam_notification(
+    id: &str,
+    follow: &mut JamFollow,
+    notification: sync_service::Notification,
+    responses: &async_channel::Sender<String>,
+) -> Result<(), ()> {
+    match &notification {
+        sync_service::Notification::Block(block) => {
+            let retained: usize = follow.headers.values().map(Vec::len).sum();
+            if retained.saturating_add(block.scale_encoded_header.len()) > JAM_PIN_BYTES
+                || follow.headers.len() >= 512
+            {
+                return Err(());
+            }
+        }
+        sync_service::Notification::BestBlockChanged { .. } => {}
+        // This backend must never claim any post-anchor finality, even if its producer regresses.
+        sync_service::Notification::Finalized { .. } => return Err(()),
+    }
+    for event in without_runtime_events(&mut follow.headers, notification) {
+        responses
+            .send(follow_event(id, event))
+            .await
+            .map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+fn without_runtime_events(
+    headers: &mut hashbrown::HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
+    notification: sync_service::Notification,
+) -> Vec<methods::FollowEvent<'static>> {
+    let mut events = Vec::with_capacity(2);
+    match notification {
+        sync_service::Notification::Finalized {
+            finalized_blocks_hashes,
+            best_block_hash_if_changed,
+            pruned_blocks,
+        } => {
+            if let Some(hash) = best_block_hash_if_changed {
+                events.push(methods::FollowEvent::BestBlockChanged {
+                    best_block_hash: methods::HashHexString(hash),
+                });
+            }
+            events.push(methods::FollowEvent::Finalized {
+                finalized_blocks_hashes: finalized_blocks_hashes
+                    .into_iter()
+                    .map(methods::HashHexString)
+                    .collect(),
+                pruned_blocks_hashes: pruned_blocks
+                    .into_iter()
+                    .map(methods::HashHexString)
+                    .collect(),
+            });
+        }
+        sync_service::Notification::BestBlockChanged { hash } => {
+            events.push(methods::FollowEvent::BestBlockChanged {
+                best_block_hash: methods::HashHexString(hash),
+            })
+        }
+        sync_service::Notification::Block(block) => {
+            let hash = pin_header(headers, block.scale_encoded_header);
+            events.push(methods::FollowEvent::NewBlock {
+                block_hash: methods::HashHexString(hash),
+                parent_block_hash: methods::HashHexString(block.parent_hash),
+                new_runtime: None,
+            });
+            if block.is_new_best {
+                events.push(methods::FollowEvent::BestBlockChanged {
+                    best_block_hash: methods::HashHexString(hash),
+                });
+            }
+        }
+    }
+    events
+}
+
+#[cfg(all(test, feature = "std"))]
+mod jam_tests {
+    use super::*;
+
+    #[test]
+    fn header_only_adapter_preserves_bytes_pins_and_event_order() {
+        let mut headers = Default::default();
+        let bytes = vec![1, 2, 3, 4, 5];
+        let hash = smoldot::jam::crypto::blake2b_256(&bytes);
+        let events = without_runtime_events(
+            &mut headers,
+            sync_service::Notification::Block(sync_service::BlockNotification {
+                is_new_best: true,
+                scale_encoded_header: bytes.clone(),
+                parent_hash: [0; 32],
+            }),
+        );
+        assert_eq!(headers.get(&hash), Some(&bytes));
+        assert!(matches!(
+            events.as_slice(),
+            [
+                methods::FollowEvent::NewBlock { .. },
+                methods::FollowEvent::BestBlockChanged { .. }
+            ]
+        ));
+        let events = without_runtime_events(
+            &mut headers,
+            sync_service::Notification::Finalized {
+                finalized_blocks_hashes: vec![hash],
+                best_block_hash_if_changed: Some(hash),
+                pruned_blocks: Vec::new(),
+            },
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [
+                methods::FollowEvent::BestBlockChanged { .. },
+                methods::FollowEvent::Finalized { .. }
+            ]
+        ));
+        assert_eq!(headers.get(&hash), Some(&bytes));
+    }
+
+    #[test]
+    fn jam_pin_budget_and_finality_fail_closed_without_altering_pins() {
+        smol::block_on(async {
+            let (_, notifications) = async_channel::bounded(1);
+            let mut follow = JamFollow {
+                headers: Default::default(),
+                notifications,
+            };
+            follow.headers.insert([7; 32], vec![0; JAM_PIN_BYTES]);
+            let (tx, rx) = async_channel::bounded(4);
+            let block = sync_service::Notification::Block(sync_service::BlockNotification {
+                is_new_best: true,
+                scale_encoded_header: vec![1],
+                parent_hash: [7; 32],
+            });
+            assert!(
+                jam_notification("1", &mut follow, block, &tx)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(follow.headers.len(), 1);
+            assert_eq!(follow.headers[&[7; 32]].len(), JAM_PIN_BYTES);
+            assert!(
+                jam_notification(
+                    "1",
+                    &mut follow,
+                    sync_service::Notification::Finalized {
+                        finalized_blocks_hashes: vec![[7; 32]],
+                        best_block_hash_if_changed: None,
+                        pruned_blocks: Vec::new()
+                    },
+                    &tx
+                )
+                .await
+                .is_err()
+            );
+            assert!(rx.try_recv().is_err());
+        });
+    }
+}
+
+pub(super) async fn run_jam<P: PlatformRef>(
+    config: super::JamConfig<P>,
+    requests: async_channel::Receiver<String>,
+    responses: async_channel::Sender<String>,
+) {
+    let mut follows: BTreeMap<String, JamFollow> = BTreeMap::new();
+    let mut sequence = 0u64;
+    loop {
+        enum Wake {
+            Request(Result<String, async_channel::RecvError>),
+            Block(String, Option<sync_service::Notification>),
+        }
+        let wake =
+            futures_lite::future::or(async { Wake::Request(requests.recv().await) }, async {
+                let mut waits = stream::FuturesUnordered::new();
+                for (id, follow) in &follows {
+                    waits.push(async move {
+                        Wake::Block(id.clone(), follow.notifications.recv().await.ok())
+                    });
+                }
+                match waits.next().await {
+                    Some(wake) => wake,
+                    None => futures_lite::future::pending().await,
+                }
+            })
+            .await;
+        match wake {
+            Wake::Request(Err(_)) => return,
+            Wake::Block(id, notification) => {
+                let Some(follow) = follows.get_mut(&id) else {
+                    continue;
+                };
+                let ok = if let Some(notification) = notification {
+                    jam_notification(&id, follow, notification, &responses)
+                        .await
+                        .is_ok()
+                } else {
+                    false
+                };
+                if !ok {
+                    follows.remove(&id);
+                    let _ = responses
+                        .send(follow_event(&id, methods::FollowEvent::Stop {}))
+                        .await;
+                }
+            }
+            Wake::Request(Ok(request)) => {
+                let (request_id, method) = match methods::parse_jsonrpc_client_to_server(&request) {
+                    Ok(parsed) => parsed,
+                    Err(methods::ParseClientToServerError::JsonRpcParse(_)) => {
+                        let _ = responses.send(parse::build_parse_error_response()).await;
+                        continue;
+                    }
+                    Err(methods::ParseClientToServerError::Method { request_id, error }) => {
+                        let _ = responses.send(error.to_json_error(request_id)).await;
+                        continue;
+                    }
+                    Err(methods::ParseClientToServerError::UnknownNotification { .. }) => continue,
+                };
+                let response = match method {
+                    methods::MethodCall::chainHead_v1_follow {
+                        with_runtime: false,
+                    } => {
+                        if follows.len()
+                            >= usize::try_from(config.max_subscriptions.min(2)).unwrap_or(2)
+                            || sequence == u64::MAX
+                        {
+                            parse::build_error_response(
+                                request_id,
+                                parse::ErrorResponse::ApplicationDefined(
+                                    -32800,
+                                    "too many active follow subscriptions",
+                                ),
+                                None,
+                            )
+                        } else {
+                            sequence += 1;
+                            let id = sequence.to_string();
+                            let snapshot = config.sync_service.subscribe_all(16, false).await;
+                            let _ = responses
+                                .send(
+                                    methods::Response::chainHead_v1_follow(Cow::Borrowed(&id))
+                                        .to_json_response(request_id),
+                                )
+                                .await;
+                            let mut follow = JamFollow {
+                                headers: Default::default(),
+                                notifications: snapshot.new_blocks,
+                            };
+                            let root = pin_header(
+                                &mut follow.headers,
+                                snapshot.finalized_block_scale_encoded_header,
+                            );
+                            let _ = responses
+                                .send(follow_event(
+                                    &id,
+                                    methods::FollowEvent::Initialized {
+                                        finalized_block_hashes: vec![methods::HashHexString(root)],
+                                        finalized_block_runtime: None,
+                                    },
+                                ))
+                                .await;
+                            let mut valid = true;
+                            let mut best_hash = root;
+                            for mut block in snapshot.non_finalized_blocks_ancestry_order {
+                                if block.is_new_best {
+                                    best_hash = header::hash_from_scale_encoded_header(
+                                        &block.scale_encoded_header,
+                                    );
+                                }
+                                // Snapshot best is reported only after all forks have been
+                                // announced. Live block notifications retain their usual order.
+                                block.is_new_best = false;
+                                if jam_notification(
+                                    &id,
+                                    &mut follow,
+                                    sync_service::Notification::Block(block),
+                                    &responses,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                            if valid {
+                                let _ = responses
+                                    .send(follow_event(
+                                        &id,
+                                        methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(best_hash),
+                                        },
+                                    ))
+                                    .await;
+                                follows.insert(id, follow);
+                            } else {
+                                let _ = responses
+                                    .send(follow_event(&id, methods::FollowEvent::Stop {}))
+                                    .await;
+                            }
+                            continue;
+                        }
+                    }
+                    methods::MethodCall::chainHead_v1_header {
+                        follow_subscription,
+                        hash,
+                    } => match follows.get(&*follow_subscription) {
+                        None => methods::Response::chainHead_v1_header(None)
+                            .to_json_response(request_id),
+                        Some(follow) => match follow.headers.get(&hash.0) {
+                            Some(bytes) => methods::Response::chainHead_v1_header(Some(
+                                methods::HexString(bytes.clone()),
+                            ))
+                            .to_json_response(request_id),
+                            None => parse::build_error_response(
+                                request_id,
+                                parse::ErrorResponse::ApplicationDefined(
+                                    -32801,
+                                    "unknown or unpinned block",
+                                ),
+                                None,
+                            ),
+                        },
+                    },
+                    methods::MethodCall::chainHead_v1_unpin {
+                        follow_subscription,
+                        hash_or_hashes,
+                    } => {
+                        let mut error = None;
+                        if let Some(follow) = follows.get_mut(&*follow_subscription) {
+                            let hashes = match hash_or_hashes {
+                                methods::HashHexStringSingleOrArray::Single(hash) => vec![hash],
+                                methods::HashHexStringSingleOrArray::Array(hashes) => hashes,
+                            };
+                            let mut seen = BTreeSet::new();
+                            for hash in &hashes {
+                                if !seen.insert(hash.0) {
+                                    error = Some(parse::ErrorResponse::ApplicationDefined(
+                                        -32804,
+                                        "duplicate block hash",
+                                    ));
+                                    break;
+                                }
+                                if !follow.headers.contains_key(&hash.0) {
+                                    error = Some(parse::ErrorResponse::ApplicationDefined(
+                                        -32801,
+                                        "unknown or unpinned block",
+                                    ));
+                                    break;
+                                }
+                            }
+                            if error.is_none() {
+                                for hash in hashes {
+                                    follow.headers.remove(&hash.0);
+                                }
+                            }
+                        }
+                        match error {
+                            Some(error) => parse::build_error_response(request_id, error, None),
+                            None => methods::Response::chainHead_v1_unpin(())
+                                .to_json_response(request_id),
+                        }
+                    }
+                    methods::MethodCall::chainHead_v1_unfollow {
+                        follow_subscription,
+                    } => {
+                        follows.remove(&*follow_subscription);
+                        methods::Response::chainHead_v1_unfollow(()).to_json_response(request_id)
+                    }
+                    _ => parse::build_error_response(
+                        request_id,
+                        parse::ErrorResponse::MethodNotFound,
+                        None,
+                    ),
+                };
+                let _ = responses.send(response).await;
+            }
+        }
+    }
+}
+
+/// Configuration for a Substrate JSON-RPC service.
 pub(super) struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     // TODO: redundant with Config above?
@@ -4680,103 +5090,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     continue;
                 };
 
-                match notification {
-                    sync_service::Notification::Finalized {
-                        finalized_blocks_hashes,
-                        best_block_hash_if_changed,
-                        pruned_blocks,
-                    } => {
-                        if let Some(new_best_block_hash) = best_block_hash_if_changed {
-                            let _ = me
-                                .responses_tx
-                                .send(
-                                    methods::ServerToClient::chainHead_v1_followEvent {
-                                        subscription: Cow::Borrowed(&subscription_id),
-                                        result: methods::FollowEvent::BestBlockChanged {
-                                            best_block_hash: methods::HashHexString(
-                                                new_best_block_hash,
-                                            ),
-                                        },
-                                    }
-                                    .to_json_request_object_parameters(None),
-                                )
-                                .await;
-                        }
-
-                        let _ = me
-                            .responses_tx
-                            .send(
-                                methods::ServerToClient::chainHead_v1_followEvent {
-                                    subscription: Cow::Borrowed(&subscription_id),
-                                    result: methods::FollowEvent::Finalized {
-                                        finalized_blocks_hashes: finalized_blocks_hashes
-                                            .into_iter()
-                                            .map(methods::HashHexString)
-                                            .collect(),
-                                        pruned_blocks_hashes: pruned_blocks
-                                            .into_iter()
-                                            .map(methods::HashHexString)
-                                            .collect(),
-                                    },
-                                }
-                                .to_json_request_object_parameters(None),
-                            )
-                            .await;
-                    }
-                    sync_service::Notification::BestBlockChanged { hash } => {
-                        let _ = me
-                            .responses_tx
-                            .send(
-                                methods::ServerToClient::chainHead_v1_followEvent {
-                                    subscription: Cow::Borrowed(&subscription_id),
-                                    result: methods::FollowEvent::BestBlockChanged {
-                                        best_block_hash: methods::HashHexString(hash),
-                                    },
-                                }
-                                .to_json_request_object_parameters(None),
-                            )
-                            .await;
-                    }
-                    sync_service::Notification::Block(block) => {
-                        // TODO: pass hash through notification
-                        let block_hash =
-                            header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                        subscription_info
-                            .pinned_blocks_headers
-                            .insert(block_hash, block.scale_encoded_header);
-
-                        let _ = me
-                            .responses_tx
-                            .send(
-                                methods::ServerToClient::chainHead_v1_followEvent {
-                                    subscription: Cow::Borrowed(&subscription_id),
-                                    result: methods::FollowEvent::NewBlock {
-                                        block_hash: methods::HashHexString(block_hash),
-                                        parent_block_hash: methods::HashHexString(
-                                            block.parent_hash,
-                                        ),
-                                        new_runtime: None,
-                                    },
-                                }
-                                .to_json_request_object_parameters(None),
-                            )
-                            .await;
-
-                        if block.is_new_best {
-                            let _ = me
-                                .responses_tx
-                                .send(
-                                    methods::ServerToClient::chainHead_v1_followEvent {
-                                        subscription: Cow::Borrowed(&subscription_id),
-                                        result: methods::FollowEvent::BestBlockChanged {
-                                            best_block_hash: methods::HashHexString(block_hash),
-                                        },
-                                    }
-                                    .to_json_request_object_parameters(None),
-                                )
-                                .await;
-                        }
-                    }
+                for event in without_runtime_events(
+                    &mut subscription_info.pinned_blocks_headers,
+                    notification,
+                ) {
+                    let _ = me
+                        .responses_tx
+                        .send(follow_event(&subscription_id, event))
+                        .await;
                 }
 
                 // Push a new task that will yield when the sync service subscription generates
