@@ -319,6 +319,41 @@ fn genesis(params: &Params, sets: &Sets) -> VerifiedHeader {
 fn decoded(params: &Params, block: &VerifiedHeader) -> Header {
     Header::decode(params, &block.encoded).unwrap()
 }
+
+impl crate::jam::tree::HeaderTree {
+    // Expose the signing harness without making the verifier's test module public.
+    pub(crate) fn signed_child_fixture() -> (Params, VerifiedHeader, Header, u64) {
+        let params = tiny_params();
+        let sets = sets();
+        let root = genesis(&params, &sets);
+        let child = seal(&params, &root, draft(1), &sets.active);
+        (params, root, child, NOW)
+    }
+}
+
+impl crate::jam::tree::HeaderTree {
+    pub(crate) fn signed_markless_fixtures() -> (Params, VerifiedHeader, Vec<Header>, u64) {
+        let params = tiny_params();
+        let sets = sets();
+        let root = genesis(&params, &sets);
+        let headers = (0u32..100)
+            .map(|i| {
+                let mut header = seal(&params, &root, draft(1), &sets.active);
+                header.extrinsic_hash[..4].copy_from_slice(&i.to_le_bytes());
+                let (_, validator, context) =
+                    author(&params, &expected(&params, &root, 1), &sets.active, 1);
+                header.seal = vrf_sign(
+                    &validator.secret,
+                    &context,
+                    &header.encode_unsigned(&params),
+                );
+                header
+            })
+            .collect();
+        (params, root, headers, NOW)
+    }
+}
+
 #[test]
 fn epoch_change_activates_pending_set_not_the_mark() {
     let params = tiny_params();
