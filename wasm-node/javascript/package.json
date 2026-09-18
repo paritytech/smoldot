@@ -71,6 +71,8 @@
     "test": "node prepare.mjs --debug && rm -rf ./dist && npm run buildModules && deno run ./dist/mjs/index-deno.js && ava --timeout=2m --concurrency 2 --no-worker-threads",
     "test:jam": "node test/jam/run.mjs",
     "test:jam:finality": "node test/jam/finality.mjs",
+    "demo:jam": "node demo/jam-harness.mjs",
+    "demo:jam:rebuild": "node prepare.mjs --debug && rm -rf ./dist && npm run buildModules && npm run demo:jam",
     "doc": "node prepare.mjs --debug && typedoc --basePath ./src --out ./dist/doc --treatWarningsAsErrors ./src/index-browser.ts"
   },
   "ava": {
