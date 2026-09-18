@@ -404,6 +404,18 @@ enum FinalityProof {
     Justification(([u8; 4], Vec<u8>)),
 }
 
+/// Reference to a finality proof. See [`FinalityProofVerify::finality_proof`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum FinalityProofRef<'a> {
+    /// SCALE-encoded Grandpa commit message.
+    GrandpaCommit(&'a [u8]),
+    /// SCALE-encoded justification, and the consensus engine id it is meant for.
+    Justification {
+        consensus_engine_id: [u8; 4],
+        scale_encoded_justification: &'a [u8],
+    },
+}
+
 impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Initializes a new [`AllForksSync`].
     pub fn new(config: Config) -> Self {
@@ -2191,6 +2203,30 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
     /// Returns the source the justification was obtained from.
     pub fn sender(&self) -> (SourceId, &TSrc) {
         (self.source_id, &self.parent[self.source_id])
+    }
+
+    /// Returns the finality proof that is about to be verified.
+    ///
+    /// Exposed so that the proof can be kept and handed over to a third party that verifies
+    /// finality on its own.
+    pub fn finality_proof(&self) -> FinalityProofRef<'_> {
+        match &self.finality_proof_to_verify {
+            FinalityProof::GrandpaCommit(commit) => FinalityProofRef::GrandpaCommit(commit),
+            FinalityProof::Justification((consensus_engine_id, justification)) => {
+                FinalityProofRef::Justification {
+                    consensus_engine_id: *consensus_engine_id,
+                    scale_encoded_justification: justification,
+                }
+            }
+        }
+    }
+
+    /// Returns the SCALE-encoded header of a non-finalized block, or `None` if it isn't known.
+    ///
+    /// Must be called before [`FinalityProofVerify::perform`], which consumes the state machine
+    /// and removes the newly-finalized blocks from it.
+    pub fn non_finalized_block_header(&self, hash: &[u8; 32]) -> Option<&[u8]> {
+        self.parent.chain.non_finalized_block_header(hash)
     }
 
     /// Perform the verification.
