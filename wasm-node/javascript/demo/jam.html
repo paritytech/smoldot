@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>C1 JAM light client</title>
+    <title>JAM light client demo</title>
     <style>
         :root {
             color-scheme: light dark;
@@ -20,25 +20,34 @@
         body { max-width: var(--page-width); margin: auto; padding: var(--space); font: var(--body-size)/1.5 sans-serif; }
         h1 { font-size: var(--title-size); }
         h2 { font-size: var(--heading-size); }
-        .warning, pre { border: var(--border); padding: var(--space); }
+        .warning, pre, .live { border: var(--border); padding: var(--space); }
         .controls { display: flex; flex-wrap: wrap; gap: var(--small); margin-block: var(--space); }
         input, button { font: inherit; padding: var(--small); max-width: 100%; }
         input[type="url"] { width: 100%; }
         label { display: block; margin-block: var(--small); }
         pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: var(--panel-height); overflow: auto; }
+        .live dl { display: grid; grid-template-columns: max-content 1fr; gap: var(--small) var(--space); margin: 0; }
+        .live dt { font-weight: bold; }
+        .live dd { margin: 0; overflow-wrap: anywhere; }
+        .note { color: GrayText; }
+        .blocks { border: var(--border); max-height: var(--panel-height); overflow: auto; }
+        .blocks table { border-collapse: collapse; width: 100%; }
+        .blocks th, .blocks td { text-align: left; padding: var(--small); border-bottom: var(--border); white-space: nowrap; }
+        .blocks th { position: sticky; top: 0; background: Canvas; }
+        .blocks tr:last-child td { border-bottom: none; }
     </style>
 </head>
 <body>
-    <h1>C1 JAM light client</h1>
-    <p class="warning"><strong>Trusted anchor only. No live finality.</strong>
-        The spec's genesis/checkpoint is a trusted starting point, not proof of trust.
-        An initialized finalized hash refers only to that anchor. New blocks are not
-        finalized. This demo does not verify header hashes or execute a runtime.</p>
+    <h1>JAM light client demo</h1>
+    <p class="warning"><strong>Trusted starting point; verified live finality.</strong>
+        The spec's genesis/checkpoint is trusted input. Its initialized finalized hash
+        is not newly proven finality. Subsequent finalized heads come from GRANDPA
+        proofs verified by smoldot. This header-only client does not execute a runtime.</p>
     <label for="spec-url">JAM JSON spec URL (used when no file is selected)</label>
-    <input id="spec-url" type="url" value="/fixtures/chain-spec.polkajam.json">
+    <input id="spec-url" type="url" value="/jam-demo/spec.json">
     <label for="spec-file">Or select a JSON spec file</label>
     <input id="spec-file" type="file" accept=".json,application/json">
-    <label><input id="dev-bootnode" type="checkbox"> Add public dev node0 P-256 bootnode at 127.0.0.1:40000 (local A5 network only)</label>
+    <label><input id="dev-bootnode" type="checkbox"> Add the running demo network's node0 bootnode (asked of the local harness, never hardcoded here; local dev network only)</label>
     <p><code>withRuntime: false</code> is required and cannot be enabled here.</p>
     <div class="controls">
         <button id="start" type="button">Start</button>
@@ -48,6 +57,79 @@
         <button id="unfollow" type="button" disabled>Unfollow</button>
     </div>
     <p id="status" role="status">Stopped</p>
+
+    <h2>Live view</h2>
+    <p class="note">Slot, epoch, marks and author index are decoded in JavaScript from the bytes
+        <code>chainHead_v1_header</code> returned, <strong>for display only</strong>. They gate no
+        control, decide no correctness, and are not verification &mdash; verification happens in Rust
+        inside the client. A dash means &ldquo;not known yet&rdquo;, never a guess. Click a hash to
+        copy it in full.</p>
+    <div class="live">
+        <dl>
+            <dt>Connection</dt><dd id="live-connection">Stopped</dd>
+            <dt>Bootnode in use</dt><dd id="live-bootnode">&ndash;</dd>
+            <dt>Last follow event</dt><dd id="live-last-event">&ndash;</dd>
+            <dt>Trusted anchor (from <code>initialized</code>)</dt><dd id="live-anchor">&ndash;</dd>
+            <dt>Blocks since Start</dt><dd id="live-count">0</dd>
+            <dt>Latest new block</dt><dd id="live-block">&ndash;</dd>
+            <dt>Parent</dt><dd id="live-parent">&ndash;</dd>
+            <dt>Slot</dt><dd id="live-slot">&ndash;</dd>
+            <dt>Epoch</dt><dd id="live-epoch">&ndash;</dd>
+            <dt>Marks on this header</dt><dd id="live-marks">&ndash;</dd>
+            <dt>Marks seen this session</dt><dd id="live-marks-seen">&ndash;</dd>
+            <dt>Author index</dt><dd id="live-author">&ndash;</dd>
+            <dt>Best block (client)</dt><dd id="live-best">&ndash;</dd>
+            <dt>Leaves the subscription knows</dt><dd id="live-leaves">&ndash;</dd>
+            <dt>Node's own best block</dt><dd id="live-node-best">&ndash;</dd>
+            <dt>Client vs node</dt><dd id="live-agreement">&ndash;</dd>
+        </dl>
+    </div>
+
+    <h2>Finality</h2>
+    <p class="note">The client head below comes only from <code>chainHead_v1_follow</code>.
+        Its initial anchor is trusted, not newly verified. Live updates advance only after
+        smoldot verifies a GRANDPA proof and the required authority transitions.
+        The node's <code>finalizedBlock</code> RPC is an independent report, not proof verified by smoldot.</p>
+    <div class="live">
+        <dl>
+            <dt>Client finality</dt><dd id="finality-state">Stopped</dd>
+            <dt>Client finalized head</dt><dd id="finality-head">&ndash;</dd>
+            <dt>Client finalized slot</dt><dd id="finality-slot">&ndash;</dd>
+            <dt>Live finality updates</dt><dd id="finality-count">0</dd>
+            <dt>Last client finality update</dt><dd id="finality-age">&ndash;</dd>
+            <dt>Node-reported finalized head</dt><dd id="finality-node">&ndash;</dd>
+            <dt>Node best / finalized slot gap</dt><dd id="finality-node-gap">&ndash;</dd>
+        </dl>
+    </div>
+
+    <h2>Recent blocks</h2>
+    <p class="note">The last 20 blocks reported by <code>chainHead_v1_follow</code>, newest first.
+        Block and parent hashes come straight from the follow events; slot, epoch, author and marks
+        are decoded from each block's <code>chainHead_v1_header</code> bytes by the same
+        <strong>display-only</strong> decoder as the live view. A row whose header has not arrived,
+        or did not decode, says so in its Marks column instead of showing a value &mdash; nothing here
+        is ever filled in by guessing. Epoch reads <code>number + position</code>. Click a hash to
+        copy it in full.</p>
+    <div class="blocks">
+        <table>
+            <thead>
+                <tr><th>Slot</th><th>Epoch</th><th>Author</th><th>Marks</th><th>Finality (client)</th><th>Block</th><th>Parent</th><th>Age</th></tr>
+            </thead>
+            <tbody id="blocks-body"></tbody>
+        </table>
+    </div>
+    <p id="blocks-empty">No block has arrived yet.</p>
+
+    <h2>Break the network</h2>
+    <p class="note">These buttons act on the local dev network started by <code>npm run demo:jam</code>,
+        through the harness's loopback control endpoint. They do nothing to the client itself.</p>
+    <div class="controls">
+        <button id="kill-node0" type="button" disabled>Kill node0</button>
+        <button id="start-node0" type="button" disabled>Start node0</button>
+        <button id="restart-node0" type="button" disabled>Restart node0 (kill + start)</button>
+    </div>
+    <p id="network-status" role="status">Looking for the demo harness&hellip;</p>
+
     <h2>Latest new block's canonical header bytes</h2>
     <p>Returned verbatim by <code>chainHead_v1_header</code>; not a claim of canonical-chain membership or finality.</p>
     <pre id="header-output" tabindex="0">No header requested.</pre>
