@@ -59,6 +59,34 @@ test('sudo_unstable_p2pDiscover returns error on invalid multiaddr', async t => 
     .then(() => client.terminate());
 });
 
+test('sudo_unstable_metrics returns a metrics snapshot', async t => {
+  const client = start({ logCallback: () => { } });
+  await client
+    .addChain({ chainSpec: westendSpec })
+    .then((chain) => {
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"sudo_unstable_metrics","params":[]}');
+      return chain;
+    })
+    .then(async (chain) => {
+      const response = await chain.nextJsonRpcResponse();
+      const parsed = JSON.parse(response);
+      if (
+        parsed.id == 1
+        && Array.isArray(parsed.result?.metrics)
+        && parsed.result.metrics.length > 0
+        && parsed.result.metrics.every((m) =>
+          typeof m.name === 'string'
+          && (m.type === 'counter' || m.type === 'gauge')
+          && Array.isArray(m.entries)
+          && m.entries.every((e) => typeof e.value === 'number'))
+      )
+        t.pass();
+      else
+        t.fail(response);
+    })
+    .then(() => client.terminate());
+});
+
 test('sudo_unstable_p2pDiscover returns error if multiaddr doesn\'t end with /p2p', async t => {
   const client = start({ logCallback: () => { } });
   await client
