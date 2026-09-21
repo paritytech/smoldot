@@ -41,7 +41,7 @@
 //! network connectivity.
 
 use crate::{
-    log,
+    log, metrics,
     platform::{self, PlatformRef, address_parse},
 };
 
@@ -140,6 +140,9 @@ pub struct ConfigChain {
 
     /// If `true`, enables the statement store protocol.
     pub enable_statement_protocol: bool,
+
+    /// Metrics of the chain.
+    pub metrics: Arc<metrics::ChainMetrics>,
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
@@ -148,12 +151,17 @@ pub struct NetworkService<TPlat: PlatformRef> {
 
     /// See [`Config::platform`].
     platform: TPlat,
+
+    /// Process-wide network metrics, shared with the background service.
+    metrics: Arc<metrics::NetworkMetrics>,
 }
 
 impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// Initializes the network service with the given configuration.
     pub fn new(config: Config<TPlat>) -> Arc<Self> {
         let (main_messages_tx, main_messages_rx) = async_channel::bounded(4);
+
+        let metrics = Arc::new(metrics::NetworkMetrics::default());
 
         let network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains_capacity,
@@ -205,6 +213,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             num_recent_connection_opening: 0,
             next_recent_connection_restore: None,
             platform: config.platform.clone(),
+            metrics: metrics.clone(),
             open_gossip_links: BTreeMap::new(),
             chains_ever_gossip_connected: HashSet::with_capacity_and_hasher(4, Default::default()),
             v2_statement_peers: HashMap::with_capacity_and_hasher(4, Default::default()),
@@ -241,7 +250,13 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         Arc::new(NetworkService {
             messages_tx: main_messages_tx,
             platform: config.platform,
+            metrics,
         })
+    }
+
+    /// Returns the process-wide network metrics.
+    pub fn metrics(&self) -> Arc<metrics::NetworkMetrics> {
+        self.metrics.clone()
     }
 
     /// Adds a chain to the list of chains that the network service connects to.
@@ -251,6 +266,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// purges that chain.
     pub fn add_chain(&self, config: ConfigChain) -> Arc<NetworkServiceChain<TPlat>> {
         let (messages_tx, messages_rx) = async_channel::bounded(32);
+        let chain_metrics = config.metrics.clone();
 
         // TODO: this code is hacky because we don't want to make `add_chain` async at the moment, because it's not convenient for lib.rs
         self.platform.spawn_task("add-chain-message-send".into(), {
@@ -277,6 +293,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     num_references: NonZero::<usize>::new(1).unwrap(),
                     next_discovery_period: Duration::from_secs(2),
                     next_discovery_when: self.platform.now(),
+                    metrics: config.metrics,
                 },
             };
 
@@ -294,7 +311,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         Arc::new(NetworkServiceChain {
             _keep_alive_messages_tx: self.messages_tx.clone(),
             messages_tx,
-            marker: core::marker::PhantomData,
+            metrics: chain_metrics,
+            platform: self.platform.clone(),
         })
     }
 }
@@ -307,8 +325,11 @@ pub struct NetworkServiceChain<TPlat: PlatformRef> {
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackgroundChain>,
 
-    /// Dummy to hold the `TPlat` type.
-    marker: core::marker::PhantomData<TPlat>,
+    /// Metrics of the chain.
+    metrics: Arc<metrics::ChainMetrics>,
+
+    /// See [`Config::platform`].
+    platform: TPlat,
 }
 
 /// Severity of a ban. See [`NetworkServiceChain::ban_and_disconnect`].
@@ -316,6 +337,29 @@ pub struct NetworkServiceChain<TPlat: PlatformRef> {
 pub enum BanSeverity {
     Low,
     High,
+}
+
+/// Reason for banning a peer. Printed in the logs and used as the `reason` label
+/// of the `networkPeerBansTotal` metric.
+// Strum derives are explained on [`crate::metrics::MetricLabel`]; `Display`
+// additionally prints the same string in log messages.
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, strum::Display, strum::EnumIter, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum BanReason {
+    BadBlockAnnounce,
+    BadChildTrieRoot,
+    BadGrandpaCommit,
+    BadJustification,
+    BadMerkleProof,
+    BadWarpSyncFragment,
+    InvalidCallProof,
+    BlocksRequestFailed,
+    CallProofRequestFailed,
+    ChildStorageRequestFailed,
+    StorageRequestFailed,
+    WarpSyncRequestFailed,
 }
 
 impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
@@ -396,7 +440,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     /// generated. Prevents a new gossip link with the same peer from being reopened for a
     /// little while.
     ///
-    /// `reason` is a human-readable string printed in the logs.
+    /// `reason` is printed in the logs and counted in the metrics.
     ///
     /// Due to race conditions, it is possible to reconnect to the peer soon after, in case the
     /// reconnection was already happening as the call to this function is still being processed.
@@ -407,8 +451,10 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         &self,
         peer_id: PeerId,
         severity: BanSeverity,
-        reason: &'static str,
+        reason: BanReason,
     ) {
+        self.metrics.peer_bans.inc(reason);
+
         let _ = self
             .messages_tx
             .send(ToBackgroundChain::DisconnectAndBan {
@@ -427,6 +473,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         config: codec::BlocksRequestConfig,
         timeout: Duration,
     ) -> Result<Vec<codec::BlockData>, BlocksRequestError> {
+        let when_started = self.platform.now();
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -439,7 +486,11 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        rx.await.unwrap()
+        let result = rx.await.unwrap();
+        self.metrics
+            .blocks_requests
+            .observe(result.is_ok(), self.platform.now() - when_started);
+        result
     }
 
     /// Sends a grandpa warp sync request to the given peer.
@@ -450,6 +501,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         begin_hash: [u8; 32],
         timeout: Duration,
     ) -> Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError> {
+        let when_started = self.platform.now();
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -462,7 +514,11 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        rx.await.unwrap()
+        let result = rx.await.unwrap();
+        self.metrics
+            .warp_sync_requests
+            .observe(result.is_ok(), self.platform.now() - when_started);
+        result
     }
 
     pub async fn set_local_best_block(&self, best_hash: [u8; 32], best_number: u64) {
@@ -490,6 +546,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         config: codec::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
         timeout: Duration,
     ) -> Result<service::EncodedMerkleProof, StorageProofRequestError> {
+        let when_started = self.platform.now();
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -509,7 +566,11 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        rx.await.unwrap()
+        let result = rx.await.unwrap();
+        self.metrics
+            .storage_proof_requests
+            .observe(result.is_ok(), self.platform.now() - when_started);
+        result
     }
 
     /// Sends a call proof request to the given peer.
@@ -522,6 +583,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
     ) -> Result<EncodedMerkleProof, CallProofRequestError> {
+        let when_started = self.platform.now();
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -542,7 +604,11 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        rx.await.unwrap()
+        let result = rx.await.unwrap();
+        self.metrics
+            .call_proof_requests
+            .observe(result.is_ok(), self.platform.now() - when_started);
+        result
     }
 
     /// Sends a child storage proof request to the given peer.
@@ -555,6 +621,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         >,
         timeout: Duration,
     ) -> Result<service::EncodedMerkleProof, ChildStorageProofRequestError> {
+        let when_started = self.platform.now();
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -574,7 +641,11 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        rx.await.unwrap()
+        let result = rx.await.unwrap();
+        self.metrics
+            .child_storage_proof_requests
+            .observe(result.is_ok(), self.platform.now() - when_started);
+        result
     }
 
     /// Announces transaction to the peers we are connected to.
@@ -885,6 +956,23 @@ impl ChildStorageProofRequestError {
     }
 }
 
+/// Why an address obtained through discovery was discarded. The `reason` label of
+/// the `networkDiscoveryAddressesDroppedTotal` metric.
+// Strum derives are explained on [`crate::metrics::MetricLabel`]; `Display`
+// additionally prints the same string in log messages.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::EnumIter, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub(crate) enum DiscoveredAddressDropReason {
+    /// Address contains a `/p2p/` component that doesn't match the peer it was announced for.
+    PeerIdMismatch,
+    /// Platform doesn't support connecting to this type of address.
+    NotSupported,
+    /// Address failed to parse.
+    Invalid,
+}
+
 /// Owned version of [`codec::ChildStorageProofRequestConfig`] for sending across channel.
 struct ChildStorageProofRequestConfigOwned {
     block_hash: [u8; 32],
@@ -913,7 +1001,7 @@ enum ToBackgroundChain {
     DisconnectAndBan {
         peer_id: PeerId,
         severity: BanSeverity,
-        reason: &'static str,
+        reason: BanReason,
     },
     // TODO: serialize the request before sending over channel
     StartBlocksRequest {
@@ -999,6 +1087,9 @@ enum ToBackgroundChain {
 struct BackgroundTask<TPlat: PlatformRef> {
     /// See [`Config::platform`].
     platform: TPlat,
+
+    /// Process-wide network metrics. Also accessible through [`NetworkService::metrics`].
+    metrics: Arc<metrics::NetworkMetrics>,
 
     /// Random number generator.
     randomness: rand_chacha::ChaCha20Rng,
@@ -1179,6 +1270,9 @@ struct Chain<TPlat: PlatformRef> {
 
     /// See [`ConfigChain::num_out_slots`].
     num_out_slots: usize,
+
+    /// See [`ConfigChain::metrics`].
+    metrics: Arc<metrics::ChainMetrics>,
 
     /// When the next discovery should be started for this chain.
     next_discovery_when: TPlat::Instant,
@@ -1758,6 +1852,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
                     debug_assert!(_was_in.is_some());
+                    task.network[chain_id].metrics.gossip_peers_connected.dec();
 
                     if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
                         peers.remove(&peer_id);
@@ -2408,6 +2503,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     );
                 }
 
+                task.metrics.connections_handshakes_finished.inc();
                 task.bitswap_peering_strategy
                     .increase_peer_connections(&peer_id);
             }
@@ -2443,6 +2539,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     address,
                     ?handshake_finished
                 );
+                task.metrics.connections_shutdowns.inc();
 
                 // Ban the peer in order to avoid trying over and over again the same address(es).
                 // Even if the handshake was finished, it is possible that the peer simply shuts
@@ -2602,6 +2699,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     },
                 );
                 debug_assert!(_prev_value.is_none());
+                task.network[chain_id].metrics.gossip_peers_connected.inc();
 
                 task.chains_ever_gossip_connected.insert(chain_id);
 
@@ -2690,6 +2788,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
                 debug_assert!(_was_in.is_some());
+                task.network[chain_id].metrics.gossip_peers_connected.dec();
 
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
@@ -3022,16 +3121,19 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         match Multiaddr::from_bytes(addr) {
                             Ok(mut a) => {
                                 if !pop_p2p_if_matches(&mut a, &peer_id) {
+                                    let reason = DiscoveredAddressDropReason::PeerIdMismatch;
                                     log!(
                                         &task.platform,
                                         Debug,
                                         "network",
-                                        "discovered-address-peer-id-mismatch",
+                                        "discovered-address-dropped",
                                         chain = &task.network[chain_id].log_name,
+                                        reason,
                                         announced_peer_id = peer_id,
                                         addr = &a,
                                         obtained_from = requestee_peer_id
                                     );
+                                    task.metrics.discovery_addresses_dropped.inc(reason);
                                     continue;
                                 }
                                 if platform::address_parse::multiaddr_to_address(&a)
@@ -3042,30 +3144,36 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 {
                                     valid_addrs.push(a)
                                 } else {
+                                    let reason = DiscoveredAddressDropReason::NotSupported;
                                     log!(
                                         &task.platform,
                                         Debug,
                                         "network",
-                                        "discovered-address-not-supported",
+                                        "discovered-address-dropped",
                                         chain = &task.network[chain_id].log_name,
+                                        reason,
                                         peer_id,
                                         addr = &a,
                                         obtained_from = requestee_peer_id
                                     );
+                                    task.metrics.discovery_addresses_dropped.inc(reason);
                                 }
                             }
                             Err((error, addr)) => {
+                                let reason = DiscoveredAddressDropReason::Invalid;
                                 log!(
                                     &task.platform,
                                     Debug,
                                     "network",
-                                    "discovered-address-invalid",
+                                    "discovered-address-dropped",
                                     chain = &task.network[chain_id].log_name,
+                                    reason,
                                     peer_id,
                                     error,
                                     addr = hex::encode(&addr),
                                     obtained_from = requestee_peer_id
                                 );
+                                task.metrics.discovery_addresses_dropped.inc(reason);
                             }
                         }
                     }
@@ -3505,6 +3613,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 task.num_recent_connection_opening += 1;
+                task.metrics.connections_dialed.inc();
 
                 let (coordinator_to_connection_tx, coordinator_to_connection_rx) =
                     async_channel::bounded(8);
