@@ -226,6 +226,17 @@ export interface Chain {
 export type LogCallback = (level: number, target: string, message: string) => void;
 
 /**
+ * Address of an outgoing connection, as handed to {@link ClientOptions.connectionFilter}.
+ *
+ * This is the transport-level destination only. The identity (PeerId) of the remote isn't known
+ * at this point: the client verifies it during the handshake, after the connection is opened.
+ */
+export type ConnectionAddress =
+    { ty: "tcp", hostname: string, port: number } |
+    { ty: "websocket", url: string } |
+    { ty: "webrtc", targetPort: number, ipVersion: string, targetIp: string, remoteTlsCertificateSha256: Uint8Array };
+
+/**
  * Configuration of a client.
  */
 export interface ClientOptions {
@@ -335,6 +346,26 @@ export interface ClientOptions {
      * supported anyway.
      */
     forbidWebRtc?: boolean;
+
+    /**
+     * Called before each outgoing connection is opened. If it returns `false`, the connection
+     * isn't opened, and the client is told that it was immediately reset.
+     *
+     * This makes it possible to restrict the client to a specific set of nodes: set the
+     * `bootNodes` of the chain specification to those nodes, and refuse every address that
+     * isn't one of theirs. The client still learns about other nodes through peer discovery
+     * and keeps trying to reach them; each attempt is refused here without any network
+     * activity.
+     *
+     * Only the transport-level address is available. The PeerId of the remote isn't known
+     * before the connection is opened, and is verified by the client itself afterwards.
+     *
+     * {@link ClientOptions.forbidTcp} and the other `forbid*` options are applied first: an
+     * address of a forbidden type is never proposed to this callback.
+     *
+     * Defaults to accepting every connection.
+     */
+    connectionFilter?: (address: ConnectionAddress) => boolean;
 }
 
 /**

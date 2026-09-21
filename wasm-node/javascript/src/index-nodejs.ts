@@ -31,6 +31,7 @@ export {
     Client,
     ClientOptions,
     ClientOptionsWithBytecode,
+    ConnectionAddress,
     SmoldotBytecode,
     CrashError,
     QueueFullError,

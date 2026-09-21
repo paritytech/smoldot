@@ -1,0 +1,4 @@
+{
+  "polkadot": "/ip4/<validator ip>/tcp/30333/p2p/<validator peer id>",
+  "asset-hub-polkadot": "/dns/<collator host>/tcp/443/wss/p2p/<collator peer id>"
+}

@@ -50,6 +50,13 @@ mod substrate_compat;
 
 pub use network_service::Role;
 
+/// How long to wait before retrying a storage request that failed at the network level.
+///
+/// Retries are otherwise issued back to back, which spends the entire attempts budget within a
+/// few milliseconds. When the failure is the remote being momentarily unable to take the request,
+/// that guarantees every attempt fails as well.
+const STORAGE_REQUEST_RETRY_DELAY: Duration = Duration::from_millis(500);
+
 /// Coarse state of the sync service. See [`SyncService::subscribe_sync_status`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncStatus {
@@ -566,6 +573,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             timeout_per_request,
             _max_parallel: max_parallel,
             outcome_errors: Vec::with_capacity(total_attempts),
+            last_request_failed: false,
             available_results: VecDeque::with_capacity(requests.len() * 4),
             requests_remaining: requests,
             response_nodes_cap: (16 * 1024 * 1024) / 164,
@@ -695,6 +703,11 @@ pub struct StorageQuery<TPlat: PlatformRef> {
     _max_parallel: NonZero<u32>,
     /// Non-fatal errors that have happened in the network requests.
     outcome_errors: Vec<StorageQueryErrorDetail>,
+    /// `true` if the last network request failed, making the next one a retry that waits for
+    /// [`STORAGE_REQUEST_RETRY_DELAY`]. A query that is merely making progress -- a prefix scan,
+    /// or keys split across several requests by [`StorageQuery::response_nodes_cap`] -- issues
+    /// its next request immediately, so a single early failure doesn't slow down the rest.
+    last_request_failed: bool,
     /// List of responses that are available to yield.
     /// The `usize` is the index of the request in the original list of requests that the API user
     /// provided.
@@ -822,6 +835,15 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                 keys
             };
 
+            // Only a retry waits: the first request of a query, and every request that follows a
+            // successful one, is issued immediately.
+            if self.last_request_failed {
+                self.sync_service
+                    .platform
+                    .sleep(STORAGE_REQUEST_RETRY_DELAY)
+                    .await;
+            }
+
             let result: Result<_, StorageQueryNetworkError> =
                 if let Some(child_trie) = &self.child_trie {
                     self.sync_service
@@ -855,7 +877,10 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                 };
 
             let proof = match result {
-                Ok(r) => r,
+                Ok(r) => {
+                    self.last_request_failed = false;
+                    r
+                }
                 Err(err) => {
                     // In case of error that isn't a protocol error, we reduce the number of
                     // trie node items to request.
@@ -868,14 +893,23 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         };
 
                     if !err.is_request_too_large() || self.response_nodes_cap == 1 {
-                        self.sync_service
-                            .network_service
-                            .ban_and_disconnect(
-                                target,
-                                network_service::BanSeverity::Low,
-                                "storage-request-failed",
-                            )
-                            .await;
+                        // The peer is deliberately not banned here. A storage request that fails
+                        // at the network level is indistinguishable from one the remote had no
+                        // room for: a node whose light-client request queue is full drops the
+                        // request without answering at all. Banning and disconnecting then tears
+                        // down a connection that is perfectly healthy. Where there are many peers
+                        // to choose from that costs little, but a client that has only one --
+                        // pinned, or simply short of peers -- loses its only peer over what is
+                        // usually a momentary overload. Worse, the peer then leaves
+                        // `peers_assumed_know_blocks`, so the next iteration of this loop finds
+                        // nobody to ask and the query fails outright without ever spending its
+                        // attempts budget. A peer that is genuinely unusable still stops being
+                        // used, because that budget runs out.
+                        //
+                        // A proof that is invalid or incomplete is a different matter, and the
+                        // cases below still ban: those are protocol violations rather than an
+                        // overloaded node.
+                        self.last_request_failed = true;
                         self.outcome_errors
                             .push(StorageQueryErrorDetail::Network(err));
                     }

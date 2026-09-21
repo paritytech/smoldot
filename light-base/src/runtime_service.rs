@@ -81,6 +81,13 @@ use smoldot::{
     trie::{self, Nibble, proof_decode},
 };
 
+/// How long to wait before retrying a call proof request that has failed.
+///
+/// Retries are otherwise issued back to back, which spends the entire attempts budget within a
+/// few milliseconds. When the failure is the remote being momentarily unable to take the request,
+/// that guarantees every attempt fails as well.
+const CALL_PROOF_RETRY_DELAY: Duration = Duration::from_millis(500);
+
 /// Configuration for a runtime service.
 pub struct Config<TPlat: PlatformRef> {
     /// Name of the chain, for logging purposes.
@@ -2292,14 +2299,26 @@ async fn run_background<TPlat: PlatformRef>(
                         operation
                             .inaccessible_errors
                             .push(RuntimeCallInaccessibleError::Network(error));
-                        background
-                            .network_service
-                            .ban_and_disconnect(
-                                call_proof_sender,
-                                network_service::BanSeverity::Low,
-                                "call-proof-request-failed",
-                            )
-                            .await;
+                        // The peer is deliberately not banned here. A call proof request that
+                        // fails at the network level is indistinguishable from one the remote
+                        // had no room for: a node whose light-client request queue is full drops
+                        // the request without answering at all. Banning and disconnecting then
+                        // tears down a connection that is perfectly healthy. Where there are many
+                        // peers to choose from that costs little, but a client that has only one
+                        // -- pinned, or simply short of peers -- loses its only peer over what is
+                        // usually a momentary overload, and the retries have nobody left to ask.
+                        // A peer that is genuinely unusable still stops being used, because the
+                        // attempts budget runs out.
+                        log!(
+                            &background.platform,
+                            Warn,
+                            &background.log_target,
+                            "call-proof-request-failed",
+                            peer_id = call_proof_sender,
+                            function_name = operation.function_name,
+                            remaining_attempts = usize::try_from(operation.total_attempts).unwrap()
+                                - operation.inaccessible_errors.len()
+                        );
                         (operation, None)
                     }
                 };
@@ -2449,6 +2468,13 @@ async fn run_background<TPlat: PlatformRef>(
                     call_proof_target,
                 );
 
+                // Only a retry waits: the first attempt of an operation is issued immediately.
+                let retry_delay = if operation.inaccessible_errors.is_empty() {
+                    None
+                } else {
+                    Some(background.platform.sleep(CALL_PROOF_RETRY_DELAY))
+                };
+
                 // Start the request.
                 background.progress_runtime_call_requests.push(Box::pin({
                     let call_proof_request_future =
@@ -2465,6 +2491,9 @@ async fn run_background<TPlat: PlatformRef>(
                         );
 
                     async move {
+                        if let Some(delay) = retry_delay {
+                            delay.await;
+                        }
                         let result = call_proof_request_future.await;
                         ProgressRuntimeCallRequest::CallProofRequestDone {
                             result,

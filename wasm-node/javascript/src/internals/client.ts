@@ -332,7 +332,17 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             }
             case "json-rpc-responses-non-empty": {
                 // Notify every single promise found in `jsonRpcResponsesPromises`.
-                const callbacks = state.chains.get(event.chainId)!.jsonRpcResponsesPromises;
+                //
+                // The chain might be gone already: `removeChain` and `terminate` both delete from
+                // `state.chains` synchronously, while an event the worker had already posted is
+                // still travelling through the `MessagePort`. Asserting the entry is there throws
+                // from within the port's event handler, where nothing catches it, and Node kills
+                // the process -- during `terminate`, that means whatever the caller was doing on
+                // the way out (saving a database, for instance) never finishes.
+                const chain = state.chains.get(event.chainId);
+                if (!chain)
+                    break;
+                const callbacks = chain.jsonRpcResponsesPromises;
                 while (callbacks.length !== 0) {
                     (callbacks.shift()!)();
                 }
@@ -340,7 +350,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             }
             case "new-connection": {
                 const connectionId = event.connectionId;
-                state.connections.set(connectionId, platformBindings.connect({
+                const connectionConfig: ConnectionConfig = {
                     address: event.address,
                     onConnectionReset(message) {
                         if (state.instance.status !== "ready")
@@ -373,7 +383,15 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                             throw new Error();
                         state.instance.instance.streamReset(connectionId, streamId, message);
                     },
-                }));
+                };
+
+                // The filter is applied here rather than in the platform bindings so that it
+                // behaves identically on every platform, including when the client runs in a
+                // worker: connections are opened on this side of the `MessagePort` even then.
+                const accepted = !options.connectionFilter || options.connectionFilter(event.address);
+                state.connections.set(connectionId, accepted
+                    ? platformBindings.connect(connectionConfig)
+                    : refusedConnection(connectionConfig));
                 break;
             }
             case "connection-reset": {
@@ -673,4 +691,25 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             state.chains.clear();
         }
     }
+}
+
+/**
+ * Stand-in for a connection refused by `ClientOptions.connectionFilter`. Nothing is opened; the
+ * client is instead told that the connection has been reset.
+ *
+ * The reset is reported asynchronously because this is called from within the instance's event
+ * callback, and the instance can't be called back into from there.
+ */
+function refusedConnection(config: ConnectionConfig): Connection {
+    let resetByClient = false;
+    setTimeout(() => {
+        if (!resetByClient)
+            config.onConnectionReset("Connection refused by connectionFilter");
+    }, 0);
+    return {
+        reset: () => { resetByClient = true; },
+        send: () => { },
+        closeSend: () => { },
+        openOutSubstream: () => { },
+    };
 }

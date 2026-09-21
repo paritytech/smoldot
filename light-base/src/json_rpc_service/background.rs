@@ -2465,6 +2465,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             continue;
                         }
 
+                        // One slot was taken per item above, but the operation is tracked, and
+                        // later released, as a single entry. Remember how many slots it actually
+                        // holds, or every multi-item query would give back one slot and leak the
+                        // rest, until the subscription stopped accepting operations for good.
+                        let occupied_slots =
+                            u32::try_from(storage_operations.len()).unwrap_or(u32::MAX);
+
                         // Initialize the storage query operation.
                         let fetch_operation = if let Some(child_trie) = child_trie {
                             me.sync_service.clone().child_storage_query(
@@ -2501,7 +2508,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _was_in = subscription.operations_in_progress.insert(
                             operation_id.clone(),
                             ChainHeadOperation {
-                                occupied_slots: 1,
+                                occupied_slots,
                                 interrupt,
                             },
                         );

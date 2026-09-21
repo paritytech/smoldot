@@ -1265,7 +1265,7 @@ async fn fetch_parachain_head_from_relay<TPlat: PlatformRef>(
                     a.extend_from_slice(b.as_ref());
                     a
                 }),
-                6,
+                12,
                 Duration::from_secs(20),
                 NonZero::<u32>::new(2).unwrap(),
             )

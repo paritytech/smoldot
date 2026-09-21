@@ -1,0 +1,12 @@
+{
+  "name": "smoldot-example-asset-hub-light",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Minimal Node.js light client for Polkadot Asset Hub, with database persistence",
+  "license": "GPL-3.0-or-later WITH Classpath-exception-2.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.mjs",
+    "start:many": "./run-instances.sh"
+  }
+}

@@ -1,0 +1,10 @@
+.db*/
+logs/
+*_logs/
+# Bootstrapped by build-image.sh and baked into the image; a perishable artefact, not source.
+seed-db/
+*_logs_*/
+# Which nodes to pin to is up to whoever runs this, so the real lists stay local: copy
+# nodes.example.json and nodes-bootstrap.example.json and fill them in.
+nodes.json
+nodes-bootstrap.json

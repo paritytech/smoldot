@@ -1,2 +1,19 @@
-target
+# Build artefacts and checkouts the image build has no use for. Keep
+# `examples/asset-hub-light/seed-db/` out of this list: build-image.sh writes the bootstrapped
+# database there and the `seeded` target copies it in.
+.git
 .github
+target
+**/node_modules
+
+# Rebuilt from source in the build stage; the checked-out copy is often stale.
+wasm-node/javascript/dist
+
+# Not workspace members, and not needed to build the light client's Wasm.
+e2e-tests
+benchmarks
+
+# Local run state: databases, logs, and the directories run-instances.sh leaves behind.
+examples/asset-hub-light/.db*
+examples/asset-hub-light/logs
+examples/asset-hub-light/*_logs*
