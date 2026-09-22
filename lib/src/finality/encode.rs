@@ -99,7 +99,7 @@ pub fn grandpa_commit_to_justification(
         }
 
         precommits.extend_from_slice(precommit.target_hash);
-        push_block_number(&mut precommits, precommit.target_number, block_number_bytes)?;
+        push_block_number(&mut precommits, precommit.target_number, block_number_bytes);
         precommits.extend_from_slice(&signature[..]);
         precommits.extend_from_slice(&authority_public_key[..]);
         num_precommits += 1;
@@ -119,7 +119,7 @@ pub fn grandpa_commit_to_justification(
     // `commit.target_hash: [u8; 32]`
     out.extend_from_slice(commit.target_hash);
     // `commit.target_number`, encoded on `block_number_bytes` bytes, little endian.
-    push_block_number(&mut out, commit.target_number, block_number_bytes)?;
+    push_block_number(&mut out, commit.target_number, block_number_bytes);
 
     // `commit.precommits: Vec<SignedPrecommit>`
     out.extend_from_slice(util::encode_scale_compact_usize(num_precommits).as_ref());
@@ -187,28 +187,21 @@ fn ancestry_of(
 }
 
 /// Appends `value` to `out`, encoded on `block_number_bytes` bytes in little endian order.
-fn push_block_number(
-    out: &mut Vec<u8>,
-    value: u64,
-    block_number_bytes: usize,
-) -> Result<(), CommitToJustificationError> {
+///
+/// `value` is always a block number that was decoded from `block_number_bytes` bytes, and
+/// therefore always fits back into them.
+fn push_block_number(out: &mut Vec<u8>, value: u64, block_number_bytes: usize) {
     let bytes = value.to_le_bytes();
-
-    // Any byte that we are about to truncate away must be zero, otherwise the encoding would
-    // silently alter the block number.
-    if bytes
-        .iter()
-        .skip(core::cmp::min(8, block_number_bytes))
-        .any(|b| *b != 0)
-    {
-        return Err(CommitToJustificationError::BlockNumberTooLarge);
-    }
+    debug_assert!(
+        bytes
+            .iter()
+            .skip(core::cmp::min(8, block_number_bytes))
+            .all(|b| *b == 0)
+    );
 
     for n in 0..block_number_bytes {
         out.push(bytes.get(n).copied().unwrap_or(0));
     }
-
-    Ok(())
 }
 
 /// Error potentially returned by [`grandpa_commit_to_justification`].
@@ -220,9 +213,6 @@ pub enum CommitToJustificationError {
     /// The number of pre-commits and the number of signatures in the commit differ.
     #[display("Mismatch between the number of pre-commits and of signatures")]
     PrecommitsAuthDataMismatch,
-    /// A block number of the commit doesn't fit in `block_number_bytes` bytes.
-    #[display("Block number doesn't fit in the block number encoding of the chain")]
-    BlockNumberTooLarge,
 }
 
 #[cfg(test)]
@@ -497,9 +487,11 @@ mod tests {
     }
 
     #[test]
-    fn commit_to_justification_block_number_too_large() {
+    fn commit_to_justification_rejects_commit_of_another_block_number_length() {
+        // A commit whose block numbers are encoded on four bytes, read as if the chain encoded
+        // them on two. The trailing bytes of the target number then land in the middle of the
+        // following fields and the commit no longer decodes.
         let mut scale_encoded_commit = build_simple_commit(1, 4);
-        // Overwrite the target number with a value that doesn't fit on two bytes.
         scale_encoded_commit[48..52].copy_from_slice(&70000u32.to_le_bytes());
         assert_eq!(
             super::grandpa_commit_to_justification(&scale_encoded_commit, 2, |_| None),

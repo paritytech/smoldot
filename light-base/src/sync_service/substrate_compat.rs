@@ -522,12 +522,15 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         // as it happens, and a warp sync leaps over most of the chain. A full
                         // node likewise stores these justifications without notifying anybody.
                         if let Some(scale_encoded_justification) = fragment_justification {
-                            task.retain_finality_proof(super::FinalityProof {
-                                consensus_engine_id: *b"FRNK",
-                                scale_encoded_justification,
-                                target_hash: fragment_hash,
-                                target_number: fragment_number,
-                            });
+                            task.retain_finality_proof(
+                                super::FinalityProof {
+                                    consensus_engine_id: *b"FRNK",
+                                    scale_encoded_justification,
+                                    target_hash: fragment_hash,
+                                    target_number: fragment_number,
+                                },
+                                true,
+                            );
                         }
                         emit_warp_syncing_status(&mut task, fragment_number);
                     }
@@ -737,19 +740,11 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         }
 
                         // Tracked so that a justification fetched from the network later can be
-                        // verified against the set that signed it. A set change can be anywhere
-                        // in the batch, not only at the proof's target.
-                        let enacted_at = finalized_blocks_newest_to_oldest
-                            .iter()
-                            .find(|block| {
-                                header_changes_authority_set(&block.header, task.block_number_bytes)
-                            })
-                            .and_then(|block| {
-                                header::decode(&block.header, task.block_number_bytes)
-                                    .ok()
-                                    .map(|header| header.number)
-                            });
-                        task.refresh_grandpa_authority_sets(&sync, enacted_at);
+                        // verified against the set that signed it.
+                        refresh_grandpa_authority_sets(
+                            &mut task.grandpa_authority_sets,
+                            sync.as_chain_information().as_ref(),
+                        );
 
                         if updates_best_block {
                             task.network_up_to_date_best = false;
@@ -1293,12 +1288,18 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
             }) => {
                 // Frontend needs the authority set that finalized a specific block, in order to
                 // verify a justification it has fetched from the network.
-                let _ = send_back.send(task.grandpa_authority_set_for(block_number));
+                let _ = send_back.send(grandpa_authority_set_for(
+                    &task.grandpa_authority_sets,
+                    block_number,
+                ));
             }
 
-            WakeUpReason::ForegroundMessage(ToBackground::RetainFinalityProof { proof }) => {
+            WakeUpReason::ForegroundMessage(ToBackground::RetainFinalityProof {
+                proof,
+                changes_authority_set,
+            }) => {
                 // Frontend has fetched and verified a proof and wants it cached.
-                task.retain_finality_proof(proof);
+                task.retain_finality_proof(proof, changes_authority_set);
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::SubscribeSyncStatus { send_back }) => {
@@ -1909,7 +1910,10 @@ struct Task<TPlat: PlatformRef> {
 ///
 /// An undecodable header is reported as not changing the set. It has been verified by the time
 /// this is called, and being wrong this way only sends its proof to the smaller cache.
-fn header_changes_authority_set(scale_encoded_header: &[u8], block_number_bytes: usize) -> bool {
+pub(super) fn header_changes_authority_set(
+    scale_encoded_header: &[u8],
+    block_number_bytes: usize,
+) -> bool {
     let Ok(header) = header::decode(scale_encoded_header, block_number_bytes) else {
         return false;
     };
@@ -1923,6 +1927,68 @@ fn header_changes_authority_set(scale_encoded_header: &[u8], block_number_bytes:
             )
         )
     })
+}
+
+/// Records the composition of the current Grandpa authority set in `authority_sets`, closing the
+/// previous entry if the set has changed.
+///
+/// The latest finalized block is the boundary between the two sets. A finality proof can never
+/// finalize past a block that enacts a change of authorities without finalizing that block itself
+/// (see `FinalityVerifyError::TooFarAhead`), so whenever the set id has changed the latest
+/// finalized block is precisely the block that enacted the change. That block is finalized by the
+/// outgoing set, and is therefore recorded as its last one.
+fn refresh_grandpa_authority_sets(
+    authority_sets: &mut VecDeque<GrandpaAuthoritySet>,
+    chain_information: chain::chain_information::ChainInformationRef<'_>,
+) {
+    let chain::chain_information::ChainInformationFinalityRef::Grandpa {
+        after_finalized_block_authorities_set_id,
+        finalized_triggered_authorities,
+        ..
+    } = chain_information.finality
+    else {
+        return;
+    };
+
+    if authority_sets
+        .back()
+        .is_some_and(|set| set.set_id == after_finalized_block_authorities_set_id)
+    {
+        return;
+    }
+
+    // The set has changed, or this is the first call.
+    let boundary = chain_information.finalized_block_header.number;
+    if let Some(previous) = authority_sets.back_mut() {
+        previous.last_block = Some(boundary);
+    }
+    authority_sets.push_back(GrandpaAuthoritySet {
+        set_id: after_finalized_block_authorities_set_id,
+        authorities: finalized_triggered_authorities
+            .iter()
+            .map(|authority| authority.public_key)
+            .collect(),
+        first_block: boundary.saturating_add(1),
+        last_block: None,
+    });
+    while authority_sets.len() > GRANDPA_AUTHORITY_SETS_HISTORY {
+        authority_sets.pop_front();
+    }
+}
+
+/// Returns the identifier and composition of the Grandpa authority set that is responsible for
+/// finalizing the given block, if it is known.
+fn grandpa_authority_set_for(
+    authority_sets: &VecDeque<GrandpaAuthoritySet>,
+    block_number: u64,
+) -> Option<(u64, Vec<[u8; 32]>)> {
+    authority_sets
+        .iter()
+        .find(|set| {
+            block_number >= set.first_block
+                && set.last_block.is_none_or(|last| block_number <= last)
+        })
+        .map(|set| (set.set_id, set.authorities.clone()))
 }
 
 enum RequestOutcome {
@@ -1963,72 +2029,20 @@ impl<TPlat: PlatformRef> Task<TPlat> {
         }
     }
 
-    /// Records the composition of the current Grandpa authority set, closing the previous entry
-    /// if the set has changed.
+    /// Keeps a finality proof around for [`super::SyncService::finality_proof`], without
+    /// reporting it to the subscribers.
     ///
-    /// `enacted_at` is the height of the highest just-finalized block that enacts a change of
-    /// authorities, if any. That block is finalized by the outgoing set, so it is recorded as
-    /// that set's last one.
-    fn refresh_grandpa_authority_sets<TRq, TSrc, TBl>(
-        &mut self,
-        sync: &all::AllSync<TRq, TSrc, TBl>,
-        enacted_at: Option<u64>,
-    ) {
-        let chain_information = sync.as_chain_information();
-        let chain_information = chain_information.as_ref();
-        let chain::chain_information::ChainInformationFinalityRef::Grandpa {
-            after_finalized_block_authorities_set_id,
-            finalized_triggered_authorities,
-            ..
-        } = chain_information.finality
-        else {
-            return;
-        };
-
-        if self
-            .grandpa_authority_sets
-            .back()
-            .is_some_and(|set| set.set_id == after_finalized_block_authorities_set_id)
-        {
-            return;
+    /// `changes_authority_set` routes the proof to the longer-lived cache, exactly like in
+    /// [`Task::on_verified_finality_proof`]. Proofs fetched from the network are requested by
+    /// the frontend on behalf of whoever is calling `chain_getBlock`, and an ordinary one must
+    /// not be able to evict the set-change proofs that [`MANDATORY_FINALITY_PROOFS_CACHE_SIZE`]
+    /// exists to protect.
+    fn retain_finality_proof(&mut self, proof: super::FinalityProof, changes_authority_set: bool) {
+        if changes_authority_set {
+            self.mandatory_finality_proofs.put(proof.target_hash, proof);
+        } else {
+            self.recent_finality_proofs.put(proof.target_hash, proof);
         }
-
-        // The set has changed, or this is the first call.
-        let finalized_number = chain_information.finalized_block_header.number;
-        let boundary = enacted_at.unwrap_or(finalized_number);
-        if let Some(previous) = self.grandpa_authority_sets.back_mut() {
-            previous.last_block = Some(boundary);
-        }
-        self.grandpa_authority_sets.push_back(GrandpaAuthoritySet {
-            set_id: after_finalized_block_authorities_set_id,
-            authorities: finalized_triggered_authorities
-                .iter()
-                .map(|authority| authority.public_key)
-                .collect(),
-            first_block: boundary.saturating_add(1),
-            last_block: None,
-        });
-        while self.grandpa_authority_sets.len() > GRANDPA_AUTHORITY_SETS_HISTORY {
-            self.grandpa_authority_sets.pop_front();
-        }
-    }
-
-    /// Returns the identifier and composition of the Grandpa authority set that is responsible
-    /// for finalizing the given block, if it is known.
-    fn grandpa_authority_set_for(&self, block_number: u64) -> Option<(u64, Vec<[u8; 32]>)> {
-        self.grandpa_authority_sets
-            .iter()
-            .find(|set| {
-                block_number >= set.first_block
-                    && set.last_block.is_none_or(|last| block_number <= last)
-            })
-            .map(|set| (set.set_id, set.authorities.clone()))
-    }
-
-    /// Keeps a finality proof of an authority-set-change block around for
-    /// [`super::SyncService::finality_proof`], without reporting it to the subscribers.
-    fn retain_finality_proof(&mut self, proof: super::FinalityProof) {
-        self.mandatory_finality_proofs.put(proof.target_hash, proof);
     }
 
     /// Sends a notification to all the notification receivers.
@@ -2295,6 +2309,105 @@ mod tests {
     };
 
     type TestSync = AllSync<future::AbortHandle, (PeerId, codec::Role), ()>;
+
+    // `refresh_grandpa_authority_sets` only ever looks at the finalized block header and at the
+    // Grandpa finality, so the rest is left at its most trivial value. Built by hand rather than
+    // through a `ValidChainInformation`, which a signed authority-set change would be needed for.
+    fn grandpa_chain_information(
+        finalized_number: u64,
+        set_id: u64,
+        authorities: &[[u8; 32]],
+    ) -> chain_information::ChainInformation {
+        chain_information::ChainInformation {
+            finalized_block_header: Box::new(header::Header {
+                parent_hash: [0; 32],
+                number: finalized_number,
+                state_root: [0; 32],
+                extrinsics_root: [0; 32],
+                digest: header::Digest::from(header::DigestRef::empty()),
+            }),
+            consensus: chain_information::ChainInformationConsensus::Unknown,
+            finality: chain_information::ChainInformationFinality::Grandpa {
+                after_finalized_block_authorities_set_id: set_id,
+                finalized_triggered_authorities: authorities
+                    .iter()
+                    .map(|public_key| header::GrandpaAuthority {
+                        public_key: *public_key,
+                        weight: NonZero::new(1).unwrap(),
+                    })
+                    .collect(),
+                finalized_scheduled_change: None,
+            },
+        }
+    }
+
+    // The block that enacts a change is finalized by the *outgoing* set, so it is the last block
+    // of the old set and the new one starts right after it.
+    #[test]
+    fn authority_set_boundary_is_the_block_that_enacts_the_change() {
+        let mut sets = VecDeque::new();
+
+        let before = grandpa_chain_information(50, 7, &[[0xaa; 32]]);
+        refresh_grandpa_authority_sets(&mut sets, (&before).into());
+        let after = grandpa_chain_information(100, 8, &[[0xbb; 32]]);
+        refresh_grandpa_authority_sets(&mut sets, (&after).into());
+
+        assert_eq!(
+            grandpa_authority_set_for(&sets, 100),
+            Some((7, vec![[0xaa; 32]]))
+        );
+        assert_eq!(
+            grandpa_authority_set_for(&sets, 101),
+            Some((8, vec![[0xbb; 32]]))
+        );
+        // Way past the head of the chain: the current set has no upper bound.
+        assert_eq!(
+            grandpa_authority_set_for(&sets, 100_000),
+            Some((8, vec![[0xbb; 32]]))
+        );
+        // Below the first block ever recorded, which is not covered by any entry.
+        assert_eq!(grandpa_authority_set_for(&sets, 50), None);
+    }
+
+    // A batch of finalized blocks that doesn't change the set must not close the current entry,
+    // otherwise the blocks it finalizes would stop being attributed to anybody.
+    #[test]
+    fn authority_set_unchanged_keeps_a_single_open_entry() {
+        let mut sets = VecDeque::new();
+
+        refresh_grandpa_authority_sets(
+            &mut sets,
+            (&grandpa_chain_information(50, 7, &[[0xaa; 32]])).into(),
+        );
+        refresh_grandpa_authority_sets(
+            &mut sets,
+            (&grandpa_chain_information(80, 7, &[[0xaa; 32]])).into(),
+        );
+
+        assert_eq!(sets.len(), 1);
+        assert_eq!(
+            grandpa_authority_set_for(&sets, 100),
+            Some((7, vec![[0xaa; 32]]))
+        );
+    }
+
+    // Sets are forgotten oldest-first, and forgetting one must not make a later block resolve to
+    // the wrong set.
+    #[test]
+    fn authority_sets_history_is_bounded() {
+        let mut sets = VecDeque::new();
+
+        for set_id in 0..(GRANDPA_AUTHORITY_SETS_HISTORY as u64 + 5) {
+            refresh_grandpa_authority_sets(
+                &mut sets,
+                (&grandpa_chain_information(set_id * 10, set_id, &[[set_id as u8; 32]])).into(),
+            );
+        }
+
+        assert_eq!(sets.len(), GRANDPA_AUTHORITY_SETS_HISTORY);
+        // The oldest sets are gone rather than merged into their successor.
+        assert_eq!(grandpa_authority_set_for(&sets, 1), None);
+    }
 
     fn aura_grandpa_genesis() -> chain_information::ValidChainInformation {
         chain_information::ValidChainInformation::try_from(chain_information::ChainInformation {

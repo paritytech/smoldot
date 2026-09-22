@@ -346,33 +346,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         block_hash: &[u8; 32],
         block: &codec::BlockData,
     ) -> Option<FinalityProof> {
-        let scale_encoded_justification = block
-            .justifications
-            .as_ref()?
-            .iter()
-            .find(|justification| justification.engine_id == *b"FRNK")?
-            .justification
-            .clone();
-
-        // The header is self-verifying: hashing it must give back what was asked for.
-        let scale_encoded_header = block.header.as_ref()?;
-        if header::hash_from_scale_encoded_header(scale_encoded_header) != *block_hash {
-            return None;
-        }
-        let target_number = header::decode(scale_encoded_header, self.block_number_bytes)
-            .ok()?
-            .number;
-
-        // A peer could answer with a justification that is perfectly valid but proves some other
-        // block, which would say nothing about this one.
-        let decoded = finality::decode::decode_grandpa_justification(
-            &scale_encoded_justification,
-            self.block_number_bytes,
-        )
-        .ok()?;
-        if decoded.target_hash != block_hash || decoded.target_number != target_number {
-            return None;
-        }
+        let (scale_encoded_justification, target_number, changes_authority_set) =
+            self_consistent_grandpa_justification(block_hash, block, self.block_number_bytes)?;
 
         let (authorities_set_id, authorities) =
             self.grandpa_authority_set_for(target_number).await?;
@@ -407,6 +382,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         self.to_background
             .send(ToBackground::RetainFinalityProof {
                 proof: proof.clone(),
+                changes_authority_set,
             })
             .await
             .unwrap();
@@ -1655,9 +1631,278 @@ enum ToBackground {
         block_number: u64,
     },
     /// Caches a finality proof that the frontend has fetched and verified.
-    RetainFinalityProof { proof: FinalityProof },
+    RetainFinalityProof {
+        proof: FinalityProof,
+        /// Whether the block that the proof targets changes the Grandpa authority set. Decides
+        /// which of the two caches the proof goes into.
+        changes_authority_set: bool,
+    },
     /// See [`SyncService::subscribe_sync_status`].
     SubscribeSyncStatus {
         send_back: oneshot::Sender<async_channel::Receiver<SyncStatus>>,
     },
+}
+
+/// Extracts the Grandpa justification out of a block downloaded from the network, after checking
+/// everything about it that can be checked without knowing the authority set: that the block data
+/// is self-consistent, and that the justification targets that very block.
+///
+/// Returns the SCALE-encoded justification, the number of the block that it targets, and whether
+/// that block changes the Grandpa authority set. The justification is still **unverified** at
+/// this point; see [`SyncService::verified_finality_proof_from_block`].
+fn self_consistent_grandpa_justification(
+    block_hash: &[u8; 32],
+    block: &codec::BlockData,
+    block_number_bytes: usize,
+) -> Option<(Vec<u8>, u64, bool)> {
+    let scale_encoded_justification = block
+        .justifications
+        .as_ref()?
+        .iter()
+        .find(|justification| justification.engine_id == *b"FRNK")?
+        .justification
+        .clone();
+
+    // The header is self-verifying: hashing it must give back what was asked for.
+    let scale_encoded_header = block.header.as_ref()?;
+    if header::hash_from_scale_encoded_header(scale_encoded_header) != *block_hash {
+        return None;
+    }
+    let target_number = header::decode(scale_encoded_header, block_number_bytes)
+        .ok()?
+        .number;
+
+    // A peer could answer with a justification that is perfectly valid but proves some other
+    // block, which would say nothing about this one.
+    let decoded = finality::decode::decode_grandpa_justification(
+        &scale_encoded_justification,
+        block_number_bytes,
+    )
+    .ok()?;
+    if decoded.target_hash != block_hash || decoded.target_number != target_number {
+        return None;
+    }
+
+    Some((
+        scale_encoded_justification,
+        target_number,
+        substrate_compat::header_changes_authority_set(scale_encoded_header, block_number_bytes),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BLOCK_NUMBER_BYTES: usize = 4;
+
+    /// SCALE-compact encoding, for the small values that the fixtures below use.
+    fn compact(value: u64) -> Vec<u8> {
+        if value < 64 {
+            vec![(value as u8) << 2]
+        } else {
+            assert!(value < 1 << 14);
+            (((value as u16) << 2) | 0b01).to_le_bytes().to_vec()
+        }
+    }
+
+    fn encode_header(number: u64, changes_authority_set: bool) -> Vec<u8> {
+        let digest = if changes_authority_set {
+            // `GrandpaConsensus` log item carrying a `ScheduledChange` with an empty list of
+            // authorities and a delay of 0.
+            let mut log = vec![1u8];
+            log.extend_from_slice(&compact(0)); // `next_authorities: Vec<_>`, empty.
+            log.extend_from_slice(&0u32.to_le_bytes()); // `delay`.
+            let mut item = vec![4u8]; // `DigestItem::Consensus`.
+            item.extend_from_slice(b"FRNK");
+            item.extend_from_slice(&compact(log.len() as u64));
+            item.extend_from_slice(&log);
+            let mut out = compact(1);
+            out.extend_from_slice(&item);
+            out
+        } else {
+            compact(0)
+        };
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&[0x11; 32]); // `parent_hash`.
+        out.extend_from_slice(&compact(number));
+        out.extend_from_slice(&[0x22; 32]); // `state_root`.
+        out.extend_from_slice(&[0x33; 32]); // `extrinsics_root`.
+        out.extend_from_slice(&digest);
+        out
+    }
+
+    /// A justification with no pre-commit and no vote ancestry. Signatures are never looked at by
+    /// [`self_consistent_grandpa_justification`], only the target that the justification claims.
+    fn encode_justification(target_hash: &[u8; 32], target_number: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&7u64.to_le_bytes()); // `round`.
+        out.extend_from_slice(target_hash);
+        out.extend_from_slice(&(target_number as u32).to_le_bytes());
+        out.extend_from_slice(&compact(0)); // `precommits`.
+        out.extend_from_slice(&compact(0)); // `votes_ancestries`.
+        out
+    }
+
+    fn block_data(
+        header: Option<Vec<u8>>,
+        justifications: Option<Vec<([u8; 4], Vec<u8>)>>,
+    ) -> codec::BlockData {
+        codec::BlockData {
+            hash: [0; 32],
+            header,
+            body: None,
+            justifications: justifications.map(|list| {
+                list.into_iter()
+                    .map(|(engine_id, justification)| codec::Justification {
+                        engine_id,
+                        justification,
+                    })
+                    .collect()
+            }),
+        }
+    }
+
+    #[test]
+    fn accepts_a_self_consistent_justification() {
+        let header = encode_header(1234, false);
+        let hash = header::hash_from_scale_encoded_header(&header);
+        let justification = encode_justification(&hash, 1234);
+
+        assert_eq!(
+            self_consistent_grandpa_justification(
+                &hash,
+                &block_data(Some(header), Some(vec![(*b"FRNK", justification.clone())])),
+                BLOCK_NUMBER_BYTES,
+            ),
+            Some((justification, 1234, false))
+        );
+    }
+
+    #[test]
+    fn reports_a_block_that_changes_the_authority_set() {
+        let header = encode_header(1234, true);
+        let hash = header::hash_from_scale_encoded_header(&header);
+        let justification = encode_justification(&hash, 1234);
+
+        let (_, _, changes_authority_set) = self_consistent_grandpa_justification(
+            &hash,
+            &block_data(Some(header), Some(vec![(*b"FRNK", justification)])),
+            BLOCK_NUMBER_BYTES,
+        )
+        .unwrap();
+        assert!(changes_authority_set);
+    }
+
+    #[test]
+    fn rejects_a_justification_targeting_another_block() {
+        let header = encode_header(1234, false);
+        let hash = header::hash_from_scale_encoded_header(&header);
+        // Valid on its own, but proves a block that isn't the one being asked about.
+        let justification = encode_justification(&[0xff; 32], 1234);
+
+        assert!(
+            self_consistent_grandpa_justification(
+                &hash,
+                &block_data(Some(header), Some(vec![(*b"FRNK", justification)])),
+                BLOCK_NUMBER_BYTES,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_a_justification_targeting_another_height() {
+        let header = encode_header(1234, false);
+        let hash = header::hash_from_scale_encoded_header(&header);
+        let justification = encode_justification(&hash, 1235);
+
+        assert!(
+            self_consistent_grandpa_justification(
+                &hash,
+                &block_data(Some(header), Some(vec![(*b"FRNK", justification)])),
+                BLOCK_NUMBER_BYTES,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_a_header_that_is_not_the_requested_block() {
+        let header = encode_header(1234, false);
+        let hash = header::hash_from_scale_encoded_header(&header);
+        let justification = encode_justification(&hash, 1234);
+
+        assert!(
+            self_consistent_grandpa_justification(
+                &[0xee; 32],
+                &block_data(Some(header), Some(vec![(*b"FRNK", justification)])),
+                BLOCK_NUMBER_BYTES,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_an_undecodable_justification() {
+        let header = encode_header(1234, false);
+        let hash = header::hash_from_scale_encoded_header(&header);
+
+        assert!(
+            self_consistent_grandpa_justification(
+                &hash,
+                &block_data(Some(header), Some(vec![(*b"FRNK", vec![0, 1, 2, 3])])),
+                BLOCK_NUMBER_BYTES,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn ignores_justifications_of_other_consensus_engines() {
+        let header = encode_header(1234, false);
+        let hash = header::hash_from_scale_encoded_header(&header);
+        let justification = encode_justification(&hash, 1234);
+
+        assert!(
+            self_consistent_grandpa_justification(
+                &hash,
+                &block_data(Some(header), Some(vec![(*b"BABE", justification)])),
+                BLOCK_NUMBER_BYTES,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_a_block_without_a_header() {
+        let header = encode_header(1234, false);
+        let hash = header::hash_from_scale_encoded_header(&header);
+        let justification = encode_justification(&hash, 1234);
+
+        assert!(
+            self_consistent_grandpa_justification(
+                &hash,
+                &block_data(None, Some(vec![(*b"FRNK", justification)])),
+                BLOCK_NUMBER_BYTES,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_a_block_without_a_justification() {
+        let header = encode_header(1234, false);
+        let hash = header::hash_from_scale_encoded_header(&header);
+
+        assert!(
+            self_consistent_grandpa_justification(
+                &hash,
+                &block_data(Some(header), None),
+                BLOCK_NUMBER_BYTES
+            )
+            .is_none()
+        );
+    }
 }
