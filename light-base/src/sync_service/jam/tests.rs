@@ -9,6 +9,9 @@ use crate::{
     platform::{self, MultiStreamAddress, SubstreamDirection},
 };
 use alloc::{borrow::Cow, collections::VecDeque};
+use ark_vrf::{
+    ietf::Prover as _, reexports::ark_serialize::CanonicalSerialize as _, suites::bandersnatch,
+};
 use core::{
     future::Future,
     ops::{Deref, DerefMut},
@@ -17,7 +20,9 @@ use core::{
 use serde_json::{Value, json};
 use smoldot::{
     jam::{
+        codec,
         crypto::blake2b_256,
+        finality::Justification,
         types::{BlockRequest, Direction, Final, Handshake, Hash, SealingSequence},
         verify::VerifiedHeader,
     },
@@ -26,7 +31,24 @@ use smoldot::{
 use std::{collections::BTreeMap, sync::Mutex, time::Instant};
 
 mod connection;
+mod grandpa;
 mod rpc;
+
+/// [`drive_connection`], discarding its end reason.
+async fn drive<P: PlatformRef>(
+    platform: &P,
+    log_name: &str,
+    params: &Params,
+    peer_index: usize,
+    state: &Arc<async_lock::Mutex<State>>,
+    transport: P::MultiStream,
+    fetch_size: &mut FetchSize,
+) {
+    drive_connection(
+        platform, log_name, params, peer_index, state, transport, fetch_size,
+    )
+    .await;
+}
 
 /// A root-only tree at a zeroed genesis with six zero keys and one-slot epochs.
 fn root_config() -> Config {
@@ -70,6 +92,9 @@ fn root_config() -> Config {
             },
         )
         .unwrap(),
+        authorities: AuthoritySet::from_checkpoint(&params, 0, vec![[0; 32]; 6], vec![[0; 32]; 6])
+            .unwrap(),
+        max_blocks: 4,
         params,
         peers: Vec::new(),
         header_bytes: 4096,
@@ -84,6 +109,10 @@ fn state(config: Config) -> State {
         subscribers: Vec::new(),
         stopped: false,
         header_bytes: config.header_bytes,
+        authorities: config.authorities,
+        max_blocks: config.max_blocks,
+        proof_owner: None,
+        proof_attempts: Vec::new(),
     }
 }
 
@@ -128,6 +157,8 @@ struct Control {
 struct IoState {
     params: Option<Params>,
     reject_batch_above: Option<u32>,
+    proofs: BTreeMap<Hash, Vec<u8>>,
+    proof_requests: Vec<Hash>,
     preferred_child: Option<(Hash, Hash)>,
     no_blocks: usize,
     fork_announcement: Option<Vec<u8>>,
@@ -172,6 +203,16 @@ impl core::fmt::Display for Reset {
 }
 
 impl Control {
+    /// The scripted CE 130 response for `target`.
+    fn proof(&mut self, target: Hash) -> Result<Vec<u8>, Reset> {
+        self.io.proof_requests.push(target);
+        self.io
+            .proofs
+            .get(&target)
+            .cloned()
+            .ok_or(Reset(Some(6), "no justification"))
+    }
+
     /// The scripted CE 128 response to `request`.
     fn blocks(&mut self, request: BlockRequest) -> Result<Vec<u8>, Reset> {
         assert!((1..=64).contains(&request.max_blocks));
@@ -411,8 +452,8 @@ impl PlatformRef for FakePlatform {
         let stream = FakeStream::new(&connection.control, Instant::now(), incoming, ce);
         connection.streams.push_back(stream);
         if !ce && connection.control.lock().unwrap().starve {
-            connection.control.lock().unwrap().io.live_streams += 2;
-            for _ in 0..2 {
+            connection.control.lock().unwrap().io.live_streams += 3;
+            for _ in 0..3 {
                 let mut stream = FakeStream::new(&connection.control, self.now(), [].into(), false);
                 stream.inbound = true;
                 connection.streams.push_back(stream);
@@ -469,6 +510,7 @@ impl PlatformRef for FakePlatform {
             let mut c = stream.control.lock().unwrap();
             let response = match stream.outgoing[0] {
                 128 => c.blocks(BlockRequest::decode(&stream.outgoing[5..]).unwrap())?,
+                130 => c.proof(stream.outgoing[5..37].try_into().unwrap())?,
                 kind => panic!("no scripted response for stream kind {kind}"),
             };
             drop(c);
@@ -531,18 +573,21 @@ impl PlatformRef for FakePlatform {
     }
 }
 
-/// The certificate vectors, or a file of the library's PolkaJam capture.
+/// The certificate vectors, the synthetic chain, or a file of the library's
+/// PolkaJam capture.
 fn fixture(name: &str) -> Value {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = match name {
         "cert_vector.json" => root.join("src/jam_webtransport_cert/fixtures").join(name),
+        "synthetic.json" => root.join("src/sync_service/jam/fixtures").join(name),
+        "polkajam-grandpa.json" => root.join("../lib/src/jam/finality/fixtures").join(name),
         _ => root.join("../lib/src/jam/fixtures/polkajam").join(name),
     };
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
 fn bytes(value: &Value) -> Vec<u8> {
-    hex::decode(value.as_str().unwrap()).unwrap()
+    hex::decode(value.as_str().unwrap().trim_start_matches("0x")).unwrap()
 }
 
 fn fixture_setup() -> (FakePlatform, String, Hash, Vec<u8>) {
@@ -599,7 +644,7 @@ fn announcement_frame(params: &Params, header: Header, final_: Final) -> Vec<u8>
 /// Serves `header` with an empty extrinsic over CE 128.
 fn serve(c: &mut Control, params: &Params, header: &Header) {
     let mut block = header.encode(params);
-    block.extend([0; 7]);
+    block.extend([0; 7]); // Five components; disputes has three lists.
     c.responses.insert(header.hash(params), framed(block));
 }
 
@@ -610,6 +655,132 @@ async fn within<T>(secs: u64, what: &str, future: impl Future<Output = T>) -> T 
         panic!("{what} timed out")
     })
     .await
+}
+
+/// Runs `scenario` within `secs` seconds while `driver` runs, failing with
+/// `what` if the driver ends first.
+async fn while_driving<T>(
+    secs: u64,
+    what: &str,
+    driver: impl Future<Output = ()>,
+    scenario: impl Future<Output = T>,
+) -> T {
+    let driver = async {
+        driver.await;
+        panic!("{what}: the driver ended")
+    };
+    within(secs, what, future::or(driver, scenario)).await
+}
+
+/// Yields until `condition` holds.
+async fn yield_until(mut condition: impl AsyncFnMut() -> bool) {
+    while !condition().await {
+        future::yield_now().await;
+    }
+}
+
+/// A GRANDPA signing key, and its public key.
+async fn grandpa_key(seed: u8) -> (ed25519_zebra::SigningKey, [u8; 32]) {
+    let key = ed25519_zebra::SigningKey::from([seed; 32]);
+    let public = ed25519_zebra::VerificationKey::from(&key).into();
+    (key, public)
+}
+
+/// A Bandersnatch secret for sealing headers, and its public key.
+fn bandersnatch_key(seed: &[u8]) -> (bandersnatch::Secret, [u8; 32]) {
+    let secret = bandersnatch::Secret::from_seed(seed);
+    let mut public = [0; 32];
+    secret
+        .public()
+        .serialize_compressed(&mut public[..])
+        .unwrap();
+    (secret, public)
+}
+
+/// An IETF VRF signature: the output point, then the proof.
+fn vrf_sign(secret: &bandersnatch::Secret, context: &[u8], aux: &[u8]) -> [u8; 96] {
+    let input = bandersnatch::Input::new(context).unwrap();
+    let output = secret.output(input);
+    let mut signature = [0; 96];
+    output.serialize_compressed(&mut signature[..32]).unwrap();
+    (secret.prove(input, output, aux))
+        .serialize_compressed(&mut signature[32..])
+        .unwrap();
+    signature
+}
+
+/// Seals `header` on `parent` as author 0 with `secret`, which must hold the
+/// fallback key of every slot of the header's epoch.
+fn seal_fallback(
+    params: &Params,
+    parent: &VerifiedHeader,
+    mut header: Header,
+    secret: &bandersnatch::Secret,
+) -> Header {
+    let state = parent.post_state();
+    // An epoch change rotates `η2` into `η3`.
+    let epoch_changed = header.slot / params.epoch_len > state.slot() / params.epoch_len;
+    let eta3 = state.entropy()[if epoch_changed { 2 } else { 3 }];
+    let context = [b"jam_fallback_seal".as_slice(), &eta3].concat();
+    let input = bandersnatch::Input::new(&context).unwrap();
+    let seal_output = &secret.output(input).hash()[..32];
+    header.author_index = 0;
+    let entropy_context = [b"jam_entropy".as_slice(), seal_output].concat();
+    header.entropy_source = vrf_sign(secret, &entropy_context, &[]);
+    header.seal = vrf_sign(secret, &context, &header.encode_unsigned(params));
+    header
+}
+
+/// A justification for `commit` with one precommit by `public`, signed over
+/// `root` as the posterior state root. The vote names the last of
+/// `witnesses`, which link it back to `commit`, or `commit` itself.
+async fn single_vote_justification(
+    (key, public): (&ed25519_zebra::SigningKey, [u8; 32]),
+    (round, set_id): (u64, u32),
+    (commit, root): (Final, Hash),
+    witnesses: &[Header],
+    params: &Params,
+) -> Vec<u8> {
+    let vote = witnesses
+        .last()
+        .map_or(commit.clone(), |h| final_of(params, h));
+    let target = |f: &Final| [&f.hash[..], &root, &f.slot.to_le_bytes()].concat();
+    let round_and_set = [round.to_le_bytes().as_slice(), &set_id.to_le_bytes()].concat();
+    let payload = [
+        b"jam_grandpa_vote\x01".as_slice(),
+        &target(&vote),
+        &round_and_set,
+    ]
+    .concat();
+    let signature: [u8; 64] = key.sign(&payload).into();
+    let mut proof = [round_and_set, target(&commit), codec::encode_natural(1)].concat();
+    proof.extend([target(&vote), signature.to_vec(), public.to_vec()].concat());
+    proof.extend(codec::encode_natural(witnesses.len().try_into().unwrap()));
+    for header in witnesses {
+        proof.extend(header.encode(params));
+    }
+    proof
+}
+
+/// Dials one scripted peer and drives that connection as `peer`.
+async fn drive_peer(
+    platform: &FakePlatform,
+    params: &Params,
+    state: &Arc<async_lock::Mutex<State>>,
+    peer: usize,
+    fetch_size: &mut FetchSize,
+) {
+    let address = MultiStreamAddress::WebTransport {
+        ip: "127.0.0.1".parse().unwrap(),
+        port: 4433,
+        cert_hashes: Cow::Owned(vec![[1; 32]; 3]),
+    };
+    let connected = platform.connect_multistream(address).await;
+    let transport = connected.connection;
+    drive(
+        platform, "scripted", params, peer, state, transport, fetch_size,
+    )
+    .await;
 }
 
 fn add_chain(
@@ -704,4 +875,52 @@ fn event_driven<F: Future<Output = ()> + Send + 'static>(
     let executor = Arc::new(smol::Executor::new());
     let task = executor.spawn(scenario(executor.clone()));
     smol::block_on(executor.run(task));
+}
+
+fn synthetic_driver(blocks: usize, capacity: usize) -> (FakePlatform, Config, Vec<Header>) {
+    let corpus = fixture("synthetic.json");
+    let (platform, boot_spec, _, _) = fixture_setup();
+    let mut spec = corpus["spec"].clone();
+    spec["bootnodes_p256"] =
+        serde_json::from_str::<Value>(&boot_spec).unwrap()["bootnodes_p256"].clone();
+    let mut config = Config::from_spec(&parse(&spec.to_string())).unwrap();
+    config.tree = HeaderTree::new(
+        config.params.clone(),
+        config.tree.finalized().clone(),
+        tree::Config {
+            max_blocks: NonZeroUsize::new(capacity).unwrap(),
+            max_bytes: usize::MAX,
+            max_epoch_records: core::num::NonZeroUsize::new(8).unwrap(),
+        },
+    )
+    .unwrap();
+    config.max_blocks = capacity;
+    let headers: Vec<_> = corpus["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .take(blocks)
+        .map(|raw| Header::decode(&config.params, &bytes(raw)).unwrap())
+        .collect();
+    let tip = headers.last().unwrap();
+    {
+        let mut c = platform.0.lock().unwrap();
+        c.responses.clear();
+        c.io.params = Some(config.params.clone());
+        for header in &headers {
+            serve(&mut c, &config.params, header);
+        }
+        c.handshake = handshake_frame(final_of(&config.params, tip), vec![]);
+        for (hash, proof) in corpus["proofs"].as_object().unwrap() {
+            c.io.proofs.insert(
+                hex::decode(hash).unwrap().try_into().unwrap(),
+                framed(bytes(proof)),
+            );
+        }
+    }
+    (platform, config, headers)
+}
+
+fn driver_state(config: Config) -> Arc<async_lock::Mutex<State>> {
+    Arc::new(async_lock::Mutex::new(state(config)))
 }

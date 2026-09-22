@@ -161,7 +161,8 @@ impl<P: PlatformRef> Conn<'_, P> {
             let block_slot = header.slot;
             let mut s = self.state.lock().await;
             let known = s.tree.get(&hash).is_some();
-            // Headers at or before the configured anchor need no import.
+            // Another peer may have finalized this prefix while the batch
+            // was in flight. Its pruned ancestors need no re-import.
             let result = if header.slot <= s.tree.finalized().slot() {
                 Ok(())
             } else {
@@ -227,6 +228,8 @@ impl<P: PlatformRef> Conn<'_, P> {
                         );
                     }
                     Err(InsertFailure::Tree(tree::InsertError::UnknownParent)) => {
+                        // Finality from another peer may have pruned the
+                        // parent since the repair was marked ready.
                         self.repair_ready = false;
                         self.repair.push(header);
                         if self.repair.len() >= REPAIR_LIMIT {
@@ -246,6 +249,14 @@ impl<P: PlatformRef> Conn<'_, P> {
     /// ascending batch from the cursor or the best block.
     pub(super) async fn request_blocks(&mut self) -> Result<(), End> {
         let s = self.state.lock().await;
+        if s.tree.len() + 1 >= s.max_blocks && s.proof_owner.is_some() {
+            // The proof already in flight must get a turn before more imports.
+            return Ok(());
+        }
+        if s.tree.len() >= s.max_blocks && s.proof_owner.is_none() {
+            // All proof candidates failed: don't deadlock on an unfinalizable fork.
+            return Err(End::TreeFull);
+        }
         let request = if let Some(header) = self.repair.last() {
             Some((
                 BlockRequest {

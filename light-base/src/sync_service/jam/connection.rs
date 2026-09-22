@@ -5,7 +5,7 @@
 
 use super::{
     FRAME_BYTES, IDLE_TIMEOUT, Peer, State, TIMEOUT,
-    log::{End, Tag, Token, elapsed_ms, event},
+    log::{End, Tag, Token, elapsed_ms, event, request_ended},
 };
 use crate::{
     jam_webtransport_cert, log,
@@ -69,6 +69,11 @@ pub(super) async fn peer_loop<P: PlatformRef>(
                 &mut fetch_size,
             )
             .await;
+            let mut s = state.lock().await;
+            if s.proof_owner.is_some_and(|(owner, _)| owner == peer_index) {
+                s.proof_owner = None;
+            }
+            drop(s);
             if platform.now() - started >= Duration::from_secs(60) {
                 backoff = 1;
             }
@@ -131,8 +136,13 @@ impl<I: Clone + core::ops::Sub<Output = Duration>, T> InFlight<I, T> {
         }
     }
 
+    /// `request` if it is the request `id`.
+    fn holding(request: &Option<Self>, id: Option<net::RequestId>) -> Option<&Self> {
+        request.as_ref().filter(|r| Some(r.id) == id)
+    }
+
     pub(super) fn holds(request: &Option<Self>, id: Option<net::RequestId>) -> bool {
-        request.as_ref().is_some_and(|r| Some(r.id) == id)
+        Self::holding(request, id).is_some()
     }
 
     /// The id of `request` once it has been queued for [`TIMEOUT`].
@@ -171,6 +181,7 @@ pub(super) struct Conn<'a, P: PlatformRef> {
     pub(super) repair_ready: bool,
     pub(super) announcements: VecDeque<Header>,
     pub(super) requested: Option<InFlight<P::Instant, BlockRequest>>,
+    pub(super) proof_requested: Option<InFlight<P::Instant, Hash>>,
     pub(super) advertised: Option<Final>,
     /// This turn did work that may leave more to do without a new I/O event.
     pub(super) local_progress: bool,
@@ -203,8 +214,8 @@ pub(super) async fn drive_connection<P: PlatformRef>(
             max_message_size: FRAME_BYTES,
             max_body_bytes: FRAME_BYTES,
             max_leaves_in_handshake: 8,
-            max_pending_requests: 1,
-            max_streams: 3,
+            max_pending_requests: 2,
+            max_streams: 4,
         },
     ) else {
         return End::Setup;
@@ -234,6 +245,7 @@ pub(super) async fn drive_connection<P: PlatformRef>(
         repair_ready: false,
         announcements: VecDeque::new(),
         requested: None,
+        proof_requested: None,
         advertised: None,
         local_progress: false,
     };
@@ -266,10 +278,20 @@ impl<P: PlatformRef> Conn<'_, P> {
         for event in self.read_write(&now).await? {
             self.handle(event).await?;
         }
-        if !self.imports.is_empty() {
+        let pause_imports = {
+            let s = self.state.lock().await;
+            if s.tree.len() >= s.max_blocks && s.proof_owner.is_none() {
+                return Err(End::TreeFull);
+            }
+            s.proof_owner.is_some() && s.tree.len() + 1 >= s.max_blocks
+        };
+        if !pause_imports && !self.imports.is_empty() {
             self.import_next(&now).await?;
-        } else if self.requested.is_none() {
+        } else if !pause_imports && self.requested.is_none() {
             self.import_repaired(&now).await?;
+        }
+        if self.handshaken && self.proof_requested.is_none() {
+            self.request_justification().await?;
         }
         if self.handshaken
             && self.requested.is_none()
@@ -278,7 +300,7 @@ impl<P: PlatformRef> Conn<'_, P> {
         {
             self.request_blocks().await?;
         }
-        self.wait().await
+        self.wait(pause_imports).await
     }
 
     /// Ends the connection once one of its deadlines has passed.
@@ -297,11 +319,18 @@ impl<P: PlatformRef> Conn<'_, P> {
         }
         // This deadline starts while the request is still queued, before a stream
         // reservation exists. Peer-created streams cannot starve it indefinitely.
-        if let Some(id) = InFlight::timed_out(&self.requested, now) {
+        let timed_out = [
+            (InFlight::timed_out(&self.requested, now), End::BlockTimeout),
+            (
+                InFlight::timed_out(&self.proof_requested, now),
+                End::JustificationTimeout,
+            ),
+        ];
+        if let Some((id, end)) = timed_out.into_iter().find_map(|(id, end)| Some((id?, end))) {
             let _ = self
                 .connection
                 .cancel_request(id, net::RequestError::Timeout);
-            return Err(End::BlockTimeout);
+            return Err(end);
         }
         if self
             .streams
@@ -316,6 +345,7 @@ impl<P: PlatformRef> Conn<'_, P> {
     /// Reads and writes each stream once and returns the connection's events.
     async fn read_write(&mut self, now: &P::Instant) -> Result<Vec<net::Event>, End> {
         let mut events = Vec::new();
+        let mut proof_unavailable = false;
         let mut index = 0;
         while index < self.streams.len() {
             let stream = &mut self.streams[index];
@@ -323,6 +353,23 @@ impl<P: PlatformRef> Conn<'_, P> {
             let mut access = self.platform.read_write_access(stream.stream.as_mut()).ok();
             if access.is_none() {
                 drop(access);
+                if let Some(r) = InFlight::holding(&self.proof_requested, request) {
+                    let _ = self
+                        .connection
+                        .cancel_request(r.id, net::RequestError::Rejected);
+                    request_ended!(
+                        self,
+                        "jam-justification-request-ended",
+                        r,
+                        "failed",
+                        error = ?net::RequestError::Rejected
+                    );
+                    self.proof_requested = None;
+                    proof_unavailable = true;
+                    self.streams.remove(index);
+                    self.local_progress = true;
+                    continue;
+                }
                 if InFlight::holds(&self.requested, request) {
                     if let Some(event) = self
                         .connection
@@ -378,7 +425,11 @@ impl<P: PlatformRef> Conn<'_, P> {
             let retired = progress.reset
                 || matches!(
                     &progress.event,
-                    Some(net::Event::BlockResponse { .. } | net::Event::RequestFailed { .. })
+                    Some(
+                        net::Event::BlockResponse { .. }
+                            | net::Event::JustificationResponse { .. }
+                            | net::Event::RequestFailed { .. }
+                    )
                 );
             drop(rw);
             if let Some(event) = progress.event {
@@ -389,6 +440,9 @@ impl<P: PlatformRef> Conn<'_, P> {
             } else {
                 index += 1;
             }
+        }
+        if proof_unavailable {
+            self.state.lock().await.proof_owner = None;
         }
         Ok(events)
     }
@@ -403,6 +457,19 @@ impl<P: PlatformRef> Conn<'_, P> {
             net::Event::Announcement(a) => self.announcement(a).await,
             net::Event::BlockResponse { request_id, blocks } => {
                 self.block_response(request_id, blocks).await
+            }
+            net::Event::JustificationResponse {
+                request_id,
+                target,
+                justification,
+            } => {
+                self.justification_response(request_id, target, justification)
+                    .await
+            }
+            net::Event::RequestFailed { request_id, reason }
+                if InFlight::holds(&self.proof_requested, Some(request_id)) =>
+            {
+                self.justification_failed(reason).await
             }
             net::Event::RequestFailed { request_id, reason } => {
                 self.block_failed(request_id, reason).await
@@ -424,7 +491,7 @@ impl<P: PlatformRef> Conn<'_, P> {
 
     /// Waits for a substream, transport buffer progress, or a bounded protocol
     /// deadline, and takes a substream the transport opened.
-    async fn wait(&mut self) -> Result<(), End> {
+    async fn wait(&mut self, pause_imports: bool) -> Result<(), End> {
         let platform = self.platform;
         let Self {
             transport,
@@ -444,9 +511,8 @@ impl<P: PlatformRef> Conn<'_, P> {
                 // another call after committing FIN. No new platform edge is promised
                 // for that work. Poll substreams above, then cooperatively drive again.
                 if *local_progress
-                    || *repair_ready
-                    || !imports.is_empty()
-                    || (requested.is_none() && !announcements.is_empty())
+                    || ((*repair_ready || !imports.is_empty()) && !pause_imports)
+                    || (!pause_imports && requested.is_none() && !announcements.is_empty())
                 {
                     return None;
                 }
@@ -487,14 +553,18 @@ impl<P: PlatformRef> Conn<'_, P> {
                     return Err(End::ProtocolError);
                 };
                 request = match kind {
-                    net::SubstreamKind::Ce128 { request_id } => Some(request_id),
+                    net::SubstreamKind::Ce128 { request_id }
+                    | net::SubstreamKind::Ce130 { request_id } => Some(request_id),
                     _ => None,
                 };
                 if self.connection.substream_opened(id, kind).is_err() {
                     let _ = self.connection.outgoing_open_failed(kind);
                     return Err(End::ProtocolError);
                 }
-                matches!(kind, net::SubstreamKind::Ce128 { .. })
+                matches!(
+                    kind,
+                    net::SubstreamKind::Ce128 { .. } | net::SubstreamKind::Ce130 { .. }
+                )
             }
             SubstreamDirection::Inbound => {
                 if self.connection.substream_incoming(id).is_err() {
@@ -524,14 +594,24 @@ impl<P: PlatformRef> Conn<'_, P> {
                 "cancelled"
             }
         };
-        let pending = [self.requested.map(|r| {
-            (
-                "jam-block-request-ended",
-                r.tag,
-                r.queued,
-                End::BlockTimeout,
-            )
-        })];
+        let pending = [
+            self.requested.map(|r| {
+                (
+                    "jam-block-request-ended",
+                    r.tag,
+                    r.queued,
+                    End::BlockTimeout,
+                )
+            }),
+            self.proof_requested.map(|r| {
+                (
+                    "jam-justification-request-ended",
+                    r.tag,
+                    r.queued,
+                    End::JustificationTimeout,
+                )
+            }),
+        ];
         for (name, tag, queued, timeout) in pending.into_iter().flatten() {
             event!(
                 self,

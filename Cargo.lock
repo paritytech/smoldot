@@ -2723,12 +2723,14 @@ dependencies = [
 name = "smoldot-light"
 version = "3.0.0"
 dependencies = [
+ "ark-vrf",
  "async-channel",
  "async-lock",
  "base64",
  "blake2-rfc",
  "bs58",
  "derive_more",
+ "ed25519-zebra",
  "either",
  "env_logger",
  "event-listener",

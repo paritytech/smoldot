@@ -60,6 +60,10 @@ std = ["dep:parking_lot", "dep:log", "dep:smol", "rand/std", "rand/std_rng", "sm
 wasmtime = ["smoldot/wasmtime"]
 
 [dev-dependencies]
+# Tests only: seals synthetic JAM headers.
+ark-vrf = { version = "=0.2.2", default-features = false, features = ["bandersnatch"] }
+# Tests only: signs synthetic GRANDPA votes.
+ed25519-zebra = { version = "4.1.0", default-features = false }
 env_logger = "0.11.4"
 rcgen = { version = "=0.14.8", default-features = false }
 # Tests only: lets the JAM sync tests build verified headers without signing them.

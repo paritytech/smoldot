@@ -306,7 +306,7 @@ fn jam_pin_budget_and_finality_preserve_pinned_headers() {
                 sync_service::Notification::Finalized {
                     finalized_blocks_hashes: vec![root],
                     best_block_hash_if_changed: None,
-                    pruned_blocks: Vec::new()
+                    pruned_blocks: vec![[8; 32]]
                 },
                 &tx
             )
