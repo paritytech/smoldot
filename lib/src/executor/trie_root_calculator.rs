@@ -193,17 +193,15 @@ impl ClosestDescendant {
                 (None, Some(base_trie_key)) => (base_trie_key.skip(iter_key_len).collect(), false),
                 (None, None) => {
                     // If neither the base trie nor the diff contain any descendant, then skip ahead.
-                    return if let Some(parent_node) = self.inner.stack.last_mut() {
-                        // If the element has a parent, indicate that the current iterated node
-                        // doesn't exist and continue the algorithm.
-                        debug_assert_ne!(parent_node.children.len(), 16);
-                        parent_node.children.push(None);
-                        self.inner.next()
-                    } else {
+                    return if self.inner.stack.is_empty() {
                         // If the element doesn't have a parent, then the trie is completely empty.
                         InProgress::Finished {
                             trie_root_hash: trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
                         }
+                    } else {
+                        // If the element has a parent, indicate that the current iterated node
+                        // doesn't exist and continue the algorithm.
+                        self.inner.push_child_result(None)
                     };
                 }
             };
@@ -453,7 +451,7 @@ impl ClosestDescendantMerkleValue {
 
     /// Indicate the Merkle value of closest descendant of the trie node indicated by
     /// [`ClosestDescendantMerkleValue::key`] and resume the calculation.
-    pub fn inject_merkle_value(mut self, merkle_value: &[u8]) -> InProgress {
+    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> InProgress {
         // We are after a call to `BaseTrieClosestDescendantMerkleValue` in the algorithm shown
         // at the top.
 
@@ -462,16 +460,13 @@ impl ClosestDescendantMerkleValue {
         // bug somewhere in the API user's code.
         debug_assert!(merkle_value.len() == 32 || trie::trie_node::decode(merkle_value).is_ok());
 
-        if let Some(parent_node) = self.inner.stack.last_mut() {
+        if !self.inner.stack.is_empty() {
             // If the element has a parent, add the Merkle value to its children and resume the
             // algorithm.
-            debug_assert_ne!(parent_node.children.len(), 16);
-            parent_node
-                .children
-                .push(Some(trie::trie_node::MerkleValueOutput::from_bytes(
+            self.inner
+                .push_child_result(Some(trie::trie_node::MerkleValueOutput::from_bytes(
                     AsRef::as_ref(&merkle_value),
-                )));
-            self.inner.next()
+                )))
         } else {
             // If the element doesn't have a parent, then the Merkle value is the root of trie!
             // This should only ever happen if the diff is empty.
@@ -541,10 +536,9 @@ impl TrieNodeInsertUpdateEvent {
     }
 
     /// Resume the computation.
-    pub fn resume(mut self) -> InProgress {
-        if let Some(parent_node) = self.inner.stack.last_mut() {
-            parent_node.children.push(Some(self.merkle_value));
-            self.inner.next()
+    pub fn resume(self) -> InProgress {
+        if !self.inner.stack.is_empty() {
+            self.inner.push_child_result(Some(self.merkle_value))
         } else {
             // No more node in the stack means that this was the root node. The calculated
             // Merkle value is the trie root hash.
@@ -606,9 +600,8 @@ impl TrieNodeRemoveEvent {
     pub fn resume(mut self) -> InProgress {
         match self.ty {
             TrieNodeRemoveEventTy::NoChildrenLeft => {
-                if let Some(parent_node) = self.inner.stack.last_mut() {
-                    parent_node.children.push(None);
-                    self.inner.next()
+                if !self.inner.stack.is_empty() {
+                    self.inner.push_child_result(None)
                 } else {
                     InProgress::Finished {
                         trie_root_hash: trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
@@ -676,7 +669,8 @@ struct Inner {
     /// a second time to recalculate its Merkle value. Removals in that subtree were already
     /// reported during the first walk, so they are not reported again while this is `Some`.
     ///
-    /// The re-walk is over once the stack shrinks back to this depth, see [`Inner::next`].
+    /// The re-walk is over once the stack shrinks back to this depth, see
+    /// [`Inner::push_child_result`].
     rewalk_start_stack_len: Option<usize>,
 
     /// Same value as [`Config::diff`].
@@ -701,14 +695,29 @@ struct InProgressNode {
 }
 
 impl Inner {
-    /// Analyzes the content of the [`Inner`] and progresses the algorithm.
-    fn next(mut self: Box<Self>) -> InProgress {
-        // `next` is called right after a node's result is pushed to its parent's children. If
-        // the stack is back at the depth where the re-walk started, the re-walk is over.
+    /// Pushes the result of the node whose calculation just finished (`Some` with its Merkle
+    /// value, or `None` if the node doesn't exist) to the children of the node at the top of
+    /// the stack, then progresses the algorithm.
+    ///
+    /// Must only be called if the stack is not empty.
+    fn push_child_result(
+        mut self: Box<Self>,
+        result: Option<trie::trie_node::MerkleValueOutput>,
+    ) -> InProgress {
+        let parent_node = self.stack.last_mut().unwrap_or_else(|| panic!());
+        debug_assert_ne!(parent_node.children.len(), 16);
+        parent_node.children.push(result);
+
+        // If the stack is back at the depth where the re-walk started, the re-walk is over.
         if self.rewalk_start_stack_len == Some(self.stack.len()) {
             self.rewalk_start_stack_len = None;
         }
 
+        self.next()
+    }
+
+    /// Analyzes the content of the [`Inner`] and progresses the algorithm.
+    fn next(self: Box<Self>) -> InProgress {
         if self.stack.last().map_or(false, |n| n.children.len() == 16) {
             // Finished obtaining `MaybeChildren` and jumping to obtaining `MaybeStorageValue`.
             return InProgress::StorageValue(StorageValue(self));
