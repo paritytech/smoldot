@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-//! Header-only JAM synchronization. The configured anchor never advances.
+//! Header-only JAM synchronization with verified GRANDPA root advancement.
 //!
 //! Resource accounting (estimates, not a process/allocator peak measurement):
 //! the tree and its verification/rebuild copies share 16 MiB. Reserve one
@@ -12,9 +12,13 @@
 //! retains at most eight repair headers and eight announcements (at most
 //! 8 MiB together at the maximum accepted header budget). Allow 16 MiB per peer
 //! for B2 frames, decoded events and bounded I/O staging, including one decoded
-//! CE128 batch capped at 1 MiB of wire bytes. Adaptive requests grow from one
+//! CE128 batch capped at 1 MiB of wire bytes (owned header allocations are
+//! bounded by their wire lengths and Params). Adaptive requests grow from one
 //! to 64 blocks within that cap. Eight subscriber queues add at most 1 MiB each.
-//! The chain task's conservative allocation allowance is approximately 72 MiB.
+//! Another 4 MiB covers the single shared proof, decoded witnesses, verifier
+//! scratch space, current/next authorities and transition copies. At most 4096
+//! attempted-target records, including vector growth slack, fit in 512 KiB.
+//! The conservative chain-task allowance rounds up to approximately 77 MiB.
 //! One RPC frontend separately allows two 4 MiB pin maps, a temporary snapshot
 //! below 8 MiB, 16 responses (each below about 1 MiB), and 32 64-KiB requests:
 //! allow another 36 MiB including collection/staging overhead. The two pin maps
@@ -39,11 +43,12 @@ use core::{net::IpAddr, num::NonZeroUsize, pin::Pin, time::Duration};
 use futures_lite::{StreamExt as _, future};
 use smoldot::jam::{
     chain_spec::JamChainSpec,
+    finality::{self, AuthoritySet, Justification},
     net,
     params::Params,
     state::LightState,
     tree::{self, HeaderTree},
-    types::{BlockRequest, Direction, Final, GenesisLightState, Handshake, Header},
+    types::{BlockRequest, Direction, Final, GenesisLightState, Handshake, Hash, Header},
     verify::verified_genesis,
 };
 
@@ -60,6 +65,8 @@ pub(crate) struct Config {
     tree: HeaderTree,
     peers: Vec<Peer>,
     header_bytes: usize,
+    authorities: AuthoritySet,
+    max_blocks: usize,
 }
 
 struct Peer {
@@ -72,11 +79,17 @@ impl Config {
     pub(crate) fn from_spec(spec: &JamChainSpec) -> Result<Self, String> {
         let params = spec.params().clone();
         let (header_bytes, limits) = memory_limits(&params)?;
+        let max_blocks = limits.max_blocks;
         let (header, raw_state) = spec.checkpoint().map_or(
             (spec.genesis_header(), spec.genesis_light_state()),
             |checkpoint| (&checkpoint.header, &checkpoint.state),
         );
         let state = Self::anchor_state(&params, raw_state)?;
+        let authorities = match spec.checkpoint() {
+            Some(checkpoint) => checkpoint.finality.clone(),
+            None => AuthoritySet::from_genesis(&params, header)
+                .map_err(|e| alloc::format!("JAM genesis finality: {e}"))?,
+        };
         let mut peers = Vec::new();
         for node in spec.boot_nodes() {
             if let Some(p256_id_text) = node.p256_id_text {
@@ -98,6 +111,8 @@ impl Config {
             params,
             tree,
             peers,
+            authorities,
+            max_blocks: max_blocks.get(),
             header_bytes,
         })
     }
@@ -161,6 +176,12 @@ struct State {
     subscribers: Vec<async_channel::Sender<Notification>>,
     stopped: bool,
     header_bytes: usize,
+    authorities: AuthoritySet,
+    max_blocks: usize,
+    /// A single shared proof reservation, deduplicated across peer drivers.
+    proof_owner: Option<(usize, Hash)>,
+    /// Attempted configured peers per retained target. Never grows beyond the tree.
+    proof_attempts: Vec<(Hash, u8)>,
 }
 
 #[derive(Debug)]
@@ -170,6 +191,96 @@ enum InsertFailure {
 }
 
 impl State {
+    fn proof_limits(&self) -> finality::Limits {
+        let witnesses = (FRAME_BYTES / self.header_bytes).max(1);
+        finality::Limits {
+            max_bytes: FRAME_BYTES,
+            max_ancestry_headers: witnesses,
+            max_ancestry_steps: self
+                .tree
+                .len()
+                .saturating_add(witnesses)
+                .saturating_mul(usize::from(self.params.max_validators))
+                .saturating_mul(2),
+        }
+    }
+
+    /// Select an authenticated target, stopping at the first unfinalized epoch
+    /// mark. Advertisements trigger fetching but never supply authority state.
+    fn reserve_proof(&mut self, peer: usize, advertised: &Final) -> Option<Hash> {
+        if self.stopped
+            || self.proof_owner.is_some()
+            || advertised.slot <= self.tree.finalized().slot
+        {
+            return None;
+        }
+        let tip = self
+            .tree
+            .get(&advertised.hash)
+            .unwrap_or_else(|| self.tree.best());
+        let path: Vec<_> = self
+            .tree
+            .ancestors(&tip.hash)
+            .take_while(|b| b.hash != self.tree.finalized().hash)
+            .collect();
+        let candidate = path
+            .iter()
+            .rev()
+            .find(|b| b.epoch_changed)
+            .copied()
+            .or_else(|| path.first().copied())?;
+        if candidate.slot > advertised.slot {
+            return None;
+        }
+        let target = candidate.hash;
+        self.proof_attempts.retain(|(hash, _)| {
+            self.tree.get(hash).is_some() && *hash != self.tree.finalized().hash
+        });
+        let bit = 1u8 << peer;
+        if let Some((_, attempts)) = self
+            .proof_attempts
+            .iter_mut()
+            .find(|(hash, _)| *hash == target)
+        {
+            if *attempts & bit != 0 {
+                return None;
+            }
+            *attempts |= bit;
+        } else {
+            self.proof_attempts.push((target, bit));
+        }
+        self.proof_owner = Some((peer, target));
+        Some(target)
+    }
+
+    fn finalize(&mut self, target: Hash, bytes: &[u8]) -> Result<(), finality::Error> {
+        let limits = self.proof_limits();
+        let proof = Justification::decode(&self.params, bytes, limits)?;
+        let verified = proof.verify(
+            &self.params,
+            self.authorities.set_id(),
+            self.authorities.current(),
+            &target,
+            limits,
+            |hash| self.tree.get(hash).and_then(finality::ancestry_link),
+        )?;
+        let result = self.tree.finalize(&verified, &mut self.authorities)?;
+        if result.finalized.is_empty() {
+            return Ok(());
+        }
+        let notification = Notification::Finalized {
+            finalized_blocks_hashes: result.finalized,
+            pruned_blocks: result.pruned,
+            best_block_hash_if_changed: result.best_changed.then(|| self.tree.best().hash),
+        };
+        self.subscribers
+            .retain(|tx| tx.try_send(notification.clone()).is_ok());
+        self.proof_attempts.retain(|(hash, _)| {
+            self.tree.get(hash).is_some() && *hash != self.tree.finalized().hash
+        });
+        Ok(())
+    }
+
     fn subscribe(&mut self, buffer_size: usize, runtime_interest: bool) -> SubscribeAll {
         self.subscribers.retain(|s| !s.is_closed());
         let queue_limit = (1024 * 1024 / self.header_bytes).clamp(1, 16);
@@ -253,6 +364,10 @@ pub(super) async fn run<P: PlatformRef>(
         subscribers: Vec::new(),
         stopped: false,
         header_bytes: config.header_bytes,
+        authorities: config.authorities,
+        max_blocks: config.max_blocks,
+        proof_owner: None,
+        proof_attempts: Vec::new(),
     }));
     let foreground = async {
         while let Ok(request) = rx.recv().await {
@@ -289,7 +404,7 @@ pub(super) async fn run<P: PlatformRef>(
     // that can immediately repoll the same child within one outer task poll.
     let (shutdown, cancelled) = async_channel::bounded::<()>(1);
     let mut peers_done = futures_util::stream::FuturesUnordered::new();
-    for peer in config.peers {
+    for (peer_index, peer) in config.peers.into_iter().enumerate() {
         let (done, finished) = futures_channel::oneshot::channel();
         peers_done.push(finished);
         let platform_ref = platform.clone();
@@ -299,7 +414,7 @@ pub(super) async fn run<P: PlatformRef>(
         let cancelled = cancelled.clone();
         platform.spawn_task(alloc::format!("jam-peer-{log_name}").into(), async move {
             future::or(
-                peer_loop(&platform_ref, &log_name, &peer, &params, state),
+                peer_loop(&platform_ref, &log_name, &peer, peer_index, &params, state),
                 async {
                     let _ = cancelled.recv().await;
                 },
@@ -319,6 +434,7 @@ async fn peer_loop<P: PlatformRef>(
     platform: &P,
     log_name: &str,
     peer: &Peer,
+    peer_index: usize,
     params: &Params,
     state: Arc<async_lock::Mutex<State>>,
 ) {
@@ -357,11 +473,17 @@ async fn peer_loop<P: PlatformRef>(
                 platform,
                 log_name,
                 params,
+                peer_index,
                 &state,
                 connected.connection,
                 &mut fetch_size,
             )
             .await;
+            let mut s = state.lock().await;
+            if s.proof_owner.is_some_and(|(owner, _)| owner == peer_index) {
+                s.proof_owner = None;
+            }
+            drop(s);
             if platform.now() - started >= Duration::from_secs(60) {
                 backoff = 1;
             }
@@ -409,6 +531,7 @@ async fn drive<P: PlatformRef>(
     platform: &P,
     log_name: &str,
     params: &Params,
+    peer_index: usize,
     state: &Arc<async_lock::Mutex<State>>,
     mut transport: P::MultiStream,
     fetch_size: &mut FetchSize,
@@ -430,8 +553,8 @@ async fn drive<P: PlatformRef>(
             max_message_size: FRAME_BYTES,
             max_body_bytes: FRAME_BYTES,
             max_leaves_in_handshake: 8,
-            max_pending_requests: 1,
-            max_streams: 3,
+            max_pending_requests: 2,
+            max_streams: 4,
         },
     ) else {
         return;
@@ -452,6 +575,7 @@ async fn drive<P: PlatformRef>(
     let mut repair_ready = false;
     let mut announcements = VecDeque::new();
     let mut requested: Option<(net::RequestId, BlockRequest, P::Instant)> = None;
+    let mut proof_requested: Option<(net::RequestId, Hash, P::Instant)> = None;
     let mut advertised: Option<Final> = None;
     loop {
         // A turn performs bounded protocol work and at most one ancestry insertion.
@@ -479,6 +603,12 @@ async fn drive<P: PlatformRef>(
             let _ = connection.cancel_request(*id, net::RequestError::Timeout);
             return;
         }
+        if let Some((id, _, when)) = &proof_requested
+            && now.clone() - when.clone() >= TIMEOUT
+        {
+            let _ = connection.cancel_request(*id, net::RequestError::Timeout);
+            return;
+        }
         if streams
             .iter()
             .any(|s| s.limited_lifetime && now.clone() - s.opened.clone() >= TIMEOUT)
@@ -492,6 +622,7 @@ async fn drive<P: PlatformRef>(
             platform.open_out_substream(&mut transport);
         }
         let mut events = Vec::new();
+        let mut proof_unavailable = false;
         let mut index = 0;
         while index < streams.len() {
             let stream = &mut streams[index];
@@ -499,6 +630,16 @@ async fn drive<P: PlatformRef>(
             let mut access = platform.read_write_access(stream.stream.as_mut()).ok();
             if access.is_none() {
                 drop(access);
+                if let Some((id, _, _)) = &proof_requested
+                    && request == Some(*id)
+                {
+                    let _ = connection.cancel_request(*id, net::RequestError::Rejected);
+                    proof_requested = None;
+                    proof_unavailable = true;
+                    streams.remove(index);
+                    local_progress = true;
+                    continue;
+                }
                 if let Some((id, _, _)) = &requested
                     && request == Some(*id)
                 {
@@ -555,7 +696,11 @@ async fn drive<P: PlatformRef>(
             let retired = progress.reset
                 || matches!(
                     &progress.event,
-                    Some(net::Event::BlockResponse { .. } | net::Event::RequestFailed { .. })
+                    Some(
+                        net::Event::BlockResponse { .. }
+                            | net::Event::JustificationResponse { .. }
+                            | net::Event::RequestFailed { .. }
+                    )
                 );
             drop(rw);
             if let Some(event) = progress.event {
@@ -566,6 +711,9 @@ async fn drive<P: PlatformRef>(
             } else {
                 index += 1;
             }
+        }
+        if proof_unavailable {
+            state.lock().await.proof_owner = None;
         }
         for event in events {
             match event {
@@ -628,6 +776,47 @@ async fn drive<P: PlatformRef>(
                         fetch_size.received(bytes);
                     }
                 }
+                net::Event::JustificationResponse {
+                    request_id,
+                    target,
+                    justification,
+                } => {
+                    let Some((id, expected, _)) = proof_requested.take() else {
+                        return;
+                    };
+                    if id != request_id || target != expected {
+                        return;
+                    }
+                    let mut s = state.lock().await;
+                    s.proof_owner = None;
+                    if let Err(error) = s.finalize(target, &justification) {
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-finality-rejected",
+                            error = alloc::format!("{error:?}")
+                        );
+                        return;
+                    }
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-finalized",
+                        slot = s.tree.finalized().slot,
+                        set_id = s.authorities.set_id(),
+                        retained = s.tree.len()
+                    );
+                }
+                net::Event::RequestFailed { request_id, .. }
+                    if proof_requested
+                        .as_ref()
+                        .is_some_and(|(id, _, _)| *id == request_id) =>
+                {
+                    proof_requested = None;
+                    state.lock().await.proof_owner = None;
+                }
                 net::Event::RequestFailed { request_id, .. } => {
                     let Some((id, request, _)) = requested.take() else {
                         return;
@@ -661,11 +850,19 @@ async fn drive<P: PlatformRef>(
                 net::Event::ProtocolError(_) => return,
             }
         }
-        if !imports.is_empty() {
+        let pause_imports = {
+            let s = state.lock().await;
+            if s.tree.len() >= s.max_blocks && s.proof_owner.is_none() {
+                return;
+            }
+            s.proof_owner.is_some() && s.tree.len() + 1 >= s.max_blocks
+        };
+        if !pause_imports && !imports.is_empty() {
             if let Some(header) = imports.pop_front() {
                 let hash = header.hash(params);
                 let mut s = state.lock().await;
-                // Headers at or before the configured anchor need no import.
+                // Another peer may have finalized this prefix while the batch
+                // was in flight. Its pruned ancestors need no re-import.
                 let result = if header.slot <= s.tree.finalized().slot {
                     Ok(())
                 } else {
@@ -686,7 +883,7 @@ async fn drive<P: PlatformRef>(
                 }
                 local_progress = true;
             }
-        } else if requested.is_none() {
+        } else if !pause_imports && requested.is_none() {
             let header = if repair_ready {
                 repair.pop()
             } else if repair.is_empty() {
@@ -705,6 +902,8 @@ async fn drive<P: PlatformRef>(
                             last_activity = now.clone();
                         }
                         Err(InsertFailure::Tree(tree::InsertError::UnknownParent)) => {
+                            // Finality from another peer may have pruned the
+                            // parent since the repair was marked ready.
                             repair_ready = false;
                             repair.push(header);
                             if repair.len() >= REPAIR_LIMIT {
@@ -718,33 +917,53 @@ async fn drive<P: PlatformRef>(
                 local_progress = true;
             }
         }
-        if handshaken && requested.is_none() && !repair_ready && imports.is_empty() {
-            let s = state.lock().await;
-            let request = if let Some(header) = repair.last() {
-                Some(BlockRequest {
-                    hash: header.parent,
-                    direction: Direction::DescendingInclusive,
-                    max_blocks: 1,
-                })
-            } else if waiting_for_finality.is_none() {
-                let head = cursor
-                    .and_then(|hash| s.tree.get(&hash))
-                    .unwrap_or_else(|| s.tree.best());
-                (peer_slot > head.slot).then_some(BlockRequest {
-                    hash: head.hash,
-                    direction: Direction::AscendingExclusive,
-                    max_blocks: fetch_size.count,
-                })
-            } else {
-                None
-            };
-            if let Some(request) = request {
-                let Ok(id) = connection.request_blocks(request.clone()) else {
+        if handshaken
+            && proof_requested.is_none()
+            && let Some(advertised) = &advertised
+        {
+            let mut s = state.lock().await;
+            if let Some(target) = s.reserve_proof(peer_index, advertised) {
+                let Ok(id) = connection.request_justification(target) else {
                     return;
                 };
-                requested = Some((id, request, platform.now()));
+                proof_requested = Some((id, target, platform.now()));
                 local_progress = true;
-                log!(platform, Debug, log_name, "jam-block-request-queued");
+            }
+        }
+        if handshaken && requested.is_none() && !repair_ready && imports.is_empty() {
+            let s = state.lock().await;
+            if s.tree.len() + 1 >= s.max_blocks && s.proof_owner.is_some() {
+                // The proof already in flight must get a turn before more imports.
+            } else if s.tree.len() >= s.max_blocks && s.proof_owner.is_none() {
+                // All proof candidates failed: don't deadlock on an unfinalizable fork.
+                return;
+            } else {
+                let request = if let Some(header) = repair.last() {
+                    Some(BlockRequest {
+                        hash: header.parent,
+                        direction: Direction::DescendingInclusive,
+                        max_blocks: 1,
+                    })
+                } else if waiting_for_finality.is_none() {
+                    let head = cursor
+                        .and_then(|hash| s.tree.get(&hash))
+                        .unwrap_or_else(|| s.tree.best());
+                    (peer_slot > head.slot).then_some(BlockRequest {
+                        hash: head.hash,
+                        direction: Direction::AscendingExclusive,
+                        max_blocks: fetch_size.count,
+                    })
+                } else {
+                    None
+                };
+                if let Some(request) = request {
+                    let Ok(id) = connection.request_blocks(request.clone()) else {
+                        return;
+                    };
+                    requested = Some((id, request, platform.now()));
+                    local_progress = true;
+                    log!(platform, Debug, log_name, "jam-block-request-queued");
+                }
             }
         }
         // Wake for substreams, transport buffer progress, or bounded protocol deadlines.
@@ -755,9 +974,8 @@ async fn drive<P: PlatformRef>(
                 // after committing FIN. No new platform edge is promised for that
                 // work. Poll substreams above, then cooperatively drive again.
                 if local_progress
-                    || repair_ready
-                    || !imports.is_empty()
-                    || (requested.is_none() && !announcements.is_empty())
+                    || ((repair_ready || !imports.is_empty()) && !pause_imports)
+                    || (!pause_imports && requested.is_none() && !announcements.is_empty())
                 {
                     return None;
                 }
@@ -791,14 +1009,18 @@ async fn drive<P: PlatformRef>(
                             return;
                         };
                         request = match kind {
-                            net::SubstreamKind::Ce128 { request_id } => Some(request_id),
+                            net::SubstreamKind::Ce128 { request_id }
+                            | net::SubstreamKind::Ce130 { request_id } => Some(request_id),
                             _ => None,
                         };
                         if connection.substream_opened(id, kind).is_err() {
                             let _ = connection.outgoing_open_failed(kind);
                             return;
                         }
-                        matches!(kind, net::SubstreamKind::Ce128 { .. })
+                        matches!(
+                            kind,
+                            net::SubstreamKind::Ce128 { .. } | net::SubstreamKind::Ce130 { .. }
+                        )
                     }
                     SubstreamDirection::Inbound => {
                         if connection.substream_incoming(id).is_err() {
