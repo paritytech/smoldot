@@ -193,7 +193,6 @@ impl ClosestDescendant {
                 (None, Some(base_trie_key)) => (base_trie_key.skip(iter_key_len).collect(), false),
                 (None, None) => {
                     // If neither the base trie nor the diff contain any descendant, then skip ahead.
-                    self.inner.maybe_finish_rewalk();
                     return if let Some(parent_node) = self.inner.stack.last_mut() {
                         // If the element has a parent, indicate that the current iterated node
                         // doesn't exist and continue the algorithm.
@@ -463,8 +462,6 @@ impl ClosestDescendantMerkleValue {
         // bug somewhere in the API user's code.
         debug_assert!(merkle_value.len() == 32 || trie::trie_node::decode(merkle_value).is_ok());
 
-        self.inner.maybe_finish_rewalk();
-
         if let Some(parent_node) = self.inner.stack.last_mut() {
             // If the element has a parent, add the Merkle value to its children and resume the
             // algorithm.
@@ -545,7 +542,6 @@ impl TrieNodeInsertUpdateEvent {
 
     /// Resume the computation.
     pub fn resume(mut self) -> InProgress {
-        self.inner.maybe_finish_rewalk();
         if let Some(parent_node) = self.inner.stack.last_mut() {
             parent_node.children.push(Some(self.merkle_value));
             self.inner.next()
@@ -610,7 +606,6 @@ impl TrieNodeRemoveEvent {
     pub fn resume(mut self) -> InProgress {
         match self.ty {
             TrieNodeRemoveEventTy::NoChildrenLeft => {
-                self.inner.maybe_finish_rewalk();
                 if let Some(parent_node) = self.inner.stack.last_mut() {
                     parent_node.children.push(None);
                     self.inner.next()
@@ -681,8 +676,7 @@ struct Inner {
     /// a second time to recalculate its Merkle value. Removals in that subtree were already
     /// reported during the first walk, so they are not reported again while this is `Some`.
     ///
-    /// The re-walk is over once the stack shrinks back to this depth. See
-    /// [`Inner::maybe_finish_rewalk`].
+    /// The re-walk is over once the stack shrinks back to this depth, see [`Inner::next`].
     rewalk_start_stack_len: Option<usize>,
 
     /// Same value as [`Config::diff`].
@@ -707,19 +701,14 @@ struct InProgressNode {
 }
 
 impl Inner {
-    /// Clears [`Inner::rewalk_start_stack_len`] if the stack is back at the depth where the
-    /// re-walk started, meaning that the re-walk is over.
-    ///
-    /// Must be called every time the calculation of a node finishes, right before its result is
-    /// pushed to the children of its parent.
-    fn maybe_finish_rewalk(&mut self) {
+    /// Analyzes the content of the [`Inner`] and progresses the algorithm.
+    fn next(mut self: Box<Self>) -> InProgress {
+        // `next` is called right after a node's result is pushed to its parent's children. If
+        // the stack is back at the depth where the re-walk started, the re-walk is over.
         if self.rewalk_start_stack_len == Some(self.stack.len()) {
             self.rewalk_start_stack_len = None;
         }
-    }
 
-    /// Analyzes the content of the [`Inner`] and progresses the algorithm.
-    fn next(self: Box<Self>) -> InProgress {
         if self.stack.last().map_or(false, |n| n.children.len() == 16) {
             // Finished obtaining `MaybeChildren` and jumping to obtaining `MaybeStorageValue`.
             return InProgress::StorageValue(StorageValue(self));
