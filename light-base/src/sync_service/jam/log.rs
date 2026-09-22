@@ -8,8 +8,10 @@
 //     jam-<area>-<what>[; key=value, key=value, ...]
 //
 // logged at `Debug`. A value is one token without `, ` or `=` (see
-// [`Token`]). `slot=` is the connection slot. `req=` ties together the lines
-// about one request; its outcome line adds `outcome=` and `elapsed_ms=`.
+// [`Token`]; `-` when the field does not apply). `slot=` is the connection
+// slot, except on the lines that carry a block slot and name the connection
+// `conn=`. `req=` ties together the lines about one request; its outcome line
+// adds `outcome=` and `elapsed_ms=`.
 
 use crate::platform::PlatformRef;
 use core::{
@@ -83,6 +85,18 @@ impl fmt::Display for Hex<'_> {
     }
 }
 
+/// The value, or `-` when the field does not apply.
+pub(super) struct Opt<T>(pub(super) Option<T>);
+
+impl<T: fmt::Display> fmt::Display for Opt<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(value) => value.fmt(f),
+            None => f.write_str("-"),
+        }
+    }
+}
+
 /// An error's variant path as one token: its `Debug` output without
 /// whitespace and without the fields of struct variants, for example
 /// `Decode(LengthLimit)` or `WrongSetId`.
@@ -131,16 +145,19 @@ pub(super) enum End {
     Idle,
     StreamOpenTimeout,
     BlockTimeout,
+    JustificationTimeout,
     StreamTimeout,
     StreamReset,
     Transport,
     Limit,
     UnexpectedResponse,
+    FinalityRejected,
     RootUnextendable,
     MessageTooLarge,
     ProtocolError,
     RequestRefused,
     InsertFailed,
+    TreeFull,
 }
 
 impl End {
@@ -151,12 +168,19 @@ impl End {
 
 #[cfg(test)]
 mod tests {
-    use super::{Hex, Token};
+    use super::{End, Hex, Opt, Token};
     use alloc::string::ToString as _;
-    use smoldot::jam::{codec::DecodeError, net};
+    use smoldot::jam::{codec::DecodeError, finality, net};
 
     #[test]
     fn tokens_are_variant_paths_without_separators() {
+        let wrong = finality::Error::WrongSetId {
+            expected: 1,
+            received: 2,
+        };
+        assert_eq!(Token(&wrong).to_string(), "WrongSetId");
+        let decode = finality::Error::Decode(DecodeError::LengthLimit);
+        assert_eq!(Token(&decode).to_string(), "Decode(LengthLimit)");
         let item = net::ProtocolError::Decode(DecodeError::InvalidDiscriminant(3));
         assert_eq!(Token(&item).to_string(), "Decode(InvalidDiscriminant(3))");
     }
@@ -164,5 +188,8 @@ mod tests {
     #[test]
     fn values_are_single_tokens() {
         assert_eq!(Hex(&[0xab, 0x01]).to_string(), "0xab01");
+        assert_eq!(Opt::<u64>(None).to_string(), "-");
+        assert_eq!(Opt(Some(7)).to_string(), "7");
+        assert_eq!(End::JustificationTimeout.as_str(), "justification-timeout");
     }
 }

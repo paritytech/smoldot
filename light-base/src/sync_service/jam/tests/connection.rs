@@ -342,6 +342,7 @@ fn external_verified_tree_memory_and_full_preserve_fixed_anchor() {
         max_epoch_records: NonZeroUsize::new(8).unwrap(),
     };
     full.tree = HeaderTree::new(full.params.clone(), anchor.clone(), limits).unwrap();
+    full.max_blocks = 2;
     let snapshot = full.subscribe(16, false);
     let [first, second] = [0, 1].map(|index| fixture_header(&full.params, index));
     full.insert(first, 1_800_000_000).unwrap();
@@ -733,7 +734,10 @@ fn checkpoint_fixture(index: usize) -> Value {
         .unwrap();
     let item =
         |index: u8| items.iter().find(|item| item["index"] == index).unwrap()["value_hex"].clone();
-    json!({"header":checkpoint["header_hex"], "state":{"safrole":item(4),"entropy":item(6),"active_validators":item(8),"slot":item(11)}})
+    // These header-sync fixtures carry no finality, so the checkpoint gets
+    // explicit trusted GRANDPA state.
+    let keys = vec![hex::encode([1; 32]); 6];
+    json!({"finality":{"set_id":0,"current":keys,"next":keys}, "header":checkpoint["header_hex"], "state":{"safrole":item(4),"entropy":item(6),"active_validators":item(8),"slot":item(11)}})
 }
 
 #[test]

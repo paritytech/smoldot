@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-//! Header-only JAM synchronization. The configured anchor never advances.
+//! Header-only JAM synchronization with verified GRANDPA root advancement.
 //!
 //! Memory is bounded: the header tree and its rebuild copy share [`TREE_BYTES`]
 //! and hold at most 4096 headers, a response is at most [`FRAME_BYTES`], each
@@ -19,10 +19,11 @@ use core::{net::IpAddr, num::NonZeroUsize, time::Duration};
 use futures_lite::{StreamExt as _, future};
 use smoldot::jam::{
     chain_spec::{self, JamChainSpec},
+    finality::{self, AuthoritySet},
     params::Params,
     state::{LightState, StateError},
     tree::{self, HeaderTree},
-    types::{GenesisLightState, Header},
+    types::{GenesisLightState, Hash, Header},
     verify::verified_genesis,
 };
 
@@ -58,6 +59,9 @@ pub enum ConfigError {
     /// The trusted anchor does not fit in the header tree.
     #[display("JAM trusted anchor exceeds tree budget")]
     AnchorExceedsTreeBudget,
+    /// The genesis header gives no valid GRANDPA authority set.
+    #[display("JAM genesis finality: {_0}")]
+    GenesisFinality(finality::Error),
     /// The chain is already used by too many clients.
     #[display("too many chain references")]
     TooManyReferences,
@@ -68,6 +72,8 @@ pub(crate) struct Config {
     tree: HeaderTree,
     peers: Vec<Peer>,
     header_bytes: usize,
+    authorities: AuthoritySet,
+    max_blocks: usize,
 }
 
 struct Peer {
@@ -80,11 +86,18 @@ impl Config {
     pub(crate) fn from_spec(spec: &JamChainSpec) -> Result<Self, ConfigError> {
         let params = spec.params().clone();
         let (header_bytes, limits) = memory_limits(&params)?;
+        let max_blocks = limits.max_blocks;
         let (header, raw_state) = spec.checkpoint().map_or(
             (spec.genesis_header(), spec.genesis_light_state()),
             |checkpoint| (&checkpoint.header, &checkpoint.state),
         );
         let state = Self::anchor_state(&params, raw_state)?;
+        let authorities = match spec.checkpoint() {
+            Some(checkpoint) => checkpoint.finality.clone(),
+            None => {
+                AuthoritySet::from_genesis(&params, header).map_err(ConfigError::GenesisFinality)?
+            }
+        };
         let mut peers = Vec::new();
         for (index, node) in spec.boot_nodes().enumerate() {
             let identity = P256PeerId::from_text(&node.p256_id_text)
@@ -104,6 +117,8 @@ impl Config {
             params,
             tree,
             peers,
+            authorities,
+            max_blocks: max_blocks.get(),
             header_bytes,
         })
     }
@@ -158,6 +173,12 @@ struct State {
     subscribers: Vec<async_channel::Sender<Notification>>,
     stopped: bool,
     header_bytes: usize,
+    authorities: AuthoritySet,
+    max_blocks: usize,
+    /// A single shared proof reservation, deduplicated across peer drivers.
+    proof_owner: Option<(usize, Hash)>,
+    /// Attempted configured peers per retained target. Never grows beyond the tree.
+    proof_attempts: Vec<(Hash, u8)>,
 }
 
 #[derive(Debug)]
@@ -291,6 +312,10 @@ async fn run<P: PlatformRef>(
         subscribers: Vec::new(),
         stopped: false,
         header_bytes: config.header_bytes,
+        authorities: config.authorities,
+        max_blocks: config.max_blocks,
+        proof_owner: None,
+        proof_attempts: Vec::new(),
     }));
     let foreground = async {
         while let Ok(request) = rx.recv().await {
@@ -333,6 +358,7 @@ async fn run<P: PlatformRef>(
 
 mod blocks;
 mod connection;
+mod grandpa;
 mod log;
 
 #[cfg(all(test, feature = "std"))]

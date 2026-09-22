@@ -3,7 +3,8 @@
 //! Helpers shared by the JAM unit tests.
 
 use super::{
-    codec::DecodeError,
+    codec::{self, DecodeError},
+    finality::Target,
     params::Params,
     tree::{HeaderTree, Insert, InsertError, VerifySuccess},
     types::{Hash, Header},
@@ -134,4 +135,30 @@ pub(crate) fn verify_and_insert(
         VerifySuccess::AlreadyKnown => Ok(Insert::AlreadyKnown),
         VerifySuccess::Verified(verified) => tree.insert_verified(verified),
     }
+}
+
+/// A GRANDPA justification in PolkaJam's encoding. Each vote is a target, a
+/// signature and an authority.
+pub(crate) fn justification(
+    params: &Params,
+    (round, set_id, target): (u64, u32, &Target),
+    votes: &[(Target, [u8; 64], [u8; 32])],
+    ancestries: &[Header],
+) -> Vec<u8> {
+    let target_bytes = |t: &Target| [&t.hash[..], &t.state_root, &t.slot.to_le_bytes()].concat();
+    let mut out = [&round.to_le_bytes()[..], &set_id.to_le_bytes()].concat();
+    out.extend(target_bytes(target));
+    out.extend(codec::encode_natural(u64::try_from(votes.len()).unwrap()));
+    for (target, signature, authority) in votes {
+        out.extend(target_bytes(target));
+        out.extend(signature);
+        out.extend(authority);
+    }
+    out.extend(codec::encode_natural(
+        u64::try_from(ancestries.len()).unwrap(),
+    ));
+    for header in ancestries {
+        out.extend(header.encode(params));
+    }
+    out
 }
