@@ -329,3 +329,104 @@ export async function runE2E({ network, specPath, wrongSpecPath, report, log }) 
     log(`assertions: ${assertions.length - failed.length}/${assertions.length} passed`);
     return failed.length === 0;
 }
+/** Manual aged-network acceptance, independent of the short CI gate. */
+export async function runAged({ network, specPath, report, log = console.log, signal }) {
+    const spec = JSON.parse(await fs.readFile(specPath, 'utf8'));
+    const genesis = hashOfHeaderHex(spec.genesis_header).slice(2);
+    const hashHex = hash => Buffer.from(hash, 'base64').toString('hex');
+    const minimum = Number(process.env.JAM_AGED_BLOCKS ?? 130);
+    if (!Number.isSafeInteger(minimum) || minimum < 1 || minimum > 100000) throw new Error('Invalid JAM_AGED_BLOCKS');
+    const ageStarted = Date.now();
+    let count, tip;
+    // Count actual ancestors: the first live slot can be millions past genesis.
+    for (;;) {
+        signal?.throwIfAborted();
+        tip = await network.rpc('bestBlock');
+        let hash = tip.header_hash;
+        count = 0;
+        while (hashHex(hash) !== genesis) {
+            if (++count > 100000) throw new Error('Aged ancestry exceeds measurement budget');
+            hash = (await network.rpc('parent', [hash])).header_hash;
+        }
+        if (count >= minimum) break;
+        if (Date.now() - ageStarted > minimum * SLOT_SECONDS * 2000 + 120000) throw new Error('Network did not age in time');
+        log(`aging: ${count}/${minimum} blocks`);
+        await delay(30000, undefined, { signal });
+    }
+    const boundMs = Number(process.env.JAM_AGED_BOUND_MS ?? 180000);
+    if (!Number.isSafeInteger(boundMs) || boundMs < 1) throw new Error('Invalid JAM_AGED_BOUND_MS');
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, args: ['--disable-features=LocalNetworkAccessChecks'] });
+    let page;
+    try {
+        page = await browser.newPage();
+        await page.route('http://localhost/**', async route => {
+            const pathname = new URL(route.request().url()).pathname;
+            const relative = pathname === '/' ? 'test/jam/page.html' : pathname.startsWith('/jam/') ? 'test' + pathname : pathname.slice(1);
+            await route.fulfill({ path: path.join(PACKAGE_DIR, relative) });
+        });
+        await page.goto(PAGE_URL);
+        await page.waitForFunction(() => window.__ready);
+        const started = Date.now();
+        await page.evaluate(async spec => {
+            window.__jam.startClient('aged', { maxLogLevel: 4, cpuRateLimit: 0.5 });
+            await window.__jam.addChain('aged', 'jam', spec);
+            window.__agedSub = await window.__jam.rpc('aged', 'jam', 'chainHead_v1_follow', [false]);
+        }, JSON.stringify(spec));
+        let cursor = 0, imported = 0, firstMs, best, finalized = 0;
+        const reached = await waitFor(async () => {
+            signal?.throwIfAborted();
+            const batch = await page.evaluate(async since => {
+                const batch = window.__jam.events('aged', 'jam', since);
+                const hashes = batch.entries.filter(e => e.event === 'newBlock').map(e => e.blockHash);
+                if (hashes.length) await window.__jam.rpc('aged', 'jam', 'chainHead_v1_unpin', [window.__agedSub, hashes]);
+                return batch;
+            }, cursor);
+            cursor = batch.total;
+            for (const event of batch.entries) {
+                if (event.event === 'stop') throw new Error('Aged subscription stopped');
+                if (event.event === 'newBlock') { imported++; firstMs ??= Date.now() - started; }
+                if (event.event === 'bestBlockChanged') best = event.bestBlockHash;
+                if (event.event === 'finalized') finalized++;
+            }
+            const live = await network.rpc('bestBlock');
+            return best === '0x' + hashHex(live.header_hash);
+        }, boundMs, 100);
+        if (!reached) throw new Error(`Fresh client failed to reach live tip in ${boundMs}ms`);
+        const elapsedMs = Date.now() - started;
+        report.aged = { blocksAtStart: count, tipSlotAtStart: tip.slot, firstNewBlockMs: firstMs,
+            timeToTipMs: elapsedMs, imported, blocksPerSecond: imported * 1000 / elapsedMs,
+            finalizedEvents: finalized, boundMs, cpuRateLimit: 0.5, best, browser: browser.version() };
+        report.logs = (await page.evaluate(() => window.__jam.logs('aged'))).entries;
+        log('PASS aged: ' + JSON.stringify(report.aged));
+    } finally {
+        if (page) report.logs = (await page.evaluate(() => window.__jam?.logs('aged')))?.entries;
+        await browser.close();
+    }
+}
+
+// `node test/jam/e2e.mjs --aged` starts a GRANDPA network and waits for 130
+// blocks. JAM_AGED_ATTACH_DIR + JAM_RPC_PORT reuse an already running network.
+if (process.argv[1] && url.pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url && process.argv.includes('--aged')) {
+    const { JamNetwork, generateSpecs, resolveBinaries } = await import('./network.mjs');
+    const os = await import('node:os');
+    const runtimeDir = process.env.JAM_AGED_ATTACH_DIR ?? await fs.mkdtemp(path.join(os.tmpdir(), 'jam-aged-'));
+    const { binDir } = await resolveBinaries();
+    const network = new JamNetwork({ binDir, runtimeDir, rpcPort: Number(process.env.JAM_RPC_PORT ?? 25800), finalityMode: 'grandpa', log: console.log });
+    const report = { startedAt: new Date().toISOString() };
+    const abort = new AbortController();
+    for (const [name, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+        process.once(name, () => { process.exitCode = code; abort.abort(new Error(name)); });
+    }
+    try {
+        const { specPath } = await generateSpecs({ runtimeDir });
+        if (!process.env.JAM_AGED_ATTACH_DIR) await network.start();
+        await runAged({ network, specPath, report, signal: abort.signal });
+    } catch (error) {
+        report.error = String(error.stack ?? error);
+        console.error(report.error);
+        process.exitCode ??= 1;
+    } finally {
+        if (!process.env.JAM_AGED_ATTACH_DIR) await network.stop();
+        await fs.writeFile(path.join(runtimeDir, process.env.JAM_AGED_REPORT ?? 'aged-report.json'), JSON.stringify(report, null, 2) + '\n');
+    }
+}

@@ -451,7 +451,7 @@ mod jam_tests {
                     sync_service::Notification::Finalized {
                         finalized_blocks_hashes: vec![root],
                         best_block_hash_if_changed: None,
-                        pruned_blocks: Vec::new()
+                        pruned_blocks: vec![[8; 32]]
                     },
                     &tx
                 )
