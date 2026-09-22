@@ -155,3 +155,18 @@ connect; the 90 s budget is a safety margin.
   `npm test` never starts a network.
 - The test does not rebuild the browser bundle; it fails fast with instructions
   if `dist/mjs/index-browser.js` is missing.
+## Aged-network catch-up (D14)
+
+After building the browser bundle, run `node test/jam/e2e.mjs --aged` from
+`wasm-node/javascript`. This manual runner starts GRANDPA nodes, counts actual
+ancestors until the network has at least 130 blocks, then starts a fresh browser
+client at `cpuRateLimit: 0.5`. It requires reaching the current RPC tip within
+180 seconds and records first-block latency, time to tip, imported blocks per
+second, and finality events in `aged-report.json` in its temporary runtime
+directory. Allow about fourteen minutes for network aging.
+
+Use `JAM_AGED_ATTACH_DIR=/path/to/running/runtime JAM_RPC_PORT=25800` to measure
+an existing network without restarting it. `JAM_AGED_BLOCKS` changes the minimum
+age in actual blocks; `JAM_AGED_BOUND_MS` changes the catch-up deadline.
+`CHROMIUM_PATH` selects an installed browser, including on NixOS. The short
+`npm run test:jam` CI gate remains separate from this deliberate aging wait.

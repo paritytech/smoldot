@@ -9,6 +9,7 @@
 
 use super::{
     codec::{self, DecodeError},
+    finality::AuthoritySet,
     params::Params,
     types::{Ed25519Public, GenesisLightState, Header},
 };
@@ -31,6 +32,8 @@ pub struct JamChainSpec {
 pub struct Checkpoint {
     pub header: Header,
     pub state: GenesisLightState,
+    /// Trusted GRANDPA state after finalizing this header.
+    pub finality: AuthoritySet,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +50,12 @@ pub struct BootNode {
 /// Failures retain the JSON field/state key or bootnode index responsible.
 #[derive(Debug)]
 pub enum Error {
+    MissingField {
+        field: &'static str,
+    },
+    InvalidFinality {
+        field: &'static str,
+    },
     Json(serde_json::Error),
     Hex {
         field: String,
@@ -156,6 +165,14 @@ struct RawSpec {
 struct RawCheckpoint {
     header: String,
     state: RawCheckpointState,
+    finality: Option<RawFinality>,
+}
+
+#[derive(Deserialize)]
+struct RawFinality {
+    set_id: Option<u32>,
+    current: Option<Vec<String>>,
+    next: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -331,7 +348,42 @@ impl JamChainSpec {
                         checkpoint: header.slot,
                     });
                 }
-                Ok(Checkpoint { header, state })
+                let raw = raw.finality.ok_or(Error::MissingField {
+                    field: "checkpoint.finality",
+                })?;
+                let set_id = raw.set_id.ok_or(Error::MissingField {
+                    field: "checkpoint.finality.set_id",
+                })?;
+                let keys = |values: Option<Vec<String>>,
+                            field: &'static str|
+                 -> Result<Vec<Ed25519Public>, Error> {
+                    let values = values.ok_or(Error::MissingField { field })?;
+                    if !params.is_valid_validator_count(values.len()) {
+                        return Err(Error::InvalidFinality { field });
+                    }
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            hex_bytes(field, &value)?
+                                .try_into()
+                                .map_err(|_| Error::InvalidFinality { field })
+                        })
+                        .collect()
+                };
+                let finality = AuthoritySet::from_checkpoint(
+                    &params,
+                    set_id,
+                    keys(raw.current, "checkpoint.finality.current")?,
+                    keys(raw.next, "checkpoint.finality.next")?,
+                )
+                .map_err(|_| Error::InvalidFinality {
+                    field: "checkpoint.finality",
+                })?;
+                Ok(Checkpoint {
+                    header,
+                    state,
+                    finality,
+                })
             })
             .transpose()?;
         let boot_nodes = raw
@@ -539,7 +591,50 @@ mod tests {
         spec["checkpoint"] = json!({"header":raw["genesis_header"], "state": {
             "safrole":hex::encode(state.safrole.encode(&params)), "entropy":hex::encode(codec::encode_entropy(&state.entropy)),
             "active_validators":hex::encode(codec::encode_active_validators(&state.active_validators)), "slot":hex::encode(header.slot.to_le_bytes())
+        }, "finality": {"set_id": 7,
+            "current": vec![hex::encode([1; 32]); usize::from(params.max_validators)],
+            "next": vec![hex::encode([2; 32]); usize::from(params.max_validators)]
         }});
+    }
+
+    #[test]
+    fn checkpoint_requires_explicit_finality_state() {
+        let (mut raw, _, _) = sample(0, true);
+        checkpoint(&mut raw, 12);
+        let parsed = parse(&raw).unwrap();
+        assert_eq!(parsed.checkpoint().unwrap().finality.set_id(), 7);
+        for (field, name) in [
+            ("set_id", "checkpoint.finality.set_id"),
+            ("current", "checkpoint.finality.current"),
+            ("next", "checkpoint.finality.next"),
+        ] {
+            let mut missing = raw.clone();
+            missing["checkpoint"]["finality"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(matches!(parse(&missing), Err(Error::MissingField { field }) if field == name));
+        }
+        for value in [json!([]), json!(["00"])] {
+            let mut bad = raw.clone();
+            bad["checkpoint"]["finality"]["current"] = value;
+            assert!(matches!(
+                parse(&bad),
+                Err(Error::InvalidFinality {
+                    field: "checkpoint.finality.current"
+                })
+            ));
+        }
+        raw["checkpoint"]
+            .as_object_mut()
+            .unwrap()
+            .remove("finality");
+        assert!(matches!(
+            parse(&raw),
+            Err(Error::MissingField {
+                field: "checkpoint.finality"
+            })
+        ));
     }
 
     #[test]

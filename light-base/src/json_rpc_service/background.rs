@@ -92,9 +92,10 @@ async fn jam_notification(
                 return Err(());
             }
         }
-        sync_service::Notification::BestBlockChanged { .. } => {}
-        // This backend must never claim any post-anchor finality, even if its producer regresses.
-        sync_service::Notification::Finalized { .. } => return Err(()),
+        // JAM sync emits finality only after proof verification and root advancement.
+        // Headers are independently pinned here and survive tree pruning.
+        sync_service::Notification::BestBlockChanged { .. }
+        | sync_service::Notification::Finalized { .. } => {}
     }
     for event in without_runtime_events(&mut follow.headers, notification) {
         responses
@@ -198,7 +199,7 @@ mod jam_tests {
     }
 
     #[test]
-    fn jam_pin_budget_and_finality_fail_closed_without_altering_pins() {
+    fn jam_pin_budget_and_finality_preserve_pinned_headers() {
         smol::block_on(async {
             let (_, notifications) = async_channel::bounded(1);
             let mut follow = JamFollow {
@@ -226,14 +227,16 @@ mod jam_tests {
                     sync_service::Notification::Finalized {
                         finalized_blocks_hashes: vec![[7; 32]],
                         best_block_hash_if_changed: None,
-                        pruned_blocks: Vec::new()
+                        pruned_blocks: vec![[8; 32]]
                     },
                     &tx
                 )
                 .await
-                .is_err()
+                .is_ok()
             );
-            assert!(rx.try_recv().is_err());
+            let event: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+            assert_eq!(event["params"]["result"]["event"], "finalized");
+            assert_eq!(follow.headers[&[7; 32]].len(), JAM_PIN_BYTES);
         });
     }
 }

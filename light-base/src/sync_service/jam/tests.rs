@@ -54,7 +54,11 @@ fn root_state() -> State {
                 max_blocks: NonZeroUsize::new(4).unwrap(),
             },
         ),
-
+        authorities: AuthoritySet::from_checkpoint(&params, 0, vec![[0; 32]; 6], vec![[0; 32]; 6])
+            .unwrap(),
+        max_blocks: 4,
+        proof_owner: None,
+        proof_attempts: Vec::new(),
         params,
         subscribers: Vec::new(),
         stopped: false,
@@ -120,6 +124,8 @@ struct Control {
 struct IoState {
     params: Option<Params>,
     reject_batch_above: Option<u32>,
+    proofs: BTreeMap<Hash, Vec<u8>>,
+    proof_requests: Vec<Hash>,
     preferred_child: Option<(Hash, Hash)>,
     no_blocks: usize,
     fork_announcement: Option<Vec<u8>>,
@@ -317,8 +323,8 @@ impl PlatformRef for FakePlatform {
             inbound: false,
         });
         if !ce && connection.control.lock().unwrap().starve {
-            connection.control.lock().unwrap().io.live_streams += 2;
-            for _ in 0..2 {
+            connection.control.lock().unwrap().io.live_streams += 3;
+            for _ in 0..3 {
                 connection.streams.push_back(FakeStream {
                     control: connection.control.clone(),
                     rw: ReadWrite {
@@ -388,6 +394,20 @@ impl PlatformRef for FakePlatform {
         stream.rw.write_bytes_queued = 0;
         if stream.rw.write_bytes_queueable.is_some() {
             stream.rw.write_bytes_queueable = Some(7);
+        }
+        if stream.ce
+            && !stream.response_started
+            && stream.rw.write_bytes_queueable.is_none()
+            && stream.outgoing[0] == 130
+        {
+            let hash: Hash = stream.outgoing[5..37].try_into().unwrap();
+            let mut c = stream.control.lock().unwrap();
+            c.io.proof_requests.push(hash);
+            let Some(response) = c.io.proofs.get(&hash).cloned() else {
+                return Err("no justification");
+            };
+            stream.incoming = response.into();
+            stream.response_started = true;
         }
         if stream.ce && !stream.response_started && stream.rw.write_bytes_queueable.is_none() {
             assert_eq!(stream.outgoing[0], 128);
@@ -747,6 +767,8 @@ fn all_foreground_requests_are_answered_without_substrate_handles() {
                 tree: state.tree,
                 peers: Vec::new(),
                 header_bytes: 4096,
+                authorities: state.authorities,
+                max_blocks: 4,
             },
         ));
         assert!(service.serialize_chain_information().await.is_none());
@@ -920,6 +942,10 @@ fn external_verified_tree_memory_and_full_preserve_fixed_anchor() {
         subscribers: Vec::new(),
         stopped: false,
         header_bytes: config.header_bytes,
+        authorities: config.authorities,
+        max_blocks: config.max_blocks,
+        proof_owner: None,
+        proof_attempts: Vec::new(),
     };
     for index in 0..36 {
         let header = Header::decode(
@@ -976,6 +1002,10 @@ fn external_verified_tree_memory_and_full_preserve_fixed_anchor() {
         subscribers: Vec::new(),
         stopped: false,
         header_bytes: state.header_bytes,
+        authorities: state.authorities,
+        max_blocks: 2,
+        proof_owner: None,
+        proof_attempts: Vec::new(),
     };
     let snapshot = full.subscribe(16, false);
     let first = Header::decode(
@@ -1494,7 +1524,10 @@ fn checkpoint_fixture(index: usize) -> Value {
         .unwrap();
     let item =
         |index: u8| items.iter().find(|item| item["index"] == index).unwrap()["value_hex"].clone();
-    json!({"header":checkpoint["header_hex"], "state":{"safrole":item(4),"entropy":item(6),"active_validators":item(8),"slot":item(11)}})
+    // These header-sync fixtures do not claim finality. Supply explicit trusted
+    // GRANDPA state rather than deriving it from their slots.
+    let keys = vec![hex::encode([1; 32]); 6];
+    json!({"finality":{"set_id":0,"current":keys,"next":keys}, "header":checkpoint["header_hex"], "state":{"safrole":item(4),"entropy":item(6),"active_validators":item(8),"slot":item(11)}})
 }
 
 fn rejected_add_chain_without_startup(platform: &FakePlatform, specification: &str) -> String {
@@ -2132,6 +2165,350 @@ fn external_checkpoint_public_follow_header_and_older_peer_finality() {
 }
 
 #[test]
+#[ignore = "requires sibling smoldot library fixture in a source checkout"]
+fn external_captured_finality_requests_are_deduplicated_and_notifications_follow_verification() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../lib/src/jam/finality/fixtures/polkajam-grandpa.json");
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let spec = JamChainSpec::from_json_bytes(fixture["spec"].to_string().as_bytes()).unwrap();
+    let config = Config::from_spec(&spec).unwrap();
+    let mut state = State {
+        tree: config.tree,
+        params: config.params,
+        subscribers: Vec::new(),
+        stopped: false,
+        header_bytes: config.header_bytes,
+        authorities: config.authorities,
+        max_blocks: config.max_blocks,
+        proof_owner: None,
+        proof_attempts: Vec::new(),
+    };
+    for encoded in fixture["headers"].as_array().unwrap() {
+        let header = Header::decode(
+            &state.params,
+            &hex::decode(encoded.as_str().unwrap().trim_start_matches("0x")).unwrap(),
+        )
+        .unwrap();
+        state.insert(header, 1_900_000_000).unwrap();
+    }
+    let snapshot = state.subscribe(16, false);
+    let advertised = Final {
+        hash: state.tree.best().hash,
+        slot: state.tree.best().slot,
+    };
+    let first_target = state.reserve_proof(0, &advertised).unwrap();
+    assert_eq!(
+        state.reserve_proof(1, &advertised),
+        None,
+        "deduplicate across peers"
+    );
+    state.proof_owner = None; // First peer failed or timed out.
+    assert_eq!(
+        state.reserve_proof(0, &advertised),
+        None,
+        "do not repeat a rejected target on the same peer"
+    );
+    assert_eq!(state.reserve_proof(1, &advertised), Some(first_target));
+    let root = state.tree.finalized().hash;
+    let set_id = state.authorities.set_id();
+    assert!(state.finalize(first_target, &[0xff]).is_err());
+    assert_eq!(state.tree.finalized().hash, root);
+    assert_eq!(state.authorities.set_id(), set_id);
+    assert!(snapshot.new_blocks.try_recv().is_err());
+    for encoded in fixture["justifications"].as_array().unwrap() {
+        let bytes = hex::decode(encoded.as_str().unwrap()).unwrap();
+        let proof = Justification::decode(&state.params, &bytes, state.proof_limits()).unwrap();
+        state.finalize(proof.target().hash, &bytes).unwrap();
+        let notification = snapshot.new_blocks.try_recv().unwrap();
+        assert!(
+            matches!(notification, Notification::Finalized { ref finalized_blocks_hashes, .. }
+            if finalized_blocks_hashes.last() == Some(&state.tree.finalized().hash))
+        );
+    }
+    assert_eq!(state.authorities.set_id(), 3);
+    assert!(state.tree.len() <= 2);
+    assert!(!snapshot.new_blocks.is_closed());
+}
+
+fn synthetic_driver(blocks: usize, capacity: usize) -> (FakePlatform, Config, Vec<Header>) {
+    let corpus = fixture("d14/synthetic.json");
+    let (platform, boot_spec, _, _) = fixture_setup();
+    let mut spec = corpus["spec"].clone();
+    spec["bootnodes"] = serde_json::from_str::<Value>(&boot_spec).unwrap()["bootnodes"].clone();
+    let spec = JamChainSpec::from_json_bytes(spec.to_string().as_bytes()).unwrap();
+    let mut config = Config::from_spec(&spec).unwrap();
+    config.tree = HeaderTree::new(
+        config.params.clone(),
+        config.tree.finalized().clone(),
+        tree::Config {
+            max_blocks: NonZeroUsize::new(capacity).unwrap(),
+        },
+    );
+    config.max_blocks = capacity;
+    let headers: Vec<_> = corpus["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .take(blocks)
+        .map(|raw| Header::decode(&config.params, &bytes(raw)).unwrap())
+        .collect();
+    let tip = headers.last().unwrap();
+    {
+        let mut c = platform.0.lock().unwrap();
+        c.responses.clear();
+        c.io.params = Some(config.params.clone());
+        for header in &headers {
+            let mut block = header.encode(&config.params);
+            block.extend([0; 7]); // Five components; disputes has three lists.
+            c.responses
+                .insert(header.hash(&config.params), framed(block));
+        }
+        c.handshake = framed(
+            Handshake {
+                final_: Final {
+                    hash: tip.hash(&config.params),
+                    slot: tip.slot,
+                },
+                leaves: vec![],
+            }
+            .encode(),
+        );
+        for (hash, proof) in corpus["proofs"].as_object().unwrap() {
+            c.io.proofs.insert(
+                hex::decode(hash).unwrap().try_into().unwrap(),
+                framed(bytes(proof)),
+            );
+        }
+    }
+    (platform, config, headers)
+}
+
+fn driver_state(config: Config) -> Arc<async_lock::Mutex<State>> {
+    Arc::new(async_lock::Mutex::new(State {
+        tree: config.tree,
+        params: config.params,
+        subscribers: vec![],
+        stopped: false,
+        header_bytes: config.header_bytes,
+        authorities: config.authorities,
+        max_blocks: config.max_blocks,
+        proof_owner: None,
+        proof_attempts: vec![],
+    }))
+}
+
+async fn scripted_drive(
+    platform: &FakePlatform,
+    params: &Params,
+    state: &Arc<async_lock::Mutex<State>>,
+) {
+    let identity = P256PeerId::from_text(
+        fixture("cert_vector.json")[0]["p256_id_text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let connected = platform
+        .connect_multistream(MultiStreamAddress::WebTransport {
+            ip: "127.0.0.1".parse().unwrap(),
+            port: 4433,
+            cert_hashes: Cow::Owned(
+                jam_webtransport_cert::certificate_hashes(&identity, 1_800_000_000).to_vec(),
+            ),
+        })
+        .await;
+    drive(
+        platform,
+        "scripted",
+        params,
+        0,
+        state,
+        connected.connection,
+        &mut FetchSize::default(),
+    )
+    .await;
+}
+
+#[test]
+#[ignore = "requires external deterministic D14 signed corpus; fixtures/d14/generator"]
+fn external_ascending_600_blocks_interleaves_finality_without_reconnect() {
+    smol::block_on(async {
+        let (platform, config, headers) = synthetic_driver(600, 32);
+        let params = config.params.clone();
+        let root = config.tree.finalized().hash;
+        let state = driver_state(config);
+        let subscription = state.lock().await.subscribe(16, false);
+        let mut imported = Vec::new();
+        let mut peak = 0;
+        future::or(
+            async {
+                scripted_drive(&platform, &params, &state).await;
+                panic!("driver disconnected before catch-up completed");
+            },
+            future::or(
+                async {
+                    loop {
+                        let event = subscription.new_blocks.recv().await.unwrap();
+                        if let Notification::Block(block) = event {
+                            imported.push(blake2b_256(&block.scale_encoded_header));
+                        }
+                        let s = state.lock().await;
+                        peak = peak.max(s.tree.len());
+                        assert!(s.tree.len() <= s.max_blocks);
+                        if s.tree.finalized().slot == 600 {
+                            break;
+                        }
+                    }
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(30)).await;
+                    panic!("600-block catch-up timed out");
+                },
+            ),
+        )
+        .await;
+        let expected: Vec<_> = headers.iter().map(|h| h.hash(&params)).collect();
+        assert_eq!(imported, expected);
+        let c = platform.0.lock().unwrap();
+        assert_eq!(c.attempts, 1);
+        assert_eq!(c.requests.len(), 15);
+        assert!(
+            c.requests
+                .iter()
+                .all(|r| r.direction == Direction::AscendingExclusive
+                    && (1..=64).contains(&r.max_blocks))
+        );
+        assert_eq!(
+            c.requests.iter().map(|r| r.hash).collect::<Vec<_>>(),
+            [
+                0, 1, 3, 7, 15, 31, 63, 127, 191, 255, 319, 383, 447, 511, 575
+            ]
+            .into_iter()
+            .map(|index| if index == 0 {
+                root
+            } else {
+                expected[index - 1]
+            })
+            .collect::<Vec<_>>()
+        );
+        for header in headers.iter().filter(|h| h.epoch_mark.is_some()) {
+            assert!(c.io.proof_requests.contains(&header.hash(&params)));
+        }
+        std::println!(
+            "D14 multi: imported=600 CE128={} CE130={} retained_peak={peak}/32 connections={}",
+            c.requests.len(),
+            c.io.proof_requests.len(),
+            c.attempts
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires external deterministic D14 signed corpus; fixtures/d14/generator"]
+fn external_dead_first_child_escapes_through_bounded_announcement_repair() {
+    smol::block_on(async {
+        let (platform, config, headers) = synthetic_driver(10, 32);
+        let params = config.params.clone();
+        let root = config.tree.finalized().hash;
+        let dead = Header::decode(
+            &params,
+            &bytes(&fixture("d14/synthetic.json")["dead_header"]),
+        )
+        .unwrap();
+        let dead_hash = dead.hash(&params);
+        {
+            let mut c = platform.0.lock().unwrap();
+            c.io.proofs.clear();
+            c.io.preferred_child = Some((dead.parent, dead_hash));
+            let mut block = dead.encode(&params);
+            block.extend([0; 7]);
+            c.responses.insert(dead_hash, framed(block));
+            c.io.fork_announcement = Some(framed(
+                smoldot::jam::types::Announcement {
+                    header: headers[9].clone(),
+                    final_: Final {
+                        hash: root,
+                        slot: 0,
+                    },
+                }
+                .encode(&params),
+            ));
+        }
+        let state = driver_state(config);
+        future::or(
+            async {
+                scripted_drive(&platform, &params, &state).await;
+                panic!("fork recovery disconnected");
+            },
+            future::or(
+                async {
+                    loop {
+                        if state.lock().await.tree.best().hash == headers[9].hash(&params) {
+                            break;
+                        }
+                        future::yield_now().await;
+                    }
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(15)).await;
+                    panic!("fork recovery timed out");
+                },
+            ),
+        )
+        .await;
+        let s = state.lock().await;
+        assert!(
+            s.tree.get(&dead_hash).is_some(),
+            "peer opinion must not remove authenticated best"
+        );
+        assert_eq!(s.tree.finalized().hash, root);
+        let c = platform.0.lock().unwrap();
+        assert_eq!(c.attempts, 1);
+        assert_eq!(
+            c.io.no_blocks, 2,
+            "best reset, then repeated dead fallback reset"
+        );
+        assert!(
+            c.requests
+                .iter()
+                .filter(|r| r.direction == Direction::DescendingInclusive)
+                .count()
+                <= REPAIR_LIMIT
+        );
+        assert_eq!(c.requests.iter().filter(|r| r.hash == root).count(), 2);
+        std::println!(
+            "D14 fork: live_tip=10 resets={} CE128={} connections={}",
+            c.io.no_blocks,
+            c.requests.len(),
+            c.attempts
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires external deterministic D14 signed corpus; fixtures/d14/generator"]
+fn external_full_unfinalizable_tree_exits_instead_of_deadlocking() {
+    smol::block_on(async {
+        let (platform, config, _) = synthetic_driver(10, 4);
+        let params = config.params.clone();
+        platform.0.lock().unwrap().io.proofs.clear();
+        let state = driver_state(config);
+        future::or(scripted_drive(&platform, &params, &state), async {
+            smol::Timer::after(Duration::from_secs(10)).await;
+            panic!("full unfinalizable tree deadlocked");
+        })
+        .await;
+        let s = state.lock().await;
+        assert_eq!(s.tree.len(), 4);
+        assert_eq!(s.tree.finalized().slot, 0);
+        assert!(
+            !s.stopped,
+            "dropping the peer leaves shared state available"
+        );
+    });
+}
+
+#[test]
 fn adaptive_batch_limit_stays_lowered_after_oversize_reconnect() {
     let mut size = FetchSize::default();
     for expected in [2, 4, 8, 16, 32, 64, 64] {
@@ -2148,4 +2525,100 @@ fn adaptive_batch_limit_stays_lowered_after_oversize_reconnect() {
     assert_eq!(size.count, 1);
     size.received(100);
     assert_eq!(size.count, 1);
+}
+
+#[test]
+#[ignore = "requires external deterministic D14 signed corpus; fixtures/d14/generator"]
+fn external_oversized_batch_retries_with_persistent_lower_ceiling() {
+    smol::block_on(async {
+        let (platform, config, headers) = synthetic_driver(10, 32);
+        let params = config.params.clone();
+        let state = driver_state(config);
+        platform.0.lock().unwrap().io.reject_batch_above = Some(2);
+        let identity = P256PeerId::from_text(
+            fixture("cert_vector.json")[0]["p256_id_text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut size = FetchSize {
+            count: 8,
+            ceiling: 64,
+        };
+        for expected in [4, 2] {
+            let connected = platform
+                .connect_multistream(MultiStreamAddress::WebTransport {
+                    ip: "127.0.0.1".parse().unwrap(),
+                    port: 4433,
+                    cert_hashes: Cow::Owned(
+                        jam_webtransport_cert::certificate_hashes(&identity, 1_800_000_000)
+                            .to_vec(),
+                    ),
+                })
+                .await;
+            future::or(
+                drive(
+                    &platform,
+                    "oversized",
+                    &params,
+                    0,
+                    &state,
+                    connected.connection,
+                    &mut size,
+                ),
+                async {
+                    smol::Timer::after(Duration::from_secs(10)).await;
+                    panic!("oversized response did not terminate the driver");
+                },
+            )
+            .await;
+            assert_eq!(size.count, expected);
+            assert_eq!(state.lock().await.tree.len(), 1);
+        }
+        let connected = platform
+            .connect_multistream(MultiStreamAddress::WebTransport {
+                ip: "127.0.0.1".parse().unwrap(),
+                port: 4433,
+                cert_hashes: Cow::Owned(
+                    jam_webtransport_cert::certificate_hashes(&identity, 1_800_000_000).to_vec(),
+                ),
+            })
+            .await;
+        future::or(
+            async {
+                drive(
+                    &platform,
+                    "resized",
+                    &params,
+                    0,
+                    &state,
+                    connected.connection,
+                    &mut size,
+                )
+                .await;
+                panic!("resized batch disconnected");
+            },
+            future::or(
+                async {
+                    loop {
+                        if state.lock().await.tree.best().hash == headers[9].hash(&params) {
+                            break;
+                        }
+                        future::yield_now().await;
+                    }
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(10)).await;
+                    panic!("resized batch did not catch up");
+                },
+            ),
+        )
+        .await;
+        assert_eq!(size.count, 2);
+        let c = platform.0.lock().unwrap();
+        assert_eq!(
+            c.requests.iter().map(|r| r.max_blocks).collect::<Vec<_>>(),
+            vec![8, 4, 2, 2, 2, 2, 2]
+        );
+    });
 }

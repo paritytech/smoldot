@@ -43,7 +43,7 @@ impl core::fmt::Display for DecodeError {
 impl core::error::Error for DecodeError {}
 
 /// A checked cursor shared with the fixed-width protocol parameter parser.
-pub(super) struct Decoder<'a> {
+pub(crate) struct Decoder<'a> {
     bytes: &'a [u8],
 }
 
@@ -61,7 +61,7 @@ impl<'a> Decoder<'a> {
         Ok(value)
     }
 
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], DecodeError> {
+    pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], DecodeError> {
         self.take(N)?
             .try_into()
             .map_err(|_| DecodeError::UnexpectedEnd)
@@ -110,7 +110,7 @@ impl<'a> Decoder<'a> {
         Ok(value)
     }
 
-    fn length(&mut self, max: usize) -> Result<usize, DecodeError> {
+    pub(crate) fn length(&mut self, max: usize) -> Result<usize, DecodeError> {
         let len = usize::try_from(self.natural()?).map_err(|_| DecodeError::LengthLimit)?;
         if len > max {
             return Err(DecodeError::LengthLimit);
@@ -129,7 +129,7 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn list<T>(
+    pub(crate) fn list<T>(
         &mut self,
         count: usize,
         min_size: usize,
@@ -334,7 +334,7 @@ pub fn encode_tickets_mark(tickets: &[Ticket]) -> Vec<u8> {
     out
 }
 
-fn read_header(params: &Params, input: &mut Decoder<'_>) -> Result<Header, DecodeError> {
+pub(crate) fn read_header(params: &Params, input: &mut Decoder<'_>) -> Result<Header, DecodeError> {
     let parent = input.array()?;
     let prior_state_root = input.array()?;
     let extrinsic_hash = input.array()?;
@@ -909,6 +909,33 @@ mod tests {
             id: [9; 32],
             attempt: 2,
         }
+    }
+
+    #[test]
+    fn internal_header_cursor_preserves_following_headers_and_bounds() {
+        let params = params();
+        let first = header();
+        let mut second = header();
+        second.slot += 1;
+        let mut bytes = first.encode(&params);
+        bytes.extend(second.encode(&params));
+        bytes.push(99);
+        assert_eq!(
+            Header::decode(&params, &bytes),
+            Err(DecodeError::TrailingBytes)
+        );
+        let mut cursor = Decoder::new(&bytes);
+        let decoded = cursor
+            .list(2, 297, |input| read_header(&params, input))
+            .unwrap();
+        assert_eq!(decoded, vec![first, second]);
+        assert_eq!(cursor.array::<1>().unwrap(), [99]);
+        cursor.finish().unwrap();
+        assert_eq!(Decoder::new(&[4]).length(3), Err(DecodeError::LengthLimit));
+        assert_eq!(
+            Decoder::new(&[0; 3]).array::<4>(),
+            Err(DecodeError::UnexpectedEnd)
+        );
     }
 
     #[test]

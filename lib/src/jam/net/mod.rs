@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-//! Bounded, sans-io JAMNP-S UP0 and block-sequence CE128 initiator.
+//! Bounded, sans-io JAMNP-S UP0, block-sequence CE128 and CE130 initiator.
 //!
 //! The transport supplies authenticated bidirectional streams. Only their opener
 //! sends a kind byte. Call [`Connection::desired_outgoing_substreams`], then report
@@ -28,13 +28,14 @@
 //! cancellation/reset APIs or dropping the connection. No I/O or clock is owned.
 
 mod ce128;
+mod ce130;
 mod framing;
 mod up0;
 
 use crate::jam::{
     codec::DecodeError,
     params::Params,
-    types::{Announcement, Block, BlockRequest, Handshake},
+    types::{Announcement, Block, BlockRequest, Handshake, Hash},
 };
 use alloc::{boxed::Box, vec::Vec};
 
@@ -65,6 +66,7 @@ pub struct Limits {
 pub enum SubstreamKind {
     Up0,
     Ce128 { request_id: RequestId },
+    Ce130 { request_id: RequestId },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,7 +95,7 @@ pub enum Error {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Request termination without a block. Timeouts are decided by the caller.
+/// Request termination without a response. Timeouts are decided by the caller.
 pub enum RequestError {
     /// The peer returned a valid empty block sequence and cleanly finished.
     NoBlocks,
@@ -114,6 +116,13 @@ pub enum Event {
     BlockResponse {
         request_id: RequestId,
         blocks: Vec<Block>,
+    },
+    /// Raw CE130 proof bytes, emitted only after the response FIN. This is not
+    /// evidence of finality. Verify the proof against `target` and trusted authorities.
+    JustificationResponse {
+        request_id: RequestId,
+        target: Hash,
+        justification: Vec<u8>,
     },
     RequestFailed {
         request_id: RequestId,
@@ -139,13 +148,28 @@ pub struct Progress {
 
 struct Pending {
     id: RequestId,
-    request: BlockRequest,
+    request: Request,
     opening: bool,
 }
+enum Request {
+    Block(BlockRequest),
+    Justification(Hash),
+}
+
+impl Request {
+    fn kind(&self, request_id: RequestId) -> SubstreamKind {
+        match self {
+            Self::Block(_) => SubstreamKind::Ce128 { request_id },
+            Self::Justification(_) => SubstreamKind::Ce130 { request_id },
+        }
+    }
+}
+
 enum Stream {
     Incoming,
     Up0(up0::Up0),
     Ce128(Box<ce128::Ce128>),
+    Ce130(Box<ce130::Ce130>),
 }
 #[derive(PartialEq, Eq)]
 enum UpState {
@@ -219,9 +243,7 @@ impl Connection {
         }
         let pending = self.pending.iter_mut().find(|p| !p.opening)?;
         pending.opening = true;
-        Some(SubstreamKind::Ce128 {
-            request_id: pending.id,
-        })
+        Some(pending.request.kind(pending.id))
     }
 
     /// Registers an outgoing stream. On API error, reset the unregistered stream
@@ -244,20 +266,28 @@ impl Connection {
                 self.up = UpState::Active;
                 Stream::Up0(stream)
             }
-            SubstreamKind::Ce128 { request_id } => {
+            SubstreamKind::Ce128 { request_id } | SubstreamKind::Ce130 { request_id } => {
                 let position = self
                     .pending
                     .iter()
-                    .position(|p| p.id == request_id && p.opening)
+                    .position(|p| p.id == request_id && p.opening && p.request.kind(p.id) == kind)
                     .ok_or(Error::InvalidState)?;
-                let stream = ce128::Ce128::new(
-                    request_id,
-                    self.pending[position].request.clone(),
-                    self.limits.max_message_size,
-                )
-                .map_err(Error::Protocol)?;
+                let stream = match &self.pending[position].request {
+                    Request::Block(request) => Stream::Ce128(Box::new(
+                        ce128::Ce128::new(
+                            request_id,
+                            request.clone(),
+                            self.limits.max_message_size,
+                        )
+                        .map_err(Error::Protocol)?,
+                    )),
+                    Request::Justification(target) => Stream::Ce130(Box::new(
+                        ce130::Ce130::new(request_id, *target, self.limits.max_message_size)
+                            .map_err(Error::Protocol)?,
+                    )),
+                };
                 self.pending.remove(position);
-                Stream::Ce128(Box::new(stream))
+                stream
             }
         };
         self.streams.push((id, stream));
@@ -273,11 +303,11 @@ impl Connection {
             SubstreamKind::Up0 if self.up == UpState::Opening => {
                 Ok(self.fail(ProtocolError::Up0Lost))
             }
-            SubstreamKind::Ce128 { request_id } => {
+            SubstreamKind::Ce128 { request_id } | SubstreamKind::Ce130 { request_id } => {
                 let position = self
                     .pending
                     .iter()
-                    .position(|p| p.id == request_id && p.opening)
+                    .position(|p| p.id == request_id && p.opening && p.request.kind(p.id) == kind)
                     .ok_or(Error::InvalidState)?;
                 self.pending.remove(position);
                 Ok(Event::RequestFailed {
@@ -306,7 +336,7 @@ impl Connection {
     }
 
     /// Queues a non-empty bounded block request. Responses may stop early.
-    /// Peer NoData resets are reported through `substream_reset`.
+    /// Peer NoData resets are reported through `substream_reset`, as for CE130.
     pub fn request_blocks(&mut self, request: BlockRequest) -> Result<RequestId, Error> {
         if self.closed {
             return Err(Error::Closed);
@@ -314,10 +344,26 @@ impl Connection {
         if request.max_blocks == 0 {
             return Err(Error::InvalidRequest);
         }
+        self.queue_request(Request::Block(request))
+    }
+
+    /// Queues a CE130 proof request. The caller must first retain and authenticate
+    /// the target header, deduplicate requests across peers, and verify the returned
+    /// bytes before advancing finality. Shares all CE128 stream/request budgets.
+    /// A peer with no proof resets the stream (PolkaJam `NoData`), rather than
+    /// sending an empty optional response. Report that through `substream_reset`.
+    pub fn request_justification(&mut self, target: Hash) -> Result<RequestId, Error> {
+        self.queue_request(Request::Justification(target))
+    }
+
+    fn queue_request(&mut self, request: Request) -> Result<RequestId, Error> {
+        if self.closed {
+            return Err(Error::Closed);
+        }
         let active = self
             .streams
             .iter()
-            .filter(|(_, s)| matches!(s, Stream::Ce128(_)))
+            .filter(|(_, s)| matches!(s, Stream::Ce128(_) | Stream::Ce130(_)))
             .count();
         if active.saturating_add(self.pending.len()) >= self.limits.max_pending_requests {
             return Err(Error::Limit);
@@ -378,7 +424,11 @@ impl Connection {
         let position = self
             .streams
             .iter()
-            .position(|(_, s)| matches!(s, Stream::Ce128(c) if c.id == request_id))
+            .position(|(_, s)| match s {
+                Stream::Ce128(c) => c.id == request_id,
+                Stream::Ce130(c) => c.id == request_id,
+                _ => false,
+            })
             .ok_or(Error::InvalidState)?;
         let (id, _) = self.streams.remove(position);
         Ok((Some(id), Event::RequestFailed { request_id, reason }))
@@ -391,6 +441,10 @@ impl Connection {
         match self.streams.remove(position).1 {
             Stream::Incoming => None,
             Stream::Up0(_) => Some(self.fail(ProtocolError::Up0Lost)),
+            Stream::Ce130(c) => Some(Event::RequestFailed {
+                request_id: c.id,
+                reason,
+            }),
             Stream::Ce128(c) => Some(Event::RequestFailed {
                 request_id: c.id,
                 reason,
@@ -453,6 +507,16 @@ impl Connection {
                 progress.written = up.writer.write(output);
                 up.read(&mut remaining, peer_fin, &self.params, &self.limits)
             }
+            Stream::Ce130(ce) => {
+                progress.written = ce.writer.write(output);
+                if ce.writer.is_empty() && !ce.fin_sent {
+                    ce.fin_sent = true;
+                    progress.finish_write = true;
+                    Ok(None)
+                } else {
+                    ce.read(&mut remaining, peer_fin, self.limits.max_message_size)
+                }
+            }
             Stream::Ce128(ce) => {
                 progress.written = ce.writer.write(output);
                 if ce.writer.is_empty() && !ce.fin_sent {
@@ -470,7 +534,11 @@ impl Connection {
             Ok(event) => {
                 if matches!(
                     event,
-                    Some(Event::BlockResponse { .. } | Event::RequestFailed { .. })
+                    Some(
+                        Event::BlockResponse { .. }
+                            | Event::JustificationResponse { .. }
+                            | Event::RequestFailed { .. }
+                    )
                 ) {
                     self.streams.remove(position);
                 }

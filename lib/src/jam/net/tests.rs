@@ -962,6 +962,167 @@ fn external_captured_frames() {
     }
 }
 
+fn open_justification(c: &mut Connection) -> RequestId {
+    let id = c.request_justification([42; 32]).unwrap();
+    let kind = SubstreamKind::Ce130 { request_id: id };
+    assert_eq!(c.desired_outgoing_substreams(), Some(kind));
+    c.substream_opened(2, kind).unwrap();
+    id
+}
+
+#[test]
+fn ce130_fragmentation_and_fin_gate() {
+    // Deliberately opaque: this layer must not claim consensus verification.
+    let proof = vec![9; 300];
+    for width in [1, 2, 4, 17, 4096] {
+        let mut c = connection();
+        open_up(&mut c);
+        let id = open_justification(&mut c);
+        let mut expected = vec![130];
+        expected.extend(frame(&[42; 32]));
+        assert_eq!(drain(&mut c, 2, width), (expected, true));
+        assert!(feed(&mut c, 2, &frame(&proof), width).is_empty());
+        assert!(c.read_write(2, &[], false, &mut []).event.is_none());
+        assert_eq!(
+            c.read_write(2, &[], true, &mut []).event,
+            Some(Event::JustificationResponse {
+                request_id: id,
+                target: [42; 32],
+                justification: proof.clone(),
+            })
+        );
+        assert!(c.read_write(2, &[], true, &mut []).reset);
+    }
+}
+
+#[test]
+fn ce130_requires_request_fin_before_consuming_response() {
+    let mut c = connection();
+    open_up(&mut c);
+    let id = open_justification(&mut c);
+    let response = frame(&[3; 10]);
+    let p = c.read_write(2, &response, true, &mut [0; 100]);
+    assert!(p.finish_write);
+    assert_eq!(p.read, 0);
+    assert!(p.event.is_none());
+    let p = c.read_write(2, &response, true, &mut []);
+    assert!(!p.finish_write);
+    assert_eq!(p.read, response.len());
+    assert_eq!(
+        p.event,
+        Some(Event::JustificationResponse {
+            request_id: id,
+            target: [42; 32],
+            justification: vec![3; 10],
+        })
+    );
+}
+
+#[test]
+fn ce130_rejects_truncated_oversize_and_multiple_frames() {
+    let mut cases = vec![
+        (vec![], ProtocolError::UnexpectedFin),
+        (vec![1, 0], ProtocolError::UnexpectedFin),
+        (vec![3, 0, 0, 0, 1], ProtocolError::UnexpectedFin),
+        (
+            4097u32.to_le_bytes().to_vec(),
+            ProtocolError::MessageTooLarge,
+        ),
+    ];
+    let mut extra = frame(&[7; 10]);
+    extra.extend(frame(&[8; 10]));
+    cases.push((extra, ProtocolError::TrailingResponse));
+    for (response, error) in cases {
+        let mut c = connection();
+        open_up(&mut c);
+        open_justification(&mut c);
+        drain(&mut c, 2, 100);
+        let p = c.read_write(2, &response, true, &mut []);
+        assert_eq!(p.event, Some(Event::ProtocolError(error)));
+        assert!(p.reset);
+        assert_eq!(c.request_justification([42; 32]), Err(Error::Closed));
+    }
+}
+
+#[test]
+fn ce130_shares_limits_and_checks_reservation_kind() {
+    let mut c = connection();
+    open_up(&mut c);
+    let proof_id = c.request_justification([42; 32]).unwrap();
+    let block_id = c.request_blocks(request()).unwrap();
+    assert_eq!(c.request_justification([43; 32]), Err(Error::Limit));
+    let kind = SubstreamKind::Ce130 {
+        request_id: proof_id,
+    };
+    assert_eq!(c.desired_outgoing_substreams(), Some(kind));
+    let wrong = SubstreamKind::Ce128 {
+        request_id: proof_id,
+    };
+    assert_eq!(c.substream_opened(2, wrong), Err(Error::InvalidState));
+    assert_eq!(c.outgoing_open_failed(wrong), Err(Error::InvalidState));
+    c.substream_opened(2, kind).unwrap();
+    assert_eq!(c.request_blocks(request()), Err(Error::Limit));
+    assert_eq!(
+        c.substream_reset(2, RequestError::Rejected),
+        Some(Event::RequestFailed {
+            request_id: proof_id,
+            reason: RequestError::Rejected,
+        })
+    );
+    assert_eq!(
+        c.desired_outgoing_substreams(),
+        Some(SubstreamKind::Ce128 {
+            request_id: block_id
+        })
+    );
+    c.request_justification([43; 32]).unwrap();
+}
+
+#[test]
+fn ce130_cancel_and_open_failure_free_capacity() {
+    for opening in [false, true] {
+        let mut c = connection();
+        open_up(&mut c);
+        let id = c.request_justification([42; 32]).unwrap();
+        let kind = SubstreamKind::Ce130 { request_id: id };
+        if opening {
+            assert_eq!(c.desired_outgoing_substreams(), Some(kind));
+        }
+        assert_eq!(
+            c.cancel_request(id, RequestError::Timeout).unwrap(),
+            (
+                None,
+                Event::RequestFailed {
+                    request_id: id,
+                    reason: RequestError::Timeout,
+                }
+            )
+        );
+        assert_eq!(c.substream_opened(2, kind), Err(Error::InvalidState));
+        let id = c.request_justification([42; 32]).unwrap();
+        let kind = c.desired_outgoing_substreams().unwrap();
+        assert_eq!(
+            c.outgoing_open_failed(kind),
+            Ok(Event::RequestFailed {
+                request_id: id,
+                reason: RequestError::OpenFailed,
+            })
+        );
+        let id = open_justification(&mut c);
+        assert_eq!(
+            c.cancel_request(id, RequestError::Cancelled).unwrap(),
+            (
+                Some(2),
+                Event::RequestFailed {
+                    request_id: id,
+                    reason: RequestError::Cancelled,
+                }
+            )
+        );
+        assert_eq!(c.substream_reset(2, RequestError::Rejected), None);
+    }
+}
+
 #[test]
 fn ce128_sequences_bind_every_link_count_and_reject_whole_malformed_response() {
     let p = params();
@@ -1045,6 +1206,28 @@ fn ce128_sequences_bind_every_link_count_and_reject_whole_malformed_response() {
             }
         }
     }
+}
+
+#[test]
+fn ce128_no_data_reset_keeps_connection_and_proof_reservation() {
+    let mut c = connection();
+    open_up(&mut c);
+    let block_id = open_ce(&mut c, request());
+    let proof_id = c.request_justification([42; 32]).unwrap();
+    assert_eq!(
+        c.substream_reset(2, RequestError::Rejected),
+        Some(Event::RequestFailed {
+            request_id: block_id,
+            reason: RequestError::Rejected
+        })
+    );
+    assert_eq!(
+        c.desired_outgoing_substreams(),
+        Some(SubstreamKind::Ce130 {
+            request_id: proof_id
+        })
+    );
+    assert!(c.request_blocks(request()).is_ok());
 }
 
 fn captured_connection(capture: &Ce128) -> Connection {

@@ -2,7 +2,7 @@
 
 //! Bounded, fork-aware storage of authenticated JAM headers.
 //!
-//! The trusted starting point is fixed; there is no finalization in the MVP.
+//! The trusted starting point advances only with verified GRANDPA evidence.
 //!
 //! C1 maps query snapshots and insert results to light-base subscription types;
 //! this library must not depend on light-base. An insertion with nonempty
@@ -11,6 +11,7 @@
 //! No notification history is retained here.
 
 use super::{
+    finality::{self, AuthoritySet, VerifiedFinality},
     params::Params,
     types::{Final, Hash, Header},
     verify::{VerifiedHeader, VerifyError, verify_header},
@@ -18,6 +19,10 @@ use super::{
 use crate::chain::fork_tree::{ForkTree, NodeIndex};
 use alloc::vec::Vec;
 use core::{iter, num::NonZeroUsize};
+
+#[cfg(test)]
+#[path = "tree/finality_tests.rs"]
+mod finality_tests;
 
 #[cfg(test)]
 mod tests {
@@ -480,7 +485,7 @@ pub enum InsertError {
     Full,
 }
 
-/// A fixed root plus verified descendants. Queries never expose mutable state.
+/// A finalized root plus verified descendants. Queries never expose mutable state.
 /// Best is the highest verified slot; equal slots retain the earlier insertion.
 /// Lookups are linear; eviction rebuilds the bounded tree in quadratic time.
 pub struct HeaderTree {
@@ -495,6 +500,16 @@ pub struct HeaderTree {
 
 #[cfg(test)]
 type TestVerifier = dyn Fn(&VerifiedHeader, Header) -> Result<VerifiedHeader, VerifyError>;
+
+/// Changes from a verified root advancement. Hashes never include the old root.
+#[derive(Debug)]
+pub struct Finalized {
+    /// Newly finalized hashes in ascending ancestry order, ending at the new root.
+    pub finalized: Vec<Hash>,
+    /// Discarded forks, not ancestors that became finalized.
+    pub pruned: Vec<Hash>,
+    pub best_changed: bool,
+}
 
 impl HeaderTree {
     /// Starts at a caller-trusted authenticated checkpoint/genesis.
@@ -663,7 +678,68 @@ impl HeaderTree {
         }
     }
 
-    /// The starting point, which never changes.
+    /// Advances root and authorities atomically. Each intermediate epoch mark
+    /// needs its own proof before the authority set can be advanced again.
+    pub fn finalize(
+        &mut self,
+        proof: &VerifiedFinality,
+        authorities: &mut AuthoritySet,
+    ) -> Result<Finalized, finality::Error> {
+        let target = proof.target();
+        let block = self
+            .get(&target.hash)
+            .ok_or(finality::Error::UnknownTarget)?;
+        if block.slot != target.slot {
+            return Err(finality::Error::TargetSlotMismatch);
+        }
+        let next = authorities.after_finalizing(&self.params, proof, &block.header)?;
+        let mut finalized = Vec::new();
+        for ancestor in self.ancestors(&target.hash) {
+            if ancestor.hash == self.root.hash {
+                break;
+            }
+            if ancestor.hash != target.hash && ancestor.header.epoch_mark.is_some() {
+                return Err(finality::Error::SkippedAuthorityTransition);
+            }
+            finalized.push(ancestor.hash);
+        }
+        finalized.reverse();
+        let old_best = self.best().hash;
+        let mut pruned = Vec::new();
+        if let Some(index) = self.blocks.find(|b| b.hash == target.hash) {
+            for removed in self.blocks.prune_ancestors(index) {
+                if removed.user_data.hash == target.hash {
+                    self.root = removed.user_data;
+                } else if !removed.is_prune_target_ancestor {
+                    pruned.push(removed.user_data.hash);
+                }
+            }
+            // Surviving indices are stable. Preserve ties if the old best survived.
+            if self.best.is_none_or(|index| !self.blocks.contains(index)) {
+                self.best = self
+                    .blocks
+                    .iter_ancestry_order()
+                    .fold(None, |best: Option<(NodeIndex, u32)>, (index, block)| {
+                        if best.is_none_or(|(_, slot)| block.slot > slot) {
+                            Some((index, block.slot))
+                        } else {
+                            best
+                        }
+                    })
+                    .map(|(index, _)| index);
+            }
+            if let Some(next) = next {
+                *authorities = next;
+            }
+        }
+        Ok(Finalized {
+            finalized,
+            pruned,
+            best_changed: self.best().hash != old_best,
+        })
+    }
+
+    /// Current verified finalized head (initially the trusted starting point).
     pub fn finalized(&self) -> &VerifiedHeader {
         &self.root
     }
