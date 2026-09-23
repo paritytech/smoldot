@@ -287,12 +287,12 @@ impl StorageValue {
                 // Trie node no longer exists after the diff has been applied.
                 // This path is only reached if the trie node has a parent, as otherwise the trie
                 // node is the trie root and thus necessarily exists.
-                let event = TrieNodeRemoveEvent {
+                TrieNodeRemoveEvent {
                     inner: self.0,
                     calculated_elem,
                     ty: TrieNodeRemoveEventTy::NoChildrenLeft,
-                };
-                event.report_unless_rewalking()
+                }
+                .report_unless_rewalking()
             }
 
             (_, None, 1, _parent_node) if !calculated_elem.children_partial_key_changed => {
@@ -306,12 +306,12 @@ impl StorageValue {
                 // To handle this situation, we back jump to `ClosestDescendant` but this time
                 // make sure to skip over `calculated_elem`.
                 // This isn't done here but in `TrieNodeRemoveEvent::resume`.
-                let event = TrieNodeRemoveEvent {
+                TrieNodeRemoveEvent {
                     inner: self.0,
                     calculated_elem,
                     ty: TrieNodeRemoveEventTy::ReplacedWithSingleChild,
-                };
-                event.report_unless_rewalking()
+                }
+                .report_unless_rewalking()
             }
 
             (_, None, 1, _parent_node) => {
@@ -565,7 +565,15 @@ pub struct TrieNodeRemoveEvent {
 }
 
 enum TrieNodeRemoveEventTy {
+    /// The node has no storage value and no children left after the diff. Nothing takes its
+    /// place.
     NoChildrenLeft,
+    /// The node has no storage value and exactly one child left after the diff. Such a node
+    /// can't exist in a trie, so the child takes its place under the node's parent.
+    ///
+    /// The child's partial key grows by the removed node's partial key plus the child index,
+    /// so its Merkle value must be calculated again. [`TrieNodeRemoveEvent::resume`] does this
+    /// by walking the child's subtree a second time, in the same way as the first time.
     ReplacedWithSingleChild,
 }
 
@@ -609,10 +617,17 @@ impl TrieNodeRemoveEvent {
                 }
             }
             TrieNodeRemoveEventTy::ReplacedWithSingleChild => {
-                // The subtree of the single child is walked again below. Removals in that
-                // subtree were already reported during the first walk, so reporting is turned
-                // off until the re-walk is over. An outer re-walk already in progress covers
-                // this one, so it is left untouched.
+                // The removed node has already been popped, so the top of the stack is its
+                // parent, waiting for a Merkle value in the slot the removed node used to fill.
+                // The `ClosestDescendant` returned below asks for the single remaining child,
+                // which pushes it onto the stack and continues the normal walk from there. Once
+                // the child's new Merkle value is pushed to the parent, the stack is back at
+                // its current depth and the algorithm continues as if the removed node had just
+                // been calculated.
+                //
+                // Every removal within the child's subtree was already reported during the
+                // first walk, so reporting is turned off until the stack is back at this depth.
+                // If an outer re-walk is already in progress, it covers this one.
                 if self.inner.rewalk_start_stack_len.is_none() {
                     self.inner.rewalk_start_stack_len = Some(self.inner.stack.len());
                 }
