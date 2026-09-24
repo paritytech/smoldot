@@ -149,7 +149,7 @@ pub fn verify_header(
         return Err(VerifyError::ParentMismatch);
     }
 
-    let parent_slot = parent.post_state.slot;
+    let parent_slot = parent.post_state.slot();
     if header.slot <= parent_slot {
         return Err(VerifyError::SlotNotIncreasing);
     }
@@ -163,10 +163,10 @@ pub fn verify_header(
             if !params.is_valid_validator_count(mark.validators.len()) {
                 return Err(VerifyError::EpochMarkLength);
             }
-            if mark.entropy != parent.post_state.entropy[0] {
+            if mark.entropy != parent.post_state.entropy()[0] {
                 return Err(VerifyError::EpochMarkEntropyMismatch);
             }
-            if mark.tickets_entropy != parent.post_state.entropy[1] {
+            if mark.tickets_entropy != parent.post_state.entropy()[1] {
                 return Err(VerifyError::EpochMarkTicketsEntropyMismatch);
             }
             Some(&mark.validators)
@@ -196,10 +196,11 @@ pub fn verify_header(
             .map_err(VerifyError::InvalidParentState)?;
     }
     if let Some(tickets) = &header.tickets_mark {
-        state.pending_tickets = Some(tickets.clone());
+        state.set_pending_tickets(tickets);
     }
 
     let author = state
+        .epoch()
         .active
         .get(usize::from(header.author_index))
         .ok_or(VerifyError::AuthorIndexOutOfRange)?
@@ -208,7 +209,7 @@ pub fn verify_header(
     let entry = state
         .sealing_entry(epoch_len, header.slot)
         .ok_or(VerifyError::InvalidParentState(StateError::SealingLength))?;
-    let eta3 = &state.entropy[3];
+    let eta3 = &state.entropy()[3];
     let mut encoded = header.encode_unsigned(params);
     let (seal_output, sealed_with_ticket) = match entry {
         SealingEntry::Ticket(ticket) => {
@@ -242,7 +243,7 @@ pub fn verify_header(
     let entropy_output = bandersnatch_vrf_verify(&author, &context, &[], &header.entropy_source)
         .map_err(VerifyError::BadEntropySignature)?;
     state.accumulate_entropy(&entropy_output.0);
-    state.slot = header.slot;
+    state.set_slot(header.slot);
 
     encoded.extend_from_slice(&header.seal);
     Ok(VerifiedHeader {

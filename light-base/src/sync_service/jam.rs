@@ -3,7 +3,12 @@
 //! Header-only JAM synchronization with verified GRANDPA root advancement.
 //!
 //! Resource accounting (estimates, not a process/allocator peak measurement):
-//! the tree and its verification/rebuild copies share 16 MiB. Each of two peers
+//! the tree and its verification/rebuild copies share 16 MiB. Reserve one
+//! worst-case header and epoch state for verification, then halve the remainder
+//! for retained storage and the survivor rebuild (shared epochs aren't copied).
+//! The byte-accounted tree preallocates its bounded slab, counts shared epoch
+//! and ticket allocations once, and permits at most eight epoch records and
+//! 4096 headers. Each of two peers
 //! retains at most eight repair headers and eight announcements (at most
 //! 8 MiB together at the maximum accepted header budget). Allow 16 MiB per peer
 //! for B2 frames, decoded events and bounded I/O staging, including one decoded
@@ -11,12 +16,16 @@
 //! bounded by their wire lengths and Params). Adaptive requests grow from one
 //! to 64 blocks within that cap. Eight subscriber queues add at most 1 MiB each.
 //! Another 4 MiB covers the single shared proof, decoded witnesses, verifier
-//! scratch space, current/next authorities and transition copies. At most 512
-//! attempted-target records add less than 32 KiB. The conservative chain-task
-//! allowance is approximately 76 MiB (rounded up separately for those records).
+//! scratch space, current/next authorities and transition copies. At most 4096
+//! attempted-target records, including vector growth slack, fit in 512 KiB.
+//! The conservative chain-task allowance rounds up to approximately 77 MiB.
 //! One RPC frontend separately allows two 4 MiB pin maps, a temporary snapshot
 //! below 8 MiB, 16 responses (each below about 1 MiB), and 32 64-KiB requests:
-//! allow another 36 MiB including collection/staging overhead. Additional
+//! allow another 36 MiB including collection/staging overhead. The two pin maps
+//! keep their independent 4-MiB byte limits even with 4096 retained headers.
+//! Their unchanged 512-pin count limit can still stop a follow initialized from
+//! a larger snapshot; increasing tree retention does not enlarge RPC pin policy.
+//! Additional
 //! frontends cost additional memory; these are not a global client limit.
 //! Platform-owned transport buffers, allocator metadata, executable/VM memory
 //! and the bounded 16-MiB chain-spec parsing input are outside these estimates.
@@ -69,7 +78,8 @@ struct Peer {
 impl Config {
     pub(crate) fn from_spec(spec: &JamChainSpec) -> Result<Self, String> {
         let params = spec.params().clone();
-        let (header_bytes, max_blocks) = memory_limits(&params)?;
+        let (header_bytes, limits) = memory_limits(&params)?;
+        let max_blocks = limits.max_blocks;
         let (header, raw_state) = spec.checkpoint().map_or(
             (spec.genesis_header(), spec.genesis_light_state()),
             |checkpoint| (&checkpoint.header, &checkpoint.state),
@@ -95,7 +105,8 @@ impl Config {
             }
         }
         let root = verified_genesis(&params, header.clone(), state);
-        let tree = HeaderTree::new(params.clone(), root, tree::Config { max_blocks });
+        let tree = HeaderTree::new(params.clone(), root, limits)
+            .map_err(|_| String::from("JAM trusted anchor exceeds tree budget"))?;
         Ok(Self {
             params,
             tree,
@@ -116,7 +127,7 @@ impl Config {
     }
 }
 
-fn memory_limits(params: &Params) -> Result<(usize, NonZeroUsize), String> {
+fn memory_limits(params: &Params) -> Result<(usize, tree::Config), String> {
     // Worst-case owned header and post-state allocations, including vector capacity
     // slack. Two complete trees cover B4's transient survivor cloning on eviction.
     let validators = usize::from(params.max_validators);
@@ -133,16 +144,33 @@ fn memory_limits(params: &Params) -> Result<(usize, NonZeroUsize), String> {
     if header_bytes > FRAME_BYTES / 2 || state_bytes > TREE_BYTES / 8 {
         return Err(String::from("JAM trusted parameters exceed memory budget"));
     }
-    // Three extra nodes cover verification temporaries alongside both retained trees.
-    let max_blocks =
-        ((TREE_BYTES / (header_bytes + state_bytes + 1024)).saturating_sub(3) / 2).min(512);
+    // Reserve one worst-case epoch/state and header for verification; keep the
+    // second-tree allowance while eviction rebuilds survivors.
+    let max_bytes = (TREE_BYTES - header_bytes - state_bytes) / 2;
+    let max_blocks = (max_bytes / HeaderTree::node_overhead()).min(4096);
     let max_blocks = NonZeroUsize::new(max_blocks)
         .filter(|n| n.get() >= 2)
         .ok_or_else(|| String::from("JAM tree budget too small"))?;
-    Ok((header_bytes, max_blocks))
+    Ok((
+        header_bytes,
+        tree::Config {
+            max_blocks,
+            max_bytes,
+            max_epoch_records: NonZeroUsize::new(8)
+                .ok_or_else(|| String::from("JAM record limit is zero"))?,
+        },
+    ))
 }
 
 struct State {
+    #[cfg(test)]
+    test_verifier: Option<
+        fn(
+            &Params,
+            &smoldot::jam::verify::VerifiedHeader,
+            Header,
+        ) -> smoldot::jam::verify::VerifiedHeader,
+    >,
     tree: HeaderTree,
     params: Params,
     subscribers: Vec<async_channel::Sender<Notification>>,
@@ -164,11 +192,14 @@ enum InsertFailure {
 
 impl State {
     fn proof_limits(&self) -> finality::Limits {
+        let witnesses = (FRAME_BYTES / self.header_bytes).max(1);
         finality::Limits {
             max_bytes: FRAME_BYTES,
-            max_ancestry_headers: (FRAME_BYTES / self.header_bytes).max(1),
+            max_ancestry_headers: witnesses,
             max_ancestry_steps: self
-                .max_blocks
+                .tree
+                .len()
+                .saturating_add(witnesses)
                 .saturating_mul(usize::from(self.params.max_validators))
                 .saturating_mul(2),
         }
@@ -279,7 +310,20 @@ impl State {
             return Err(InsertFailure::ResourceLimit);
         }
         let hash = header.hash(&self.params);
-        match self.tree.insert(header.parent, header, now) {
+        #[cfg(test)]
+        let preverified = self.test_verifier.map(|verify| {
+            let parent = self
+                .tree
+                .get(&header.parent)
+                .ok_or(tree::InsertError::UnknownParent)?;
+            self.tree
+                .insert_verified(header.parent, verify(&self.params, parent, header.clone()))
+        });
+        #[cfg(test)]
+        let result = preverified.unwrap_or_else(|| self.tree.insert(header.parent, header, now));
+        #[cfg(not(test))]
+        let result = self.tree.insert(header.parent, header, now);
+        match result {
             Ok(tree::Insert::AlreadyKnown) => Ok(()),
             Ok(tree::Insert::Inserted { evicted, .. }) => {
                 if !evicted.is_empty() {
@@ -313,6 +357,8 @@ pub(super) async fn run<P: PlatformRef>(
     rx: async_channel::Receiver<ToBackground>,
 ) {
     let state = Arc::new(async_lock::Mutex::new(State {
+        #[cfg(test)]
+        test_verifier: None,
         tree: config.tree,
         params: config.params.clone(),
         subscribers: Vec::new(),

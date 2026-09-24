@@ -14,7 +14,7 @@ use super::{
     params::Params,
     types::{BandersnatchPublic, Ed25519Public, GenesisLightState, Hash, SealingSequence, Ticket},
 };
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
 
 /// A validator's Bandersnatch and Ed25519 public keys, as carried by an epoch mark.
@@ -22,10 +22,10 @@ pub type ValidatorPair = (BandersnatchPublic, Ed25519Public);
 
 /// Light Safrole state after some header. See the module documentation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LightState {
+pub struct EpochState {
     /// `η`: the entropy accumulator `η0` followed by its value at the end of the
     /// three most recently ended epochs (`η1`, `η2`, `η3`).
-    pub entropy: [Hash; 4],
+    pub history: [Hash; 3],
     /// `κ`: validators sealing the current epoch.
     pub active: Vec<ValidatorPair>,
     /// `γ_k`: validators for the *next* epoch. This is what the epoch mark carries.
@@ -33,11 +33,15 @@ pub struct LightState {
     pub pending: Vec<ValidatorPair>,
     /// `γ_s`: the current epoch's sealing sequence, `Params::epoch_len` entries.
     pub sealing: SealingSequence,
-    /// Winning tickets seen in a mark or recovered from a trusted anchor, already
-    /// in outside-in order. Becomes `sealing` next epoch if no epoch is skipped.
-    pub pending_tickets: Option<Vec<Ticket>>,
-    /// `τ`: the slot of the most recent block.
-    pub slot: u32,
+}
+
+/// Per-block accumulator and shared immutable epoch data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LightState {
+    epoch: Arc<EpochState>,
+    eta0: Hash,
+    pending_tickets: Option<Arc<[Ticket]>>,
+    slot: u32,
 }
 
 /// Parameters or a state shape that would make header verification index or
@@ -74,6 +78,87 @@ impl core::fmt::Display for StateError {
 impl core::error::Error for StateError {}
 
 impl LightState {
+    /// Constructs trusted state components. Call `validate` to check their shape.
+    pub fn from_parts(
+        entropy: [Hash; 4],
+        active: Vec<ValidatorPair>,
+        pending: Vec<ValidatorPair>,
+        sealing: SealingSequence,
+        pending_tickets: Option<Vec<Ticket>>,
+        slot: u32,
+    ) -> Self {
+        Self {
+            epoch: Arc::new(EpochState {
+                history: [entropy[1], entropy[2], entropy[3]],
+                active,
+                pending,
+                sealing,
+            }),
+            eta0: entropy[0],
+            pending_tickets: pending_tickets.map(Arc::from),
+            slot,
+        }
+    }
+
+    /// Immutable epoch-constant state.
+    pub fn epoch(&self) -> &EpochState {
+        &self.epoch
+    }
+    #[cfg(test)]
+    pub(super) fn epoch_mut(&mut self) -> &mut EpochState {
+        Arc::make_mut(&mut self.epoch)
+    }
+    #[cfg(test)]
+    pub(super) fn set_entropy(&mut self, entropy: [Hash; 4]) {
+        self.eta0 = entropy[0];
+        self.epoch_mut().history = [entropy[1], entropy[2], entropy[3]];
+    }
+    /// Accumulator followed by the three epoch snapshots.
+    pub fn entropy(&self) -> [Hash; 4] {
+        [
+            self.eta0,
+            self.epoch.history[0],
+            self.epoch.history[1],
+            self.epoch.history[2],
+        ]
+    }
+    /// Winning tickets, already in outside-in order.
+    pub fn pending_tickets(&self) -> Option<&[Ticket]> {
+        self.pending_tickets.as_deref()
+    }
+    /// Most recent slot.
+    pub fn slot(&self) -> u32 {
+        self.slot
+    }
+    pub(super) fn set_slot(&mut self, slot: u32) {
+        self.slot = slot;
+    }
+    pub(super) fn set_pending_tickets(&mut self, tickets: &[Ticket]) {
+        self.pending_tickets = Some(Arc::from(tickets));
+    }
+    pub(super) fn epoch_allocation(&self) -> (usize, usize) {
+        let sealing = match &self.epoch.sealing {
+            SealingSequence::Keys(v) => v.capacity() * core::mem::size_of::<BandersnatchPublic>(),
+            SealingSequence::Tickets(v) => v.capacity() * core::mem::size_of::<Ticket>(),
+        };
+        (
+            Arc::as_ptr(&self.epoch) as usize,
+            core::mem::size_of::<EpochState>()
+                + 2 * core::mem::size_of::<usize>()
+                + (self.epoch.active.capacity() + self.epoch.pending.capacity())
+                    * core::mem::size_of::<ValidatorPair>()
+                + sealing,
+        )
+    }
+    pub(super) fn tickets_allocation(&self) -> Option<(usize, usize)> {
+        self.pending_tickets.as_ref().map(|v| {
+            (
+                v.as_ptr() as usize,
+                (core::mem::size_of_val(v.as_ref()) + 2 * core::mem::size_of::<usize>())
+                    .next_multiple_of(core::mem::align_of::<usize>()),
+            )
+        })
+    }
     /// Bootstraps from trusted genesis or checkpoint state items: `active ← C(8)`,
     /// `pending ← C(4).pending_validators`, `sealing ← C(4).sealing`,
     /// `entropy ← C(6)`, `slot ← C(11)`.
@@ -93,14 +178,12 @@ impl LightState {
         let pairs = |keys: &[super::types::ValidatorKey]| -> Vec<ValidatorPair> {
             keys.iter().map(|k| (k.bandersnatch, k.ed25519)).collect()
         };
-        let state = Self {
-            entropy: g.entropy,
-            active: pairs(&g.active_validators),
-            pending: pairs(&g.safrole.pending_validators),
-            sealing: g.safrole.sealing.clone(),
-            pending_tickets: if has_len(accumulator, epoch_len)
-                && g.slot % epoch_len >= params.epoch_tail_start
-            {
+        let state = Self::from_parts(
+            g.entropy,
+            pairs(&g.active_validators),
+            pairs(&g.safrole.pending_validators),
+            g.safrole.sealing.clone(),
+            if has_len(accumulator, epoch_len) && g.slot % epoch_len >= params.epoch_tail_start {
                 Some(
                     (0..accumulator.len())
                         .map(|i| {
@@ -116,8 +199,8 @@ impl LightState {
             } else {
                 None
             },
-            slot: g.slot,
-        };
+            g.slot,
+        );
         state.validate(params)?;
         Ok(state)
     }
@@ -133,15 +216,15 @@ impl LightState {
         if params.max_validators == 0 {
             return Err(StateError::ZeroValidatorCount);
         }
-        if self.active.is_empty() || self.pending.is_empty() {
+        if self.epoch.active.is_empty() || self.epoch.pending.is_empty() {
             return Err(StateError::EmptyValidatorSet);
         }
-        if !params.is_valid_validator_count(self.active.len())
-            || !params.is_valid_validator_count(self.pending.len())
+        if !params.is_valid_validator_count(self.epoch.active.len())
+            || !params.is_valid_validator_count(self.epoch.pending.len())
         {
             return Err(StateError::InvalidValidatorCount);
         }
-        let sealing_len = match &self.sealing {
+        let sealing_len = match &self.epoch.sealing {
             SealingSequence::Tickets(tickets) => tickets.len(),
             SealingSequence::Keys(keys) => keys.len(),
         };
@@ -171,26 +254,28 @@ impl LightState {
         consecutive: bool,
         next_pending: &[ValidatorPair],
     ) -> Result<(), StateError> {
-        let [eta0, eta1, eta2, _] = self.entropy;
-        self.entropy = [eta0, eta0, eta1, eta2];
-        self.active = core::mem::replace(&mut self.pending, next_pending.to_vec());
-        self.sealing = match self.pending_tickets.take() {
-            Some(tickets) if consecutive => SealingSequence::Tickets(tickets),
-            _ => SealingSequence::Keys(fallback_key_sequence(
-                params,
-                &self.entropy[2],
-                &self.active,
-            )?),
+        let [eta0, eta1, eta2, _] = self.entropy();
+        let active = self.epoch.pending.clone();
+        let sealing = match &self.pending_tickets {
+            Some(tickets) if consecutive => SealingSequence::Tickets(tickets.to_vec()),
+            _ => SealingSequence::Keys(fallback_key_sequence(params, &eta1, &active)?),
         };
+        self.epoch = Arc::new(EpochState {
+            history: [eta0, eta1, eta2],
+            active,
+            pending: next_pending.to_vec(),
+            sealing,
+        });
+        self.pending_tickets = None;
         Ok(())
     }
 
     /// `η0' = blake2b(η0 ++ output)`, where `output` is the header's entropy VRF output.
     pub(super) fn accumulate_entropy(&mut self, output: &Hash) {
         let mut input = [0; 64];
-        input[..32].copy_from_slice(&self.entropy[0]);
+        input[..32].copy_from_slice(&self.eta0);
         input[32..].copy_from_slice(output);
-        self.entropy[0] = blake2b_256(&input);
+        self.eta0 = blake2b_256(&input);
     }
 
     /// The sealing entry for `slot`: `γ_s[slot mod E]`. `None` if the sequence is
@@ -201,7 +286,7 @@ impl LightState {
         slot: u32,
     ) -> Option<SealingEntry<'_>> {
         let index = usize_from(slot % epoch_len);
-        match &self.sealing {
+        match &self.epoch.sealing {
             SealingSequence::Tickets(tickets) => tickets.get(index).map(SealingEntry::Ticket),
             SealingSequence::Keys(keys) => keys.get(index).map(SealingEntry::Key),
         }
@@ -327,6 +412,36 @@ mod tests {
     }
 
     #[test]
+    fn cloning_shares_epoch_and_tickets_until_transition() {
+        let params = tiny_params();
+        let mut parent = LightState::from_anchor(&params, &genesis(&params)).unwrap();
+        parent.set_pending_tickets(&vec![
+            Ticket {
+                id: [7; 32],
+                attempt: 0
+            };
+            12
+        ]);
+        let mut child = parent.clone();
+        child.accumulate_entropy(&[8; 32]);
+        child.set_slot(11);
+        assert!(Arc::ptr_eq(&parent.epoch, &child.epoch));
+        assert!(Arc::ptr_eq(
+            parent.pending_tickets.as_ref().unwrap(),
+            child.pending_tickets.as_ref().unwrap()
+        ));
+        assert_eq!(parent.epoch_allocation(), child.epoch_allocation());
+        assert_eq!(parent.tickets_allocation(), child.tickets_allocation());
+        child
+            .enter_epoch(&params, true, &parent.epoch().pending)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&parent.epoch, &child.epoch));
+        assert!(child.pending_tickets().is_none());
+        assert!(parent.pending_tickets().is_some());
+        assert_ne!(parent.entropy(), child.entropy());
+    }
+
+    #[test]
     fn anchor_validates_active_and_pending_counts_independently() {
         let mut params = tiny_params();
         params.core_count = 4;
@@ -339,8 +454,8 @@ mod tests {
                 let result = LightState::from_anchor(&params, &anchor);
                 if [6, 9, 12].contains(&active) && [6, 9, 12].contains(&pending) {
                     let state = result.unwrap();
-                    assert_eq!(state.active.len(), active);
-                    assert_eq!(state.pending.len(), pending);
+                    assert_eq!(state.epoch().active.len(), active);
+                    assert_eq!(state.epoch().pending.len(), pending);
                     assert_eq!(state.validate(&params), Ok(()));
                 } else if active == 0 || pending == 0 {
                     assert_eq!(result, Err(StateError::EmptyValidatorSet));
@@ -356,23 +471,23 @@ mod tests {
         let params = tiny_params();
         let g = genesis(&params);
         let state = LightState::from_anchor(&params, &g).unwrap();
-        assert_eq!(state.entropy, g.entropy);
+        assert_eq!(state.entropy(), g.entropy);
         assert_eq!(state.slot, 0);
         assert_eq!(state.pending_tickets, None);
-        assert_eq!(state.sealing, g.safrole.sealing);
+        assert_eq!(state.epoch().sealing, g.safrole.sealing);
         assert_eq!(
-            state.active,
+            state.epoch().active,
             (1..=6)
                 .map(|i| ([i; 32], [i + 100; 32]))
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            state.pending,
+            state.epoch().pending,
             (11..=16)
                 .map(|i| ([i; 32], [i + 100; 32]))
                 .collect::<Vec<_>>()
         );
-        assert_ne!(state.active, state.pending);
+        assert_ne!(state.epoch().active, state.epoch().pending);
     }
 
     #[test]
@@ -423,7 +538,7 @@ mod tests {
             );
         }
         let mut state = LightState::from_anchor(&params, &g).unwrap();
-        state.pending_tickets = Some(Vec::new());
+        state.pending_tickets = Some(Arc::from([]));
         assert_eq!(state.validate(&params), Err(StateError::SealingLength));
     }
 
@@ -450,11 +565,11 @@ mod tests {
                 .map(|i| g.safrole.ticket_accumulator[i].clone())
                 .collect();
             let mut state = LightState::from_anchor(&params, &g).unwrap();
-            assert_eq!(state.pending_tickets, Some(winners.clone()));
+            assert_eq!(state.pending_tickets(), Some(winners.as_slice()));
             state
-                .enter_epoch(&params, true, &state.pending.clone())
+                .enter_epoch(&params, true, &state.epoch().pending.clone())
                 .unwrap();
-            assert_eq!(state.sealing, SealingSequence::Tickets(winners));
+            assert_eq!(state.epoch().sealing, SealingSequence::Tickets(winners));
             assert_eq!(state.pending_tickets, None);
 
             if len > 1 {
@@ -462,11 +577,12 @@ mod tests {
                 let mut state = LightState::from_anchor(&params, &g).unwrap();
                 assert_eq!(state.pending_tickets, None);
                 let fallback =
-                    fallback_key_sequence(&params, &state.entropy[1], &state.pending).unwrap();
+                    fallback_key_sequence(&params, &state.entropy()[1], &state.epoch().pending)
+                        .unwrap();
                 state
-                    .enter_epoch(&params, true, &state.pending.clone())
+                    .enter_epoch(&params, true, &state.epoch().pending.clone())
                     .unwrap();
-                assert_eq!(state.sealing, SealingSequence::Keys(fallback));
+                assert_eq!(state.epoch().sealing, SealingSequence::Keys(fallback));
                 g.slot += 1;
             }
             g.safrole.ticket_accumulator.pop();
@@ -540,31 +656,32 @@ mod tests {
         let next: Vec<ValidatorPair> = (21..27).map(|i| ([i; 32], [i; 32])).collect();
         let before = state.clone();
         state.enter_epoch(&params, true, &next).unwrap();
-        assert_eq!(state.active, before.pending);
-        assert_eq!(state.pending, next);
+        assert_eq!(state.epoch().active, before.epoch().pending);
+        assert_eq!(state.epoch().pending, next);
         assert_eq!(
-            state.entropy,
+            state.entropy(),
             [
-                before.entropy[0],
-                before.entropy[0],
-                before.entropy[1],
-                before.entropy[2]
+                before.entropy()[0],
+                before.entropy()[0],
+                before.entropy()[1],
+                before.entropy()[2]
             ]
         );
         assert_eq!(
-            state.sealing,
+            state.epoch().sealing,
             SealingSequence::Keys(
-                fallback_key_sequence(&params, &before.entropy[1], &before.pending).unwrap()
+                fallback_key_sequence(&params, &before.entropy()[1], &before.epoch().pending)
+                    .unwrap()
             )
         );
         assert_eq!(state.pending_tickets, None);
         // η0 is only touched by the entropy accumulation.
         state.accumulate_entropy(&[9; 32]);
         let mut input = [0; 64];
-        input[..32].copy_from_slice(&before.entropy[0]);
+        input[..32].copy_from_slice(&before.entropy()[0]);
         input[32..].fill(9);
-        assert_eq!(state.entropy[0], blake2b_256(&input));
-        assert_eq!(state.entropy[1..], before.entropy[..3]);
+        assert_eq!(state.entropy()[0], blake2b_256(&input));
+        assert_eq!(state.entropy()[1..], before.entropy()[..3]);
     }
 
     #[test]
@@ -577,22 +694,22 @@ mod tests {
             })
             .collect();
         let base = LightState::from_anchor(&params, &genesis(&params)).unwrap();
-        let next = base.pending.clone();
+        let next = base.epoch().pending.clone();
         let mut consecutive = base.clone();
-        consecutive.pending_tickets = Some(tickets.clone());
+        consecutive.pending_tickets = Some(Arc::from(tickets.clone()));
         consecutive.enter_epoch(&params, true, &next).unwrap();
         assert_eq!(
-            consecutive.sealing,
+            consecutive.epoch().sealing,
             SealingSequence::Tickets(tickets.clone())
         );
         assert_eq!(consecutive.pending_tickets, None);
         let mut skipped = base.clone();
-        skipped.pending_tickets = Some(tickets);
+        skipped.pending_tickets = Some(Arc::from(tickets));
         skipped.enter_epoch(&params, false, &next).unwrap();
-        assert!(matches!(skipped.sealing, SealingSequence::Keys(_)));
+        assert!(matches!(skipped.epoch().sealing, SealingSequence::Keys(_)));
         assert_eq!(skipped.pending_tickets, None);
         let mut empty = base;
-        empty.pending.clear();
+        Arc::make_mut(&mut empty.epoch).pending.clear();
         assert_eq!(
             empty.enter_epoch(&params, true, &next),
             Err(StateError::EmptyValidatorSet)

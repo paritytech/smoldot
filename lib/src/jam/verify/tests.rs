@@ -123,8 +123,8 @@ fn draft(slot: u32) -> Draft {
 
 fn mark(parent: &VerifiedHeader, validators: &[ValidatorPair]) -> EpochMark {
     EpochMark {
-        entropy: parent.post_state.entropy[0],
-        tickets_entropy: parent.post_state.entropy[1],
+        entropy: parent.post_state.entropy()[0],
+        tickets_entropy: parent.post_state.entropy()[1],
         validators: validators.to_vec(),
     }
 }
@@ -141,25 +141,25 @@ struct Expected {
 
 fn expected(params: &Params, parent: &VerifiedHeader, slot: u32) -> Expected {
     let state = &parent.post_state;
-    let epochs = (state.slot / params.epoch_len, slot / params.epoch_len);
+    let epochs = (state.slot() / params.epoch_len, slot / params.epoch_len);
     if epochs.1 > epochs.0 {
-        let active = state.pending.clone();
-        let sealing = match &state.pending_tickets {
-            Some(tickets) if epochs.1 == epochs.0 + 1 => SealingSequence::Tickets(tickets.clone()),
+        let active = state.epoch().pending.clone();
+        let sealing = match state.pending_tickets() {
+            Some(tickets) if epochs.1 == epochs.0 + 1 => SealingSequence::Tickets(tickets.to_vec()),
             _ => SealingSequence::Keys(
-                fallback_key_sequence(params, &state.entropy[1], &active).unwrap(),
+                fallback_key_sequence(params, &state.entropy()[1], &active).unwrap(),
             ),
         };
         Expected {
             active,
-            eta3: state.entropy[2],
+            eta3: state.entropy()[2],
             sealing,
         }
     } else {
         Expected {
-            active: state.active.clone(),
-            eta3: state.entropy[3],
-            sealing: state.sealing.clone(),
+            active: state.epoch().active.clone(),
+            eta3: state.entropy()[3],
+            sealing: state.epoch().sealing.clone(),
         }
     }
 }
@@ -252,7 +252,7 @@ fn extend(
 /// A tickets mark for the epoch after `parent`'s: one ticket per slot, won by the
 /// validators of `pool` (the parent's pending set) under the `η3'` of that epoch.
 fn tickets_mark(params: &Params, parent: &VerifiedHeader, pool: &[Validator]) -> Vec<Ticket> {
-    let eta3_next = parent.post_state.entropy[2];
+    let eta3_next = parent.post_state.entropy()[2];
     (0..params.epoch_len)
         .map(|i| {
             let validator = &pool[usize::try_from(i).unwrap() % pool.len()];
@@ -291,16 +291,9 @@ fn all(sets: &Sets) -> Vec<&Validator> {
 fn genesis(params: &Params, sets: &Sets) -> VerifiedHeader {
     let entropy = [[0xa0; 32], [0xa1; 32], [0xa2; 32], [0xa3; 32]];
     let active = pairs(&sets.active);
-    let state = LightState {
-        sealing: SealingSequence::Keys(
-            fallback_key_sequence(params, &entropy[2], &active).unwrap(),
-        ),
-        entropy,
-        active,
-        pending: pairs(&sets.pending),
-        pending_tickets: None,
-        slot: 0,
-    };
+    let sealing =
+        SealingSequence::Keys(fallback_key_sequence(params, &entropy[2], &active).unwrap());
+    let state = LightState::from_parts(entropy, active, pairs(&sets.pending), sealing, None, 0);
     let header = Header {
         parent: [0; 32],
         prior_state_root: [0; 32],
@@ -334,39 +327,71 @@ impl crate::jam::tree::HeaderTree {
     }
 }
 
+impl crate::jam::tree::HeaderTree {
+    pub(crate) fn signed_markless_fixtures() -> (Params, VerifiedHeader, Vec<Header>, u64) {
+        let params = tiny_params();
+        let sets = sets();
+        let root = genesis(&params, &sets);
+        let headers = (0u32..100)
+            .map(|i| {
+                let mut header = seal(&params, &root, draft(1), &sets.active);
+                header.extrinsic_hash[..4].copy_from_slice(&i.to_le_bytes());
+                let (_, validator, context) =
+                    author(&params, &expected(&params, &root, 1), &sets.active, 1);
+                header.seal = vrf_sign(
+                    &validator.secret,
+                    &context,
+                    &header.encode_unsigned(&params),
+                );
+                header
+            })
+            .collect();
+        (params, root, headers, NOW)
+    }
+}
+
 #[test]
 fn epoch_change_activates_pending_set_not_the_mark() {
     let params = tiny_params();
     let sets = sets();
     let genesis = genesis(&params, &sets);
-    assert_ne!(genesis.post_state.active, genesis.post_state.pending);
+    assert_ne!(
+        genesis.post_state.epoch().active,
+        genesis.post_state.epoch().pending
+    );
 
     let h1 = extend(&params, &genesis, draft(3), &sets.active);
     assert!(!h1.epoch_changed && !h1.sealed_with_ticket);
-    assert_eq!(h1.post_state.active, pairs(&sets.active));
-    assert_eq!(h1.post_state.pending, pairs(&sets.pending));
-    assert_eq!(h1.post_state.entropy[1..], genesis.post_state.entropy[1..]);
-    assert_ne!(h1.post_state.entropy[0], genesis.post_state.entropy[0]);
-    assert_eq!(h1.post_state.slot, 3);
-    assert_eq!(h1.post_state.sealing, genesis.post_state.sealing);
+    assert_eq!(h1.post_state.epoch().active, pairs(&sets.active));
+    assert_eq!(h1.post_state.epoch().pending, pairs(&sets.pending));
+    assert_eq!(
+        h1.post_state.entropy()[1..],
+        genesis.post_state.entropy()[1..]
+    );
+    assert_ne!(h1.post_state.entropy()[0], genesis.post_state.entropy()[0]);
+    assert_eq!(h1.post_state.slot(), 3);
+    assert_eq!(
+        h1.post_state.epoch().sealing,
+        genesis.post_state.epoch().sealing
+    );
 
     // First epoch change: the genesis *pending* set seals, the mark's set queues.
     let mut d2 = draft(12);
     d2.epoch_mark = Some(mark(&h1, &pairs(&sets.next)));
     let h2 = extend(&params, &h1, d2.clone(), &sets.pending);
     assert!(h2.epoch_changed && !h2.sealed_with_ticket);
-    assert_eq!(h2.post_state.active, pairs(&sets.pending));
-    assert_eq!(h2.post_state.pending, pairs(&sets.next));
-    let eta = h1.post_state.entropy;
-    assert_eq!(h2.post_state.entropy[1..], [eta[0], eta[1], eta[2]]);
+    assert_eq!(h2.post_state.epoch().active, pairs(&sets.pending));
+    assert_eq!(h2.post_state.epoch().pending, pairs(&sets.next));
+    let eta = h1.post_state.entropy();
+    assert_eq!(h2.post_state.entropy()[1..], [eta[0], eta[1], eta[2]]);
     assert_eq!(
-        h2.post_state.sealing,
+        h2.post_state.epoch().sealing,
         SealingSequence::Keys(
             fallback_key_sequence(&params, &eta[1], &pairs(&sets.pending)).unwrap()
         )
     );
-    assert_eq!(h2.post_state.pending_tickets, None);
-    let author_key = h2.post_state.active[usize::from(h2.header.author_index)].0;
+    assert_eq!(h2.post_state.pending_tickets(), None);
+    let author_key = h2.post_state.epoch().active[usize::from(h2.header.author_index)].0;
     assert!(sets.pending.iter().any(|v| v.keys.0 == author_key));
 
     // The same header sealed as if the mark's set (or the old active set) had
@@ -391,11 +416,11 @@ fn epoch_change_activates_pending_set_not_the_mark() {
     let mut d3 = draft(24);
     d3.epoch_mark = Some(mark(&h2, &pairs(&sets.later)));
     let h3 = extend(&params, &h2, d3, &sets.next);
-    assert_eq!(h3.post_state.active, pairs(&sets.next));
-    assert_eq!(h3.post_state.pending, pairs(&sets.later));
+    assert_eq!(h3.post_state.epoch().active, pairs(&sets.next));
+    assert_eq!(h3.post_state.epoch().pending, pairs(&sets.later));
     let h4 = extend(&params, &h3, draft(25), &sets.next);
-    assert_eq!(h4.post_state.active, pairs(&sets.next));
-    assert_eq!(h4.post_state.sealing, h3.post_state.sealing);
+    assert_eq!(h4.post_state.epoch().active, pairs(&sets.next));
+    assert_eq!(h4.post_state.epoch().sealing, h3.post_state.epoch().sealing);
     assert_eq!(h4.hash, h4.header.hash(&params));
     assert_eq!(h4.header.parent, h3.hash);
 }
@@ -452,8 +477,8 @@ fn shrinking_and_growing_sets_use_post_rotation_author_bounds() {
                 Err(VerifyError::AuthorIndexOutOfRange)
             );
             let child = extend(&params, &parent, draft, active);
-            assert_eq!(child.post_state.active, pairs(active));
-            assert_eq!(child.post_state.pending, pairs(next));
+            assert_eq!(child.post_state.epoch().active, pairs(active));
+            assert_eq!(child.post_state.epoch().pending, pairs(next));
             child.post_state.validate(&params).unwrap();
             parent = child;
         }
@@ -492,33 +517,42 @@ fn tickets_mark_seals_the_next_epoch() {
     d1.tickets_mark = Some(tickets.clone());
     let h1 = extend(&params, &genesis, d1, &sets.active);
     assert!(!h1.sealed_with_ticket);
-    assert_eq!(h1.post_state.pending_tickets, Some(tickets.clone()));
-    assert_eq!(h1.post_state.sealing, genesis.post_state.sealing);
+    assert_eq!(h1.post_state.pending_tickets(), Some(tickets.as_slice()));
+    assert_eq!(
+        h1.post_state.epoch().sealing,
+        genesis.post_state.epoch().sealing
+    );
 
     let h2 = extend(&params, &h1, draft(11), &sets.active);
-    assert_eq!(h2.post_state.pending_tickets, Some(tickets.clone()));
+    assert_eq!(h2.post_state.pending_tickets(), Some(tickets.as_slice()));
 
     let mut d3 = draft(12);
     d3.epoch_mark = Some(mark(&h2, &pairs(&sets.next)));
     let h3 = extend(&params, &h2, d3, &sets.pending);
     assert!(h3.epoch_changed && h3.sealed_with_ticket);
     assert_eq!(
-        h3.post_state.sealing,
+        h3.post_state.epoch().sealing,
         SealingSequence::Tickets(tickets.clone())
     );
-    assert_eq!(h3.post_state.pending_tickets, None);
-    assert_eq!(h3.post_state.active, pairs(&sets.pending));
+    assert_eq!(h3.post_state.pending_tickets(), None);
+    assert_eq!(h3.post_state.epoch().active, pairs(&sets.pending));
 
     let h4 = extend(&params, &h3, draft(17), &sets.pending);
     assert!(h4.sealed_with_ticket && !h4.epoch_changed);
-    assert_eq!(h4.post_state.sealing, SealingSequence::Tickets(tickets));
+    assert_eq!(
+        h4.post_state.epoch().sealing,
+        SealingSequence::Tickets(tickets)
+    );
 
     // Without a tickets mark in the tail, the next epoch falls back to keys.
     let mut d5 = draft(24);
     d5.epoch_mark = Some(mark(&h4, &pairs(&sets.later)));
     let h5 = extend(&params, &h4, d5, &sets.next);
     assert!(h5.epoch_changed && !h5.sealed_with_ticket);
-    assert!(matches!(h5.post_state.sealing, SealingSequence::Keys(_)));
+    assert!(matches!(
+        h5.post_state.epoch().sealing,
+        SealingSequence::Keys(_)
+    ));
 }
 
 #[test]
@@ -542,18 +576,18 @@ fn pre_tail_saturated_anchor_verifies_fallback_next_epoch() {
     accumulator.sort_by_key(|ticket| ticket.id);
     let anchor = GenesisLightState {
         safrole: SafroleState {
-            pending_validators: keys(&parent.post_state.pending),
+            pending_validators: keys(&parent.post_state.epoch().pending),
             epoch_root: [0; 144],
-            sealing: parent.post_state.sealing.clone(),
+            sealing: parent.post_state.epoch().sealing.clone(),
             ticket_accumulator: accumulator,
         },
-        entropy: parent.post_state.entropy,
-        active_validators: keys(&parent.post_state.active),
+        entropy: parent.post_state.entropy(),
+        active_validators: keys(&parent.post_state.epoch().active),
         slot: parent.slot,
     };
     let state = LightState::from_anchor(&params, &anchor).unwrap();
     assert_eq!(state, parent.post_state);
-    assert_eq!(state.pending_tickets, None);
+    assert_eq!(state.pending_tickets(), None);
     let anchored = verified_genesis(&params, parent.header.clone(), state);
     let mut d = draft(12);
     d.epoch_mark = Some(mark(&parent, &pairs(&sets.next)));
@@ -577,11 +611,11 @@ fn skipped_epoch_discards_tickets() {
     d2.epoch_mark = Some(mark(&h1, &pairs(&sets.next)));
     let h2 = extend(&params, &h1, d2.clone(), &sets.pending);
     assert!(h2.epoch_changed && !h2.sealed_with_ticket);
-    assert_eq!(h2.post_state.active, pairs(&sets.pending));
+    assert_eq!(h2.post_state.epoch().active, pairs(&sets.pending));
     assert_eq!(
-        h2.post_state.sealing,
+        h2.post_state.epoch().sealing,
         SealingSequence::Keys(
-            fallback_key_sequence(&params, &h1.post_state.entropy[1], &pairs(&sets.pending))
+            fallback_key_sequence(&params, &h1.post_state.entropy()[1], &pairs(&sets.pending))
                 .unwrap()
         )
     );
@@ -589,7 +623,7 @@ fn skipped_epoch_discards_tickets() {
     // Sealing the skipped-epoch header with the discarded tickets is rejected.
     let ticket_expected = Expected {
         active: pairs(&sets.pending),
-        eta3: h1.post_state.entropy[2],
+        eta3: h1.post_state.entropy()[2],
         sealing: SealingSequence::Tickets(tickets),
     };
     let (index, validator, context) = author(&params, &ticket_expected, &sets.pending, 24);
@@ -717,7 +751,7 @@ fn rejects_invalid_parent_state() {
         ))
     );
     let mut empty = genesis.clone();
-    empty.post_state.pending.clear();
+    empty.post_state.epoch_mut().pending.clear();
     assert_eq!(
         verify(&params, &empty, header.clone()),
         Err(VerifyError::InvalidParentState(
@@ -725,13 +759,13 @@ fn rejects_invalid_parent_state() {
         ))
     );
     let mut short = genesis.clone();
-    short.post_state.sealing = SealingSequence::Keys(Vec::new());
+    short.post_state.epoch_mut().sealing = SealingSequence::Keys(Vec::new());
     assert_eq!(
         verify(&params, &short, header.clone()),
         Err(VerifyError::InvalidParentState(StateError::SealingLength))
     );
     let mut bad_tickets = genesis;
-    bad_tickets.post_state.pending_tickets = Some(vec![Ticket {
+    bad_tickets.post_state.set_pending_tickets(&[Ticket {
         id: [0; 32],
         attempt: 0,
     }]);
@@ -1171,11 +1205,21 @@ fn fuzzed_headers_never_panic() {
     let mut rng = rand::rngs::StdRng::seed_from_u64(0xB4);
     for _ in 0..200 {
         let mut parent = genesis.clone();
-        parent.post_state.active.truncate(rng.gen_range(0..7));
-        parent.post_state.pending.truncate(rng.gen_range(0..7));
-        parent.post_state.slot = rng.r#gen::<u32>() >> rng.gen_range(0..32);
+        parent
+            .post_state
+            .epoch_mut()
+            .active
+            .truncate(rng.gen_range(0..7));
+        parent
+            .post_state
+            .epoch_mut()
+            .pending
+            .truncate(rng.gen_range(0..7));
+        parent
+            .post_state
+            .set_slot(rng.r#gen::<u32>() >> rng.gen_range(0..32));
         if rng.gen_bool(0.5) {
-            parent.post_state.sealing =
+            parent.post_state.epoch_mut().sealing =
                 SealingSequence::Keys(vec![rng.r#gen(); rng.gen_range(0..14)]);
         }
         let mut params = params.clone();
@@ -1249,24 +1293,24 @@ fn assert_state(state: &LightState, expected: &serde_json::Value, what: &str) {
         .iter()
         .map(json_hash)
         .collect();
-    assert_eq!(state.entropy.as_slice(), entropy, "{what}: entropy");
+    assert_eq!(state.entropy().as_slice(), entropy, "{what}: entropy");
     assert_eq!(
-        state.active,
+        state.epoch().active,
         json_pairs(&expected["active_validators"]),
         "{what}: active"
     );
     assert_eq!(
-        state.pending,
+        state.epoch().pending,
         json_pairs(&expected["safrole"]["pending_validators"]),
         "{what}: pending"
     );
     assert_eq!(
-        state.sealing,
+        state.epoch().sealing,
         json_sealing(&expected["safrole"]["sealing"]),
         "{what}: sealing"
     );
     assert_eq!(
-        u64::from(state.slot),
+        u64::from(state.slot()),
         expected["slot"].as_u64().unwrap(),
         "{what}: slot"
     );
@@ -1282,7 +1326,7 @@ fn fixture_genesis(root: &std::path::Path, params: &Params) -> VerifiedHeader {
     let header = Header::decode(params, &json_hex(&genesis["header_hex"])).unwrap();
     let state = fixture_anchor_state(params, &genesis["light_state"]);
     let state = LightState::from_anchor(params, &state).unwrap();
-    assert_eq!(state.pending_tickets, None);
+    assert_eq!(state.pending_tickets(), None);
     assert_state(&state, &genesis["light_state"], "genesis");
     let verified = verified_genesis(params, header, state);
     assert_eq!(verified.hash, json_hash(&genesis["header_hash"]));
@@ -1366,7 +1410,7 @@ fn a5_tail_anchor_replays_next_ticket_epoch() {
         .collect();
     assert_eq!(outside_in, winners);
     let state = LightState::from_anchor(&params, &anchor).unwrap();
-    assert_eq!(state.pending_tickets, Some(winners.clone()));
+    assert_eq!(state.pending_tickets(), Some(winners.as_slice()));
     assert_state(
         &state,
         &fixtures[anchor_index]["post_light_state"],
@@ -1397,7 +1441,7 @@ fn a5_tail_anchor_replays_next_ticket_epoch() {
         assert!(tip.sealed_with_ticket);
         assert_eq!(tip.epoch_changed, i == anchor_index + 1);
         assert_eq!(
-            tip.post_state.sealing,
+            tip.post_state.epoch().sealing,
             SealingSequence::Tickets(winners.clone())
         );
         assert_state(&tip.post_state, &fixture["post_light_state"], &what);
@@ -1449,12 +1493,12 @@ fn a5_chain_replays_from_genesis() {
         );
         assert_state(&verified.post_state, &fixture["post_light_state"], &what);
         assert_eq!(
-            verified.post_state.active[usize::from(verified.header.author_index)].0,
+            verified.post_state.epoch().active[usize::from(verified.header.author_index)].0,
             json_hash(&fixture["author_bandersnatch"]),
             "{what}"
         );
         assert_eq!(
-            verified.post_state.entropy[3],
+            verified.post_state.entropy()[3],
             json_hash(&fixture["eta3_used_for_seal"]),
             "{what}"
         );
@@ -1475,35 +1519,51 @@ fn a5_chain_replays_from_genesis() {
             assert_state(&verified.post_state, &transition["post_light_state"], &what);
             // PolkaJam's NextEpochDescriptor is (η1', η2', pending') after rotation.
             let mark = verified.header.epoch_mark.as_ref().unwrap();
-            assert_eq!(mark.entropy, verified.post_state.entropy[1], "{what}");
+            assert_eq!(mark.entropy, verified.post_state.entropy()[1], "{what}");
             assert_eq!(
-                mark.tickets_entropy, verified.post_state.entropy[2],
+                mark.tickets_entropy,
+                verified.post_state.entropy()[2],
                 "{what}"
             );
-            assert_eq!(mark.validators, verified.post_state.pending, "{what}");
-            assert_eq!(verified.post_state.active, tip.post_state.pending, "{what}");
-            assert_eq!(verified.post_state.pending_tickets, None, "{what}");
+            assert_eq!(
+                mark.validators,
+                verified.post_state.epoch().pending,
+                "{what}"
+            );
+            assert_eq!(
+                verified.post_state.epoch().active,
+                tip.post_state.epoch().pending,
+                "{what}"
+            );
+            assert_eq!(verified.post_state.pending_tickets(), None, "{what}");
         } else {
-            assert_eq!(verified.post_state.active, tip.post_state.active, "{what}");
             assert_eq!(
-                verified.post_state.pending, tip.post_state.pending,
+                verified.post_state.epoch().active,
+                tip.post_state.epoch().active,
                 "{what}"
             );
             assert_eq!(
-                verified.post_state.sealing, tip.post_state.sealing,
+                verified.post_state.epoch().pending,
+                tip.post_state.epoch().pending,
+                "{what}"
+            );
+            assert_eq!(
+                verified.post_state.epoch().sealing,
+                tip.post_state.epoch().sealing,
                 "{what}"
             );
         }
         if fixture["has_tickets_mark"].as_bool().unwrap() {
             ticket_marks += 1;
             assert_eq!(
-                verified.post_state.pending_tickets.as_deref(),
+                verified.post_state.pending_tickets(),
                 verified.header.tickets_mark.as_deref(),
                 "{what}"
             );
         } else if !verified.epoch_changed {
             assert_eq!(
-                verified.post_state.pending_tickets, tip.post_state.pending_tickets,
+                verified.post_state.pending_tickets(),
+                tip.post_state.pending_tickets(),
                 "{what}"
             );
         }
@@ -1545,7 +1605,7 @@ fn a5_mutated_headers_are_rejected_and_never_panic() {
         bad.parent[5] ^= 1;
         assert_eq!(check(bad, NOW), Err(VerifyError::ParentMismatch));
         let mut bad = header.clone();
-        bad.slot = tip.post_state.slot;
+        bad.slot = tip.post_state.slot();
         assert_eq!(check(bad, NOW), Err(VerifyError::SlotNotIncreasing));
         assert_eq!(
             check(header.clone(), start - 7),
@@ -1557,7 +1617,7 @@ fn a5_mutated_headers_are_rejected_and_never_panic() {
             bad.epoch_mark = None;
             assert_eq!(check(bad, NOW), Err(VerifyError::EpochMarkMissing));
         } else {
-            bad.epoch_mark = Some(mark(&tip, &tip.post_state.pending));
+            bad.epoch_mark = Some(mark(&tip, &tip.post_state.epoch().pending));
             assert_eq!(check(bad, NOW), Err(VerifyError::EpochMarkUnexpected));
         }
         let mut bad = header.clone();

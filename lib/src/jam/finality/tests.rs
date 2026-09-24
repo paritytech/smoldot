@@ -734,8 +734,11 @@ fn captured_polkajam_proofs_advance_authenticated_headers_and_reject_mutations()
         root,
         tree::Config {
             max_blocks: core::num::NonZeroUsize::new(64).unwrap(),
+            max_bytes: usize::MAX,
+            max_epoch_records: core::num::NonZeroUsize::new(8).unwrap(),
         },
-    );
+    )
+    .unwrap();
     for hex in fixture["headers"].as_array().unwrap() {
         let header = Header::decode(
             params,
@@ -814,21 +817,21 @@ fn captured_polkajam_proofs_advance_authenticated_headers_and_reject_mutations()
                     })
                     .collect()
             };
-            let mut accumulator = state.pending_tickets.clone().unwrap_or_default();
+            let mut accumulator = state.pending_tickets().unwrap_or_default().to_vec();
             accumulator.sort_by_key(|ticket| ticket.id);
             let safrole = SafroleState {
-                pending_validators: keys(&state.pending),
+                pending_validators: keys(&state.epoch().pending),
                 epoch_root: [0; 144],
-                sealing: state.sealing.clone(),
+                sealing: state.epoch().sealing.clone(),
                 ticket_accumulator: accumulator,
             };
             let mut raw = fixture["spec"].clone();
             raw["checkpoint"] = serde_json::json!({
                 "header": hex::encode(root.header.encode(params)),
                 "state": {"safrole":hex::encode(safrole.encode(params)),
-                    "entropy":hex::encode(codec::encode_entropy(&state.entropy)),
-                    "active_validators":hex::encode(codec::encode_active_validators(&keys(&state.active))),
-                    "slot":hex::encode(state.slot.to_le_bytes())},
+                    "entropy":hex::encode(codec::encode_entropy(&state.entropy())),
+                    "active_validators":hex::encode(codec::encode_active_validators(&keys(&state.epoch().active))),
+                    "slot":hex::encode(state.slot().to_le_bytes())},
                 "finality":{"set_id":authorities.set_id(),
                     "current":authorities.current().iter().map(hex::encode).collect::<Vec<_>>(),
                     "next":authorities.next().iter().map(hex::encode).collect::<Vec<_>>()}
@@ -848,8 +851,11 @@ fn captured_polkajam_proofs_advance_authenticated_headers_and_reject_mutations()
                 verified_genesis(params, checkpoint.header.clone(), restored),
                 tree::Config {
                     max_blocks: core::num::NonZeroUsize::new(64).unwrap(),
+                    max_bytes: usize::MAX,
+                    max_epoch_records: core::num::NonZeroUsize::new(8).unwrap(),
                 },
-            );
+            )
+            .unwrap();
             authorities = checkpoint.finality.clone();
             for header in descendants {
                 tree.insert(header.parent, header, 1_900_000_000).unwrap();

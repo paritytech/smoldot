@@ -38,22 +38,27 @@ fn root_state() -> State {
         offenders_mark: Vec::new(),
         seal: [0; 96],
     };
-    let state = LightState {
-        entropy: [[0; 32]; 4],
-        active: vec![([0; 32], [0; 32]); 6],
-        pending: vec![([0; 32], [0; 32]); 6],
-        sealing: SealingSequence::Keys(vec![[0; 32]]),
-        pending_tickets: None,
-        slot: 0,
-    };
+    let state = LightState::from_parts(
+        [[0; 32]; 4],
+        vec![([0; 32], [0; 32]); 6],
+        vec![([0; 32], [0; 32]); 6],
+        SealingSequence::Keys(vec![[0; 32]]),
+        None,
+        0,
+    );
     State {
+        #[cfg(test)]
+        test_verifier: None,
         tree: HeaderTree::new(
             params.clone(),
             verified_genesis(&params, header, state),
             tree::Config {
                 max_blocks: NonZeroUsize::new(4).unwrap(),
+                max_bytes: usize::MAX,
+                max_epoch_records: core::num::NonZeroUsize::new(8).unwrap(),
             },
-        ),
+        )
+        .unwrap(),
         authorities: AuthoritySet::from_checkpoint(&params, 0, vec![[0; 32]; 6], vec![[0; 32]; 6])
             .unwrap(),
         max_blocks: 4,
@@ -726,16 +731,119 @@ fn external_frames_add_chain_follow_header_unpin_unfollow_and_reconnect() {
 }
 
 #[test]
+fn proof_work_includes_witnesses_beyond_a_small_retained_tree() {
+    smol::block_on(async {
+        use smoldot::{
+            identity::keystore::{KeyNamespace, Keystore},
+            jam::codec,
+        };
+        let mut state = root_state();
+        let keys = Keystore::new(None, [43; 32]).await.unwrap();
+        let public = keys
+            .generate_ed25519(KeyNamespace::Grandpa, false)
+            .await
+            .unwrap();
+        state.authorities =
+            AuthoritySet::from_checkpoint(&state.params, 0, vec![public; 6], vec![public; 6])
+                .unwrap();
+        let mut block = state.tree.finalized().clone();
+        let root = block.hash;
+        block.header.parent = root;
+        block.header.slot = 1;
+        block.slot = 1;
+        block.hash = block.header.hash(&state.params);
+        let target = block.hash;
+        state.tree.insert_verified(root, block.clone()).unwrap();
+        let mut witnesses = Vec::new();
+        let mut previous = target;
+        for slot in 2u32..=26 {
+            block.header.parent = previous;
+            block.header.slot = slot;
+            previous = block.header.hash(&state.params);
+            witnesses.push(block.header.clone());
+        }
+        assert!(state.proof_limits().max_ancestry_headers >= witnesses.len());
+        assert!(state.proof_limits().max_ancestry_steps >= witnesses.len());
+        let mut payload = b"jam_grandpa_vote".to_vec();
+        payload.push(1);
+        payload.extend(previous);
+        payload.extend(26u32.to_le_bytes());
+        payload.extend(1u64.to_le_bytes());
+        payload.extend(0u32.to_le_bytes());
+        let signature = keys
+            .sign(KeyNamespace::Grandpa, &public, &payload)
+            .await
+            .unwrap();
+        let mut proof = 1u64.to_le_bytes().to_vec();
+        proof.extend(0u32.to_le_bytes());
+        proof.extend(target);
+        proof.extend(1u32.to_le_bytes());
+        proof.extend(codec::encode_natural(1));
+        proof.extend(previous);
+        proof.extend(26u32.to_le_bytes());
+        proof.extend(signature);
+        proof.extend(public);
+        proof.extend(codec::encode_natural(witnesses.len().try_into().unwrap()));
+        for header in witnesses {
+            proof.extend(header.encode(&state.params));
+        }
+        state.finalize(target, &proof).unwrap();
+        assert_eq!(state.tree.finalized().hash, target);
+    });
+}
+
+#[test]
 fn conservative_full_network_and_oversized_parameter_budgets() {
     let mut params = root_state().params;
     params.epoch_len = 600;
     params.max_validators = 1023;
-    let (header, blocks) = memory_limits(&params).unwrap();
+    let (header, limits) = memory_limits(&params).unwrap();
     let state = 600 * 160 + 1023 * 256 + 2048;
-    assert!((blocks.get() * 2 + 3) * (header + state + 1024) <= TREE_BYTES);
+    assert!(limits.max_blocks.get() >= 2048);
+    assert!(limits.max_bytes * 2 + header + state <= TREE_BYTES);
+    let epoch = smoldot::jam::state::EpochState {
+        active: vec![([0; 32], [0; 32]); 1023],
+        pending: vec![([0; 32], [0; 32]); 1023],
+        sealing: SealingSequence::Keys(vec![[0; 32]; 600]),
+        history: [[0; 32]; 3],
+    };
+    let record =
+        core::mem::size_of_val(&epoch) + 2 * core::mem::size_of::<usize>() + 2046 * 64 + 600 * 32;
+    assert!(2048 * HeaderTree::node_overhead() + record <= limits.max_bytes);
+    let anchor = root_state().tree.finalized().header.clone();
+    let root = verified_genesis(
+        &params,
+        anchor.clone(),
+        LightState::from_parts(
+            [[0; 32]; 4],
+            epoch.active,
+            epoch.pending,
+            epoch.sealing,
+            None,
+            0,
+        ),
+    );
+    let mut tree = HeaderTree::new(params.clone(), root.clone(), limits).unwrap();
+    for i in 0u32..2048 {
+        let mut block = root.clone();
+        block.header.parent = root.hash;
+        block.header.slot = 1;
+        block.header.extrinsic_hash[..4].copy_from_slice(&i.to_le_bytes());
+        block.slot = 1;
+        block.hash = block.header.hash(&params);
+        tree.insert_verified(root.hash, block).unwrap();
+    }
+    assert_eq!(tree.len(), 2049);
+    assert_eq!(tree.epoch_records(), 1);
+    assert!(tree.retained_bytes() <= limits.max_bytes);
+    std::println!(
+        "D13 full retention: 2048 markless + root, bytes={}, record={record}, max_bytes={}",
+        tree.retained_bytes(),
+        limits.max_bytes
+    );
     std::println!(
         "full-network budget: header={header}, state={state}, retained blocks={}, tree/transient ceiling={TREE_BYTES}",
-        blocks.get()
+        limits.max_blocks.get()
     );
     params.epoch_len = u32::MAX;
     assert!(memory_limits(&params).is_err());
@@ -937,6 +1045,8 @@ fn external_verified_tree_memory_and_full_preserve_fixed_anchor() {
     let parsed = JamChainSpec::from_json_bytes(spec.as_bytes()).unwrap();
     let config = Config::from_spec(&parsed).unwrap();
     let mut state = State {
+        #[cfg(test)]
+        test_verifier: None,
         tree: config.tree,
         params: config.params,
         subscribers: Vec::new(),
@@ -955,49 +1065,25 @@ fn external_verified_tree_memory_and_full_preserve_fixed_anchor() {
         .unwrap();
         state.insert(header, 1_800_000_000).unwrap();
     }
-    let measured: usize = state
-        .tree
-        .ancestry_order()
-        .map(|block| {
-            let state = &block.post_state;
-            core::mem::size_of_val(block)
-                + state.active.capacity()
-                    * core::mem::size_of::<smoldot::jam::state::ValidatorPair>()
-                + state.pending.capacity()
-                    * core::mem::size_of::<smoldot::jam::state::ValidatorPair>()
-                + match &state.sealing {
-                    SealingSequence::Keys(keys) => keys.capacity() * 32,
-                    SealingSequence::Tickets(tickets) => {
-                        tickets.capacity() * core::mem::size_of::<smoldot::jam::types::Ticket>()
-                    }
-                }
-                + state.pending_tickets.as_ref().map_or(0, |tickets| {
-                    tickets.capacity() * core::mem::size_of::<smoldot::jam::types::Ticket>()
-                })
-                + block
-                    .header
-                    .epoch_mark
-                    .as_ref()
-                    .map_or(0, |mark| mark.validators.capacity() * 64)
-                + block.header.tickets_mark.as_ref().map_or(0, |tickets| {
-                    tickets.capacity() * core::mem::size_of::<smoldot::jam::types::Ticket>()
-                })
-                + block.header.offenders_mark.capacity() * 32
-        })
-        .sum();
+    let measured = state.tree.retained_bytes();
     std::println!(
-        "37 authenticated fixture nodes: {measured} measured inline/vector-capacity bytes (excludes allocator/ForkTree metadata); tree+transient ceiling={TREE_BYTES}"
+        "37 authenticated fixture nodes: {measured} accounted retained bytes; tree+transient ceiling={TREE_BYTES}"
     );
     assert!(measured * 2 < TREE_BYTES);
     let anchor = state.tree.finalized().clone();
     let mut full = State {
+        #[cfg(test)]
+        test_verifier: None,
         tree: HeaderTree::new(
             state.params.clone(),
             anchor.clone(),
             tree::Config {
                 max_blocks: core::num::NonZeroUsize::new(2).unwrap(),
+                max_bytes: usize::MAX,
+                max_epoch_records: core::num::NonZeroUsize::new(8).unwrap(),
             },
-        ),
+        )
+        .unwrap(),
         params: state.params,
         subscribers: Vec::new(),
         stopped: false,
@@ -1325,14 +1411,28 @@ fn external_genesis_and_checkpoint_configs_use_complete_anchor_state() {
                     raw_state.slot % parsed.params().epoch_len >= parsed.params().epoch_tail_start
                 );
                 assert!(raw_state.safrole.ticket_accumulator.len() < epoch_len);
-                assert!(config.tree.finalized().post_state.pending_tickets.is_none());
+                assert!(
+                    config
+                        .tree
+                        .finalized()
+                        .post_state
+                        .pending_tickets()
+                        .is_none()
+                );
             }
             1 => {
                 assert!(
                     raw_state.slot % parsed.params().epoch_len < parsed.params().epoch_tail_start
                 );
                 assert_eq!(raw_state.safrole.ticket_accumulator.len(), epoch_len);
-                assert!(config.tree.finalized().post_state.pending_tickets.is_none());
+                assert!(
+                    config
+                        .tree
+                        .finalized()
+                        .post_state
+                        .pending_tickets()
+                        .is_none()
+                );
             }
             2 => {
                 assert_eq!(raw_state.safrole.ticket_accumulator.len(), epoch_len);
@@ -1356,8 +1456,8 @@ fn external_genesis_and_checkpoint_configs_use_complete_anchor_state() {
                     })
                     .expect("captured winners mark in checkpoint epoch");
                 assert_eq!(
-                    config.tree.finalized().post_state.pending_tickets.as_ref(),
-                    Some(&winners)
+                    config.tree.finalized().post_state.pending_tickets(),
+                    Some(winners.as_slice())
                 );
                 assert_ne!(winners, raw_state.safrole.ticket_accumulator);
             }
@@ -2173,6 +2273,8 @@ fn external_captured_finality_requests_are_deduplicated_and_notifications_follow
     let spec = JamChainSpec::from_json_bytes(fixture["spec"].to_string().as_bytes()).unwrap();
     let config = Config::from_spec(&spec).unwrap();
     let mut state = State {
+        #[cfg(test)]
+        test_verifier: None,
         tree: config.tree,
         params: config.params,
         subscribers: Vec::new(),
@@ -2242,8 +2344,11 @@ fn synthetic_driver(blocks: usize, capacity: usize) -> (FakePlatform, Config, Ve
         config.tree.finalized().clone(),
         tree::Config {
             max_blocks: NonZeroUsize::new(capacity).unwrap(),
+            max_bytes: usize::MAX,
+            max_epoch_records: core::num::NonZeroUsize::new(8).unwrap(),
         },
-    );
+    )
+    .unwrap();
     config.max_blocks = capacity;
     let headers: Vec<_> = corpus["headers"]
         .as_array()
@@ -2285,6 +2390,8 @@ fn synthetic_driver(blocks: usize, capacity: usize) -> (FakePlatform, Config, Ve
 
 fn driver_state(config: Config) -> Arc<async_lock::Mutex<State>> {
     Arc::new(async_lock::Mutex::new(State {
+        #[cfg(test)]
+        test_verifier: None,
         tree: config.tree,
         params: config.params,
         subscribers: vec![],
@@ -2295,6 +2402,198 @@ fn driver_state(config: Config) -> Arc<async_lock::Mutex<State>> {
         proof_owner: None,
         proof_attempts: vec![],
     }))
+}
+
+#[test]
+#[ignore = "requires external A5 fake-platform identity fixture"]
+fn external_full_parameter_1200_blocks_interleave_finality() {
+    smol::block_on(async {
+        use smoldot::{
+            identity::keystore::{KeyNamespace, Keystore},
+            jam::{codec, types::EpochMark, verify::VerifiedHeader},
+        };
+        let (platform, _, _, _) = fixture_setup();
+        let keys = Keystore::new(None, [42; 32]).await.unwrap();
+        let public = keys
+            .generate_ed25519(KeyNamespace::Grandpa, false)
+            .await
+            .unwrap();
+        let mut params = root_state().params;
+        params.epoch_len = 600;
+        params.epoch_tail_start = 500;
+        params.max_validators = 1023;
+        params.core_count = 341;
+        let (header_bytes, limits) = memory_limits(&params).unwrap();
+        let pairs = vec![([0; 32], public); 1023];
+        let mut header = root_state().tree.finalized().header.clone();
+        header.slot = 0;
+        let root = verified_genesis(
+            &params,
+            header.clone(),
+            LightState::from_parts(
+                [[0; 32]; 4],
+                pairs.clone(),
+                pairs.clone(),
+                SealingSequence::Keys(vec![[0; 32]; 600]),
+                None,
+                0,
+            ),
+        );
+        let mut headers = Vec::new();
+        let mut proofs = BTreeMap::new();
+        let mut parent = root.hash;
+        for slot in 1u32..=1200 {
+            header.parent = parent;
+            header.slot = slot;
+            header.epoch_mark = (slot % 600 == 0).then(|| EpochMark {
+                entropy: [0; 32],
+                tickets_entropy: [0; 32],
+                validators: pairs.clone(),
+            });
+            let hash = header.hash(&params);
+            let set_id = (slot - 1) / 600;
+            // PolkaJam's signed precommit: domain, tag, hash, slot, round, set.
+            let mut payload = b"jam_grandpa_vote".to_vec();
+            payload.push(1);
+            payload.extend(hash);
+            payload.extend(slot.to_le_bytes());
+            payload.extend(1u64.to_le_bytes());
+            payload.extend(set_id.to_le_bytes());
+            let signature = keys
+                .sign(KeyNamespace::Grandpa, &public, &payload)
+                .await
+                .unwrap();
+            let mut proof = 1u64.to_le_bytes().to_vec();
+            proof.extend(set_id.to_le_bytes());
+            proof.extend(hash);
+            proof.extend(slot.to_le_bytes());
+            proof.extend(codec::encode_natural(1));
+            proof.extend(hash);
+            proof.extend(slot.to_le_bytes());
+            proof.extend(signature);
+            proof.extend(public);
+            proof.extend(codec::encode_natural(0));
+            proofs.insert(hash, framed(proof));
+            headers.push(header.clone());
+            parent = hash;
+        }
+        {
+            let mut control = platform.0.lock().unwrap();
+            control.responses.clear();
+            control.io.params = Some(params.clone());
+            control.io.proofs = proofs;
+            for header in &headers {
+                let mut block = header.encode(&params);
+                block.extend([0; 7]);
+                control
+                    .responses
+                    .insert(header.hash(&params), framed(block));
+            }
+            control.handshake = framed(
+                Handshake {
+                    final_: Final {
+                        hash: parent,
+                        slot: 1200,
+                    },
+                    leaves: vec![],
+                }
+                .encode(),
+            );
+        }
+        let config = Config {
+            params: params.clone(),
+            tree: HeaderTree::new(params.clone(), root, limits).unwrap(),
+            peers: vec![],
+            header_bytes,
+            authorities: AuthoritySet::from_checkpoint(
+                &params,
+                0,
+                vec![public; 1023],
+                vec![public; 1023],
+            )
+            .unwrap(),
+            max_blocks: limits.max_blocks.get(),
+        };
+        let state = driver_state(config);
+        state.lock().await.test_verifier = Some(|params, parent, header| {
+            let mut post_state = parent.post_state.clone();
+            if let Some(mark) = &header.epoch_mark {
+                post_state = LightState::from_parts(
+                    post_state.entropy(),
+                    post_state.epoch().pending.clone(),
+                    mark.validators.clone(),
+                    post_state.epoch().sealing.clone(),
+                    None,
+                    header.slot,
+                );
+            }
+            VerifiedHeader {
+                hash: header.hash(params),
+                slot: header.slot,
+                epoch_changed: header.epoch_mark.is_some(),
+                sealed_with_ticket: false,
+                header,
+                post_state,
+            }
+        });
+        let subscription = state.lock().await.subscribe(16, false);
+        let mut imported = Vec::new();
+        let mut peak_nodes = 0;
+        let mut peak_bytes = 0;
+        future::or(
+            async {
+                scripted_drive(&platform, &params, &state).await;
+                panic!("full-parameter driver disconnected");
+            },
+            future::or(
+                async {
+                    loop {
+                        if let Notification::Block(block) =
+                            subscription.new_blocks.recv().await.unwrap()
+                        {
+                            imported.push(blake2b_256(&block.scale_encoded_header));
+                        }
+                        let s = state.lock().await;
+                        peak_nodes = peak_nodes.max(s.tree.len());
+                        peak_bytes = peak_bytes.max(s.tree.retained_bytes());
+                        assert!(s.tree.len() + 64 < s.max_blocks, "no import backpressure");
+                        assert!(s.tree.retained_bytes() <= limits.max_bytes);
+                        assert!(s.tree.epoch_records() <= 2);
+                        assert!(!s.stopped);
+                        if s.tree.finalized().slot == 1200 {
+                            break;
+                        }
+                    }
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(30)).await;
+                    panic!("full-parameter catch-up timed out");
+                },
+            ),
+        )
+        .await;
+        assert_eq!(
+            imported,
+            headers.iter().map(|h| h.hash(&params)).collect::<Vec<_>>()
+        );
+        let control = platform.0.lock().unwrap();
+        assert_eq!(control.attempts, 1);
+        assert!(!control.io.proof_requests.is_empty());
+        assert!(
+            control
+                .requests
+                .iter()
+                .all(|r| r.direction == Direction::AscendingExclusive)
+        );
+        std::println!(
+            "D13 full driver: imported={} peak_nodes={peak_nodes} peak_bytes={peak_bytes} max_bytes={} max_blocks={} CE130={} connections={}",
+            imported.len(),
+            limits.max_bytes,
+            limits.max_blocks,
+            control.io.proof_requests.len(),
+            control.attempts
+        );
+    });
 }
 
 async fn scripted_drive(

@@ -51,14 +51,14 @@ fn setup_sized(validators: u16, epoch_len: u32) -> (HeaderTree, AuthoritySet, Si
         slot: 0,
         sealed_with_ticket: false,
         epoch_changed: false,
-        post_state: LightState {
-            entropy: [[0; 32]; 4],
-            active: vec![([0; 32], public); validators as usize],
-            pending: vec![([0; 32], public); validators as usize],
-            sealing: SealingSequence::Keys(vec![[0; 32]; epoch_len as usize]),
-            pending_tickets: None,
-            slot: 0,
-        },
+        post_state: LightState::from_parts(
+            [[0; 32]; 4],
+            vec![([0; 32], public); validators as usize],
+            vec![([0; 32], public); validators as usize],
+            SealingSequence::Keys(vec![[0; 32]; epoch_len as usize]),
+            None,
+            0,
+        ),
     };
     let p = params.clone();
     // Header authentication has its own real-signature tests. Isolate pruning
@@ -68,12 +68,19 @@ fn setup_sized(validators: u16, epoch_len: u32) -> (HeaderTree, AuthoritySet, Si
         root,
         Config {
             max_blocks: NonZeroUsize::new(5).unwrap(),
+            max_bytes: usize::MAX,
+            max_epoch_records: core::num::NonZeroUsize::new(8).unwrap(),
         },
         move |parent, header| {
             let mut b = parent.clone();
             b.hash = header.hash(&p);
             b.slot = header.slot;
-            b.post_state.slot = header.slot;
+            b.post_state.set_slot(header.slot);
+            if let Some(mark) = &header.epoch_mark {
+                b.post_state
+                    .enter_epoch(&p, true, &mark.validators)
+                    .unwrap();
+            }
             b.header = header;
             Ok(b)
         },
@@ -219,28 +226,17 @@ fn full_parameter_retention_is_bounded_over_720_blocks() {
     let (mut tree, mut authorities, key) = setup_sized(1023, 600);
     let mut peak_nodes = 0;
     let mut peak_bytes = 0;
+    let mut markless_growth = 0;
+    let record = tree.finalized().post_state.epoch_allocation().1;
     for slot in 1..=720 {
         let parent = tree.best().hash;
+        let before = tree.retained_bytes();
         let hash = insert(&mut tree, parent, slot, slot % 600 == 0);
+        if slot % 600 != 0 {
+            markless_growth = markless_growth.max(tree.retained_bytes() - before);
+        }
         peak_nodes = peak_nodes.max(tree.len());
-        let bytes: usize = tree
-            .ancestry_order()
-            .map(|b| {
-                core::mem::size_of_val(b)
-                    + b.post_state.active.capacity() * 64
-                    + b.post_state.pending.capacity() * 64
-                    + match &b.post_state.sealing {
-                        SealingSequence::Keys(keys) => keys.capacity() * 32,
-                        SealingSequence::Tickets(tickets) => {
-                            tickets.capacity() * core::mem::size_of_val(&tickets[0])
-                        }
-                    }
-                    + b.header
-                        .epoch_mark
-                        .as_ref()
-                        .map_or(0, |mark| mark.validators.capacity() * 64)
-            })
-            .sum();
+        let bytes = tree.retained_bytes();
         peak_bytes = peak_bytes.max(bytes);
         if slot % 3 == 0 {
             let proof = proof(&tree, &authorities, &key, hash);
@@ -250,7 +246,38 @@ fn full_parameter_retention_is_bounded_over_720_blocks() {
     assert_eq!(peak_nodes, 4);
     assert_eq!(tree.len(), 1);
     assert!(peak_bytes < 1024 * 1024);
+    assert!(markless_growth < 2048);
+    assert_eq!(tree.epoch_records(), 1);
     std::println!(
-        "Full-sized state retention replay: 720 blocks, peak {peak_nodes} nodes, {peak_bytes} inline/vector bytes (not allocator/process RSS)"
+        "D13 full: 720 blocks, peak {peak_nodes} nodes, {peak_bytes} accounted bytes; incremental={markless_growth} bytes/node, epoch record={record} bytes"
     );
+}
+
+#[test]
+fn epoch_forks_evict_and_finalize_records_atomically() {
+    let (mut tree, mut authorities, key) = setup_sized(6, 12);
+    tree.config.max_epoch_records = NonZeroUsize::new(3).unwrap();
+    let root = tree.finalized().hash;
+    let lowest = insert(&mut tree, root, 12, true);
+    insert(&mut tree, root, 13, true);
+    assert_eq!(tree.epoch_records(), 3);
+    let best = insert(&mut tree, root, 14, true);
+    assert!(tree.get(&lowest).is_none());
+    assert_eq!(tree.epoch_records(), 3);
+    let mut rejected = tree.get(&best).unwrap().header.clone();
+    rejected.slot = 12;
+    rejected.extrinsic_hash = [9; 32];
+    let before: Vec<_> = tree.ancestry_order().cloned().collect();
+    let bytes = tree.retained_bytes();
+    assert_eq!(
+        tree.insert(root, rejected, u64::MAX),
+        Err(InsertError::Full)
+    );
+    assert_eq!(tree.ancestry_order().cloned().collect::<Vec<_>>(), before);
+    assert_eq!(tree.retained_bytes(), bytes);
+    let proof = proof(&tree, &authorities, &key, best);
+    tree.finalize(&proof, &mut authorities).unwrap();
+    assert_eq!(tree.epoch_records(), 1);
+    assert_eq!(tree.len(), 1);
+    assert!(tree.retained_bytes() < bytes);
 }
