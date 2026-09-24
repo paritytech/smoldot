@@ -316,6 +316,10 @@ fn genesis(params: &Params, sets: &Sets) -> VerifiedHeader {
 
 // Positive synthetic chains.
 
+fn decoded(params: &Params, block: &VerifiedHeader) -> Header {
+    Header::decode(params, &block.encoded).unwrap()
+}
+
 impl crate::jam::tree::HeaderTree {
     // Expose the signing harness without making the verifier's test module public.
     pub(crate) fn signed_child_fixture() -> (Params, VerifiedHeader, Header, u64) {
@@ -391,7 +395,8 @@ fn epoch_change_activates_pending_set_not_the_mark() {
         )
     );
     assert_eq!(h2.post_state.pending_tickets(), None);
-    let author_key = h2.post_state.epoch().active[usize::from(h2.header.author_index)].0;
+    let author_key =
+        h2.post_state.epoch().active[usize::from(decoded(&params, &h2).author_index)].0;
     assert!(sets.pending.iter().any(|v| v.keys.0 == author_key));
 
     // The same header sealed as if the mark's set (or the old active set) had
@@ -421,8 +426,8 @@ fn epoch_change_activates_pending_set_not_the_mark() {
     let h4 = extend(&params, &h3, draft(25), &sets.next);
     assert_eq!(h4.post_state.epoch().active, pairs(&sets.next));
     assert_eq!(h4.post_state.epoch().sealing, h3.post_state.epoch().sealing);
-    assert_eq!(h4.hash, h4.header.hash(&params));
-    assert_eq!(h4.header.parent, h3.hash);
+    assert_eq!(h4.hash, decoded(&params, &h4).hash(&params));
+    assert_eq!(h4.parent, h3.hash);
 }
 
 #[test]
@@ -588,7 +593,7 @@ fn pre_tail_saturated_anchor_verifies_fallback_next_epoch() {
     let state = LightState::from_anchor(&params, &anchor).unwrap();
     assert_eq!(state, parent.post_state);
     assert_eq!(state.pending_tickets(), None);
-    let anchored = verified_genesis(&params, parent.header.clone(), state);
+    let anchored = verified_genesis(&params, decoded(&params, &parent), state);
     let mut d = draft(12);
     d.epoch_mark = Some(mark(&parent, &pairs(&sets.next)));
     let header = seal(&params, &parent, d, &sets.pending);
@@ -1164,9 +1169,9 @@ fn fuzzed_headers_never_panic() {
     let h2 = extend(&params, &h1, d2, &sets.pending);
     let h3 = extend(&params, &h2, draft(13), &sets.pending);
     let seeds = [
-        (&genesis, h1.header.clone()),
-        (&h1, h2.header.clone()),
-        (&h2, h3.header.clone()),
+        (&genesis, decoded(&params, &h1)),
+        (&h1, decoded(&params, &h2)),
+        (&h2, decoded(&params, &h3)),
     ];
     let pool: Vec<ValidatorPair> = all(&sets).into_iter().map(|v| v.keys).collect();
     let mut rng = rand::rngs::StdRng::seed_from_u64(0xB3);
@@ -1194,7 +1199,10 @@ fn fuzzed_headers_never_panic() {
             rng.next_u64()
         };
         match verify_header(&params, parent, header, now) {
-            Ok(verified) => assert_eq!(verified.header, *original),
+            Ok(verified) => assert_eq!(
+                Header::decode(&params, &verified.encoded).unwrap(),
+                *original
+            ),
             Err(_) => rejected += 1,
         }
     }
@@ -1226,7 +1234,7 @@ fn fuzzed_headers_never_panic() {
         if rng.gen_bool(0.2) {
             params.epoch_len = rng.gen_range(0..3);
         }
-        let _ = verify_header(&params, &parent, h1.header.clone(), NOW);
+        let _ = verify_header(&params, &parent, seeds[0].1.clone(), NOW);
     }
 }
 
@@ -1480,7 +1488,7 @@ fn a5_chain_replays_from_genesis() {
             "{what}"
         );
         assert_eq!(
-            u64::from(verified.header.author_index),
+            u64::from(decoded(&params, &verified).author_index),
             fixture["author_index"].as_u64().unwrap(),
             "{what}"
         );
@@ -1493,7 +1501,9 @@ fn a5_chain_replays_from_genesis() {
         );
         assert_state(&verified.post_state, &fixture["post_light_state"], &what);
         assert_eq!(
-            verified.post_state.epoch().active[usize::from(verified.header.author_index)].0,
+            verified.post_state.epoch().active
+                [usize::from(decoded(&params, &verified).author_index)]
+            .0,
             json_hash(&fixture["author_bandersnatch"]),
             "{what}"
         );
@@ -1518,7 +1528,8 @@ fn a5_chain_replays_from_genesis() {
             assert_state(&tip.post_state, &transition["parent_light_state"], &what);
             assert_state(&verified.post_state, &transition["post_light_state"], &what);
             // PolkaJam's NextEpochDescriptor is (η1', η2', pending') after rotation.
-            let mark = verified.header.epoch_mark.as_ref().unwrap();
+            let header = decoded(&params, &verified);
+            let mark = header.epoch_mark.as_ref().unwrap();
             assert_eq!(mark.entropy, verified.post_state.entropy()[1], "{what}");
             assert_eq!(
                 mark.tickets_entropy,
@@ -1557,7 +1568,7 @@ fn a5_chain_replays_from_genesis() {
             ticket_marks += 1;
             assert_eq!(
                 verified.post_state.pending_tickets(),
-                verified.header.tickets_mark.as_deref(),
+                decoded(&params, &verified).tickets_mark.as_deref(),
                 "{what}"
             );
         } else if !verified.epoch_changed {

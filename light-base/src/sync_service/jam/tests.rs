@@ -97,7 +97,7 @@ fn invalid_header_does_not_change_anchor_or_notify() {
     let mut state = root_state();
     let snapshot = state.subscribe(1, false);
     let root = state.tree.finalized().clone();
-    let mut child = root.header.clone();
+    let mut child = Header::decode(&state.params, &root.encoded).unwrap();
     child.parent = root.hash;
     child.slot = 1;
     assert!(state.insert(child, u64::MAX).is_err());
@@ -748,19 +748,22 @@ fn proof_work_includes_witnesses_beyond_a_small_retained_tree() {
                 .unwrap();
         let mut block = state.tree.finalized().clone();
         let root = block.hash;
-        block.header.parent = root;
-        block.header.slot = 1;
+        let mut header = Header::decode(&state.params, &block.encoded).unwrap();
+        header.parent = root;
+        header.slot = 1;
+        block.parent = root;
+        block.encoded = header.encode(&state.params);
         block.slot = 1;
-        block.hash = block.header.hash(&state.params);
+        block.hash = header.hash(&state.params);
         let target = block.hash;
         state.tree.insert_verified(root, block.clone()).unwrap();
         let mut witnesses = Vec::new();
         let mut previous = target;
         for slot in 2u32..=26 {
-            block.header.parent = previous;
-            block.header.slot = slot;
-            previous = block.header.hash(&state.params);
-            witnesses.push(block.header.clone());
+            header.parent = previous;
+            header.slot = slot;
+            previous = header.hash(&state.params);
+            witnesses.push(header.clone());
         }
         assert!(state.proof_limits().max_ancestry_headers >= witnesses.len());
         assert!(state.proof_limits().max_ancestry_steps >= witnesses.len());
@@ -810,7 +813,7 @@ fn conservative_full_network_and_oversized_parameter_budgets() {
     let record =
         core::mem::size_of_val(&epoch) + 2 * core::mem::size_of::<usize>() + 2046 * 64 + 600 * 32;
     assert!(2048 * HeaderTree::node_overhead() + record <= limits.max_bytes);
-    let anchor = root_state().tree.finalized().header.clone();
+    let anchor = Header::decode(&params, &root_state().tree.finalized().encoded).unwrap();
     let root = verified_genesis(
         &params,
         anchor.clone(),
@@ -826,11 +829,14 @@ fn conservative_full_network_and_oversized_parameter_budgets() {
     let mut tree = HeaderTree::new(params.clone(), root.clone(), limits).unwrap();
     for i in 0u32..2048 {
         let mut block = root.clone();
-        block.header.parent = root.hash;
-        block.header.slot = 1;
-        block.header.extrinsic_hash[..4].copy_from_slice(&i.to_le_bytes());
+        let mut header = anchor.clone();
+        header.parent = root.hash;
+        header.slot = 1;
+        header.extrinsic_hash[..4].copy_from_slice(&i.to_le_bytes());
+        block.parent = header.parent;
+        block.encoded = header.encode(&params);
         block.slot = 1;
-        block.hash = block.header.hash(&params);
+        block.hash = header.hash(&params);
         tree.insert_verified(root.hash, block).unwrap();
     }
     assert_eq!(tree.len(), 2049);
@@ -1402,7 +1408,10 @@ fn external_genesis_and_checkpoint_configs_use_complete_anchor_state() {
             LightState::from_anchor(parsed.params(), &raw_state).unwrap(),
             "fixture {index:04}",
         );
-        assert_eq!(config.tree.finalized().header, checkpoint.header);
+        assert_eq!(
+            Header::decode(&config.params, &config.tree.finalized().encoded).unwrap(),
+            checkpoint.header
+        );
         assert_eq!(config.tree.len(), 1);
         let epoch_len = usize::try_from(parsed.params().epoch_len).unwrap();
         match case {
@@ -2425,7 +2434,7 @@ fn external_full_parameter_1200_blocks_interleave_finality() {
         params.core_count = 341;
         let (header_bytes, limits) = memory_limits(&params).unwrap();
         let pairs = vec![([0; 32], public); 1023];
-        let mut header = root_state().tree.finalized().header.clone();
+        let mut header = Header::decode(&params, &root_state().tree.finalized().encoded).unwrap();
         header.slot = 0;
         let root = verified_genesis(
             &params,
@@ -2532,7 +2541,8 @@ fn external_full_parameter_1200_blocks_interleave_finality() {
                 slot: header.slot,
                 epoch_changed: header.epoch_mark.is_some(),
                 sealed_with_ticket: false,
-                header,
+                encoded: header.encode(params),
+                parent: header.parent,
                 post_state,
             }
         });

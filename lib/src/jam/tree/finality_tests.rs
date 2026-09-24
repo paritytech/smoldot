@@ -47,7 +47,8 @@ fn setup_sized(validators: u16, epoch_len: u32) -> (HeaderTree, AuthoritySet, Si
     };
     let root = VerifiedHeader {
         hash: header.hash(&params),
-        header,
+        parent: header.parent,
+        encoded: header.encode(&params),
         slot: 0,
         sealed_with_ticket: false,
         epoch_changed: false,
@@ -81,7 +82,9 @@ fn setup_sized(validators: u16, epoch_len: u32) -> (HeaderTree, AuthoritySet, Si
                     .enter_epoch(&p, true, &mark.validators)
                     .unwrap();
             }
-            b.header = header;
+            b.parent = header.parent;
+            b.epoch_changed = header.epoch_mark.is_some();
+            b.encoded = header.encode(&p);
             Ok(b)
         },
     );
@@ -89,7 +92,7 @@ fn setup_sized(validators: u16, epoch_len: u32) -> (HeaderTree, AuthoritySet, Si
 }
 
 fn insert(tree: &mut HeaderTree, parent: Hash, slot: u32, mark: bool) -> Hash {
-    let mut header = tree.get(&parent).unwrap().header.clone();
+    let mut header = Header::decode(&tree.params, &tree.get(&parent).unwrap().encoded).unwrap();
     header.parent = parent;
     header.slot = slot;
     header.epoch_mark = mark.then(|| EpochMark {
@@ -145,7 +148,7 @@ fn proof(
             authorities.current(),
             &hash,
             limits,
-            |hash| tree.get(hash).map(|b| &b.header),
+            |hash| tree.get(hash).map(|b| (b.hash, b.parent, b.slot)),
         )
         .unwrap()
 }
@@ -247,9 +250,13 @@ fn full_parameter_retention_is_bounded_over_720_blocks() {
     assert_eq!(tree.len(), 1);
     assert!(peak_bytes < 1024 * 1024);
     assert!(markless_growth < 2048);
+    let amortized = markless_growth
+        + core::mem::size_of::<VerifiedHeader>()
+        + 10 * core::mem::size_of::<usize>();
+    assert!(amortized < 2048);
     assert_eq!(tree.epoch_records(), 1);
     std::println!(
-        "D13 full: 720 blocks, peak {peak_nodes} nodes, {peak_bytes} accounted bytes; incremental={markless_growth} bytes/node, epoch record={record} bytes"
+        "D13 full: 720 blocks, peak {peak_nodes} nodes, {peak_bytes} accounted bytes; incremental={markless_growth} bytes/node, amortized={amortized} bytes/node, epoch record={record} bytes"
     );
 }
 
@@ -264,7 +271,7 @@ fn epoch_forks_evict_and_finalize_records_atomically() {
     let best = insert(&mut tree, root, 14, true);
     assert!(tree.get(&lowest).is_none());
     assert_eq!(tree.epoch_records(), 3);
-    let mut rejected = tree.get(&best).unwrap().header.clone();
+    let mut rejected = Header::decode(&tree.params, &tree.get(&best).unwrap().encoded).unwrap();
     rejected.slot = 12;
     rejected.extrinsic_hash = [9; 32];
     let before: Vec<_> = tree.ancestry_order().cloned().collect();

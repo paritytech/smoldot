@@ -141,14 +141,14 @@ impl Justification {
     /// Ancestry headers are hash-linked witnesses, not imports: their seals are not
     /// reverified, and they cannot alter the tree or the authority set.
     /// Every vote must descend from the commit target, even for an equivocator.
-    pub fn verify<'a>(
+    pub fn verify(
         &self,
         params: &Params,
         expected_set_id: u32,
         authorities: &[Ed25519Public],
         expected_target: &Hash,
         limits: Limits,
-        lookup: impl Fn(&Hash) -> Option<&'a Header>,
+        lookup: impl Fn(&Hash) -> Option<(Hash, Hash, u32)>,
     ) -> Result<VerifiedFinality, Error> {
         validate_authorities(params, authorities)?;
         if self.set_id != expected_set_id {
@@ -161,10 +161,10 @@ impl Justification {
             return Err(Error::TargetMismatch);
         }
         let target = lookup(expected_target).ok_or(Error::UnknownTarget)?;
-        if target.hash(params) != *expected_target {
+        if target.0 != *expected_target {
             return Err(Error::TargetMismatch);
         }
-        if target.slot != self.target.slot {
+        if target.2 != self.target.slot {
             return Err(Error::TargetSlotMismatch);
         }
         let mut witnesses = BTreeMap::new();
@@ -223,15 +223,15 @@ impl Justification {
                 steps += 1;
                 let header = if let Some((header, used)) = witnesses.get_mut(&hash) {
                     *used = true;
-                    *header
+                    (header.hash(params), header.parent, header.slot)
                 } else {
                     lookup(&hash).ok_or(Error::InvalidAncestry)?
                 };
-                if header.slot != slot || header.hash(params) != hash {
+                if header.2 != slot || header.0 != hash {
                     return Err(Error::InvalidAncestry);
                 }
                 path.push((hash, slot));
-                hash = header.parent;
+                hash = header.1;
                 slot = if hash == self.target.hash {
                     self.target.slot
                 } else if let Some((header, _)) = witnesses.get(&hash) {
@@ -239,9 +239,9 @@ impl Justification {
                 } else if let Some(known_slot) = proven.get(&hash) {
                     *known_slot
                 } else {
-                    lookup(&hash).ok_or(Error::InvalidAncestry)?.slot
+                    lookup(&hash).ok_or(Error::InvalidAncestry)?.2
                 };
-                if slot >= header.slot {
+                if slot >= header.2 {
                     return Err(Error::InvalidAncestry);
                 }
             }
@@ -342,7 +342,9 @@ impl AuthoritySet {
         &self,
         params: &Params,
         proof: &VerifiedFinality,
-        header: &Header,
+        hash: Hash,
+        slot: u32,
+        validators: Option<&[super::state::ValidatorPair]>,
     ) -> Result<Option<Self>, Error> {
         if proof.set_id != self.set_id {
             return Err(Error::WrongSetId {
@@ -353,17 +355,13 @@ impl AuthoritySet {
         if proof.authority_fingerprint != authority_fingerprint(&self.current) {
             return Err(Error::InvalidAuthorities);
         }
-        if header.hash(params) != proof.target.hash || header.slot != proof.target.slot {
+        if hash != proof.target.hash || slot != proof.target.slot {
             return Err(Error::TargetMismatch);
         }
-        let Some(mark) = &header.epoch_mark else {
+        let Some(validators) = validators else {
             return Ok(None);
         };
-        let next = mark
-            .validators
-            .iter()
-            .map(|(_, ed25519)| *ed25519)
-            .collect();
+        let next = validators.iter().map(|(_, ed25519)| *ed25519).collect();
         // PolkaJam node/src/finality/authorities.rs:76-80: current <- old next,
         // next <- finalized mark, set_id += 1. Never rotate at header import.
         let set_id = self.set_id.checked_add(1).ok_or(Error::SetIdOverflow)?;

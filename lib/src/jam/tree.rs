@@ -50,7 +50,8 @@ mod tests {
 
     fn root() -> VerifiedHeader {
         VerifiedHeader {
-            header: header(255, 0, 0),
+            encoded: header(255, 0, 0).encode(&params()),
+            parent: [255; 32],
             hash: [0; 32],
             slot: 0,
             sealed_with_ticket: false,
@@ -98,7 +99,8 @@ mod tests {
             slot: header.slot,
             sealed_with_ticket: true,
             epoch_changed: false,
-            header,
+            encoded: header.encode(&params()),
+            parent: header.parent,
             post_state,
         })
     }
@@ -132,7 +134,7 @@ mod tests {
         let mut tree = HeaderTree::new(params(), root.clone(), limits).unwrap();
         assert_eq!(tree.retained_bytes(), measured);
         assert_eq!(
-            tree.insert_verified(root.header.parent, root.clone()),
+            tree.insert_verified(root.parent, root.clone()),
             Ok(Insert::AlreadyKnown)
         );
         assert_eq!(
@@ -152,7 +154,8 @@ mod tests {
         let mut tree = tree(4);
         let initial = tree.retained_bytes();
         let mut child = tree.finalized().clone();
-        child.header = header(0, 1, 1);
+        child.encoded = header(0, 1, 1).encode(&params());
+        child.parent = [0; 32];
         child.hash = [1; 32];
         child.slot = 1;
         tree.config.max_bytes = initial;
@@ -162,13 +165,13 @@ mod tests {
         );
         assert_eq!(tree.len(), 1);
         assert_eq!(tree.retained_bytes(), initial);
-        let exact = tree.accounting(Some(&child), &[]).0;
+        let exact = tree.accounting(Some(&child.clone()), &[]).0;
         tree.config.max_bytes = exact;
         tree.insert_verified([0; 32], child.clone()).unwrap();
         assert_eq!(tree.retained_bytes(), exact);
         assert_eq!(tree.epoch_records(), 1);
         child.hash = [2; 32];
-        child.header.extrinsic_hash = [2; 32];
+        child.encoded = header(0, 2, 1).encode(&params());
         let shared = tree.accounting(Some(&child), &[]).0;
         child.post_state.set_pending_tickets(&[Ticket {
             id: [6; 32],
@@ -190,7 +193,7 @@ mod tests {
             HeaderTree::with_verifier(p.clone(), root(), config(4), move |parent, header| {
                 counter.set(counter.get() + 1);
                 let mut verified = verify(parent, header)?;
-                verified.hash = verified.header.hash(&p);
+                verified.hash = super::super::crypto::blake2b_256(&verified.encoded);
                 Ok(verified)
             });
         let header = header(0, 1, 1);
@@ -214,12 +217,14 @@ mod tests {
             tree.insert(header.parent, header, now).unwrap();
         }
         let growth = (tree.retained_bytes() - before) / 100;
+        let amortized =
+            growth + core::mem::size_of::<VerifiedHeader>() + 10 * core::mem::size_of::<usize>();
         assert_eq!(tree.epoch_records(), 1);
         assert!(growth < 1024);
-        assert!(HeaderTree::node_overhead() < 1024);
+        assert!(amortized < 1024);
         std::println!(
             "D13 dev: 100 real markless headers; incremental={growth} bytes/node, amortized node={} bytes, epoch record={record} bytes",
-            HeaderTree::node_overhead()
+            amortized
         );
     }
 
@@ -229,10 +234,7 @@ mod tests {
         for block in tree.ancestry_order() {
             assert!(!seen.contains(&block.hash));
             if block.hash != tree.finalized().hash {
-                assert!(
-                    seen.contains(&block.header.parent),
-                    "dangling/out-of-order parent"
-                );
+                assert!(seen.contains(&block.parent), "dangling/out-of-order parent");
             } else {
                 assert!(seen.is_empty());
             }
@@ -253,7 +255,7 @@ mod tests {
             let has_children = tree
                 .ancestry_order()
                 .skip(1)
-                .any(|b| b.header.parent == block.hash);
+                .any(|b| b.parent == block.hash);
             assert_eq!(
                 leaves.iter().any(|leaf| leaf.hash == block.hash),
                 !has_children
@@ -415,7 +417,11 @@ mod tests {
             Ok(Insert::AlreadyKnown)
         );
         assert_eq!(
-            insert(&mut tree, 255, root().header),
+            insert(
+                &mut tree,
+                255,
+                Header::decode(&params(), &root().encoded).unwrap()
+            ),
             Ok(Insert::AlreadyKnown)
         );
         let mut root_only = self::tree(1);
@@ -424,7 +430,11 @@ mod tests {
             Err(InsertError::Full)
         );
         assert_eq!(
-            insert(&mut root_only, 255, root().header),
+            insert(
+                &mut root_only,
+                255,
+                Header::decode(&params(), &root().encoded).unwrap()
+            ),
             Ok(Insert::AlreadyKnown)
         );
     }
@@ -522,7 +532,10 @@ mod tests {
             }
         );
         let stored = tree.get(&hash).unwrap();
-        assert_eq!(stored.header, child);
+        assert_eq!(
+            Header::decode(&tree.params, &stored.encoded).unwrap(),
+            child
+        );
         assert_eq!(stored.hash, hash);
         assert_eq!(stored.slot, child.slot);
         assert!(!stored.sealed_with_ticket);
@@ -555,8 +568,9 @@ mod tests {
             insert_at(&mut tree, parent, child, now).unwrap(),
             Insert::AlreadyKnown
         );
+        let root_header = Header::decode(&tree.params, &root.encoded).unwrap();
         assert_eq!(
-            insert_at(&mut tree, root.header.parent, root.header, now).unwrap(),
+            insert_at(&mut tree, root.parent, root_header, now).unwrap(),
             Insert::AlreadyKnown
         );
     }
@@ -735,7 +749,7 @@ impl HeaderTree {
         parent_hash: Hash,
         verified: VerifiedHeader,
     ) -> Result<Insert, InsertError> {
-        if verified.header.parent != parent_hash {
+        if verified.parent != parent_hash {
             return Err(InsertError::ParentMismatch);
         }
         if self.get(&verified.hash).is_some() {
@@ -778,12 +792,12 @@ impl HeaderTree {
                 if evicted.contains(&block.hash) {
                     continue;
                 }
-                let parent = if block.header.parent == self.root.hash {
+                let parent = if block.parent == self.root.hash {
                     None
                 } else {
                     Some(
                         rebuilt_index
-                            .get(&block.header.parent)
+                            .get(&block.parent)
                             .copied()
                             .ok_or(InsertError::UnknownParent)?,
                     )
@@ -881,13 +895,21 @@ impl HeaderTree {
         if block.slot != target.slot {
             return Err(finality::Error::TargetSlotMismatch);
         }
-        let next = authorities.after_finalizing(&self.params, proof, &block.header)?;
+        let next = authorities.after_finalizing(
+            &self.params,
+            proof,
+            block.hash,
+            block.slot,
+            block
+                .epoch_changed
+                .then_some(block.post_state.epoch().pending.as_slice()),
+        )?;
         let mut finalized = Vec::new();
         for ancestor in self.ancestors(&target.hash) {
             if ancestor.hash == self.root.hash {
                 break;
             }
-            if ancestor.hash != target.hash && ancestor.header.epoch_mark.is_some() {
+            if ancestor.hash != target.hash && ancestor.epoch_changed {
                 return Err(finality::Error::SkippedAuthorityTransition);
             }
             finalized.push(ancestor.hash);
@@ -980,18 +1002,7 @@ impl HeaderTree {
             .filter(|b| !removed.contains(&b.hash))
             .chain(incoming)
         {
-            let header = &block.header;
-            // Until the stored-bytes step, charge actual decoded vector capacities,
-            // not a hypothetical maximum-size epoch mark on every node.
-            let mut node = Self::node_overhead() - slot;
-            node = node.saturating_add(header.offenders_mark.capacity() * 32);
-            if let Some(mark) = &header.epoch_mark {
-                node = node.saturating_add(mark.validators.capacity() * 64);
-            }
-            if let Some(mark) = &header.tickets_mark {
-                node = node
-                    .saturating_add(mark.capacity() * core::mem::size_of::<super::types::Ticket>());
-            }
+            let node = (Self::node_overhead() - slot).saturating_add(block.encoded.capacity());
             bytes = bytes.saturating_add(node);
             let (id, cost) = block.post_state.epoch_allocation();
             if epochs.insert(id, ()).is_none() {
@@ -1025,7 +1036,7 @@ impl HeaderTree {
             if block.hash == self.root.hash {
                 None
             } else {
-                self.get(&block.header.parent)
+                self.get(&block.parent)
             }
         })
     }

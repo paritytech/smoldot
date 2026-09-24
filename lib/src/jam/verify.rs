@@ -17,6 +17,7 @@ use super::{
     state::{LightState, SealingEntry, StateError, epoch_len, has_len},
     types::{Hash, Header},
 };
+use alloc::vec::Vec;
 
 /// Unix time of the start of the JAM common era, 2025-01-01 12:00 UTC
 /// (Gray Paper `overview.tex`, "Time"). Slot `s` starts at
@@ -27,7 +28,9 @@ pub const JAM_COMMON_ERA: u64 = 1_735_732_800;
 /// [`verified_genesis`], with the light state after it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedHeader {
-    pub header: Header,
+    /// Canonical bytes including the seal.
+    pub encoded: Vec<u8>,
+    pub parent: Hash,
     /// BLAKE2b-256 of the encoded header, including the seal.
     pub hash: Hash,
     pub slot: u32,
@@ -110,11 +113,13 @@ impl core::error::Error for VerifyError {}
 /// Construct the state with [`LightState::from_anchor`]; shape validation does not
 /// authenticate either the header or its state.
 pub fn verified_genesis(params: &Params, header: Header, state: LightState) -> VerifiedHeader {
-    let hash = header.hash(params);
+    let encoded = header.encode(params);
+    let hash = blake2b_256(&encoded);
     VerifiedHeader {
         slot: header.slot,
         hash,
-        header,
+        parent: header.parent,
+        encoded,
         sealed_with_ticket: false,
         epoch_changed: false,
         post_state: state,
@@ -249,7 +254,8 @@ pub fn verify_header(
     Ok(VerifiedHeader {
         hash: blake2b_256(&encoded),
         slot: header.slot,
-        header,
+        parent: header.parent,
+        encoded,
         sealed_with_ticket,
         epoch_changed,
         post_state: state,

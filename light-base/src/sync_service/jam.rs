@@ -147,7 +147,7 @@ fn memory_limits(params: &Params) -> Result<(usize, tree::Config), String> {
     // Reserve one worst-case epoch/state and header for verification; keep the
     // second-tree allowance while eviction rebuilds survivors.
     let max_bytes = (TREE_BYTES - header_bytes - state_bytes) / 2;
-    let max_blocks = (max_bytes / HeaderTree::node_overhead()).min(4096);
+    let max_blocks = (max_bytes / (HeaderTree::node_overhead() + 297)).min(4096);
     let max_blocks = NonZeroUsize::new(max_blocks)
         .filter(|n| n.get() >= 2)
         .ok_or_else(|| String::from("JAM tree budget too small"))?;
@@ -226,7 +226,7 @@ impl State {
         let candidate = path
             .iter()
             .rev()
-            .find(|b| b.header.epoch_mark.is_some())
+            .find(|b| b.epoch_changed)
             .copied()
             .or_else(|| path.first().copied())?;
         if candidate.slot > advertised.slot {
@@ -262,7 +262,7 @@ impl State {
             self.authorities.current(),
             &target,
             limits,
-            |hash| self.tree.get(hash).map(|b| &b.header),
+            |hash| self.tree.get(hash).map(|b| (b.hash, b.parent, b.slot)),
         )?;
         let result = self.tree.finalize(&verified, &mut self.authorities)?;
         if result.finalized.is_empty() {
@@ -289,7 +289,7 @@ impl State {
             self.subscribers.push(tx);
         }
         SubscribeAll {
-            finalized_block_scale_encoded_header: self.tree.finalized().header.encode(&self.params),
+            finalized_block_scale_encoded_header: self.tree.finalized().encoded.clone(),
             finalized_block_runtime: None,
             non_finalized_blocks_ancestry_order: self
                 .tree
@@ -297,8 +297,8 @@ impl State {
                 .skip(1)
                 .map(|b| BlockNotification {
                     is_new_best: b.hash == self.tree.best().hash,
-                    scale_encoded_header: b.header.encode(&self.params),
-                    parent_hash: b.header.parent,
+                    scale_encoded_header: b.encoded.clone(),
+                    parent_hash: b.parent,
                 })
                 .collect(),
             new_blocks: rx,
@@ -332,8 +332,8 @@ impl State {
                 if let Some(block) = self.tree.get(&hash) {
                     let notification = Notification::Block(BlockNotification {
                         is_new_best: self.tree.best().hash == hash,
-                        scale_encoded_header: block.header.encode(&self.params),
-                        parent_hash: block.header.parent,
+                        scale_encoded_header: block.encoded.clone(),
+                        parent_hash: block.parent,
                     });
                     self.subscribers
                         .retain(|tx| tx.try_send(notification.clone()).is_ok());

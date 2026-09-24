@@ -114,7 +114,31 @@ fn verify(
         authorities,
         &target.hash(&params()),
         limits(),
-        |hash| (*hash == target.hash(&params())).then_some(target),
+        |hash| {
+            (*hash == target.hash(&params())).then_some((
+                target.hash(&params()),
+                target.parent,
+                target.slot,
+            ))
+        },
+    )
+}
+
+fn after_finalizing(
+    state: &AuthoritySet,
+    params: &Params,
+    proof: &VerifiedFinality,
+    header: &Header,
+) -> Result<Option<AuthoritySet>, Error> {
+    state.after_finalizing(
+        params,
+        proof,
+        header.hash(params),
+        header.slot,
+        header
+            .epoch_mark
+            .as_ref()
+            .map(|mark| mark.validators.as_slice()),
     )
 }
 
@@ -142,7 +166,7 @@ fn polkajam_payload_layout_and_signed_field_binding() {
     bad.set_id = 8;
     assert_eq!(
         bad.verify(&params(), 8, &public, &h.hash(&params()), limits(), |_| {
-            Some(&h)
+            Some((h.hash(&params()), h.parent, h.slot))
         })
         .unwrap_err(),
         Error::BadSignature
@@ -324,6 +348,7 @@ fn ancestry_routes_through_witnesses_and_retained_tree() {
                     .iter()
                     .copied()
                     .find(|header| header.hash(&params()) == *hash)
+                    .map(|header| (header.hash(&params()), header.parent, header.slot))
             }
         )
         .is_ok()
@@ -402,7 +427,7 @@ fn ancestry_rejects_wrong_slots_forks_unused_and_duplicate_headers() {
             &authorities,
             &h.hash(&params()),
             bound,
-            |_| Some(&h)
+            |_| Some((h.hash(&params()), h.parent, h.slot))
         )
         .unwrap_err(),
         Error::ResourceLimit
@@ -500,11 +525,10 @@ fn authority_pipeline_changes_only_on_verified_finalization() {
     mark(&mut fork, &d);
     let verified = verify(&proof(&h, 7, &a[..5]), &h, original.current()).unwrap();
     assert_eq!(
-        original.after_finalizing(&params(), &verified, &fork),
+        after_finalizing(&original, &params(), &verified, &fork),
         Err(Error::TargetMismatch)
     );
-    let next = original
-        .after_finalizing(&params(), &verified, &h)
+    let next = after_finalizing(&original, &params(), &verified, &h)
         .unwrap()
         .unwrap();
     assert_eq!(original.set_id(), 7);
@@ -523,21 +547,23 @@ fn authority_pipeline_changes_only_on_verified_finalization() {
             next.current(),
             &h2.hash(&params()),
             limits(),
-            |_| Some(&h2),
+            |_| Some((h2.hash(&params()), h2.parent, h2.slot)),
         )
         .unwrap();
-    let next2 = next.after_finalizing(&params(), &v2, &h2).unwrap().unwrap();
+    let next2 = after_finalizing(&next, &params(), &v2, &h2)
+        .unwrap()
+        .unwrap();
     assert_eq!(next2.set_id(), 9);
     assert_eq!(next2.current(), public(&c));
     assert_eq!(next2.next(), public(&d));
     let wrong_snapshot =
         AuthoritySet::from_checkpoint(&params(), 7, public(&b), public(&c)).unwrap();
     assert_eq!(
-        wrong_snapshot.after_finalizing(&params(), &verified, &h),
+        after_finalizing(&wrong_snapshot, &params(), &verified, &h),
         Err(Error::InvalidAuthorities)
     );
     assert!(matches!(
-        next.after_finalizing(&params(), &verified, &h),
+        after_finalizing(&next, &params(), &verified, &h),
         Err(Error::WrongSetId { .. })
     ));
 }
@@ -563,7 +589,7 @@ fn genesis_and_checkpoint_positions_need_no_round_state() {
         let verified =
             verify(&proof(&ordinary, 7, &a[..5]), &ordinary, snapshot.current()).unwrap();
         assert_eq!(
-            snapshot.after_finalizing(&params(), &verified, &ordinary),
+            after_finalizing(&snapshot, &params(), &verified, &ordinary),
             Ok(None)
         );
         let mut transition = header(ordinary.hash(&params()), slot + 12);
@@ -575,8 +601,7 @@ fn genesis_and_checkpoint_positions_need_no_round_state() {
         )
         .unwrap();
         assert_eq!(
-            snapshot
-                .after_finalizing(&params(), &verified, &transition)
+            after_finalizing(&snapshot, &params(), &verified, &transition)
                 .unwrap()
                 .unwrap()
                 .set_id(),
@@ -610,11 +635,10 @@ fn variable_authority_sets_rotate_and_use_the_actual_quorum() {
                 snapshot.current(),
                 &h.hash(&params),
                 limits(),
-                |_| Some(&h),
+                |_| Some((h.hash(&params), h.parent, h.slot)),
             )
             .unwrap();
-        let rotated = snapshot
-            .after_finalizing(&params, &verified, &h)
+        let rotated = after_finalizing(&snapshot, &params, &verified, &h)
             .unwrap()
             .unwrap();
         assert_eq!(rotated.current(), public(&all[..next_count]));
@@ -628,7 +652,7 @@ fn variable_authority_sets_rotate_and_use_the_actual_quorum() {
                     snapshot.current(),
                     &h.hash(&params),
                     limits(),
-                    |_| Some(&h)
+                    |_| Some((h.hash(&params), h.parent, h.slot))
                 )
                 .unwrap_err(),
             Error::InsufficientWeight
@@ -672,11 +696,11 @@ fn authority_shape_and_overflow_fail_without_mutation() {
             snapshot.current(),
             &h.hash(&params()),
             limits(),
-            |_| Some(&h),
+            |_| Some((h.hash(&params()), h.parent, h.slot)),
         )
         .unwrap();
     assert_eq!(
-        snapshot.after_finalizing(&params(), &verified, &h),
+        after_finalizing(&snapshot, &params(), &verified, &h),
         Err(Error::SetIdOverflow)
     );
     assert_eq!(snapshot.set_id(), u32::MAX);
@@ -768,7 +792,7 @@ fn captured_polkajam_proofs_advance_authenticated_headers_and_reject_mutations()
                 authorities.current(),
                 &proof.target.hash,
                 limits,
-                |hash| tree.get(hash).map(|b| &b.header),
+                |hash| tree.get(hash).map(|b| (b.hash, b.parent, b.slot)),
             )
         };
         if index == 0 {
@@ -827,7 +851,7 @@ fn captured_polkajam_proofs_advance_authenticated_headers_and_reject_mutations()
             };
             let mut raw = fixture["spec"].clone();
             raw["checkpoint"] = serde_json::json!({
-                "header": hex::encode(root.header.encode(params)),
+                "header": hex::encode(&root.encoded),
                 "state": {"safrole":hex::encode(safrole.encode(params)),
                     "entropy":hex::encode(codec::encode_entropy(&state.entropy())),
                     "active_validators":hex::encode(codec::encode_active_validators(&keys(&state.epoch().active))),
@@ -844,7 +868,7 @@ fn captured_polkajam_proofs_advance_authenticated_headers_and_reject_mutations()
             let descendants: Vec<_> = tree
                 .ancestry_order()
                 .skip(1)
-                .map(|b| b.header.clone())
+                .map(|b| Header::decode(params, &b.encoded).unwrap())
                 .collect();
             tree = HeaderTree::new(
                 params.clone(),
