@@ -1568,6 +1568,7 @@ where
                     // Auto-fire an outbound Identify request the first time we see this peer.
                     // The response will populate `kademlia_capable_peers`, which discovery
                     // logic uses to find Kademlia targets independently of gossip state.
+                    // It also populates `statement_capable_peers`.
                     //
                     // Identify expects a length-prefixed empty body (see inbound handler
                     // around line 2037, which checks `request_payload.is_empty()`). Passing
