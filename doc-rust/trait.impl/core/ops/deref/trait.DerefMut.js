@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["smoldot",[["impl&lt;'a, TNow: <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/clone/trait.Clone.html\" title=\"trait core::clone::Clone\">Clone</a>&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/ops/deref/trait.DerefMut.html\" title=\"trait core::ops::deref::DerefMut\">DerefMut</a> for <a class=\"struct\" href=\"smoldot/libp2p/connection/noise/struct.InnerReadWrite.html\" title=\"struct smoldot::libp2p::connection::noise::InnerReadWrite\">InnerReadWrite</a>&lt;'a, TNow&gt;"],["impl&lt;'a, TNow: <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/clone/trait.Clone.html\" title=\"trait core::clone::Clone\">Clone</a>&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/ops/deref/trait.DerefMut.html\" title=\"trait core::ops::deref::DerefMut\">DerefMut</a> for <a class=\"struct\" href=\"smoldot/libp2p/connection/webrtc_framing/struct.InnerReadWrite.html\" title=\"struct smoldot::libp2p::connection::webrtc_framing::InnerReadWrite\">InnerReadWrite</a>&lt;'a, TNow&gt;"],["impl&lt;'a, TNow: <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/clone/trait.Clone.html\" title=\"trait core::clone::Clone\">Clone</a>&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/ops/deref/trait.DerefMut.html\" title=\"trait core::ops::deref::DerefMut\">DerefMut</a> for <a class=\"struct\" href=\"smoldot/libp2p/with_buffers/struct.ReadWriteAccess.html\" title=\"struct smoldot::libp2p::with_buffers::ReadWriteAccess\">ReadWriteAccess</a>&lt;'a, TNow&gt;"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[1546]}
