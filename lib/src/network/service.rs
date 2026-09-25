@@ -280,6 +280,10 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
     /// Peers known to support a chain's Kademlia protocol, as determined by Identify responses.
     /// Used by [`ChainNetwork::kademlia_capable_peers`].
     kademlia_capable_peers: BTreeSet<(usize, PeerIndex)>,
+
+    /// Peers known to support a chain's statement/2 protocol, as determined by Identify
+    /// responses. Used by [`ChainNetwork::statement_capable_peers`].
+    statement_capable_peers: BTreeSet<(usize, PeerIndex)>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -490,6 +494,7 @@ where
                 Default::default(),
             ),
             kademlia_capable_peers: BTreeSet::new(),
+            statement_capable_peers: BTreeSet::new(),
             chains: slab::Slab::with_capacity(config.chains_capacity),
             chains_by_protocol_info: hashbrown::HashMap::with_capacity_and_hasher(
                 config.chains_capacity,
@@ -733,6 +738,8 @@ where
         }
 
         self.kademlia_capable_peers
+            .retain(|(c, _)| *c != chain_id.0);
+        self.statement_capable_peers
             .retain(|(c, _)| *c != chain_id.0);
 
         // Actually remove the chain. This will panic if the `ChainId` is invalid.
@@ -1561,6 +1568,7 @@ where
                     // Auto-fire an outbound Identify request the first time we see this peer.
                     // The response will populate `kademlia_capable_peers`, which discovery
                     // logic uses to find Kademlia targets independently of gossip state.
+                    // It also populates `statement_capable_peers`.
                     //
                     // Identify expects a length-prefixed empty body (see inbound handler
                     // around line 2037, which checks `request_payload.is_empty()`). Passing
@@ -1866,6 +1874,8 @@ where
                             // a chain when its self-advertised protocols list contains that
                             // chain's Kad protocol name. The response is consumed internally
                             // (no `Event::RequestResult` is emitted for Identify).
+                            // `statement_capable_peers` is populated the same way from the
+                            // statement/2 protocol name, for chains that use statements.
                             if let Ok(payload) = response {
                                 if let Ok(decoded) = codec::decode_identify_response(&payload) {
                                     let advertised: Vec<&str> = decoded.protocols.collect();
@@ -1879,6 +1889,20 @@ where
                                         if advertised.iter().any(|p| *p == kad_name_string) {
                                             self.kademlia_capable_peers
                                                 .insert((chain_index, peer_index));
+                                        }
+
+                                        if chain.enable_statement_protocol {
+                                            let statement_name = codec::encode_protocol_name_string(
+                                                codec::ProtocolName::Statement {
+                                                    genesis_hash: chain.genesis_hash,
+                                                    fork_id: chain.fork_id.as_deref(),
+                                                    version: codec::StatementProtocolVersion::V2,
+                                                },
+                                            );
+                                            if advertised.iter().any(|p| *p == statement_name) {
+                                                self.statement_capable_peers
+                                                    .insert((chain_index, peer_index));
+                                            }
                                         }
                                     }
                                 }
@@ -4174,6 +4198,24 @@ where
             .map(|(_, peer_index)| &self.peers[peer_index.0])
     }
 
+    /// Returns the list of peers known to support the statement/2 protocol of the given chain,
+    /// as determined by their Identify protocol response.
+    ///
+    /// Always empty if [`ChainConfig::enable_statement_protocol`] is `false` for this chain.
+    /// The same limits as [`ChainNetwork::kademlia_capable_peers`] apply: Identify is sent at
+    /// most once per peer, so peers that connected before the chain was added are missing.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn statement_capable_peers(&self, chain_id: ChainId) -> impl Iterator<Item = &PeerId> {
+        assert!(self.chains.contains(chain_id.0));
+        self.statement_capable_peers
+            .range((chain_id.0, PeerIndex(usize::MIN))..=(chain_id.0, PeerIndex(usize::MAX)))
+            .map(|(_, peer_index)| &self.peers[peer_index.0])
+    }
+
     /// Returns the list of all peers for a [`Event::GossipConnected`] event of the given kind has
     /// been emitted.
     /// It is possible to send gossip notifications to these peers.
@@ -5332,6 +5374,8 @@ where
         // otherwise a future peer reusing this `PeerIndex` would inherit stale Kad capability.
         self.identify_requested_peers.remove(&peer_index);
         self.kademlia_capable_peers
+            .retain(|(_, p)| *p != peer_index);
+        self.statement_capable_peers
             .retain(|(_, p)| *p != peer_index);
 
         let peer_id = self.peers.remove(peer_index.0);
