@@ -1859,8 +1859,8 @@ enum CompactStorageValueOwned {
     None,
 }
 
-struct CompactFrame {
-    partial_key: Vec<nibble::Nibble>,
+struct CompactFrame<'a> {
+    partial_key: trie_node::DecodedPartialKey<'a>,
     new_children: [Option<Vec<u8>>; 16],
     new_storage_value: CompactStorageValueOwned,
     descended_into: usize,
@@ -1877,7 +1877,7 @@ fn compact_proof_compute_merkle<'a, I: Iterator<Item = &'a [u8]>>(
     expected_value: &[u8],
     state_version: TrieEntryVersion,
 ) -> Option<CompactMerkleValue> {
-    let mut stack: Vec<CompactFrame> = Vec::new();
+    let mut stack: Vec<CompactFrame<'a>> = Vec::new();
     let mut node_bytes: &[u8] = root_node_bytes;
     let mut key_pos = 0usize;
     let mut is_root = true;
@@ -1885,12 +1885,12 @@ fn compact_proof_compute_merkle<'a, I: Iterator<Item = &'a [u8]>>(
     let mut current = loop {
         let decoded = trie_node::decode(node_bytes).ok()?;
 
-        let partial_key: Vec<nibble::Nibble> = decoded.partial_key.clone().collect();
-        for pk_nibble in &partial_key {
+        let partial_key = decoded.partial_key.clone();
+        for pk_nibble in partial_key.clone() {
             if key_pos >= key.len() {
                 return None;
             }
-            if key[key_pos] != *pk_nibble {
+            if key[key_pos] != pk_nibble {
                 return None;
             }
             key_pos += 1;
@@ -1967,7 +1967,7 @@ fn compact_proof_compute_merkle<'a, I: Iterator<Item = &'a [u8]>>(
 }
 
 fn compact_encode_node(
-    partial_key: Vec<nibble::Nibble>,
+    partial_key: impl iter::ExactSizeIterator<Item = nibble::Nibble> + Clone,
     new_children: [Option<Vec<u8>>; 16],
     new_storage_value: CompactStorageValueOwned,
     is_root: bool,
@@ -1980,7 +1980,7 @@ fn compact_encode_node(
     let children_view: [Option<&[u8]>; 16] = core::array::from_fn(|i| new_children[i].as_deref());
 
     let encoded = trie_node::encode_to_vec(trie_node::Decoded {
-        partial_key: partial_key.into_iter(),
+        partial_key,
         children: children_view,
         storage_value: sv_view,
     })
