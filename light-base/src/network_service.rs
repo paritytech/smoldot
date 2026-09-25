@@ -3360,7 +3360,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 },
             ) => {
                 // Can't happen as the statement kind reports through the `StatementProtocol*`
-                // events.
+                // events, and inbound statement substreams are accepted or refused without
+                // asking.
                 unreachable!()
             }
             WakeUpReason::NetworkEvent(service::Event::IdentifyRequestIn {
