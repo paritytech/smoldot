@@ -3341,6 +3341,28 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // Can't happen as we already instantaneously accept or reject gossip in requests.
                 unreachable!()
             }
+            WakeUpReason::NetworkEvent(
+                service::Event::GossipConnected {
+                    kind: service::GossipKind::Statement,
+                    ..
+                }
+                | service::Event::GossipOpenFailed {
+                    kind: service::GossipKind::Statement,
+                    ..
+                }
+                | service::Event::GossipDisconnected {
+                    kind: service::GossipKind::Statement,
+                    ..
+                }
+                | service::Event::GossipInDesired {
+                    kind: service::GossipKind::Statement,
+                    ..
+                },
+            ) => {
+                // Can't happen as the statement kind reports through the `StatementProtocol*`
+                // events.
+                unreachable!()
+            }
             WakeUpReason::NetworkEvent(service::Event::IdentifyRequestIn {
                 peer_id,
                 substream_id,
@@ -3463,6 +3485,38 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 .remove(&peer_id);
                         }
                     }
+                }
+            }
+            WakeUpReason::NetworkEvent(service::Event::StatementProtocolOpenFailed {
+                peer_id,
+                chain_id,
+                error,
+            }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "statement-protocol-open-error",
+                    chain = &task.network[chain_id].log_name,
+                    peer_id,
+                    ?error,
+                );
+            }
+            WakeUpReason::NetworkEvent(service::Event::StatementProtocolDisconnected {
+                peer_id,
+                chain_id,
+            }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "statement-protocol-closed",
+                    chain = &task.network[chain_id].log_name,
+                    peer_id,
+                );
+
+                if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                    peers.remove(&peer_id);
                 }
             }
             // TODO: we don't filter outbound statements yet

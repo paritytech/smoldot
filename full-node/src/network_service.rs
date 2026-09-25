@@ -1788,6 +1788,14 @@ async fn background_task(mut inner: Inner) {
                 // that this event can't happen.
                 unreachable!()
             }
+            WakeUpReason::NetworkEvent(service::Event::GossipInDesired {
+                kind: service::GossipKind::Statement,
+                ..
+            }) => {
+                // Can't happen as the statement kind reports through the `StatementProtocol*`
+                // events.
+                unreachable!()
+            }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
                 peer_id,
@@ -2292,6 +2300,33 @@ async fn background_task(mut inner: Inner) {
                     format!(
                         "statement-protocol-connected; peer_id={}; chain={}; version={:?}",
                         peer_id, inner.network[chain_id].log_name, version
+                    ),
+                );
+            }
+
+            WakeUpReason::NetworkEvent(service::Event::StatementProtocolOpenFailed {
+                peer_id,
+                chain_id,
+                error,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "statement-protocol-open-error; peer_id={}; chain={}; error={}",
+                        peer_id, inner.network[chain_id].log_name, error
+                    ),
+                );
+            }
+
+            WakeUpReason::NetworkEvent(service::Event::StatementProtocolDisconnected {
+                peer_id,
+                chain_id,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "statement-protocol-disconnected; peer_id={}; chain={}",
+                        peer_id, inner.network[chain_id].log_name
                     ),
                 );
             }
