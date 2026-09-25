@@ -1792,8 +1792,8 @@ async fn background_task(mut inner: Inner) {
                 kind: service::GossipKind::Statement,
                 ..
             }) => {
-                // Can't happen as the statement kind reports through the `StatementProtocol*`
-                // events.
+                // Can't happen as inbound statement substreams are accepted or refused without
+                // asking.
                 unreachable!()
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {

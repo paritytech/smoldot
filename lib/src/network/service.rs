@@ -608,6 +608,10 @@ where
             self.gossip_remove_desired_inner(chain_id, desired, kind);
         }
 
+        // The chain index is reused by a later chain, which must not inherit these links.
+        self.opened_gossip_undesired
+            .retain(|(c, _, _)| *c != chain_id);
+
         // Close any notifications substream of the chain.
         for protocol in [
             NotificationsProtocol::BlockAnnounces {
@@ -786,7 +790,8 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if the given [`ChainId`] is invalid.
+    /// Panics if the given [`ChainId`] is invalid, or if the kind is [`GossipKind::Statement`]
+    /// and the chain has the statement protocol disabled.
     ///
     pub fn gossip_insert_desired(
         &mut self,
@@ -930,34 +935,9 @@ where
             .collect::<Vec<_>>();
 
         for chain_index in chains {
-            let _was_in = self
-                .gossip_desired_peers
-                .remove(&(peer_index, kind, chain_index));
+            let _was_in = self.gossip_remove_desired_inner(ChainId(chain_index), peer_index, kind);
             debug_assert!(_was_in);
-            let _was_in =
-                self.gossip_desired_peers_by_chain
-                    .remove(&(chain_index, kind, peer_index));
-            debug_assert!(_was_in);
-            self.connected_unopened_gossip_desired.remove(&(
-                peer_index,
-                ChainId(chain_index),
-                kind,
-            ));
         }
-
-        if self
-            .gossip_desired_peers
-            .range(
-                (peer_index, GossipKind::MIN, usize::MIN)
-                    ..=(peer_index, GossipKind::MAX, usize::MAX),
-            )
-            .next()
-            .is_none()
-        {
-            self.unconnected_desired.remove(&peer_index);
-        }
-
-        self.try_clean_up_peer(peer_index);
     }
 
     /// Returns the list of gossip-desired peers for the given chain, in no specific order.
@@ -2441,9 +2421,10 @@ where
                             // we fall back once to V1.
                             //
                             // A statement substream that anchors a `GossipKind::Statement`
-                            // link only gets the V2 to V1 fallback. Any other failure is
-                            // reported to the API user, as a silent retry would hide a peer
-                            // that refuses statement-only links.
+                            // link only gets the V2 to V1 fallback, and none when the
+                            // connection is shutting down. Any other failure is reported to
+                            // the API user, as a silent retry would hide a peer that refuses
+                            // statement-only links.
                             if let Err(error) = &result {
                                 let is_wanted_statement_link = matches!(
                                     substream_protocol,
@@ -2724,11 +2705,11 @@ where
                                 debug_assert!(_was_inserted);
                             }
 
-                            // The transactions, Grandpa and Statement protocols are tied to the
-                            // block announces substream. As such, we also close any transactions,
-                            // grandpa, or statement substream, either pending or fully opened.
-                            // The statement substreams of a `GossipKind::Statement` link stand
-                            // on their own and stay open.
+                            // The transactions and Grandpa protocols, and the statement protocol
+                            // without a `GossipKind::Statement` link, are tied to the block
+                            // announces substream. As such, we also close their substreams,
+                            // either pending or fully opened. The statement substreams of a
+                            // `GossipKind::Statement` link stand on their own and stay open.
                             let keep_statement =
                                 self.statement_link_wanted(chain_index, peer_index);
                             for proto in [
@@ -2847,8 +2828,9 @@ where
                         }
 
                         // The transactions, grandpa, and statement protocols are tied to the block
-                        // announces substream. If there is a block announce substream with the
-                        // peer, we try to reopen these substreams.
+                        // announces substream, except the statement substream of a
+                        // `GossipKind::Statement` link. If there is a block announce substream
+                        // with the peer, we try to reopen these substreams.
                         NotificationsProtocol::Transactions { .. }
                         | NotificationsProtocol::Grandpa { .. }
                         | NotificationsProtocol::Statement { .. } => {
@@ -3136,23 +3118,22 @@ where
 
                     // Check whether there is an open outgoing block announces substream, as this
                     // means that we are "gossip-connected". A statement notification is also
-                    // accepted over an open outgoing statement substream, which is what a
-                    // `GossipKind::Statement` link is anchored on, or from a peer whose
-                    // statement link is wanted and about to open. Otherwise, the notification
+                    // accepted when an open outgoing statement substream exists, which is what
+                    // a `GossipKind::Statement` link is anchored on. Otherwise, the notification
                     // is silently discarded.
                     let block_announces_open = self.has_out_notification_substream(
                         peer_index,
                         iter::once(NotificationsProtocol::BlockAnnounces { chain_index }),
                         true,
                     );
-                    let statement_open_or_wanted =
+                    let statement_open =
                         matches!(substream_protocol, NotificationsProtocol::Statement { .. })
-                            && (self.has_out_notification_substream(
+                            && self.has_out_notification_substream(
                                 peer_index,
                                 statement_protocols(chain_index),
                                 true,
-                            ) || self.statement_link_wanted(chain_index, peer_index));
-                    if !block_announces_open && !statement_open_or_wanted {
+                            );
+                    if !block_announces_open && !statement_open {
                         continue;
                     }
 
@@ -4155,12 +4136,13 @@ where
             .map(|(_, peer_index)| &self.peers[peer_index.0])
     }
 
-    /// Returns the list of all peers for a [`Event::GossipConnected`] event of the given kind has
-    /// been emitted.
+    /// Returns the list of all peers with an open gossip link of the given kind.
     /// It is possible to send gossip notifications to these peers.
     ///
-    /// For [`GossipKind::Statement`], returns the peers with an open outbound statement
-    /// substream, whether it anchors a statement link or follows a block announces substream.
+    /// For [`GossipKind::ConsensusTransactions`], these are the peers for which a
+    /// [`Event::GossipConnected`] event has been emitted. For [`GossipKind::Statement`], these
+    /// are the peers with an open outbound statement substream, whether it anchors a statement
+    /// link or follows a block announces substream.
     ///
     /// # Panic
     ///
@@ -4199,13 +4181,13 @@ where
         })
     }
 
-    /// Returns the list of all peers for a [`Event::GossipConnected`] event of the given kind has
-    /// been emitted.
-    /// It is possible to send gossip notifications to these peers.
+    /// Returns `true` if a gossip link of the given kind is open with the given peer.
+    /// It is possible to send gossip notifications to that peer.
     ///
-    /// For [`GossipKind::Statement`], returns `true` if an outbound statement substream is open
-    /// with the peer, whether it anchors a statement link or follows a block announces
-    /// substream.
+    /// For [`GossipKind::ConsensusTransactions`], this means that a [`Event::GossipConnected`]
+    /// event has been emitted. For [`GossipKind::Statement`], this means that an outbound
+    /// statement substream is open with the peer, whether it anchors a statement link or
+    /// follows a block announces substream.
     ///
     /// # Panic
     ///
@@ -4241,8 +4223,12 @@ where
     /// [`Event::StatementProtocolOpenFailed`] is guaranteed to later be generated, unless
     /// [`ChainNetwork::gossip_close`] is called in the meanwhile. Returns
     /// [`OpenGossipError::AlreadyOpened`] if a statement substream already exists with the peer,
-    /// including one that follows a block announces substream. In that case the
-    /// [`Event::StatementProtocolConnected`] for it has already been generated or is coming.
+    /// including one that follows a block announces substream. That substream then anchors the
+    /// statement link: it stays open when the block announces substream closes, and its closing
+    /// is reported through [`Event::StatementProtocolDisconnected`]. If it is still pending, a
+    /// [`Event::StatementProtocolConnected`] or [`Event::StatementProtocolOpenFailed`] follows.
+    /// If it is already open, the [`Event::StatementProtocolConnected`] for it was generated
+    /// earlier.
     ///
     /// # Panic
     ///
@@ -4266,6 +4252,17 @@ where
         // It is forbidden to open more than one gossip notifications substream of a kind with
         // any given peer.
         if self.gossip_link_exists(chain_id.0, peer_index, kind) {
+            // A statement substream that follows a block announces substream becomes the anchor
+            // of the statement link the API user asked for, so that it outlives the block
+            // announces substream and its closing is reported.
+            if kind == GossipKind::Statement
+                && !self
+                    .gossip_desired_peers
+                    .contains(&(peer_index, kind, chain_id.0))
+            {
+                self.opened_gossip_undesired
+                    .insert((chain_id, peer_index, kind));
+            }
             return Err(OpenGossipError::AlreadyOpened);
         }
 
@@ -4431,7 +4428,9 @@ where
     /// This can be used:
     ///
     /// - To close a opening in progress after having called [`ChainNetwork::gossip_open`], in
-    /// which case no [`Event::GossipConnected`] or [`Event::GossipOpenFailed`] is generated.
+    /// which case no [`Event::GossipConnected`] or [`Event::GossipOpenFailed`] is generated, and
+    /// no [`Event::StatementProtocolConnected`] or [`Event::StatementProtocolOpenFailed`] for a
+    /// [`GossipKind::Statement`] link.
     /// - To close a fully open gossip link. All the notifications that have been queued are still
     /// delivered. No event is generated.
     /// - To respond to a [`Event::GossipInDesired`] by rejecting the request.
@@ -5387,7 +5386,8 @@ where
 
     /// Forgets a [`GossipKind::Statement`] link that has just failed to open or has been
     /// closed, and puts the peer back in
-    /// [`ChainNetwork::connected_unopened_gossip_desired`] when it is still desired.
+    /// [`ChainNetwork::connected_unopened_gossip_desired`] when it is still desired and an
+    /// established connection with it remains.
     fn statement_link_lost(&mut self, chain_index: usize, peer_index: PeerIndex) {
         self.opened_gossip_undesired.remove(&(
             ChainId(chain_index),
@@ -5636,8 +5636,9 @@ impl<TChain, TConn, TNow> ops::IndexMut<ConnectionId> for ChainNetwork<TChain, T
     }
 }
 
-/// Kind of gossip link. Each kind is anchored on one notifications substream: the link exists
-/// as long as that outbound substream exists, and closes with it.
+/// Kind of gossip link. Each kind is anchored on one notifications protocol, either version of
+/// it for statements: the link exists as long as an outbound substream of that protocol exists,
+/// and closes with it.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GossipKind {
     /// Anchored on the block announces substream. The transactions and Grandpa substreams
@@ -5763,6 +5764,9 @@ pub enum Event<TConn> {
     /// Now connected to the given peer for gossiping purposes.
     ///
     /// This event can only happen as a result of a call to [`ChainNetwork::gossip_open`].
+    ///
+    /// The kind is always [`GossipKind::ConsensusTransactions`]. The statement kind reports
+    /// through the `StatementProtocol*` events.
     GossipConnected {
         /// Peer we are now connected to.
         peer_id: PeerId,
@@ -5781,6 +5785,9 @@ pub enum Event<TConn> {
     /// An attempt has been made to open the given chain, but something wrong happened.
     ///
     /// This event can only happen as a result of a call to [`ChainNetwork::gossip_open`].
+    ///
+    /// The kind is always [`GossipKind::ConsensusTransactions`]. The statement kind reports
+    /// through the `StatementProtocol*` events.
     GossipOpenFailed {
         /// Peer concerned by the event.
         peer_id: PeerId,
@@ -5793,6 +5800,9 @@ pub enum Event<TConn> {
     },
 
     /// No longer connected to the given peer for gossiping purposes.
+    ///
+    /// The kind is always [`GossipKind::ConsensusTransactions`]. The statement kind reports
+    /// through the `StatementProtocol*` events.
     GossipDisconnected {
         /// Peer we are no longer connected to.
         peer_id: PeerId,
@@ -5803,6 +5813,9 @@ pub enum Event<TConn> {
     },
 
     /// A peer would like to open a gossiping link with the local node.
+    ///
+    /// The kind is always [`GossipKind::ConsensusTransactions`]. Inbound statement substreams
+    /// are accepted or refused without asking the API user.
     // TODO: document what to do
     // TODO: include handshake content?
     GossipInDesired {
@@ -5816,6 +5829,8 @@ pub enum Event<TConn> {
 
     /// A previously-emitted [`Event::GossipInDesired`] is no longer relevant as the peer has
     /// stopped the opening attempt.
+    ///
+    /// The kind is always [`GossipKind::ConsensusTransactions`], like the event it cancels.
     GossipInDesiredCancel {
         /// Peer concerned by the event.
         peer_id: PeerId,
@@ -5877,8 +5892,9 @@ pub enum Event<TConn> {
 
     /// Received statements from the network.
     ///
-    /// Can only happen after a [`Event::StatementProtocolConnected`] with the given [`PeerId`]
-    /// and [`ChainId`] combination has happened.
+    /// Can only happen after a [`Event::GossipConnected`] or a
+    /// [`Event::StatementProtocolConnected`] with the given [`PeerId`] and [`ChainId`]
+    /// combination has happened.
     StatementsNotification {
         /// Identity of the sender of the statements.
         peer_id: PeerId,
@@ -5909,7 +5925,17 @@ pub enum Event<TConn> {
     /// This event can only happen as a result of a call to [`ChainNetwork::gossip_open`] with
     /// [`GossipKind::Statement`], or when a peer desired under that kind has its statement
     /// substream refused. A statement substream that follows a block announces substream is
-    /// retried silently instead.
+    /// handled silently instead: retried on a transient error, dropped when the peer lacks the
+    /// protocol.
+    ///
+    /// The error is the one of the last version tried. When the connection is shutting down,
+    /// no V1 fallback is attempted and the error can be the V2 refusal, which then says nothing
+    /// about the peer's support for the protocol.
+    ///
+    /// A peer still desired under [`GossipKind::Statement`] is put back in
+    /// [`ChainNetwork::connected_unopened_gossip_desired`]. The API user must remove it from
+    /// the desired peers or wait before opening again, otherwise a peer that refuses statement
+    /// links is opened again at once.
     StatementProtocolOpenFailed {
         /// Peer concerned by the event.
         peer_id: PeerId,
@@ -5924,7 +5950,9 @@ pub enum Event<TConn> {
     /// Can only happen after a [`Event::StatementProtocolConnected`] with the given [`PeerId`]
     /// and [`ChainId`] combination, and only for a peer that has a [`GossipKind::Statement`]
     /// link, whether desired or opened with [`ChainNetwork::gossip_open`]. A statement
-    /// substream that follows a block announces substream is reopened silently instead.
+    /// substream that follows a block announces substream is reopened silently instead, with a
+    /// second [`Event::StatementProtocolConnected`] once it is open again, or closes with the
+    /// block announces substream and its [`Event::GossipDisconnected`].
     StatementProtocolDisconnected {
         /// Peer we are no longer connected to.
         peer_id: PeerId,
