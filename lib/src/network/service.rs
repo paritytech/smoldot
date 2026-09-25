@@ -76,6 +76,9 @@
 
 // TODO: expand explanations once the API is finalized
 
+#[cfg(test)]
+mod tests;
+
 use crate::libp2p::collection;
 use crate::network::codec;
 use crate::util::{self, SipHasherBuild};
@@ -559,9 +562,11 @@ where
     ///
     pub fn remove_chain(&mut self, chain_id: ChainId) -> Result<TChain, RemoveChainError> {
         // Check whether the chain is still in use.
-        for protocol in [NotificationsProtocol::BlockAnnounces {
+        for protocol in iter::once(NotificationsProtocol::BlockAnnounces {
             chain_index: chain_id.0,
-        }] {
+        })
+        .chain(statement_protocols(chain_id.0))
+        {
             if self
                 .notification_substreams_by_peer_id
                 .range(
@@ -602,6 +607,10 @@ where
         for (kind, desired) in desired {
             self.gossip_remove_desired_inner(chain_id, desired, kind);
         }
+
+        // The chain index is reused by a later chain, which must not inherit these links.
+        self.opened_gossip_undesired
+            .retain(|(c, _, _)| *c != chain_id);
 
         // Close any notifications substream of the chain.
         for protocol in [
@@ -781,7 +790,8 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if the given [`ChainId`] is invalid.
+    /// Panics if the given [`ChainId`] is invalid, or if the kind is [`GossipKind::Statement`]
+    /// and the chain has the statement protocol disabled.
     ///
     pub fn gossip_insert_desired(
         &mut self,
@@ -790,6 +800,7 @@ where
         kind: GossipKind,
     ) -> bool {
         assert!(self.chains.contains(chain_id.0));
+        assert!(kind != GossipKind::Statement || self.chains[chain_id.0].enable_statement_protocol);
 
         let peer_index = self.peer_index_or_insert(peer_id);
 
@@ -813,44 +824,13 @@ where
 
         //  Add either to `unconnected_desired` or to `connected_unopened_gossip_desired`,
         // depending on the situation.
-        if self
-            .connections_by_peer_id
-            .range((peer_index, ConnectionId::MIN)..=(peer_index, ConnectionId::MAX))
-            .any(|(_, connection_id)| {
-                let state = self.inner.connection_state(*connection_id);
-                state.established && !state.shutting_down
-            })
+        if self.has_established_connection(peer_index)
+            && !self.gossip_link_exists(chain_id.0, peer_index, kind)
         {
-            if self
-                .notification_substreams_by_peer_id
-                .range(
-                    (
-                        NotificationsProtocol::BlockAnnounces {
-                            chain_index: chain_id.0,
-                        },
-                        peer_index,
-                        SubstreamDirection::Out,
-                        NotificationsSubstreamState::MIN,
-                        SubstreamId::MIN,
-                    )
-                        ..=(
-                            NotificationsProtocol::BlockAnnounces {
-                                chain_index: chain_id.0,
-                            },
-                            peer_index,
-                            SubstreamDirection::Out,
-                            NotificationsSubstreamState::MAX,
-                            SubstreamId::MAX,
-                        ),
-                )
-                .next()
-                .is_none()
-            {
-                let _was_inserted = self
-                    .connected_unopened_gossip_desired
-                    .insert((peer_index, chain_id, kind));
-                debug_assert!(_was_inserted);
-            }
+            let _was_inserted = self
+                .connected_unopened_gossip_desired
+                .insert((peer_index, chain_id, kind));
+            debug_assert!(_was_inserted);
         }
 
         if !self
@@ -927,31 +907,7 @@ where
             self.unconnected_desired.remove(&peer_index);
         }
 
-        if self
-            .notification_substreams_by_peer_id
-            .range(
-                (
-                    NotificationsProtocol::BlockAnnounces {
-                        chain_index: chain_id.0,
-                    },
-                    peer_index,
-                    SubstreamDirection::Out,
-                    NotificationsSubstreamState::MIN,
-                    SubstreamId::MIN,
-                )
-                    ..=(
-                        NotificationsProtocol::BlockAnnounces {
-                            chain_index: chain_id.0,
-                        },
-                        peer_index,
-                        SubstreamDirection::Out,
-                        NotificationsSubstreamState::MAX,
-                        SubstreamId::MAX,
-                    ),
-            )
-            .next()
-            .is_some()
-        {
+        if self.gossip_link_exists(chain_id.0, peer_index, kind) {
             let _was_inserted = self
                 .opened_gossip_undesired
                 .insert((chain_id, peer_index, kind));
@@ -979,34 +935,9 @@ where
             .collect::<Vec<_>>();
 
         for chain_index in chains {
-            let _was_in = self
-                .gossip_desired_peers
-                .remove(&(peer_index, kind, chain_index));
+            let _was_in = self.gossip_remove_desired_inner(ChainId(chain_index), peer_index, kind);
             debug_assert!(_was_in);
-            let _was_in =
-                self.gossip_desired_peers_by_chain
-                    .remove(&(chain_index, kind, peer_index));
-            debug_assert!(_was_in);
-            self.connected_unopened_gossip_desired.remove(&(
-                peer_index,
-                ChainId(chain_index),
-                kind,
-            ));
         }
-
-        if self
-            .gossip_desired_peers
-            .range(
-                (peer_index, GossipKind::MIN, usize::MIN)
-                    ..=(peer_index, GossipKind::MAX, usize::MAX),
-            )
-            .next()
-            .is_none()
-        {
-            self.unconnected_desired.remove(&peer_index);
-        }
-
-        self.try_clean_up_peer(peer_index);
     }
 
     /// Returns the list of gossip-desired peers for the given chain, in no specific order.
@@ -1471,39 +1402,20 @@ where
 
                     // Insert the new connection in `self.connected_unopened_gossip_desired`
                     // if relevant.
-                    for (_, kind, chain_id) in self.gossip_desired_peers.range(
-                        (actual_peer_index, GossipKind::MIN, usize::MIN)
-                            ..=(actual_peer_index, GossipKind::MAX, usize::MAX),
-                    ) {
-                        if self
-                            .notification_substreams_by_peer_id
-                            .range(
-                                (
-                                    NotificationsProtocol::BlockAnnounces {
-                                        chain_index: *chain_id,
-                                    },
-                                    actual_peer_index,
-                                    SubstreamDirection::Out,
-                                    NotificationsSubstreamState::MIN,
-                                    SubstreamId::MIN,
-                                )
-                                    ..=(
-                                        NotificationsProtocol::BlockAnnounces {
-                                            chain_index: *chain_id,
-                                        },
-                                        actual_peer_index,
-                                        SubstreamDirection::Out,
-                                        NotificationsSubstreamState::MAX,
-                                        SubstreamId::MAX,
-                                    ),
-                            )
-                            .next()
-                            .is_none()
-                        {
+                    for (kind, chain_id) in self
+                        .gossip_desired_peers
+                        .range(
+                            (actual_peer_index, GossipKind::MIN, usize::MIN)
+                                ..=(actual_peer_index, GossipKind::MAX, usize::MAX),
+                        )
+                        .map(|(_, kind, chain_id)| (*kind, *chain_id))
+                        .collect::<Vec<_>>()
+                    {
+                        if !self.gossip_link_exists(chain_id, actual_peer_index, kind) {
                             self.connected_unopened_gossip_desired.insert((
                                 actual_peer_index,
-                                ChainId(*chain_id),
-                                *kind,
+                                ChainId(chain_id),
+                                kind,
                             ));
                         }
                     }
@@ -2164,27 +2076,23 @@ where
                                                 }),
                                         )
                                     {
-                                        if self
-                                            .notification_substreams_by_peer_id
-                                            .range(
-                                                (
-                                                    other_protocol,
+                                        // A statement substream of either version counts, as
+                                        // a `GossipKind::Statement` link may have fallen back
+                                        // to V1 already.
+                                        let already_exists = match other_protocol {
+                                            NotificationsProtocol::Statement { .. } => self
+                                                .gossip_link_exists(
+                                                    chain_index,
                                                     peer_index,
-                                                    SubstreamDirection::Out,
-                                                    NotificationsSubstreamState::MIN,
-                                                    SubstreamId::MIN,
-                                                )
-                                                    ..=(
-                                                        other_protocol,
-                                                        peer_index,
-                                                        SubstreamDirection::Out,
-                                                        NotificationsSubstreamState::MAX,
-                                                        SubstreamId::MAX,
-                                                    ),
-                                            )
-                                            .next()
-                                            .is_some()
-                                        {
+                                                    GossipKind::Statement,
+                                                ),
+                                            other_protocol => self.has_out_notification_substream(
+                                                peer_index,
+                                                iter::once(other_protocol),
+                                                false,
+                                            ),
+                                        };
+                                        if already_exists {
                                             continue;
                                         }
 
@@ -2252,6 +2160,15 @@ where
                                         ));
                                     }
 
+                                    // The statement substream opened above anchors a
+                                    // `GossipKind::Statement` link if the peer is desired under
+                                    // that kind, so there is nothing left to open for it.
+                                    self.connected_unopened_gossip_desired.remove(&(
+                                        peer_index,
+                                        ChainId(chain_index),
+                                        GossipKind::Statement,
+                                    ));
+
                                     return Some(Event::GossipConnected {
                                         peer_id: self.peers[peer_index.0].clone(),
                                         chain_id: ChainId(chain_index),
@@ -2266,7 +2183,7 @@ where
                                         .connections_by_peer_id
                                         .range(
                                             (peer_index, ConnectionId::MIN)
-                                                ..=(peer_index, ConnectionId::MIN),
+                                                ..=(peer_index, ConnectionId::MAX),
                                         )
                                         .any(|(_, c)| {
                                             let state = self.inner.connection_state(*c);
@@ -2324,7 +2241,11 @@ where
                                         self.substreams.remove(&substream_id).unwrap();
                                     }
 
-                                    // Close all the notification substreams of that chain.
+                                    // Close all the notification substreams of that chain,
+                                    // except the statement substreams of a
+                                    // `GossipKind::Statement` link, which stand on their own.
+                                    let keep_statement =
+                                        self.statement_link_wanted(chain_index, peer_index);
                                     for other_protocol in [
                                         NotificationsProtocol::BlockAnnounces { chain_index },
                                         NotificationsProtocol::Transactions { chain_index },
@@ -2338,6 +2259,15 @@ where
                                             version: codec::StatementProtocolVersion::V2,
                                         },
                                     ] {
+                                        if keep_statement
+                                            && matches!(
+                                                other_protocol,
+                                                NotificationsProtocol::Statement { .. }
+                                            )
+                                        {
+                                            continue;
+                                        }
+
                                         for (substream_id, direction, state) in self
                                             .notification_substreams_by_peer_id
                                             .range(
@@ -2462,31 +2392,22 @@ where
                         | NotificationsProtocol::Statement { chain_index, .. } => {
                             // TODO: doesn't check the handshakes
 
-                            // This can only happen if we have a block announces substream with
-                            // that peer, otherwise the substream opening attempt should have
-                            // been cancelled.
+                            // For the transactions and Grandpa protocols, this can only happen
+                            // if we have a block announces substream with that peer, otherwise
+                            // the substream opening attempt should have been cancelled. A
+                            // statement substream can also anchor a `GossipKind::Statement`
+                            // link on its own.
                             debug_assert!(
-                                self.notification_substreams_by_peer_id
-                                    .range(
-                                        (
-                                            NotificationsProtocol::BlockAnnounces { chain_index },
-                                            peer_index,
-                                            SubstreamDirection::Out,
-                                            NotificationsSubstreamState::OPEN_MIN_VALUE,
-                                            SubstreamId::MIN
-                                        )
-                                            ..=(
-                                                NotificationsProtocol::BlockAnnounces {
-                                                    chain_index
-                                                },
-                                                peer_index,
-                                                SubstreamDirection::Out,
-                                                NotificationsSubstreamState::OPEN_MAX_VALUE,
-                                                SubstreamId::MAX
-                                            )
-                                    )
-                                    .next()
-                                    .is_some()
+                                matches!(
+                                    substream_protocol,
+                                    NotificationsProtocol::Statement { .. }
+                                ) || self.has_out_notification_substream(
+                                    peer_index,
+                                    iter::once(NotificationsProtocol::BlockAnnounces {
+                                        chain_index
+                                    }),
+                                    true,
+                                )
                             );
 
                             // If the substream failed to open, we may try again.
@@ -2498,24 +2419,58 @@ where
                             // for an issue in Substrate where a protocol could be briefly
                             // unavailable. Statement V2 is special: on `ProtocolNotAvailable`
                             // we fall back once to V1.
-                            if result.is_err() {
-                                if self.inner.connection_state(connection_id).shutting_down {
-                                    continue;
-                                }
-
-                                let (substream_protocol, should_retry) = match (
-                                    &result,
+                            //
+                            // A statement substream that anchors a `GossipKind::Statement`
+                            // link only gets the V2 to V1 fallback, and none when the
+                            // connection is shutting down. Any other failure is reported to
+                            // the API user, as a silent retry would hide a peer that refuses
+                            // statement-only links.
+                            if let Err(error) = &result {
+                                let is_wanted_statement_link = matches!(
                                     substream_protocol,
-                                ) {
+                                    NotificationsProtocol::Statement { .. }
+                                ) && self
+                                    .statement_link_wanted(chain_index, peer_index);
+
+                                let is_v2_fallback = matches!(
+                                    (error, substream_protocol),
                                     (
-                                        Err(collection::NotificationsOutErr::Substream(
+                                        collection::NotificationsOutErr::Substream(
                                             established::NotificationsOutErr::ProtocolNotAvailable,
-                                        )),
+                                        ),
                                         NotificationsProtocol::Statement {
                                             version: codec::StatementProtocolVersion::V2,
                                             ..
                                         },
-                                    ) => (
+                                    )
+                                );
+
+                                let shutting_down =
+                                    self.inner.connection_state(connection_id).shutting_down;
+
+                                if is_wanted_statement_link && (shutting_down || !is_v2_fallback) {
+                                    let error = error.clone();
+                                    self.close_notification_substreams(
+                                        peer_index,
+                                        statement_protocols(chain_index),
+                                    );
+                                    self.statement_link_lost(chain_index, peer_index);
+                                    return Some(Event::StatementProtocolOpenFailed {
+                                        peer_id: self.peers[peer_index.0].clone(),
+                                        chain_id: ChainId(chain_index),
+                                        error,
+                                    });
+                                }
+
+                                if shutting_down {
+                                    continue;
+                                }
+
+                                let (substream_protocol, should_retry) = match (
+                                    error,
+                                    substream_protocol,
+                                ) {
+                                    (_, _) if is_v2_fallback => (
                                         NotificationsProtocol::Statement {
                                             chain_index,
                                             version: codec::StatementProtocolVersion::V1,
@@ -2523,9 +2478,9 @@ where
                                         true,
                                     ),
                                     (
-                                        Err(collection::NotificationsOutErr::Substream(
+                                        collection::NotificationsOutErr::Substream(
                                             established::NotificationsOutErr::ProtocolNotAvailable,
-                                        )),
+                                        ),
                                         p,
                                     ) => (p, false),
                                     (_, p) => (p, true),
@@ -2750,9 +2705,13 @@ where
                                 debug_assert!(_was_inserted);
                             }
 
-                            // The transactions, Grandpa and Statement protocols are tied to the
-                            // block announces substream. As such, we also close any transactions,
-                            // grandpa, or statement substream, either pending or fully opened.
+                            // The transactions and Grandpa protocols, and the statement protocol
+                            // without a `GossipKind::Statement` link, are tied to the block
+                            // announces substream. As such, we also close their substreams,
+                            // either pending or fully opened. The statement substreams of a
+                            // `GossipKind::Statement` link stand on their own and stay open.
+                            let keep_statement =
+                                self.statement_link_wanted(chain_index, peer_index);
                             for proto in [
                                 NotificationsProtocol::Transactions { chain_index },
                                 NotificationsProtocol::Grandpa { chain_index },
@@ -2765,6 +2724,12 @@ where
                                     version: codec::StatementProtocolVersion::V2,
                                 },
                             ] {
+                                if keep_statement
+                                    && matches!(proto, NotificationsProtocol::Statement { .. })
+                                {
+                                    continue;
+                                }
+
                                 for (substream_direction, substream_state, substream_id) in self
                                     .notification_substreams_by_peer_id
                                     .range(
@@ -2863,11 +2828,30 @@ where
                         }
 
                         // The transactions, grandpa, and statement protocols are tied to the block
-                        // announces substream. If there is a block announce substream with the
-                        // peer, we try to reopen these substreams.
+                        // announces substream, except the statement substream of a
+                        // `GossipKind::Statement` link. If there is a block announce substream
+                        // with the peer, we try to reopen these substreams.
                         NotificationsProtocol::Transactions { .. }
                         | NotificationsProtocol::Grandpa { .. }
                         | NotificationsProtocol::Statement { .. } => {
+                            // A statement substream that anchors a `GossipKind::Statement` link
+                            // is not reopened: the closing is reported to the API user, who
+                            // decides whether to open the link again.
+                            if let NotificationsProtocol::Statement { chain_index, .. } =
+                                substream_protocol
+                                && self.statement_link_wanted(chain_index, peer_index)
+                            {
+                                self.close_notification_substreams(
+                                    peer_index,
+                                    statement_protocols(chain_index),
+                                );
+                                self.statement_link_lost(chain_index, peer_index);
+                                return Some(Event::StatementProtocolDisconnected {
+                                    peer_id: self.peers[peer_index.0].clone(),
+                                    chain_id: ChainId(chain_index),
+                                });
+                            }
+
                             // Don't actually try to reopen if the connection is shutting down.
                             // Note that we don't try to reopen on a different connection, as the
                             // block announces substream will very soon be closed too anyway.
@@ -2934,7 +2918,8 @@ where
                     //   pending inbound notifications substream. Opening multiple notification
                     //   substreams of the same protocol is a protocol violation. This also happens
                     //   for transactions and grandpa substreams if no block announce substream is
-                    //   open.
+                    //   open, and for statement substreams if additionally no statement gossip
+                    //   link exists or is desired.
                     // - Generate an event to ask the API user whether to accept the demand. This
                     //   happens specifically for block announce substreams.
 
@@ -2997,27 +2982,22 @@ where
                     }
 
                     // If an outgoing block announces notifications protocol (either pending or
-                    // fully open) exists, accept the substream immediately.
-                    if self
-                        .notification_substreams_by_peer_id
-                        .range(
-                            (
-                                NotificationsProtocol::BlockAnnounces { chain_index },
+                    // fully open) exists, accept the substream immediately. A statement
+                    // substream is also accepted when a statement gossip link exists or is
+                    // desired, as the local node is opening or about to open one anyway.
+                    let statement_link_wanted_or_exists =
+                        matches!(substream_protocol, NotificationsProtocol::Statement { .. })
+                            && (self.gossip_link_exists(
+                                chain_index,
                                 peer_index,
-                                SubstreamDirection::Out,
-                                NotificationsSubstreamState::MIN,
-                                SubstreamId::MIN,
-                            )
-                                ..=(
-                                    NotificationsProtocol::BlockAnnounces { chain_index },
-                                    peer_index,
-                                    SubstreamDirection::Out,
-                                    NotificationsSubstreamState::MAX,
-                                    SubstreamId::MAX,
-                                ),
+                                GossipKind::Statement,
+                            ) || self.statement_link_wanted(chain_index, peer_index));
+                    if statement_link_wanted_or_exists
+                        || self.gossip_link_exists(
+                            chain_index,
+                            peer_index,
+                            GossipKind::ConsensusTransactions,
                         )
-                        .next()
-                        .is_some()
                     {
                         let _was_inserted = self.notification_substreams_by_peer_id.insert((
                             substream_protocol,
@@ -3137,29 +3117,23 @@ where
                         .unwrap_or_else(|| unreachable!());
 
                     // Check whether there is an open outgoing block announces substream, as this
-                    // means that we are "gossip-connected". If not, then the notification is
-                    // silently discarded.
-                    if self
-                        .notification_substreams_by_peer_id
-                        .range(
-                            (
-                                NotificationsProtocol::BlockAnnounces { chain_index },
+                    // means that we are "gossip-connected". A statement notification is also
+                    // accepted when an open outgoing statement substream exists, which is what
+                    // a `GossipKind::Statement` link is anchored on. Otherwise, the notification
+                    // is silently discarded.
+                    let block_announces_open = self.has_out_notification_substream(
+                        peer_index,
+                        iter::once(NotificationsProtocol::BlockAnnounces { chain_index }),
+                        true,
+                    );
+                    let statement_open =
+                        matches!(substream_protocol, NotificationsProtocol::Statement { .. })
+                            && self.has_out_notification_substream(
                                 peer_index,
-                                SubstreamDirection::Out,
-                                NotificationsSubstreamState::OPEN_MIN_VALUE,
-                                collection::SubstreamId::MIN,
-                            )
-                                ..=(
-                                    NotificationsProtocol::BlockAnnounces { chain_index },
-                                    peer_index,
-                                    SubstreamDirection::Out,
-                                    NotificationsSubstreamState::OPEN_MAX_VALUE,
-                                    collection::SubstreamId::MAX,
-                                ),
-                        )
-                        .next()
-                        .is_none()
-                    {
+                                statement_protocols(chain_index),
+                                true,
+                            );
+                    if !block_announces_open && !statement_open {
                         continue;
                     }
 
@@ -4162,9 +4136,13 @@ where
             .map(|(_, peer_index)| &self.peers[peer_index.0])
     }
 
-    /// Returns the list of all peers for a [`Event::GossipConnected`] event of the given kind has
-    /// been emitted.
+    /// Returns the list of all peers with an open gossip link of the given kind.
     /// It is possible to send gossip notifications to these peers.
+    ///
+    /// For [`GossipKind::ConsensusTransactions`], these are the peers for which a
+    /// [`Event::GossipConnected`] event has been emitted. For [`GossipKind::Statement`], these
+    /// are the peers with an open outbound statement substream, whether it anchors a statement
+    /// link or follows a block announces substream.
     ///
     /// # Panic
     ///
@@ -4176,39 +4154,40 @@ where
         kind: GossipKind,
     ) -> impl Iterator<Item = &PeerId> {
         assert!(self.chains.contains(chain_id.0));
-        let GossipKind::ConsensusTransactions = kind;
 
-        self.notification_substreams_by_peer_id
-            .range(
-                (
-                    NotificationsProtocol::BlockAnnounces {
-                        chain_index: chain_id.0,
-                    },
-                    PeerIndex(usize::MIN),
-                    SubstreamDirection::Out,
-                    NotificationsSubstreamState::MIN,
-                    SubstreamId::MIN,
-                )
-                    ..=(
-                        NotificationsProtocol::BlockAnnounces {
-                            chain_index: chain_id.0,
-                        },
-                        PeerIndex(usize::MAX),
+        gossip_kind_anchor_protocols(chain_id.0, kind).flat_map(move |protocol| {
+            self.notification_substreams_by_peer_id
+                .range(
+                    (
+                        protocol,
+                        PeerIndex(usize::MIN),
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::MAX,
-                        SubstreamId::MAX,
-                    ),
-            )
-            .filter(move |(_, _, d, s, _)| {
-                *d == SubstreamDirection::Out
-                    && matches!(*s, NotificationsSubstreamState::Open { .. })
-            })
-            .map(|(_, peer_index, _, _, _)| &self.peers[peer_index.0])
+                        NotificationsSubstreamState::MIN,
+                        SubstreamId::MIN,
+                    )
+                        ..=(
+                            protocol,
+                            PeerIndex(usize::MAX),
+                            SubstreamDirection::Out,
+                            NotificationsSubstreamState::MAX,
+                            SubstreamId::MAX,
+                        ),
+                )
+                .filter(move |(_, _, d, s, _)| {
+                    *d == SubstreamDirection::Out
+                        && matches!(*s, NotificationsSubstreamState::Open { .. })
+                })
+                .map(|(_, peer_index, _, _, _)| &self.peers[peer_index.0])
+        })
     }
 
-    /// Returns the list of all peers for a [`Event::GossipConnected`] event of the given kind has
-    /// been emitted.
-    /// It is possible to send gossip notifications to these peers.
+    /// Returns `true` if a gossip link of the given kind is open with the given peer.
+    /// It is possible to send gossip notifications to that peer.
+    ///
+    /// For [`GossipKind::ConsensusTransactions`], this means that a [`Event::GossipConnected`]
+    /// event has been emitted. For [`GossipKind::Statement`], this means that an outbound
+    /// statement substream is open with the peer, whether it anchors a statement link or
+    /// follows a block announces substream.
     ///
     /// # Panic
     ///
@@ -4221,46 +4200,40 @@ where
         kind: GossipKind,
     ) -> bool {
         assert!(self.chains.contains(chain_id.0));
-        let GossipKind::ConsensusTransactions = kind;
 
         let Some(&peer_index) = self.peers_by_peer_id.get(target) else {
             // If the `PeerId` is unknown, then we also don't have any gossip link to it.
             return false;
         };
 
-        self.notification_substreams_by_peer_id
-            .range(
-                (
-                    NotificationsProtocol::BlockAnnounces {
-                        chain_index: chain_id.0,
-                    },
-                    peer_index,
-                    SubstreamDirection::Out,
-                    NotificationsSubstreamState::OPEN_MIN_VALUE,
-                    SubstreamId::MIN,
-                )
-                    ..=(
-                        NotificationsProtocol::BlockAnnounces {
-                            chain_index: chain_id.0,
-                        },
-                        peer_index,
-                        SubstreamDirection::Out,
-                        NotificationsSubstreamState::OPEN_MAX_VALUE,
-                        SubstreamId::MAX,
-                    ),
-            )
-            .next()
-            .is_some()
+        self.has_out_notification_substream(
+            peer_index,
+            gossip_kind_anchor_protocols(chain_id.0, kind),
+            true,
+        )
     }
 
     /// Open a gossiping substream with the given peer on the given chain.
     ///
-    /// Either a [`Event::GossipConnected`] or [`Event::GossipOpenFailed`] is guaranteed to later
-    /// be generated, unless [`ChainNetwork::gossip_close`] is called in the meanwhile.
+    /// For [`GossipKind::ConsensusTransactions`], either a [`Event::GossipConnected`] or
+    /// [`Event::GossipOpenFailed`] is guaranteed to later be generated, unless
+    /// [`ChainNetwork::gossip_close`] is called in the meanwhile.
+    ///
+    /// For [`GossipKind::Statement`], either a [`Event::StatementProtocolConnected`] or
+    /// [`Event::StatementProtocolOpenFailed`] is guaranteed to later be generated, unless
+    /// [`ChainNetwork::gossip_close`] is called in the meanwhile. Returns
+    /// [`OpenGossipError::AlreadyOpened`] if a statement substream already exists with the peer,
+    /// including one that follows a block announces substream. That substream then anchors the
+    /// statement link: it stays open when the block announces substream closes, and its closing
+    /// is reported through [`Event::StatementProtocolDisconnected`]. If it is still pending, a
+    /// [`Event::StatementProtocolConnected`] or [`Event::StatementProtocolOpenFailed`] follows.
+    /// If it is already open, the [`Event::StatementProtocolConnected`] for it was generated
+    /// earlier.
     ///
     /// # Panic
     ///
-    /// Panics if the [`ChainId`] is invalid.
+    /// Panics if the [`ChainId`] is invalid, or if the kind is [`GossipKind::Statement`] and
+    /// the chain has the statement protocol disabled.
     ///
     pub fn gossip_open(
         &mut self,
@@ -4268,42 +4241,28 @@ where
         target: &PeerId,
         kind: GossipKind,
     ) -> Result<(), OpenGossipError> {
-        let GossipKind::ConsensusTransactions = kind;
-
         let Some(&peer_index) = self.peers_by_peer_id.get(target) else {
             // If the `PeerId` is unknown, then we also don't have any connection to it.
             return Err(OpenGossipError::NoConnection);
         };
 
         let chain_info = &self.chains[chain_id.0];
+        assert!(kind != GossipKind::Statement || chain_info.enable_statement_protocol);
 
-        // It is forbidden to open more than one gossip notifications substream with any given
-        // peer.
-        if self
-            .notification_substreams_by_peer_id
-            .range(
-                (
-                    NotificationsProtocol::BlockAnnounces {
-                        chain_index: chain_id.0,
-                    },
-                    peer_index,
-                    SubstreamDirection::Out,
-                    NotificationsSubstreamState::MIN,
-                    SubstreamId::MIN,
-                )
-                    ..=(
-                        NotificationsProtocol::BlockAnnounces {
-                            chain_index: chain_id.0,
-                        },
-                        peer_index,
-                        SubstreamDirection::Out,
-                        NotificationsSubstreamState::MAX,
-                        SubstreamId::MAX,
-                    ),
-            )
-            .next()
-            .is_some()
-        {
+        // It is forbidden to open more than one gossip notifications substream of a kind with
+        // any given peer.
+        if self.gossip_link_exists(chain_id.0, peer_index, kind) {
+            // A statement substream that follows a block announces substream becomes the anchor
+            // of the statement link the API user asked for, so that it outlives the block
+            // announces substream and its closing is reported.
+            if kind == GossipKind::Statement
+                && !self
+                    .gossip_desired_peers
+                    .contains(&(peer_index, kind, chain_id.0))
+            {
+                self.opened_gossip_undesired
+                    .insert((chain_id, peer_index, kind));
+            }
             return Err(OpenGossipError::AlreadyOpened);
         }
 
@@ -4324,8 +4283,8 @@ where
             })
             .ok_or(OpenGossipError::NoConnection)?;
 
-        // Accept inbound substreams.
-        for (protocol, in_substream_id) in [
+        // Accept inbound substreams. A statement link only concerns the statement substreams.
+        let all_protocols = [
             NotificationsProtocol::BlockAnnounces {
                 chain_index: chain_id.0,
             },
@@ -4343,29 +4302,35 @@ where
                 chain_index: chain_id.0,
                 version: codec::StatementProtocolVersion::V2,
             },
-        ]
-        .into_iter()
-        .flat_map(|protocol| {
-            self.notification_substreams_by_peer_id
-                .range(
-                    (
-                        protocol,
-                        peer_index,
-                        SubstreamDirection::In,
-                        NotificationsSubstreamState::Pending,
-                        SubstreamId::MIN,
-                    )
-                        ..=(
+        ];
+        let protocols_to_accept: &[NotificationsProtocol] = match kind {
+            GossipKind::ConsensusTransactions => &all_protocols[..],
+            GossipKind::Statement => &all_protocols[3..],
+        };
+        for (protocol, in_substream_id) in protocols_to_accept
+            .iter()
+            .copied()
+            .flat_map(|protocol| {
+                self.notification_substreams_by_peer_id
+                    .range(
+                        (
                             protocol,
                             peer_index,
                             SubstreamDirection::In,
                             NotificationsSubstreamState::Pending,
-                            SubstreamId::MAX,
-                        ),
-                )
-                .map(move |&(_, _, _, _, substream_id)| (protocol, substream_id))
-        })
-        .collect::<Vec<_>>()
+                            SubstreamId::MIN,
+                        )
+                            ..=(
+                                protocol,
+                                peer_index,
+                                SubstreamDirection::In,
+                                NotificationsSubstreamState::Pending,
+                                SubstreamId::MAX,
+                            ),
+                    )
+                    .map(move |&(_, _, _, _, substream_id)| (protocol, substream_id))
+            })
+            .collect::<Vec<_>>()
         {
             let _was_removed = self.notification_substreams_by_peer_id.remove(&(
                 protocol,
@@ -4394,39 +4359,47 @@ where
             )
         }
 
-        // Open the block announces substream.
+        // Open the substream the link is anchored on. A statement link starts with V2 and
+        // falls back to V1 if the peer doesn't support it.
+        let (anchor_protocol, anchor_protocol_name) = match kind {
+            GossipKind::ConsensusTransactions => (
+                NotificationsProtocol::BlockAnnounces {
+                    chain_index: chain_id.0,
+                },
+                codec::ProtocolName::BlockAnnounces {
+                    genesis_hash: chain_info.genesis_hash,
+                    fork_id: chain_info.fork_id.as_deref(),
+                },
+            ),
+            GossipKind::Statement => (
+                NotificationsProtocol::Statement {
+                    chain_index: chain_id.0,
+                    version: codec::StatementProtocolVersion::V2,
+                },
+                codec::ProtocolName::Statement {
+                    genesis_hash: chain_info.genesis_hash,
+                    fork_id: chain_info.fork_id.as_deref(),
+                    version: codec::StatementProtocolVersion::V2,
+                },
+            ),
+        };
         let substream_id = self.inner.open_out_notifications(
             connection_id,
-            codec::encode_protocol_name_string(codec::ProtocolName::BlockAnnounces {
-                genesis_hash: chain_info.genesis_hash,
-                fork_id: chain_info.fork_id.as_deref(),
-            }),
-            self.notifications_protocol_handshake_timeout(NotificationsProtocol::BlockAnnounces {
-                chain_index: chain_id.0,
-            }),
-            self.notifications_protocol_handshake(NotificationsProtocol::BlockAnnounces {
-                chain_index: chain_id.0,
-            }),
-            self.notifications_protocol_max_handshake_size(NotificationsProtocol::BlockAnnounces {
-                chain_index: chain_id.0,
-            }),
+            codec::encode_protocol_name_string(anchor_protocol_name),
+            self.notifications_protocol_handshake_timeout(anchor_protocol),
+            self.notifications_protocol_handshake(anchor_protocol),
+            self.notifications_protocol_max_handshake_size(anchor_protocol),
         );
         let _prev_value = self.substreams.insert(
             substream_id,
             SubstreamInfo {
                 connection_id,
-                protocol: Some(Protocol::Notifications(
-                    NotificationsProtocol::BlockAnnounces {
-                        chain_index: chain_id.0,
-                    },
-                )),
+                protocol: Some(Protocol::Notifications(anchor_protocol)),
             },
         );
         debug_assert!(_prev_value.is_none());
         let _was_inserted = self.notification_substreams_by_peer_id.insert((
-            NotificationsProtocol::BlockAnnounces {
-                chain_index: chain_id.0,
-            },
+            anchor_protocol,
             peer_index,
             SubstreamDirection::Out,
             NotificationsSubstreamState::Pending,
@@ -4439,11 +4412,9 @@ where
             .gossip_desired_peers
             .contains(&(peer_index, kind, chain_id.0))
         {
-            let _was_inserted = self.opened_gossip_undesired.insert((
-                chain_id,
-                peer_index,
-                GossipKind::ConsensusTransactions,
-            ));
+            let _was_inserted = self
+                .opened_gossip_undesired
+                .insert((chain_id, peer_index, kind));
             debug_assert!(_was_inserted);
         }
         self.connected_unopened_gossip_desired
@@ -4457,10 +4428,17 @@ where
     /// This can be used:
     ///
     /// - To close a opening in progress after having called [`ChainNetwork::gossip_open`], in
-    /// which case no [`Event::GossipConnected`] or [`Event::GossipOpenFailed`] is generated.
+    /// which case no [`Event::GossipConnected`] or [`Event::GossipOpenFailed`] is generated, and
+    /// no [`Event::StatementProtocolConnected`] or [`Event::StatementProtocolOpenFailed`] for a
+    /// [`GossipKind::Statement`] link.
     /// - To close a fully open gossip link. All the notifications that have been queued are still
     /// delivered. No event is generated.
     /// - To respond to a [`Event::GossipInDesired`] by rejecting the request.
+    ///
+    /// Closing a [`GossipKind::ConsensusTransactions`] link also closes the statement
+    /// substreams, unless the peer is desired under [`GossipKind::Statement`] or a statement
+    /// link was opened with it. Closing a [`GossipKind::Statement`] link closes the statement
+    /// substreams only, even when they follow a block announces substream.
     ///
     /// # Panic
     ///
@@ -4472,8 +4450,6 @@ where
         peer_id: &PeerId,
         kind: GossipKind,
     ) -> Result<(), CloseGossipError> {
-        let GossipKind::ConsensusTransactions = kind;
-
         let Some(&peer_index) = self.peers_by_peer_id.get(peer_id) else {
             // If the `PeerId` is unknown, then we also don't have any gossip link to it.
             return Err(CloseGossipError::NotOpen);
@@ -4488,7 +4464,7 @@ where
         let mut has_closed_something = false;
 
         // Close all substreams, pending or open.
-        for protocol in [
+        let all_protocols = [
             NotificationsProtocol::BlockAnnounces {
                 chain_index: chain_id.0,
             },
@@ -4498,7 +4474,25 @@ where
             NotificationsProtocol::Grandpa {
                 chain_index: chain_id.0,
             },
-        ] {
+            NotificationsProtocol::Statement {
+                chain_index: chain_id.0,
+                version: codec::StatementProtocolVersion::V1,
+            },
+            NotificationsProtocol::Statement {
+                chain_index: chain_id.0,
+                version: codec::StatementProtocolVersion::V2,
+            },
+        ];
+        let protocols_to_close: &[NotificationsProtocol] = match kind {
+            GossipKind::ConsensusTransactions
+                if self.statement_link_wanted(chain_id.0, peer_index) =>
+            {
+                &all_protocols[..3]
+            }
+            GossipKind::ConsensusTransactions => &all_protocols[..],
+            GossipKind::Statement => &all_protocols[3..],
+        };
+        for protocol in protocols_to_close.iter().copied() {
             for (substream_id, direction, state) in self
                 .notification_substreams_by_peer_id
                 .range(
@@ -4594,11 +4588,8 @@ where
         }
 
         // Desired peers tracking update.
-        self.opened_gossip_undesired.remove(&(
-            chain_id,
-            peer_index,
-            GossipKind::ConsensusTransactions,
-        ));
+        self.opened_gossip_undesired
+            .remove(&(chain_id, peer_index, kind));
 
         if has_closed_something {
             Ok(())
@@ -4888,8 +4879,40 @@ where
 
         assert!(self.chains.contains(chain_index));
 
+        // A statement substream is what a `GossipKind::Statement` link is anchored on, so it
+        // is usable on its own, with or without a block announces substream.
+        if let NotificationsProtocol::Statement { .. } = protocol {
+            let substream_id = self
+                .notification_substreams_by_peer_id
+                .range(
+                    (
+                        protocol,
+                        peer_index,
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::OPEN_MIN_VALUE,
+                        SubstreamId::MIN,
+                    )
+                        ..=(
+                            protocol,
+                            peer_index,
+                            SubstreamDirection::Out,
+                            NotificationsSubstreamState::OPEN_MAX_VALUE,
+                            SubstreamId::MAX,
+                        ),
+                )
+                .next()
+                .map(|(_, _, _, _, substream_id)| *substream_id)
+                .ok_or(QueueNotificationError::NoConnection)?;
+
+            return match self.inner.queue_notification(substream_id, notification) {
+                Ok(()) => Ok(()),
+                Err(collection::QueueNotificationError::QueueFull) => {
+                    Err(QueueNotificationError::QueueFull)
+                }
+            };
+        }
+
         // We first find a block announces substream for that peer.
-        // TODO: only relevant for GossipKind::ConsensusTransactions
         // If none is found, then we are not considered "gossip-connected", and return an error
         // no matter what, even if a substream of the requested protocol exists.
         let block_announces_substream = self
@@ -5285,6 +5308,205 @@ where
         }
     }
 
+    /// Returns `true` if at least one connection with the given peer is established and not
+    /// shutting down.
+    fn has_established_connection(&self, peer_index: PeerIndex) -> bool {
+        self.connections_by_peer_id
+            .range((peer_index, ConnectionId::MIN)..=(peer_index, ConnectionId::MAX))
+            .any(|(_, connection_id)| {
+                let state = self.inner.connection_state(*connection_id);
+                state.established && !state.shutting_down
+            })
+    }
+
+    /// Returns `true` if an outbound substream of any of the given protocols exists with the
+    /// given peer. With `open_only`, pending substreams are ignored.
+    fn has_out_notification_substream(
+        &self,
+        peer_index: PeerIndex,
+        protocols: impl IntoIterator<Item = NotificationsProtocol>,
+        open_only: bool,
+    ) -> bool {
+        let min_state = if open_only {
+            NotificationsSubstreamState::OPEN_MIN_VALUE
+        } else {
+            NotificationsSubstreamState::MIN
+        };
+
+        protocols.into_iter().any(|protocol| {
+            self.notification_substreams_by_peer_id
+                .range(
+                    (
+                        protocol,
+                        peer_index,
+                        SubstreamDirection::Out,
+                        min_state,
+                        SubstreamId::MIN,
+                    )
+                        ..=(
+                            protocol,
+                            peer_index,
+                            SubstreamDirection::Out,
+                            NotificationsSubstreamState::MAX,
+                            SubstreamId::MAX,
+                        ),
+                )
+                .next()
+                .is_some()
+        })
+    }
+
+    /// Returns `true` if a gossip link of the given kind exists with the given peer, in other
+    /// words if the outbound substream the kind is anchored on exists, pending or open.
+    fn gossip_link_exists(
+        &self,
+        chain_index: usize,
+        peer_index: PeerIndex,
+        kind: GossipKind,
+    ) -> bool {
+        self.has_out_notification_substream(
+            peer_index,
+            gossip_kind_anchor_protocols(chain_index, kind),
+            false,
+        )
+    }
+
+    /// Returns `true` if the API user wants a [`GossipKind::Statement`] link with the given
+    /// peer: the peer is desired under that kind, or [`ChainNetwork::gossip_open`] was called
+    /// with it. A statement substream that isn't wanted follows the block announces substream.
+    fn statement_link_wanted(&self, chain_index: usize, peer_index: PeerIndex) -> bool {
+        self.gossip_desired_peers
+            .contains(&(peer_index, GossipKind::Statement, chain_index))
+            || self.opened_gossip_undesired.contains(&(
+                ChainId(chain_index),
+                peer_index,
+                GossipKind::Statement,
+            ))
+    }
+
+    /// Forgets a [`GossipKind::Statement`] link that has just failed to open or has been
+    /// closed, and puts the peer back in
+    /// [`ChainNetwork::connected_unopened_gossip_desired`] when it is still desired and an
+    /// established connection with it remains.
+    fn statement_link_lost(&mut self, chain_index: usize, peer_index: PeerIndex) {
+        self.opened_gossip_undesired.remove(&(
+            ChainId(chain_index),
+            peer_index,
+            GossipKind::Statement,
+        ));
+
+        if self
+            .gossip_desired_peers
+            .contains(&(peer_index, GossipKind::Statement, chain_index))
+            && self.has_established_connection(peer_index)
+        {
+            self.connected_unopened_gossip_desired.insert((
+                peer_index,
+                ChainId(chain_index),
+                GossipKind::Statement,
+            ));
+        }
+    }
+
+    /// Closes every substream of the given protocols with the given peer. Outbound substreams
+    /// are closed at once, pending inbound substreams are rejected, and open inbound substreams
+    /// are asked to leave.
+    fn close_notification_substreams(
+        &mut self,
+        peer_index: PeerIndex,
+        protocols: impl IntoIterator<Item = NotificationsProtocol>,
+    ) {
+        for protocol in protocols {
+            for (substream_id, direction, state) in self
+                .notification_substreams_by_peer_id
+                .range(
+                    (
+                        protocol,
+                        peer_index,
+                        SubstreamDirection::MIN,
+                        NotificationsSubstreamState::MIN,
+                        SubstreamId::MIN,
+                    )
+                        ..=(
+                            protocol,
+                            peer_index,
+                            SubstreamDirection::MAX,
+                            NotificationsSubstreamState::MAX,
+                            SubstreamId::MAX,
+                        ),
+                )
+                .map(|(_, _, dir, state, sub_id)| (*sub_id, *dir, *state))
+                .collect::<Vec<_>>()
+            {
+                match (direction, state) {
+                    (SubstreamDirection::Out, _) => {
+                        self.inner.close_out_notifications(substream_id);
+                        let _was_in = self.notification_substreams_by_peer_id.remove(&(
+                            protocol,
+                            peer_index,
+                            direction,
+                            state,
+                            substream_id,
+                        ));
+                        debug_assert!(_was_in);
+                        let _was_in = self.substreams.remove(&substream_id);
+                        debug_assert!(_was_in.is_some());
+                    }
+                    (SubstreamDirection::In, NotificationsSubstreamState::Pending) => {
+                        self.inner.reject_in_notifications(substream_id);
+                        let _was_in = self.notification_substreams_by_peer_id.remove(&(
+                            protocol,
+                            peer_index,
+                            direction,
+                            state,
+                            substream_id,
+                        ));
+                        debug_assert!(_was_in);
+                        let _was_in = self.substreams.remove(&substream_id);
+                        debug_assert!(_was_in.is_some());
+                    }
+                    (
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Open {
+                            asked_to_leave: false,
+                        },
+                    ) => {
+                        self.inner
+                            .start_close_in_notifications(substream_id, Duration::from_secs(5)); // TODO: arbitrary constant
+                        let _was_removed = self.notification_substreams_by_peer_id.remove(&(
+                            protocol,
+                            peer_index,
+                            SubstreamDirection::In,
+                            NotificationsSubstreamState::Open {
+                                asked_to_leave: false,
+                            },
+                            substream_id,
+                        ));
+                        debug_assert!(_was_removed);
+                        let _was_inserted = self.notification_substreams_by_peer_id.insert((
+                            protocol,
+                            peer_index,
+                            SubstreamDirection::In,
+                            NotificationsSubstreamState::Open {
+                                asked_to_leave: true,
+                            },
+                            substream_id,
+                        ));
+                        debug_assert!(_was_inserted);
+                    }
+                    (
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Open {
+                            asked_to_leave: true,
+                        },
+                    ) => {
+                        // Nothing to do.
+                    }
+                }
+            }
+        }
+    }
+
     /// Checks whether the given [`PeerIndex`] is still in use, and if no removes it from
     /// [`ChainNetwork::peers`].
     fn try_clean_up_peer(&mut self, peer_index: PeerIndex) {
@@ -5414,14 +5636,56 @@ impl<TChain, TConn, TNow> ops::IndexMut<ConnectionId> for ChainNetwork<TChain, T
     }
 }
 
+/// Kind of gossip link. Each kind is anchored on one notifications protocol, either version of
+/// it for statements: the link exists as long as an outbound substream of that protocol exists,
+/// and closes with it.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GossipKind {
+    /// Anchored on the block announces substream. The transactions and Grandpa substreams
+    /// follow it, and so does the statement substream unless the peer also has a
+    /// [`GossipKind::Statement`] link. Reports through [`Event::GossipConnected`],
+    /// [`Event::GossipOpenFailed`] and [`Event::GossipDisconnected`].
     ConsensusTransactions,
+    /// Anchored on the statement substream alone, with no block announces substream required.
+    /// Reports through [`Event::StatementProtocolConnected`],
+    /// [`Event::StatementProtocolOpenFailed`] and [`Event::StatementProtocolDisconnected`].
+    Statement,
 }
 
 impl GossipKind {
     const MIN: Self = GossipKind::ConsensusTransactions;
-    const MAX: Self = GossipKind::ConsensusTransactions;
+    const MAX: Self = GossipKind::Statement;
+}
+
+/// Both versions of the statement protocol of the given chain.
+fn statement_protocols(chain_index: usize) -> [NotificationsProtocol; 2] {
+    [
+        NotificationsProtocol::Statement {
+            chain_index,
+            version: codec::StatementProtocolVersion::V1,
+        },
+        NotificationsProtocol::Statement {
+            chain_index,
+            version: codec::StatementProtocolVersion::V2,
+        },
+    ]
+}
+
+/// Notifications protocols a gossip link of the given kind is anchored on. The link exists as
+/// long as an outbound substream of one of them exists.
+fn gossip_kind_anchor_protocols(
+    chain_index: usize,
+    kind: GossipKind,
+) -> impl Iterator<Item = NotificationsProtocol> {
+    match kind {
+        GossipKind::ConsensusTransactions => [
+            Some(NotificationsProtocol::BlockAnnounces { chain_index }),
+            None,
+        ],
+        GossipKind::Statement => statement_protocols(chain_index).map(Some),
+    }
+    .into_iter()
+    .flatten()
 }
 
 /// Error returned by [`ChainNetwork::add_chain`].
@@ -5500,6 +5764,9 @@ pub enum Event<TConn> {
     /// Now connected to the given peer for gossiping purposes.
     ///
     /// This event can only happen as a result of a call to [`ChainNetwork::gossip_open`].
+    ///
+    /// The kind is always [`GossipKind::ConsensusTransactions`]. The statement kind reports
+    /// through the `StatementProtocol*` events.
     GossipConnected {
         /// Peer we are now connected to.
         peer_id: PeerId,
@@ -5518,6 +5785,9 @@ pub enum Event<TConn> {
     /// An attempt has been made to open the given chain, but something wrong happened.
     ///
     /// This event can only happen as a result of a call to [`ChainNetwork::gossip_open`].
+    ///
+    /// The kind is always [`GossipKind::ConsensusTransactions`]. The statement kind reports
+    /// through the `StatementProtocol*` events.
     GossipOpenFailed {
         /// Peer concerned by the event.
         peer_id: PeerId,
@@ -5530,6 +5800,9 @@ pub enum Event<TConn> {
     },
 
     /// No longer connected to the given peer for gossiping purposes.
+    ///
+    /// The kind is always [`GossipKind::ConsensusTransactions`]. The statement kind reports
+    /// through the `StatementProtocol*` events.
     GossipDisconnected {
         /// Peer we are no longer connected to.
         peer_id: PeerId,
@@ -5540,6 +5813,9 @@ pub enum Event<TConn> {
     },
 
     /// A peer would like to open a gossiping link with the local node.
+    ///
+    /// The kind is always [`GossipKind::ConsensusTransactions`]. Inbound statement substreams
+    /// are accepted or refused without asking the API user.
     // TODO: document what to do
     // TODO: include handshake content?
     GossipInDesired {
@@ -5553,6 +5829,8 @@ pub enum Event<TConn> {
 
     /// A previously-emitted [`Event::GossipInDesired`] is no longer relevant as the peer has
     /// stopped the opening attempt.
+    ///
+    /// The kind is always [`GossipKind::ConsensusTransactions`], like the event it cancels.
     GossipInDesiredCancel {
         /// Peer concerned by the event.
         peer_id: PeerId,
@@ -5614,7 +5892,8 @@ pub enum Event<TConn> {
 
     /// Received statements from the network.
     ///
-    /// Can only happen after a [`Event::GossipConnected`] with the given [`PeerId`] and [`ChainId`]
+    /// Can only happen after a [`Event::GossipConnected`] or a
+    /// [`Event::StatementProtocolConnected`] with the given [`PeerId`] and [`ChainId`]
     /// combination has happened.
     StatementsNotification {
         /// Identity of the sender of the statements.
@@ -5628,6 +5907,10 @@ pub enum Event<TConn> {
     /// A statement protocol substream has been successfully negotiated with a peer.
     ///
     /// Indicates which protocol version (V1 or V2) was agreed upon.
+    ///
+    /// Happens as a result of a call to [`ChainNetwork::gossip_open`] with
+    /// [`GossipKind::Statement`], and also after a [`Event::GossipConnected`] with the same peer,
+    /// as the statement substream then opens alongside the block announces substream.
     StatementProtocolConnected {
         /// Identity of the remote peer.
         peer_id: PeerId,
@@ -5635,6 +5918,46 @@ pub enum Event<TConn> {
         chain_id: ChainId,
         /// Negotiated statement protocol version.
         version: codec::StatementProtocolVersion,
+    },
+
+    /// An attempt to open a statement gossip link has failed.
+    ///
+    /// This event can only happen as a result of a call to [`ChainNetwork::gossip_open`] with
+    /// [`GossipKind::Statement`], or when a peer desired under that kind has its statement
+    /// substream refused. A statement substream that follows a block announces substream is
+    /// handled silently instead: retried on a transient error, dropped when the peer lacks the
+    /// protocol.
+    ///
+    /// The error is the one of the last version tried. When the connection is shutting down,
+    /// no V1 fallback is attempted and the error can be the V2 refusal, which then says nothing
+    /// about the peer's support for the protocol.
+    ///
+    /// A peer still desired under [`GossipKind::Statement`] is put back in
+    /// [`ChainNetwork::connected_unopened_gossip_desired`]. The API user must remove it from
+    /// the desired peers or wait before opening again, otherwise a peer that refuses statement
+    /// links is opened again at once.
+    StatementProtocolOpenFailed {
+        /// Peer concerned by the event.
+        peer_id: PeerId,
+        /// Chain of the gossip connection.
+        chain_id: ChainId,
+        /// Problem that happened.
+        error: NotificationsOutErr,
+    },
+
+    /// A statement gossip link has been closed by the remote, or lost with its connection.
+    ///
+    /// Can only happen after a [`Event::StatementProtocolConnected`] with the given [`PeerId`]
+    /// and [`ChainId`] combination, and only for a peer that has a [`GossipKind::Statement`]
+    /// link, whether desired or opened with [`ChainNetwork::gossip_open`]. A statement
+    /// substream that follows a block announces substream is reopened silently instead, with a
+    /// second [`Event::StatementProtocolConnected`] once it is open again, or closes with the
+    /// block announces substream and its [`Event::GossipDisconnected`].
+    StatementProtocolDisconnected {
+        /// Peer we are no longer connected to.
+        peer_id: PeerId,
+        /// Chain of the gossip connection.
+        chain_id: ChainId,
     },
 
     /// Received a topic affinity bloom filter from a V2 peer.
