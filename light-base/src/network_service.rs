@@ -3330,9 +3330,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // can't happen if we are already opening an out slot, which we do
                 // immediately.
                 // TODO: add debug_assert! ^
+                // Statement links do not take an inbound block announces slot.
                 if task
                     .network
                     .opened_gossip_undesired_by_chain(chain_id)
+                    .filter(|(_, kind)| *kind == service::GossipKind::ConsensusTransactions)
                     .count()
                     < 4
                 {
