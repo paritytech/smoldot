@@ -4498,6 +4498,14 @@ where
             NotificationsProtocol::Grandpa {
                 chain_index: chain_id.0,
             },
+            NotificationsProtocol::Statement {
+                chain_index: chain_id.0,
+                version: codec::StatementProtocolVersion::V1,
+            },
+            NotificationsProtocol::Statement {
+                chain_index: chain_id.0,
+                version: codec::StatementProtocolVersion::V2,
+            },
         ] {
             for (substream_id, direction, state) in self
                 .notification_substreams_by_peer_id
