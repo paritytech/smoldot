@@ -89,6 +89,7 @@ use core::{
     time::Duration,
 };
 use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
+use strum::VariantArray as _;
 
 pub use crate::libp2p::{
     collection::{
@@ -374,15 +375,15 @@ enum NotificationsProtocol {
     },
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, strum::VariantArray)]
 enum SubstreamDirection {
     In,
     Out,
 }
 
 impl SubstreamDirection {
-    const MIN: Self = SubstreamDirection::In;
-    const MAX: Self = SubstreamDirection::Out;
+    const MIN: Self = Self::VARIANTS[0];
+    const MAX: Self = Self::VARIANTS[Self::VARIANTS.len() - 1];
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -405,7 +406,7 @@ impl NotificationsSubstreamState {
 }
 
 /// Lifecycle state of the Bitswap substream.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, strum::VariantArray)]
 enum BitswapSubstreamState {
     /// Used for outbound substreams that were requested, but not yet confirmed by the remote.
     Pending,
@@ -414,8 +415,8 @@ enum BitswapSubstreamState {
 }
 
 impl BitswapSubstreamState {
-    const MIN: Self = BitswapSubstreamState::Pending;
-    const MAX: Self = BitswapSubstreamState::Open;
+    const MIN: Self = Self::VARIANTS[0];
+    const MAX: Self = Self::VARIANTS[Self::VARIANTS.len() - 1];
 }
 
 impl<TChain, TConn, TNow> ChainNetwork<TChain, TConn, TNow>
@@ -5414,14 +5415,14 @@ impl<TChain, TConn, TNow> ops::IndexMut<ConnectionId> for ChainNetwork<TChain, T
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, strum::VariantArray)]
 pub enum GossipKind {
     ConsensusTransactions,
 }
 
 impl GossipKind {
-    const MIN: Self = GossipKind::ConsensusTransactions;
-    const MAX: Self = GossipKind::ConsensusTransactions;
+    const MIN: Self = Self::VARIANTS[0];
+    const MAX: Self = Self::VARIANTS[Self::VARIANTS.len() - 1];
 }
 
 /// Error returned by [`ChainNetwork::add_chain`].
