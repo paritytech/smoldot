@@ -5767,6 +5767,7 @@ pub enum Event<TConn> {
     ///
     /// The kind is always [`GossipKind::ConsensusTransactions`]. The statement kind reports
     /// through the `StatementProtocol*` events.
+    // TODO: remove the `kind` field from all the `Gossip*` events, as it is always the same
     GossipConnected {
         /// Peer we are now connected to.
         peer_id: PeerId,
