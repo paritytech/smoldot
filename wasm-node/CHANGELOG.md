@@ -8,6 +8,7 @@
 
 ### Added
 
+- WebRTC multiaddresses whose host is a domain name (`/dns/<host>/udp/<port>/webrtc-direct/certhash/<hash>`, and likewise `/dns4/` and `/dns6/`) are now dialed in browsers instead of being silently dropped. A browser cannot put a domain name in a WebRTC session description, so smoldot resolves the name itself over DNS-over-HTTPS (Cloudflare, falling back to Google; `/dns4/` asks for A records only and `/dns6/` for AAAA records only) and then connects to the resolved address. ([#3385](https://github.com/paritytech/smoldot/issues/3385))
 - Add the `lifecycle_unstable_follow` and `lifecycle_unstable_unfollow` JSON-RPC functions. The subscription reports the lifecycle state of the chain: whether it is still connecting, warp syncing (with the current and target block heights), or ready, how many peers are connected, and whether the built-in watchdog considers it stalled (no peers, or no warp sync progress). The first notification is the current state, reported as syncing as soon as warp sync fragments are requested, and every later notification carries the whole new state, so an embedder can show what the light client is doing without parsing log output. The schema is unstable. ([#3301](https://github.com/paritytech/smoldot/issues/3301))
 
 ### Fixed
