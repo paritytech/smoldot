@@ -350,6 +350,8 @@ pub enum ConnectionType {
     WebRtcIpv4,
     /// Libp2p-specific WebRTC flavour.
     WebRtcIpv6,
+    /// Libp2p-specific WebRTC flavour, with a domain name.
+    WebRtcDns,
 }
 
 impl<'a> From<&'a Address<'a>> for ConnectionType {
@@ -391,6 +393,7 @@ impl<'a> From<&'a MultiStreamAddress<'a>> for ConnectionType {
             MultiStreamAddress::WebRtc {
                 ip: IpAddr::V6(_), ..
             } => ConnectionType::WebRtcIpv6,
+            MultiStreamAddress::WebRtcDns { .. } => ConnectionType::WebRtcDns,
         }
     }
 }
@@ -448,8 +451,18 @@ pub enum Address<'a> {
     },
 }
 
+/// Address family that a domain name found in a multiaddress is expected to resolve to.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum DnsFamily {
+    /// Name resolve to either IPv4 or IPv6.
+    Any,
+    /// Name resolve to IPv4.
+    Ipv4,
+    /// Name resolve to IPv6.
+    Ipv6,
+}
+
 /// Address passed to [`PlatformRef::connect_multistream`].
-// TODO: we don't differentiate between Dns4 and Dns6
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MultiStreamAddress<'a> {
     /// Libp2p-specific WebRTC flavour.
@@ -461,6 +474,18 @@ pub enum MultiStreamAddress<'a> {
     WebRtc {
         /// IP address to connect to.
         ip: IpAddr,
+        /// UDP port to connect to.
+        port: u16,
+        /// SHA-256 hash of the target's WebRTC certificate.
+        remote_certificate_sha256: &'a [u8; 32],
+    },
+
+    /// Same as [`MultiStreamAddress::WebRtc`], but with a domain name instead of an IP address.
+    WebRtcDns {
+        /// DNS hostname to connect to.
+        hostname: &'a str,
+        /// Address family the hostname must resolve to.
+        family: DnsFamily,
         /// UDP port to connect to.
         port: u16,
         /// SHA-256 hash of the target's WebRTC certificate.

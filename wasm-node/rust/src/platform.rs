@@ -284,6 +284,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             smoldot_light::platform::ConnectionType::WebSocketDns { secure: true, .. } => 14,
             smoldot_light::platform::ConnectionType::WebRtcIpv4 => 16,
             smoldot_light::platform::ConnectionType::WebRtcIpv6 => 17,
+            smoldot_light::platform::ConnectionType::WebRtcDns => 18,
         };
 
         bindings::connection_type_supported(ty) != 0
@@ -423,6 +424,21 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 .chain(port.to_be_bytes())
                 .chain(remote_certificate_sha256.iter().copied())
                 .chain(ip.to_string().bytes())
+                .collect(),
+            smoldot_light::platform::MultiStreamAddress::WebRtcDns {
+                hostname,
+                family,
+                port,
+                remote_certificate_sha256,
+            } => iter::once(18u8)
+                .chain(port.to_be_bytes())
+                .chain(iter::once(match family {
+                    smoldot_light::platform::DnsFamily::Any => 0u8,
+                    smoldot_light::platform::DnsFamily::Ipv4 => 4u8,
+                    smoldot_light::platform::DnsFamily::Ipv6 => 6u8,
+                }))
+                .chain(remote_certificate_sha256.iter().copied())
+                .chain(hostname.as_bytes().iter().copied())
                 .collect(),
         };
 

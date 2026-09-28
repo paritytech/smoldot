@@ -19,6 +19,7 @@
 
 import { Client, ClientOptionsWithBytecode } from './public-types.js'
 import { start as innerStart, Connection, ConnectionConfig } from './internals/client.js'
+import { resolveDnsOverHttps } from './internals/dns-over-https.js'
 
 export {
     AddChainError,
@@ -218,8 +219,7 @@ function connect(config: ConnectionConfig): Connection {
             };
         }
 
-        const { targetPort, ipVersion, targetIp, remoteTlsCertificateSha256 } =
-            config.address;
+        const { targetPort, remoteTlsCertificateSha256 } = config.address;
 
         const state: {
             // Note that `pc` can be the connection, but also null or undefined.
@@ -235,17 +235,53 @@ function connect(config: ConnectionConfig): Connection {
             // Set to `true` before any outbound substream is open. Used to detect when the first
             // substream is opened.
             isFirstOutSubstream: boolean,
+            // Aborts the DNS resolution of the target, if one is in progress.
+            dnsAbort: AbortController | null,
         } = {
             pc: undefined,
             dataChannels: new Map(),
             nextStreamId: 0,
             isFirstOutSubstream: true,
+            dnsAbort: null,
         };
+
+        // SDP session needs the literal IP address of the remote.
+        // Browsers expose no DNS API, so a multiaddress with a domain name is first resolved
+        // over DNS-over-HTTPS, concurrently with the certificate generation. Resolution is
+        // bounded in time, an unresponsive resolver doesn't keep the connection attempt
+        // pending forever.
+        let target: Promise<{ targetIp: string, ipVersion: string }>;
+        if ("targetIp" in config.address) {
+            target = Promise.resolve({ targetIp: config.address.targetIp, ipVersion: config.address.ipVersion });
+        } else {
+            const { hostname, family } = config.address;
+            const controller = new AbortController();
+            state.dnsAbort = controller;
+            const timeout = setTimeout(() => controller.abort(), 10000);
+            const finished = () => {
+                clearTimeout(timeout);
+                state.dnsAbort = null;
+            };
+            target = resolveDnsOverHttps(hostname, family, controller.signal).then(
+                (ip) => {
+                    finished();
+                    return { targetIp: ip, ipVersion: ip.includes(':') ? '6' : '4' };
+                },
+                (error) => {
+                    finished();
+                    throw error;
+                }
+            );
+            target.catch(() => { });
+        }
 
         // Kills all the JavaScript objects (the connection and all its substreams), ensuring that no
         // callback will be called again. Doesn't report anything to smoldot, as this should be done
         // by the caller.
         const killAllJs = () => {
+            if (state.dnsAbort)
+                state.dnsAbort.abort();
+
             // The `RTCPeerConnection` is created pretty quickly. It is however still possible for
             // smoldot to cancel the opening, in which case `pc` will still be undefined.
             if (!state.pc) {
@@ -337,6 +373,23 @@ function connect(config: ConnectionConfig): Connection {
         // According to <https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-generatecertificate>,
         // browsers are guaranteed to support `{ name: "ECDSA", namedCurve: "P-256" }`.
         RTCPeerConnection.generateCertificate({ name: "ECDSA", namedCurve: "P-256", hash: "SHA-256" } as EcKeyGenParams).then(async (localCertificate) => {
+            if (state.pc === null)
+                return;
+
+            // Wait for the DNS resolution of the target, if any.
+            let targetIp: string;
+            let ipVersion: string;
+            try {
+                ({ targetIp, ipVersion } = await target);
+            } catch (error) {
+                // `reset()` might have been called while we were waiting,
+                // in which case nothing must be reported.
+                if (state.pc === null)
+                    return;
+                killAllJs();
+                config.onConnectionReset("DNS resolution failed: " + (error instanceof Error ? error.message : String(error)));
+                return;
+            }
             if (state.pc === null)
                 return;
 
