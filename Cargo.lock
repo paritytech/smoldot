@@ -2674,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -2772,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -2802,12 +2802,13 @@ dependencies = [
  "slab",
  "smol",
  "smoldot",
+ "strum",
  "zeroize",
 ]
 
 [[package]]
 name = "smoldot-light-wasm"
-version = "3.5.0"
+version = "3.6.0"
 dependencies = [
  "async-lock",
  "async-task",
@@ -2869,6 +2870,27 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
+name = "strum"
+version = "0.27.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
+dependencies = [
+ "strum_macros",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.27.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
 
 [[package]]
 name = "subtle"

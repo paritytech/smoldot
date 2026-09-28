@@ -599,21 +599,13 @@ where
         let desired = self
             .gossip_desired_peers_by_chain
             .range(
-                (
-                    chain_id.0,
-                    GossipKind::ConsensusTransactions,
-                    PeerIndex(usize::MIN),
-                )
-                    ..=(
-                        chain_id.0,
-                        GossipKind::ConsensusTransactions,
-                        PeerIndex(usize::MAX),
-                    ),
+                (chain_id.0, GossipKind::MIN, PeerIndex(usize::MIN))
+                    ..=(chain_id.0, GossipKind::MAX, PeerIndex(usize::MAX)),
             )
-            .map(|(_, _, peer_index)| *peer_index)
+            .map(|(_, kind, peer_index)| (*kind, *peer_index))
             .collect::<Vec<_>>();
-        for desired in desired {
-            self.gossip_remove_desired_inner(chain_id, desired, GossipKind::ConsensusTransactions);
+        for (kind, desired) in desired {
+            self.gossip_remove_desired_inner(chain_id, desired, kind);
         }
 
         // Close any notifications substream of the chain.
@@ -932,7 +924,10 @@ where
 
         if self
             .gossip_desired_peers
-            .range((peer_index, kind, usize::MIN)..=(peer_index, kind, usize::MAX))
+            .range(
+                (peer_index, GossipKind::MIN, usize::MIN)
+                    ..=(peer_index, GossipKind::MAX, usize::MAX),
+            )
             .next()
             .is_none()
         {
@@ -984,19 +979,17 @@ where
             return;
         };
 
-        let chains = {
-            // TODO: this works only because there's only one GossipKind
-            let mut chains_and_after =
-                self.gossip_desired_peers
-                    .split_off(&(peer_index, kind, usize::MIN));
-            let mut chains_after =
-                chains_and_after.split_off(&(PeerIndex(peer_index.0 + 1), kind, usize::MIN));
-            self.gossip_desired_peers.append(&mut chains_after);
-            chains_and_after
-        };
+        let chains = self
+            .gossip_desired_peers
+            .range((peer_index, kind, usize::MIN)..=(peer_index, kind, usize::MAX))
+            .map(|(_, _, chain_index)| *chain_index)
+            .collect::<Vec<_>>();
 
-        for (_removed_peer_index, _, chain_index) in chains {
-            debug_assert_eq!(_removed_peer_index, peer_index);
+        for chain_index in chains {
+            let _was_in = self
+                .gossip_desired_peers
+                .remove(&(peer_index, kind, chain_index));
+            debug_assert!(_was_in);
             let _was_in =
                 self.gossip_desired_peers_by_chain
                     .remove(&(chain_index, kind, peer_index));
@@ -1008,7 +1001,18 @@ where
             ));
         }
 
-        self.unconnected_desired.remove(&peer_index);
+        if self
+            .gossip_desired_peers
+            .range(
+                (peer_index, GossipKind::MIN, usize::MIN)
+                    ..=(peer_index, GossipKind::MAX, usize::MAX),
+            )
+            .next()
+            .is_none()
+        {
+            self.unconnected_desired.remove(&peer_index);
+        }
+
         self.try_clean_up_peer(peer_index);
     }
 
@@ -1443,16 +1447,8 @@ where
                             if self
                                 .gossip_desired_peers
                                 .range(
-                                    (
-                                        expected_peer_index,
-                                        GossipKind::ConsensusTransactions,
-                                        usize::MIN,
-                                    )
-                                        ..=(
-                                            expected_peer_index,
-                                            GossipKind::ConsensusTransactions,
-                                            usize::MAX,
-                                        ),
+                                    (expected_peer_index, GossipKind::MIN, usize::MIN)
+                                        ..=(expected_peer_index, GossipKind::MAX, usize::MAX),
                                 )
                                 .next()
                                 .is_some()
@@ -1482,17 +1478,9 @@ where
 
                     // Insert the new connection in `self.connected_unopened_gossip_desired`
                     // if relevant.
-                    for (_, _, chain_id) in self.gossip_desired_peers.range(
-                        (
-                            actual_peer_index,
-                            GossipKind::ConsensusTransactions,
-                            usize::MIN,
-                        )
-                            ..=(
-                                actual_peer_index,
-                                GossipKind::ConsensusTransactions,
-                                usize::MAX,
-                            ),
+                    for (_, kind, chain_id) in self.gossip_desired_peers.range(
+                        (actual_peer_index, GossipKind::MIN, usize::MIN)
+                            ..=(actual_peer_index, GossipKind::MAX, usize::MAX),
                     ) {
                         if self
                             .notification_substreams_by_peer_id
@@ -1522,7 +1510,7 @@ where
                             self.connected_unopened_gossip_desired.insert((
                                 actual_peer_index,
                                 ChainId(*chain_id),
-                                GossipKind::ConsensusTransactions,
+                                *kind,
                             ));
                         }
                     }
@@ -1627,8 +1615,8 @@ where
                     if self
                         .gossip_desired_peers
                         .range(
-                            (peer_index, GossipKind::ConsensusTransactions, usize::MIN)
-                                ..=(peer_index, GossipKind::ConsensusTransactions, usize::MAX),
+                            (peer_index, GossipKind::MIN, usize::MIN)
+                                ..=(peer_index, GossipKind::MAX, usize::MAX),
                         )
                         .count()
                         != 0
@@ -1655,14 +1643,14 @@ where
                                 state.established && !state.shutting_down
                             })
                         {
-                            for (_, _, chain_index) in self.gossip_desired_peers.range(
-                                (peer_index, GossipKind::ConsensusTransactions, usize::MIN)
-                                    ..=(peer_index, GossipKind::ConsensusTransactions, usize::MAX),
+                            for (_, kind, chain_index) in self.gossip_desired_peers.range(
+                                (peer_index, GossipKind::MIN, usize::MIN)
+                                    ..=(peer_index, GossipKind::MAX, usize::MAX),
                             ) {
                                 self.connected_unopened_gossip_desired.remove(&(
                                     peer_index,
                                     ChainId(*chain_index),
-                                    GossipKind::ConsensusTransactions,
+                                    *kind,
                                 ));
                             }
                         }
@@ -5357,8 +5345,8 @@ where
         if self
             .gossip_desired_peers
             .range(
-                (peer_index, GossipKind::ConsensusTransactions, usize::MIN)
-                    ..=(peer_index, GossipKind::ConsensusTransactions, usize::MAX),
+                (peer_index, GossipKind::MIN, usize::MIN)
+                    ..=(peer_index, GossipKind::MAX, usize::MAX),
             )
             .next()
             .is_some()
@@ -5473,6 +5461,11 @@ impl<TChain, TConn, TNow> ops::IndexMut<ConnectionId> for ChainNetwork<TChain, T
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GossipKind {
     ConsensusTransactions,
+}
+
+impl GossipKind {
+    const MIN: Self = GossipKind::ConsensusTransactions;
+    const MAX: Self = GossipKind::ConsensusTransactions;
 }
 
 /// Error returned by [`ChainNetwork::add_chain`].
