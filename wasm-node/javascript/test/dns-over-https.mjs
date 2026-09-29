@@ -17,7 +17,8 @@
 
 // Unit tests for the DNS-over-HTTPS resolver that browsers use for
 // `/dns/<host>/udp/<port>/webrtc-direct/...` multiaddresses. No network is
-// involved: `fetch` is stubbed and the URLs it is called with are recorded.
+// involved: `fetch` is stubbed, and the URLs and abort signals it is called
+// with are recorded.
 
 import test from "ava";
 import { parseDnsJsonAnswer, resolveDnsOverHttps } from "../dist/mjs/internals/dns-over-https.js";
@@ -28,26 +29,58 @@ const CNAME = (data) => ({ name: "example.com", type: 5, TTL: 60, data });
 
 const CLOUDFLARE = (type) => `https://cloudflare-dns.com/dns-query?name=example.com&type=${type}`;
 const GOOGLE = (type) => `https://dns.google/resolve?name=example.com&type=${type}`;
+const isCloudflare = (url) => url.startsWith("https://cloudflare-dns.com/");
 
 const answer = (records) => ({ body: { Status: 0, Answer: records } });
 
 /**
- * Builds a `fetch` stub. `handler(url)` returns `{ status?, body }`, or an
- * `Error` to make the call reject. The URLs are recorded in call order.
+ * Builds a `fetch` stub. `handler(url)` returns `{ status?, body }`, an
+ * `Error` to make the call reject, or a promise of either to answer later.
+ * A pending call rejects with an `AbortError` when its signal is aborted.
+ * The URLs and the signals are recorded in call order.
  */
 function fakeFetch(handler) {
   const urls = [];
-  const fetchImpl = async (url) => {
+  const signals = [];
+  const fetchImpl = (url, init) => {
     urls.push(String(url));
-    const reply = handler(String(url));
-    if (reply instanceof Error) throw reply;
-    const { status = 200, body } = reply;
-    return { ok: status >= 200 && status < 300, status, json: async () => body };
+    const signal = init?.signal;
+    signals.push(signal);
+    return new Promise((resolve, reject) => {
+      const onAbort = () =>
+        reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+      if (signal?.aborted) return onAbort();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      Promise.resolve(handler(String(url))).then(
+        (reply) => {
+          signal?.removeEventListener("abort", onAbort);
+          if (reply instanceof Error) return reject(reply);
+          const { status = 200, body } = reply;
+          resolve({ ok: status >= 200 && status < 300, status, json: async () => body });
+        },
+        (error) => {
+          signal?.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
+    });
   };
-  return { urls, fetchImpl };
+  return { urls, signals, fetchImpl };
 }
 
 const signal = () => new AbortController().signal;
+
+/** A promise settled by hand from the test. */
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Stagger used by the tests that exercise the race, short so that they run fast.
+const STAGGER_MS = 5;
 
 test("parseDnsJsonAnswer keeps only the records of the wanted family", (t) => {
   const body = {
@@ -71,7 +104,7 @@ test("parseDnsJsonAnswer yields nothing for failures and malformed input", (t) =
 
 test("falls back to the next provider when the first one fails", async (t) => {
   const { urls, fetchImpl } = fakeFetch((url) =>
-    url.startsWith("https://cloudflare-dns.com/") ? { status: 502, body: null } : answer([A("1.2.3.4")]),
+    isCloudflare(url) ? { status: 502, body: null } : answer([A("1.2.3.4")]),
   );
   t.is(await resolveDnsOverHttps("example.com", 4, signal(), fetchImpl), "1.2.3.4");
   t.deepEqual(urls, [CLOUDFLARE("A"), GOOGLE("A")]);
@@ -134,4 +167,62 @@ test("an aborted signal rejects without any request", async (t) => {
     message: /aborted/,
   });
   t.deepEqual(urls, []);
+});
+
+test("a provider that doesn't answer in time is overtaken by the next one", async (t) => {
+  const cloudflare = deferred();
+  const { urls, signals, fetchImpl } = fakeFetch((url) =>
+    isCloudflare(url) ? cloudflare.promise : answer([A("5.6.7.8")]),
+  );
+  const result = resolveDnsOverHttps("example.com", 4, signal(), fetchImpl, STAGGER_MS);
+  t.is(await result, "5.6.7.8");
+  t.deepEqual(urls, [CLOUDFLARE("A"), GOOGLE("A")]);
+  // The loser is cancelled, and its late answer changes nothing.
+  t.true(signals[0].aborted);
+  cloudflare.resolve(answer([A("1.2.3.4")]));
+  await sleep(STAGGER_MS * 4);
+  t.is(await result, "5.6.7.8");
+  t.deepEqual(urls, [CLOUDFLARE("A"), GOOGLE("A")]);
+});
+
+test("a failure starts the next provider without waiting for the stagger", async (t) => {
+  const { urls, fetchImpl } = fakeFetch((url) =>
+    isCloudflare(url) ? new Error("network down") : answer([A("5.6.7.8")]),
+  );
+  // A stagger far longer than the test timeout: the second request must not depend on it.
+  t.is(await resolveDnsOverHttps("example.com", 4, signal(), fetchImpl, 60_000), "5.6.7.8");
+  t.deepEqual(urls, [CLOUDFLARE("A"), GOOGLE("A")]);
+});
+
+test("the first answer wins while several providers are in flight", async (t) => {
+  const cloudflare = deferred();
+  const { urls, signals, fetchImpl } = fakeFetch((url) => {
+    if (isCloudflare(url)) return cloudflare.promise;
+    // Google has just been started because of the stagger; Cloudflare answers now, Google never.
+    cloudflare.resolve(answer([A("1.2.3.4")]));
+    return deferred().promise;
+  });
+  t.is(await resolveDnsOverHttps("example.com", 4, signal(), fetchImpl, STAGGER_MS), "1.2.3.4");
+  t.deepEqual(urls, [CLOUDFLARE("A"), GOOGLE("A")]);
+  t.true(signals[1].aborted);
+});
+
+test("no second request when the first provider answers within the stagger", async (t) => {
+  const { urls, fetchImpl } = fakeFetch(() => answer([A("1.2.3.4")]));
+  t.is(await resolveDnsOverHttps("example.com", 4, signal(), fetchImpl, STAGGER_MS), "1.2.3.4");
+  await sleep(STAGGER_MS * 4);
+  t.deepEqual(urls, [CLOUDFLARE("A")]);
+});
+
+test("aborting the signal while a request is pending rejects and starts nothing else", async (t) => {
+  const controller = new AbortController();
+  const { urls, signals, fetchImpl } = fakeFetch(() => deferred().promise);
+  const result = resolveDnsOverHttps("example.com", undefined, controller.signal, fetchImpl, STAGGER_MS);
+  t.deepEqual(urls, [CLOUDFLARE("A")]);
+  controller.abort();
+  await t.throwsAsync(result, { message: /aborted/ });
+  t.true(signals[0].aborted);
+  // Neither the next provider nor the AAAA lookup is started afterwards.
+  await sleep(STAGGER_MS * 4);
+  t.deepEqual(urls, [CLOUDFLARE("A")]);
 });
