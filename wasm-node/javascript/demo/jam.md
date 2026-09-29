@@ -38,7 +38,7 @@ runs the dedicated GRANDPA acceptance and proof capture.
   After editing Rust or JavaScript, stop the demo, run `npm run demo:jam:rebuild`,
   and reload the page.
 - **The `polkajam` executable, already built.** The spec is pinned to
-  `8ceedf46c4828137c8835e4227d7f3a62ada0463`. The harness looks in
+  `3ccb03b7dc5ca54b16de81db7fdf7076de083ad0`. The harness looks in
   `POLKAJAM_BIN_DIR` if set, otherwise on `PATH`, and stops if it is missing.
   A `polkajam` older than this pin signs GRANDPA votes without the posterior
   state root: the client logs `jam-finality-rejected` and `jam-warp-rejected`

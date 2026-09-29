@@ -122,11 +122,15 @@ for WebTransport); no HTTP server is started.
 
 ## Pinned PolkaJam
 
-`POLKAJAM_COMMIT = 8ceedf46c4828137c8835e4227d7f3a62ada0463` (A5 capture base,
-`polkajam 0.1.29 / GP 0.8.0`). The checked-in spec was generated at that pin
-with `SKIP_PVM_BUILDS=1`. Binary provenance is not checked during a run.
-Regenerate and diff the spec whenever the pin changes, following
-[CHAIN_SPEC.md](CHAIN_SPEC.md).
+`POLKAJAM_COMMIT = 3ccb03b7dc5ca54b16de81db7fdf7076de083ad0`, the head of the PolkaJam branch
+`skunert/polkajam-light-client`: main of 2026-09-30 (`27d63b8d`) plus three
+commits, `gen-spec` writing each validator's P-256 id into its metadata, the
+restored `SKIP_PVM_BUILDS` switch, and combined `<ed25519>+<p256>@ip:port`
+bootnodes in specs and `gen-spec` (`polkajam 0.1.29 / GP 0.8.0`; GRANDPA votes
+sign the header hash with its posterior state root since PR #1261). The version
+string does not distinguish it from earlier pins, and binary provenance is not
+checked during a run. This pin's `SKIP_PVM_BUILDS=1` build reproduces the
+checked-in spec; see [CHAIN_SPEC.md](CHAIN_SPEC.md).
 
 ## Teardown and evidence
 

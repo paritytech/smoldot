@@ -17,7 +17,7 @@ POLKAJAM_BIN_DIR=/path/to/pinned/binaries npm run test:jam:finality
 `POLKAJAM_BIN_DIR` is optional: without it `polkajam` is taken from `PATH`.
 It is the only required executable and must be built beforehand; nothing is
 built during a run. A missing executable stops startup. Build instructions for
-PolkaJam `8ceedf46c4828137c8835e4227d7f3a62ada0463` are in
+PolkaJam `3ccb03b7dc5ca54b16de81db7fdf7076de083ad0` are in
 [README.md](README.md). Every node reads [dev-chain-spec.json](dev-chain-spec.json),
 with validator ports fixed at 40000–40005. Stop other test/demo networks first.
 `CHROMIUM_PATH` optionally selects a system Chrome executable.

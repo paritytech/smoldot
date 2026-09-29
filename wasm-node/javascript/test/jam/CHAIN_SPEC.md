@@ -1,7 +1,7 @@
 # Fixed tiny dev chain spec
 
 `dev-chain-spec.json` was generated on 2026-09-23 from PolkaJam commit
-`8ceedf46c4828137c8835e4227d7f3a62ada0463`, built with `SKIP_PVM_BUILDS=1`
+`1445c6cebf0557aa7f2d7ade851364f880f303c9`, built with `SKIP_PVM_BUILDS=1`
 and the flags in [README.md](README.md). The spec uses six deterministic dev
 validators at 127.0.0.1:40000–40005. RPC and HTTP ports are runtime settings
 outside the spec. Only one local test/demo network can run at a time.

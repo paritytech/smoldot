@@ -25,6 +25,60 @@ pub struct Limits {
     pub max_ancestry_steps: usize,
 }
 
+/// One decoded but unverified CE153 fragment.
+#[derive(Debug, Clone)]
+pub struct WarpFragment {
+    pub header: Header,
+    pub justification: Justification,
+}
+
+/// Allocation bounds for CE153. The protocol cap is always 32 fragments.
+#[derive(Debug, Clone, Copy)]
+pub struct WarpLimits {
+    pub max_fragments: usize,
+    pub max_header_bytes: usize,
+    pub proof: Limits,
+}
+
+/// Decodes a natural-number count followed by header/justification pairs.
+pub fn decode_warp_response(
+    params: &Params,
+    bytes: &[u8],
+    limits: &WarpLimits,
+) -> Result<Vec<WarpFragment>, Error> {
+    let mut input = Decoder::new(bytes);
+    let count = input.length(limits.max_fragments.min(32))?;
+    // Smallest fragment: a 297-byte header and an 82-byte justification (round,
+    // set id, 68-byte commit target, empty precommit and ancestry lists).
+    if count > input.remaining().len() / (297 + 82) {
+        return Err(DecodeError::UnexpectedEnd.into());
+    }
+    let mut fragments = Vec::new();
+    fragments
+        .try_reserve_exact(count)
+        .map_err(|_| Error::ResourceLimit)?;
+    for _ in 0..count {
+        let bytes = input.remaining();
+        let window = &bytes[..bytes.len().min(limits.max_header_bytes)];
+        let mut header_input = Decoder::new(window);
+        let header = codec::read_header(params, &mut header_input).map_err(|error| {
+            if window.len() < bytes.len() && error == DecodeError::UnexpectedEnd {
+                Error::ResourceLimit
+            } else {
+                Error::Decode(error)
+            }
+        })?;
+        input.take(window.len() - header_input.remaining().len())?;
+        let justification = read_justification(params, &mut input, limits.proof)?;
+        fragments.push(WarpFragment {
+            header,
+            justification,
+        });
+    }
+    input.finish()?;
+    Ok(fragments)
+}
+
 /// A GRANDPA vote target with the slot every vote carries beside it.
 ///
 /// Mirrors PolkaJam `27d63b8d` `jam-std-common/src/finality.rs` `GrandpaTarget
@@ -66,6 +120,7 @@ pub enum Error {
     ResourceLimit,
     InvalidAuthorities,
     MissingGenesisEpochMark,
+    MissingEpochMark,
     WrongSetId { expected: u32, received: u32 },
     TargetMismatch,
     UnknownTarget,
@@ -124,9 +179,15 @@ impl Justification {
             return Err(Error::ResourceLimit);
         }
         let mut input = Decoder::new(bytes);
+        let proof = read_justification(params, &mut input, limits)?;
+        input.finish()?;
+        Ok(proof)
+    }
+
+    fn read(params: &Params, input: &mut Decoder<'_>, limits: Limits) -> Result<Self, Error> {
         let round = input.u64()?;
         let set_id = input.u32()?;
-        let target = read_target(&mut input)?;
+        let target = read_target(input)?;
         let count = input.length(usize::from(params.max_validators) * 2)?;
         // 68-byte target, 64-byte signature, 32-byte authority.
         let precommits = input.list(count, 164, |input| {
@@ -139,7 +200,6 @@ impl Justification {
         let count = input.length(limits.max_ancestry_headers)?;
         // A header without marks or offenders occupies 297 bytes.
         let ancestries = input.list(count, 297, |input| codec::read_header(params, input))?;
-        input.finish()?;
         Ok(Self {
             round,
             set_id,
@@ -298,6 +358,25 @@ impl Justification {
     }
 }
 
+fn read_justification(
+    params: &Params,
+    input: &mut Decoder<'_>,
+    limits: Limits,
+) -> Result<Justification, Error> {
+    let bytes = input.remaining();
+    let window = &bytes[..bytes.len().min(limits.max_bytes)];
+    let mut proof_input = Decoder::new(window);
+    let proof = Justification::read(params, &mut proof_input, limits).map_err(|error| {
+        if window.len() < bytes.len() && error == Error::Decode(DecodeError::UnexpectedEnd) {
+            Error::ResourceLimit
+        } else {
+            error
+        }
+    })?;
+    input.take(window.len() - proof_input.remaining().len())?;
+    Ok(proof)
+}
+
 /// The [`Justification::verify`] lookup entry of a retained authenticated header:
 /// `(hash, parent, parent_state_root, slot)`. The parent's posterior root is the
 /// header's prior state root, bytes 32 to 64 of the canonical encoding.
@@ -342,6 +421,54 @@ pub struct AuthoritySet {
 }
 
 impl AuthoritySet {
+    /// Authenticates a fragment and prepares its one-step rotation, without mutation.
+    /// Returns the rotated set and the verified commit target: its hash is the
+    /// fragment header's, its `state_root` the signed posterior root of that header.
+    pub fn advance_warp(
+        &self,
+        params: &Params,
+        fragment: &WarpFragment,
+        limits: Limits,
+    ) -> Result<(Self, Target), Error> {
+        if fragment.justification.set_id() != self.set_id {
+            return Err(Error::WrongSetId {
+                expected: self.set_id,
+                received: fragment.justification.set_id(),
+            });
+        }
+        let mark = fragment
+            .header
+            .epoch_mark
+            .as_ref()
+            .ok_or(Error::MissingEpochMark)?;
+        let hash = fragment.header.hash(params);
+        let proof = fragment.justification.verify(
+            params,
+            self.set_id,
+            &self.current,
+            &hash,
+            limits,
+            |target| {
+                (*target == hash).then_some((
+                    hash,
+                    fragment.header.parent,
+                    fragment.header.prior_state_root,
+                    fragment.header.slot,
+                ))
+            },
+        )?;
+        let next = self
+            .after_finalizing(
+                params,
+                &proof,
+                hash,
+                fragment.header.slot,
+                Some(&mark.validators),
+            )?
+            .ok_or(Error::MissingEpochMark)?;
+        Ok((next, *proof.target()))
+    }
+
     /// Shape validation only. The caller must trust this checkpoint data, whose
     /// values describe GRANDPA immediately AFTER finalizing the anchor header.
     pub fn from_checkpoint(

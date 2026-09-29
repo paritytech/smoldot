@@ -50,6 +50,68 @@ async function waitFor(check, timeoutMs, intervalMs = 250) {
     }
 }
 
+// Serialized into the page: each reconnect gets its own identity, even at the
+// same URL. A request records how many advertisements preceded its transmission.
+function installJamWireCapture() {
+    const wire = window.__jamWire = { connections: [], requests: [] };
+    const Native = window.WebTransport;
+    if (!Native) return;
+    window.WebTransport = new Proxy(Native, { construct(target, args) {
+        const transport = new target(...args);
+        const connection = { id: wire.connections.length, url: String(args[0]), initialFinal: null, finals: [] };
+        wire.connections.push(connection);
+        const create = transport.createBidirectionalStream.bind(transport);
+        transport.createBidirectionalStream = async (...args) => {
+            const stream = await create(...args);
+            const bytes = [];
+            let incoming = [], messages = 0;
+            const getReader = stream.readable.getReader.bind(stream.readable);
+            stream.readable.getReader = () => {
+                const reader = getReader();
+                const read = reader.read.bind(reader);
+                reader.read = async () => {
+                    const result = await read();
+                    if (bytes[0] === 0 && result.value) {
+                        for (const byte of result.value) incoming.push(byte);
+                        while (incoming.length >= 4) {
+                            const length = new DataView(Uint8Array.from(incoming.slice(0, 4)).buffer).getUint32(0, true);
+                            if (length > 1024 * 1024) throw new Error('UP0 capture exceeds frame budget');
+                            if (incoming.length < length + 4) break;
+                            const payload = incoming.splice(0, length + 4).slice(4);
+                            const initial = messages++ === 0;
+                            const final = initial ? payload.slice(0, 36) : payload.slice(-36);
+                            if (final.length !== 36) throw new Error('Truncated UP0 finalized advertisement');
+                            const advertised = {
+                                t: Date.now(),
+                                hash: final.slice(0, 32).map(b => b.toString(16).padStart(2, '0')).join(''),
+                                slot: new DataView(Uint8Array.from(final.slice(32)).buffer).getUint32(0, true),
+                            };
+                            if (initial) connection.initialFinal = advertised;
+                            connection.finals.push(advertised);
+                        }
+                    }
+                    return result;
+                };
+                return reader;
+            };
+            const getWriter = stream.writable.getWriter.bind(stream.writable);
+            stream.writable.getWriter = () => {
+                const writer = getWriter();
+                const write = writer.write.bind(writer);
+                const close = writer.close.bind(writer);
+                writer.write = chunk => { if (bytes.length < 42) bytes.push(...new Uint8Array(chunk).slice(0, 42 - bytes.length)); return write(chunk); };
+                writer.close = () => {
+                    wire.requests.push({ connection: connection.id, t: Date.now(), bytes, finalsSeen: connection.finals.length });
+                    return close();
+                };
+                return writer;
+            };
+            return stream;
+        };
+        return transport;
+    }});
+}
+
 export async function runE2E({ network, specPath, wrongSpecPath, report, log }) {
     const spec = JSON.parse(await fs.readFile(specPath, 'utf8'));
     const wrongSpec = JSON.parse(await fs.readFile(wrongSpecPath, 'utf8'));
@@ -71,6 +133,7 @@ export async function runE2E({ network, specPath, wrongSpecPath, report, log }) 
     const browserVersion = browser.version();
     const context = await browser.newContext();
     const page = await context.newPage();
+    await page.addInitScript(installJamWireCapture);
     page.on('pageerror', (error) => console.error(`[browser:pageerror] ${error.message}`));
     page.on('console', (message) => {
         if (message.type() === 'error') console.error(`[browser:error] ${message.text()}`);
@@ -306,6 +369,14 @@ export async function runE2E({ network, specPath, wrongSpecPath, report, log }) 
         });
 
         await phase('final', async () => {
+            const wire = await page.evaluate(() => window.__jamWire);
+            const logs = (await jam.logs('main', 0)).entries;
+            check('positive', 'Dummy CE153 terminates with typed NoData',
+                wire.requests.some(r => r.bytes[0] === 153)
+                && logs.some(e => e.message.startsWith('jam-warp-fragmentless;') && e.message.includes('reason=NoData')));
+            check('positive', 'Dummy makes zero CE129 requests',
+                wire.requests.every(r => r.bytes[0] !== 129));
+            report.wire = wire;
             const { entries: mainSessionEvents } = await jam.events('main', 'main', 0);
             check('positive', 'no finalized event after initialized for the whole session',
                 !mainSessionEvents.some((entry) => entry.event === 'finalized'),
@@ -350,31 +421,38 @@ export async function runAged({ network, specPath, report, log = console.log, si
     const spec = JSON.parse(await fs.readFile(specPath, 'utf8'));
     const genesis = hashOfHeaderHex(spec.genesis_header).slice(2);
     const hashHex = hash => Buffer.from(hash, 'base64').toString('hex');
-    const minimum = Number(process.env.JAM_AGED_BLOCKS ?? 130);
-    if (!Number.isSafeInteger(minimum) || minimum < 1 || minimum > 100000) throw new Error('Invalid JAM_AGED_BLOCKS');
+    const minimum = Number(process.env.JAM_AGED_BLOCKS ?? 201);
+    if (!Number.isSafeInteger(minimum) || minimum < 201 || minimum > 100000) throw new Error('JAM_AGED_BLOCKS must be at least 201 for D7 acceptance');
     const ageStarted = Date.now();
-    let count, tip;
+    let count, tip, ageSeconds;
     // Count actual ancestors: the first live slot can be millions past genesis.
     for (;;) {
         signal?.throwIfAborted();
         tip = await network.rpc('bestBlock');
         let hash = tip.header_hash;
         count = 0;
+        let earliestSlot = tip.slot;
         while (hashHex(hash) !== genesis) {
             if (++count > 100000) throw new Error('Aged ancestry exceeds measurement budget');
-            hash = (await network.rpc('parent', [hash])).header_hash;
+            const parent = await network.rpc('parent', [hash]);
+            if (hashHex(parent.header_hash) !== genesis) earliestSlot = parent.slot;
+            hash = parent.header_hash;
         }
-        if (count >= minimum) break;
+        ageSeconds = (tip.slot - earliestSlot) * SLOT_SECONDS;
+        if (count >= minimum && ageSeconds >= 1200) break;
         if (Date.now() - ageStarted > minimum * SLOT_SECONDS * 2000 + 120000) throw new Error('Network did not age in time');
         log(`aging: ${count}/${minimum} blocks`);
         await delay(30000, undefined, { signal });
     }
     const boundMs = Number(process.env.JAM_AGED_BOUND_MS ?? 180000);
     if (!Number.isSafeInteger(boundMs) || boundMs < 1) throw new Error('Invalid JAM_AGED_BOUND_MS');
-    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, args: ['--disable-features=LocalNetworkAccessChecks'] });
+    const launchArgs = ['--disable-features=LocalNetworkAccessChecks'];
+    if (typeof process.getuid === 'function' && process.getuid() === 0) launchArgs.push('--no-sandbox');
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, args: launchArgs });
     let page;
     try {
         page = await browser.newPage();
+        await page.addInitScript(installJamWireCapture);
         await page.route('http://localhost/**', async route => {
             const pathname = new URL(route.request().url()).pathname;
             const relative = pathname === '/' ? 'test/jam/page.html' : pathname.startsWith('/jam/') ? 'test' + pathname : pathname.slice(1);
@@ -382,25 +460,29 @@ export async function runAged({ network, specPath, report, log = console.log, si
         });
         await page.goto(PAGE_URL);
         await page.waitForFunction(() => window.__ready);
+        const finalizedBeforeConnect = await network.rpc('finalizedBlock');
         const started = Date.now();
         await page.evaluate(async spec => {
-            window.__jam.startClient('aged', { maxLogLevel: 4, cpuRateLimit: 0.5 });
+            window.__jam.startClient('aged', { maxLogLevel: 4, cpuRateLimit: 1 });
             await window.__jam.addChain('aged', 'jam', spec);
             window.__agedSub = await window.__jam.rpc('aged', 'jam', 'chainHead_v1_follow', [false]);
         }, JSON.stringify(spec));
-        let cursor = 0, imported = 0, firstMs, best, finalized = 0;
+        let cursor = 0, imported = 0, firstMs, firstAt, best, finalized = 0, stops = 0, root;
         const reached = await waitFor(async () => {
             signal?.throwIfAborted();
             const batch = await page.evaluate(async since => {
                 const batch = window.__jam.events('aged', 'jam', since);
                 const hashes = batch.entries.filter(e => e.event === 'newBlock').map(e => e.blockHash);
-                if (hashes.length) await window.__jam.rpc('aged', 'jam', 'chainHead_v1_unpin', [window.__agedSub, hashes]);
+                if (batch.entries.some(e => e.event === 'stop')) {
+                    window.__agedSub = await window.__jam.rpc('aged', 'jam', 'chainHead_v1_follow', [false]);
+                } else if (hashes.length) await window.__jam.rpc('aged', 'jam', 'chainHead_v1_unpin', [window.__agedSub, hashes]);
                 return batch;
             }, cursor);
             cursor = batch.total;
             for (const event of batch.entries) {
-                if (event.event === 'stop') throw new Error('Aged subscription stopped');
-                if (event.event === 'newBlock') { imported++; firstMs ??= Date.now() - started; }
+                if (event.event === 'stop') { if (++stops > 1) throw new Error('Repeated stop after warp'); }
+                if (event.event === 'initialized') root = event.finalizedBlockHashes[0];
+                if (event.event === 'newBlock') { imported++; firstAt ??= event.t; firstMs ??= event.t - started; }
                 if (event.event === 'bestBlockChanged') best = event.bestBlockHash;
                 if (event.event === 'finalized') finalized++;
             }
@@ -409,9 +491,60 @@ export async function runAged({ network, specPath, report, log = console.log, si
         }, boundMs, 100);
         if (!reached) throw new Error(`Fresh client failed to reach live tip in ${boundMs}ms`);
         const elapsedMs = Date.now() - started;
-        report.aged = { blocksAtStart: count, tipSlotAtStart: tip.slot, firstNewBlockMs: firstMs,
+        const wire = await page.evaluate(() => window.__jamWire);
+        const requestsToTip = wire.requests;
+        const ascendingBatches = requestsToTip.filter(r => r.bytes[0] === 128 && r.bytes[37] === 0).length;
+        const logs = (await page.evaluate(() => window.__jam.logs('aged'))).entries;
+        const applied = logs.find(e => e.message.startsWith('jam-warp-applied'));
+        const connect = logs.find(e => e.message === 'jam-connect');
+        const setId = Number(applied?.message.match(/set_id[=:]\s*(\d+)/)?.[1]);
+        const rootSlot = Number(applied?.message.match(/(?:root_slot|slot)[=:]\s*(\d+)/)?.[1]);
+        if (!applied || !Number.isInteger(setId) || setId < 3) throw new Error('Missing jam-warp-applied with set id >= 3');
+        if (!connect || firstAt - connect.t > 5000) throw new Error('First newBlock exceeded 5 seconds after connecting');
+        if (ascendingBatches > 2) throw new Error(`Warp catch-up used ${ascendingBatches} ascending CE128 batches`);
+        const finalizedAfterWarp = await network.rpc('finalizedBlock');
+        if (rootSlot > finalizedAfterWarp.slot) throw new Error('RPC has not yet finalized the join root');
+        let appliedRoot = finalizedAfterWarp;
+        while (appliedRoot.slot > rootSlot) appliedRoot = await network.rpc('parent', [appliedRoot.header_hash]);
+        const appliedHash = hashHex(appliedRoot.header_hash);
+        if (appliedRoot.slot !== rootSlot || root !== '0x' + appliedHash) throw new Error('Follower did not reinitialize at finalized join head');
+        const requestHash = r => Buffer.from(r.bytes.slice(5, 37)).toString('hex');
+        const descending = requestsToTip.filter(r => r.bytes[0] === 128 && r.bytes[37] === 1);
+        const joinBlocksFetched = descending.length === 1 ? Buffer.from(descending[0].bytes).readUInt32LE(38) : undefined;
+        if (descending.length !== 1 || requestHash(descending[0]) !== appliedHash || joinBlocksFetched !== 1) throw new Error('Join must fetch only F with one descending max=1 request at F');
+        const selection = descending[0];
+        const servingConnection = wire.connections.find(c => c.id === selection.connection);
+        // Policy: freeze the latest UP0 final processed at chain_done. It may be
+        // newer than this connection's initial final, but cannot come from a
+        // different connection or an advertisement received after selection.
+        const frozen = logs.find(e => e.message.startsWith('jam-warp-join-selected;'));
+        const advertisementRevision = Number(frozen?.message.match(/advertisement[=:]\s*(\d+)/)?.[1]);
+        const frozenSlot = Number(frozen?.message.match(/slot[=:]\s*(\d+)/)?.[1]);
+        const selectedFinal = servingConnection?.finals[advertisementRevision - 1];
+        if (!Number.isSafeInteger(advertisementRevision) || advertisementRevision < 1
+            || advertisementRevision > selection.finalsSeen || !servingConnection?.initialFinal
+            || !selectedFinal || selectedFinal.slot !== frozenSlot || frozenSlot !== rootSlot
+            || selectedFinal.hash !== requestHash(selection)) throw new Error('Frozen join F does not match its exact serving-connection UP0 advertisement');
+        const fragmentFinality = /fragment_finality[=:]\s*true/.test(applied.message);
+        if (!fragmentFinality && !requestsToTip.some(r => r.connection === selection.connection && r.bytes[0] === 130 && requestHash(r) === appliedHash)) throw new Error('Join head has neither consumed fragment finality nor CE130 on its serving connection');
+        // Since D15 (pin move) the read is at F itself, against the posterior root F's justification signs.
+        const stateRequests = requestsToTip.filter(r => r.bytes[0] === 129);
+        if (!stateRequests.length || stateRequests.some(r => r.connection !== selection.connection || r.t < selection.t || requestHash(r) !== appliedHash)) throw new Error('Join state reads were not bound to frozen F and its serving connection');
+        const stateResponses = Number(applied.message.match(/state_responses[=:]\s*(\d+)/)?.[1]);
+        if (!Number.isInteger(stateResponses) || stateResponses < 1 || stateResponses > 2) throw new Error('Join exceeded two CE129 responses');
+        const finalitySeen = await waitFor(async () => {
+            const events = (await page.evaluate(() => window.__jam.events('aged', 'jam'))).entries;
+            finalized = events.filter(e => e.event === 'finalized').length;
+            return finalized > 0;
+        }, 30000);
+        if (!finalitySeen) throw new Error('No finalized events after warp');
+        report.aged = { blocksAtStart: count, ageSeconds, tipSlotAtStart: tip.slot, firstNewBlockMs: firstMs,
             timeToTipMs: elapsedMs, imported, blocksPerSecond: imported * 1000 / elapsedMs,
-            finalizedEvents: finalized, boundMs, cpuRateLimit: 0.5, best, browser: browser.version() };
+            finalizedEvents: finalized, boundMs, cpuRateLimit: 1, best, browser: browser.version(),
+            setId, rootSlot, root, appliedRootHash: '0x' + hashHex(appliedRoot.header_hash),
+            finalizedBeforeConnect, finalizedAfterWarp, servingConnection, selectedFinal, advertisementRevision,
+            selectionPolicy: 'latest UP0 final processed at chain_done, frozen for the join',
+            fragmentFinality, stateResponses, joinBlocksFetched, stateReadAt: '0x' + appliedHash, stops, ascendingBatches, firstBlockAfterConnectMs: firstAt - connect.t };
         report.logs = (await page.evaluate(() => window.__jam.logs('aged'))).entries;
         log('PASS aged: ' + JSON.stringify(report.aged));
     } finally {
@@ -420,8 +553,8 @@ export async function runAged({ network, specPath, report, log = console.log, si
     }
 }
 
-// `node test/jam/e2e.mjs --aged` starts a GRANDPA network and waits for 130
-// blocks. JAM_AGED_ATTACH_DIR + JAM_RPC_PORT reuse an already running network.
+// `node test/jam/e2e.mjs --aged` starts a GRANDPA network and ages it 20 minutes.
+// JAM_AGED_ATTACH_DIR + JAM_RPC_PORT reuse an already running network.
 if (process.argv[1] && url.pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url && process.argv.includes('--aged')) {
     const { JamNetwork, generateSpecs, resolveBinaries } = await import('./network.mjs');
     const os = await import('node:os');

@@ -21,7 +21,19 @@
 //! State reads share the two pending CE slots with blocks and finality proofs.
 //! One shared read retains at most 1 MiB of entries and 31 KiB of boundary nodes plus its verified
 //! copy; allow another 4 MiB for entry metadata, proof indexing and frame staging.
-//! The conservative chain-task allowance rounds up to approximately 81 MiB.
+//! Warp adds one 8-MiB CE153 frame, its bounded decoded fragments, one join
+//! header (the finalized head, whose state is read against the posterior root
+//! its justification signs) and four bounded state values. Only the reserved
+//! peer can warp; allow 24 MiB for that transient phase (approximately 105 MiB
+//! total).
+//! CE128 block budget: `FRAME_BYTES` stays 1 MiB per response. PolkaJam
+//! `27d63b8d` (PR #1284) allows a block of header and extrinsic maxima plus a
+//! 32 MiB preimage and serves responses up to four times that. Measured on the
+//! dev network at that pin (2026-10-04, 205 blocks, 20 minutes): largest block
+//! 2,659 bytes, largest header 746 bytes, none near 256 KiB. A block above the
+//! budget cannot be fetched, which stalls the join and ascending sync at that
+//! block until D16 (light blocks over CE 128); the budget is deliberately not
+//! raised to the theoretical maximum.
 //! One RPC frontend separately allows two 4 MiB pin maps, a temporary snapshot
 //! below 8 MiB, 16 responses (each below about 1 MiB), and 32 64-KiB requests:
 //! allow another 36 MiB including collection/staging overhead. The two pin maps
@@ -58,6 +70,7 @@ use smoldot::jam::{
 
 const TREE_BYTES: usize = 16 * 1024 * 1024;
 const FRAME_BYTES: usize = 1024 * 1024;
+const WARP_BYTES: usize = 8 * 1024 * 1024;
 const REPAIR_LIMIT: usize = 8;
 const MAX_SUBSCRIBERS: usize = 8;
 const MAX_PEERS: usize = 2;
@@ -71,6 +84,7 @@ pub(crate) struct Config {
     header_bytes: usize,
     authorities: AuthoritySet,
     max_blocks: usize,
+    tree_config: tree::Config,
 }
 
 struct Peer {
@@ -118,6 +132,7 @@ impl Config {
             authorities,
             max_blocks: max_blocks.get(),
             header_bytes,
+            tree_config: limits,
         })
     }
 
@@ -187,6 +202,220 @@ struct State {
     proof_owner: Option<(usize, Hash)>,
     /// Attempted configured peers per retained target. Never grows beyond the tree.
     proof_attempts: Vec<(Hash, u8)>,
+    tree_config: tree::Config,
+    warp_owner: Option<usize>,
+    warp_revision: u64,
+    /// Refusals apply only to this exact finalized root, by distinct peers.
+    root_refusals: Option<(Hash, u8)>,
+    peer_count: usize,
+}
+
+#[derive(Debug)]
+enum WarpError {
+    Finality(finality::Error),
+    State(smoldot::jam::state::StateError),
+    Tree(tree::InsertError),
+    InvalidJoin,
+    StaleAnchor,
+    ResourceLimit,
+}
+
+/// Terminal availability failure, scoped to the exact authenticated anchor.
+#[derive(Debug, PartialEq, Eq)]
+struct AnchorUnserved {
+    hash: Hash,
+    slot: u32,
+}
+
+impl core::fmt::Display for AnchorUnserved {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "anchor {:?} at slot {} is unserved",
+            self.hash, self.slot
+        )
+    }
+}
+
+impl core::error::Error for AnchorUnserved {}
+
+impl core::fmt::Display for WarpError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Finality(e) => write!(f, "{e}"),
+            Self::State(e) => write!(f, "{e}"),
+            Self::Tree(e) => write!(f, "{e:?}"),
+            other => write!(f, "{other:?}"),
+        }
+    }
+}
+
+/// Staged authorities and state never affect the live tree until the finalized
+/// head's justification and the state proofs against its signed root succeed.
+struct Warp {
+    anchor: Hash,
+    authorities: AuthoritySet,
+    last_slot: u32,
+    /// Exact target already finalized and rotated by the last verified fragment.
+    last_final: Option<finality::Target>,
+    fragments: usize,
+    chain_done: bool,
+    final_head: Option<Final>,
+    /// The frozen finalized head F, fetched as one descending block.
+    head: Option<Header>,
+    /// F's verified GRANDPA target: its `state_root` is the signed posterior root
+    /// the join reads against. `None` until F is authenticated.
+    finalized: Option<finality::Target>,
+    state_responses: usize,
+    items: Vec<(trie::StateKey, Vec<u8>)>,
+    read: Option<futures_channel::oneshot::Receiver<Result<StateReadResult, StateReadError>>>,
+}
+
+impl Warp {
+    fn new(state: &State) -> Self {
+        Self {
+            anchor: state.tree.finalized().hash,
+            authorities: state.authorities.clone(),
+            last_slot: state.tree.finalized().slot,
+            last_final: None,
+            fragments: 0,
+            chain_done: false,
+            final_head: None,
+            head: None,
+            finalized: None,
+            state_responses: 0,
+            items: Vec::new(),
+            read: None,
+        }
+    }
+
+    fn advance(
+        &mut self,
+        params: &Params,
+        bytes: &[u8],
+        limits: &finality::WarpLimits,
+    ) -> Result<(), WarpError> {
+        let fragments =
+            finality::decode_warp_response(params, bytes, limits).map_err(WarpError::Finality)?;
+        self.chain_done = fragments.len() < 32;
+        for fragment in fragments {
+            if params.epoch_len == 0
+                || fragment.header.slot / params.epoch_len <= self.last_slot / params.epoch_len
+            {
+                return Err(WarpError::InvalidJoin);
+            }
+            let (authorities, target) = self
+                .authorities
+                .advance_warp(params, &fragment, limits.proof)
+                .map_err(WarpError::Finality)?;
+            self.authorities = authorities;
+            self.last_slot = fragment.header.slot;
+            self.last_final = Some(target);
+            self.fragments = self
+                .fragments
+                .checked_add(1)
+                .ok_or(WarpError::ResourceLimit)?;
+        }
+        Ok(())
+    }
+
+    fn receive_headers(
+        &mut self,
+        params: &Params,
+        blocks: Vec<smoldot::jam::types::Block>,
+        header_bytes: usize,
+    ) -> Result<(), WarpError> {
+        let advertised = self.final_head.as_ref().ok_or(WarpError::InvalidJoin)?;
+        if blocks.len() != 1 || self.head.is_some() {
+            return Err(WarpError::InvalidJoin);
+        }
+        let f = blocks
+            .into_iter()
+            .next()
+            .ok_or(WarpError::InvalidJoin)?
+            .header;
+        if f.hash(params) != advertised.hash
+            || f.slot != advertised.slot
+            || f.slot < self.last_slot
+            || f.encode(params).len() > header_bytes
+        {
+            return Err(WarpError::InvalidJoin);
+        }
+        // The fragment's proof used the outgoing set. Its successful advancement
+        // already authenticated this exact header, signed its posterior root and
+        // consumed its rotation.
+        self.finalized = self
+            .last_final
+            .filter(|last| last.hash == advertised.hash && last.slot == f.slot);
+        self.head = Some(f);
+        Ok(())
+    }
+
+    fn authenticate(
+        &mut self,
+        params: &Params,
+        bytes: &[u8],
+        limits: finality::Limits,
+    ) -> Result<(), WarpError> {
+        if self.finalized.is_some() {
+            return Err(WarpError::InvalidJoin);
+        }
+        let f = self.head.as_ref().ok_or(WarpError::InvalidJoin)?;
+        let hash = f.hash(params);
+        let proof = Justification::decode(params, bytes, limits).map_err(WarpError::Finality)?;
+        let verified = proof
+            .verify(
+                params,
+                self.authorities.set_id(),
+                self.authorities.current(),
+                &hash,
+                limits,
+                |h| (*h == hash).then_some((hash, f.parent, f.prior_state_root, f.slot)),
+            )
+            .map_err(WarpError::Finality)?;
+        if let Some(authorities) = self
+            .authorities
+            .after_finalizing(
+                params,
+                &verified,
+                hash,
+                f.slot,
+                f.epoch_mark.as_ref().map(|mark| mark.validators.as_slice()),
+            )
+            .map_err(WarpError::Finality)?
+        {
+            self.authorities = authorities;
+        }
+        self.finalized = Some(*verified.target());
+        Ok(())
+    }
+
+    /// Reads at F itself against the posterior root its justification signs.
+    fn next_read(&self) -> Result<StateRead, WarpError> {
+        let target = self.finalized.as_ref().ok_or(WarpError::InvalidJoin)?;
+        let index = *[4, 6, 8, 11]
+            .get(self.items.len())
+            .ok_or(WarpError::InvalidJoin)?;
+        let key = trie::state_key(index);
+        Ok(StateRead {
+            at: target.hash,
+            root: target.state_root,
+            trust: Trust::Finalized,
+            root_header: Some(target.hash),
+            // The captured full range costs more bytes but saves three round trips.
+            // An honest early stop falls back to the remaining individual keys.
+            request: StateRequest {
+                block: target.hash,
+                start: key,
+                end: if self.items.is_empty() {
+                    trie::state_key(11)
+                } else {
+                    key
+                },
+                max_size: 800_000,
+            },
+        })
+    }
 }
 
 /// Trust of the caller-authenticated header carrying this posterior state root.
@@ -275,6 +504,14 @@ impl StateReads {
         {
             return Err(net::Error::InvalidRequest);
         }
+        if self.owner.is_none()
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|(_, tx)| tx.is_canceled())
+        {
+            self.pending = None;
+        }
         if self.pending.is_some() || self.owner.is_some() {
             return Err(net::Error::Limit);
         }
@@ -349,11 +586,8 @@ enum InsertFailure {
 }
 
 impl State {
-    /// Convenience for consumers: wait (None) until the best chain has an
-    /// authenticated child of the finalized head. This does not choose a root
-    /// inside the read verifier. Finalized-child reads instead come from callers
-    /// retaining that child's finality evidence, because the tree prunes its parent.
-    #[allow(dead_code)] // D3/D7 consumer API.
+    /// Wait until the best chain has an authenticated child of the finalized head.
+    #[allow(dead_code)] // D3 consumer API.
     fn finalized_read(
         &self,
         start: trie::StateKey,
@@ -380,6 +614,102 @@ impl State {
         })
     }
 
+    fn reserve_warp(&mut self, peer: usize) -> Option<Warp> {
+        if self.reads.owner.is_none()
+            && self
+                .reads
+                .pending
+                .as_ref()
+                .is_some_and(|(_, tx)| tx.is_canceled())
+        {
+            self.reads.pending = None;
+        }
+        if self.stopped
+            || self.warp_owner.is_some()
+            || self.proof_owner.is_some()
+            || self.reads.owner.is_some()
+            || self.reads.pending.is_some()
+        {
+            return None;
+        }
+        self.warp_owner = Some(peer);
+        Some(Warp::new(self))
+    }
+
+    fn apply_warp(&mut self, peer: usize, warp: Warp) -> Result<(), WarpError> {
+        if self.stopped
+            || self.warp_owner != Some(peer)
+            || self.tree.finalized().hash != warp.anchor
+        {
+            return Err(WarpError::StaleAnchor);
+        }
+        let (Some(target), Some(head)) = (warp.finalized, warp.head) else {
+            return Err(WarpError::InvalidJoin);
+        };
+        if warp.items.len() != 4 || head.hash(&self.params) != target.hash {
+            return Err(WarpError::InvalidJoin);
+        }
+        // The items were proven against F's signed posterior root, so they are
+        // the state after F: anchor at F directly, as a checkpoint would.
+        let raw = GenesisLightState::from_state_items(
+            &self.params,
+            warp.items.iter().map(|(k, v)| (k, v.as_slice())),
+        )
+        .map_err(|_| WarpError::InvalidJoin)?;
+        if raw.slot != head.slot {
+            return Err(WarpError::InvalidJoin);
+        }
+        let state = LightState::from_anchor(&self.params, &raw).map_err(WarpError::State)?;
+        let root = verified_genesis(&self.params, head, state);
+        let tree = HeaderTree::new(self.params.clone(), root, self.tree_config)
+            .map_err(WarpError::Tree)?;
+        let revision = self
+            .warp_revision
+            .checked_add(1)
+            .ok_or(WarpError::ResourceLimit)?;
+        self.tree = tree;
+        self.authorities = warp.authorities;
+        self.warp_revision = revision;
+        self.warp_owner = None;
+        self.proof_attempts.clear();
+        self.root_refusals = None;
+        self.subscribers.clear();
+        Ok(())
+    }
+
+    fn refuse_root(&mut self, peer: usize, hash: Hash) -> Result<(), AnchorUnserved> {
+        if hash != self.tree.finalized().hash || peer >= MAX_PEERS {
+            return Ok(());
+        }
+        let old = self
+            .root_refusals
+            .filter(|(root, _)| *root == hash)
+            .map_or(0, |(_, mask)| mask);
+        let mask = old | (1u8 << peer);
+        self.root_refusals = Some((hash, mask));
+        self.stop_if_unserved()
+    }
+
+    fn stop_if_unserved(&mut self) -> Result<(), AnchorUnserved> {
+        let mask = self
+            .root_refusals
+            .filter(|(hash, _)| *hash == self.tree.finalized().hash)
+            .map_or(0, |(_, mask)| mask);
+        // A concurrently staged warp may still replace the refused anchor.
+        if self.warp_owner.is_none()
+            && self.peer_count == MAX_PEERS
+            && mask.count_ones() >= u32::try_from(self.peer_count).unwrap_or(u32::MAX)
+        {
+            self.stopped = true;
+            self.subscribers.clear();
+            return Err(AnchorUnserved {
+                hash: self.tree.finalized().hash,
+                slot: self.tree.finalized().slot,
+            });
+        }
+        Ok(())
+    }
+
     fn proof_limits(&self) -> finality::Limits {
         let witnesses = (FRAME_BYTES / self.header_bytes).max(1);
         finality::Limits {
@@ -398,6 +728,7 @@ impl State {
     /// mark. Advertisements trigger fetching but never supply authority state.
     fn reserve_proof(&mut self, peer: usize, advertised: &Final) -> Option<Hash> {
         if self.stopped
+            || self.warp_owner.is_some()
             || self.proof_owner.is_some()
             || advertised.slot <= self.tree.finalized().slot
         {
@@ -499,6 +830,7 @@ impl State {
             return Err(InsertFailure::ResourceLimit);
         }
         let hash = header.hash(&self.params);
+        let extends_root = header.parent == self.tree.finalized().hash;
         #[cfg(test)]
         let preverified = self.test_verifier.map(|verify| {
             let parent = self
@@ -513,8 +845,16 @@ impl State {
         #[cfg(not(test))]
         let result = self.tree.insert(header.parent, header, now);
         match result {
-            Ok(tree::Insert::AlreadyKnown) => Ok(()),
+            Ok(tree::Insert::AlreadyKnown) => {
+                if extends_root {
+                    self.root_refusals = None;
+                }
+                Ok(())
+            }
             Ok(tree::Insert::Inserted { evicted, .. }) => {
+                if extends_root {
+                    self.root_refusals = None;
+                }
                 if !evicted.is_empty() {
                     self.subscribers.clear();
                 }
@@ -558,6 +898,11 @@ pub(super) async fn run<P: PlatformRef>(
         max_blocks: config.max_blocks,
         proof_owner: None,
         proof_attempts: Vec::new(),
+        tree_config: config.tree_config,
+        warp_owner: None,
+        warp_revision: 0,
+        root_refusals: None,
+        peer_count: config.peers.len(),
     }));
     let foreground = async {
         while let Ok(request) = rx.recv().await {
@@ -630,6 +975,7 @@ async fn peer_loop<P: PlatformRef>(
 ) {
     let mut backoff = 1;
     let mut fetch_size = FetchSize::default();
+    let mut root_probe = None;
     loop {
         if state.lock().await.stopped {
             future::pending::<()>().await;
@@ -666,13 +1012,20 @@ async fn peer_loop<P: PlatformRef>(
                 peer_index,
                 &state,
                 connected.connection,
-                &mut fetch_size,
+                (&mut fetch_size, &mut root_probe),
             )
             .await;
             let mut s = state.lock().await;
             s.reads.release(peer_index, false);
             if s.proof_owner.is_some_and(|(owner, _)| owner == peer_index) {
                 s.proof_owner = None;
+            }
+            if s.warp_owner == Some(peer_index) {
+                s.warp_owner = None;
+            }
+            if s.stopped {
+                drop(s);
+                continue;
             }
             drop(s);
             if platform.now() - started >= Duration::from_secs(60) {
@@ -739,7 +1092,7 @@ async fn drive<P: PlatformRef>(
     peer_index: usize,
     state: &Arc<async_lock::Mutex<State>>,
     mut transport: P::MultiStream,
-    fetch_size: &mut FetchSize,
+    (fetch_size, root_probe): (&mut FetchSize, &mut Option<Hash>),
 ) {
     let handshake = {
         let s = state.lock().await;
@@ -751,11 +1104,15 @@ async fn drive<P: PlatformRef>(
             leaves: s.tree.leaves().into_iter().take(8).collect(),
         }
     };
+    if root_probe.is_some_and(|hash| hash != handshake.final_.hash) {
+        *root_probe = None;
+    }
     let Ok(mut connection) = net::Connection::new(
         params.clone(),
         handshake,
         net::Limits {
             max_message_size: FRAME_BYTES,
+            max_warp_message_size: WARP_BYTES,
             max_body_bytes: FRAME_BYTES,
             max_leaves_in_handshake: 8,
             max_pending_requests: 2,
@@ -773,6 +1130,8 @@ async fn drive<P: PlatformRef>(
     let mut peer_slot = 0;
     // A fallback cursor can traverse known headers without changing local best.
     let mut cursor = None;
+    // The root probe is retained by peer_loop across transient failures. The
+    // remaining cursors and repair buffers belong to this connection only.
     let mut fallback = false;
     let mut waiting_for_finality = None;
     let mut repair = Vec::new();
@@ -783,11 +1142,22 @@ async fn drive<P: PlatformRef>(
     let mut proof_requested: Option<(net::RequestId, Hash, P::Instant)> = None;
     let mut state_requested: Option<(net::RequestId, P::Instant)> = None;
     let mut advertised: Option<Final> = None;
+    let mut advertisement_revision = 0u64;
+    let mut warped = false;
+    let mut warp: Option<Warp> = None;
+    let mut warp_requested: Option<(net::RequestId, u32, P::Instant)> = None;
+    let mut warp_revision = state.lock().await.warp_revision;
     loop {
         // A turn performs bounded protocol work and at most one ancestry insertion.
         // In particular, never retain the shared tree lock across this yield: RPC
         // consumers and the other peer must be able to run between notifications.
         future::yield_now().await;
+        {
+            let s = state.lock().await;
+            if s.stopped || s.warp_revision != warp_revision {
+                return;
+            }
+        }
         let mut local_progress = false;
         let now = platform.now();
         if (!handshaken && now.clone() - started.clone() >= TIMEOUT)
@@ -822,6 +1192,12 @@ async fn drive<P: PlatformRef>(
             let _ = connection.cancel_request(*id, net::RequestError::Timeout);
             return;
         }
+        if let Some((id, _, when)) = &warp_requested
+            && now.clone() - when.clone() >= TIMEOUT
+        {
+            let _ = connection.cancel_request(*id, net::RequestError::Timeout);
+            return;
+        }
         if streams
             .iter()
             .any(|s| s.limited_lifetime && now.clone() - s.opened.clone() >= TIMEOUT)
@@ -840,19 +1216,26 @@ async fn drive<P: PlatformRef>(
         while index < streams.len() {
             let stream = &mut streams[index];
             let request = stream.request;
-            let (mut access, reset) = match platform.read_write_access(stream.stream.as_mut()) {
+            let (mut access, error) = match platform.read_write_access(stream.stream.as_mut()) {
                 Ok(access) => (Some(access), None),
-                Err(error) => (None, Some(classify_reset(&alloc::format!("{error}")))),
+                Err(error) => (None, Some(alloc::format!("{error}"))),
             };
-            if access.is_none() {
+            if let Some(message) = error {
+                let reason = classify_reset(&message);
+                log!(
+                    platform,
+                    Debug,
+                    log_name,
+                    "jam-stream-reset",
+                    reason = alloc::format!("{reason:?}"),
+                    message = message
+                );
                 drop(access);
                 if state_requested
                     .as_ref()
                     .is_some_and(|(id, _)| request == Some(*id))
                 {
-                    if let Some(event) = connection
-                        .substream_reset(stream.id, reset.unwrap_or(net::RequestError::Rejected))
-                    {
+                    if let Some(event) = connection.substream_reset(stream.id, reason) {
                         events.push(event);
                     }
                     streams.remove(index);
@@ -862,19 +1245,24 @@ async fn drive<P: PlatformRef>(
                 if let Some((id, _, _)) = &proof_requested
                     && request == Some(*id)
                 {
-                    let _ = connection.cancel_request(*id, net::RequestError::Rejected);
+                    if warp.is_some() {
+                        return;
+                    }
+                    let _ = connection.cancel_request(*id, reason);
                     proof_requested = None;
                     proof_unavailable = true;
                     streams.remove(index);
                     local_progress = true;
                     continue;
                 }
-                if let Some((id, _, _)) = &requested
-                    && request == Some(*id)
+                if requested
+                    .as_ref()
+                    .is_some_and(|(id, _, _)| request == Some(*id))
+                    || warp_requested
+                        .as_ref()
+                        .is_some_and(|(id, _, _)| request == Some(*id))
                 {
-                    if let Some(event) =
-                        connection.substream_reset(stream.id, net::RequestError::Rejected)
-                    {
+                    if let Some(event) = connection.substream_reset(stream.id, reason) {
                         events.push(event);
                     }
                     streams.remove(index);
@@ -893,6 +1281,11 @@ async fn drive<P: PlatformRef>(
                 .is_some_and(|(id, _)| request == Some(*id))
             {
                 FRAME_BYTES + 496 * 64 + 8
+            } else if warp_requested
+                .as_ref()
+                .is_some_and(|(id, _, _)| request == Some(*id))
+            {
+                WARP_BYTES + 4
             } else {
                 FRAME_BYTES + 4
             };
@@ -937,6 +1330,7 @@ async fn drive<P: PlatformRef>(
                         net::Event::BlockResponse { .. }
                             | net::Event::StateResponse { .. }
                             | net::Event::JustificationResponse { .. }
+                            | net::Event::WarpResponse { .. }
                             | net::Event::RequestFailed { .. }
                     )
                 );
@@ -987,11 +1381,12 @@ async fn drive<P: PlatformRef>(
                         .await
                         .reads
                         .release(peer_index, reason == net::RequestError::Transient);
-                    if reason != net::RequestError::NoData {
+                    if warp.is_some() || reason != net::RequestError::NoData {
                         return;
                     }
                 }
                 net::Event::HandshakeReceived(h) => {
+                    advertisement_revision = 1;
                     handshaken = true;
                     advertised = Some(h.final_.clone());
                     peer_slot = h
@@ -1003,6 +1398,10 @@ async fn drive<P: PlatformRef>(
                         .unwrap_or(0);
                 }
                 net::Event::Announcement(a) => {
+                    let Some(revision) = advertisement_revision.checked_add(1) else {
+                        return;
+                    };
+                    advertisement_revision = revision;
                     log!(platform, Debug, log_name, "jam-announcement");
                     peer_slot = peer_slot.max(a.header.slot).max(a.final_.slot);
                     if waiting_for_finality.is_some_and(|slot| a.final_.slot > slot) {
@@ -1027,6 +1426,34 @@ async fn drive<P: PlatformRef>(
                     if id != request_id {
                         return;
                     }
+                    if *root_probe == Some(request.hash)
+                        && request.direction == Direction::DescendingInclusive
+                    {
+                        *root_probe = None;
+                        state.lock().await.root_refusals = None;
+                        waiting_for_finality = Some(advertised.as_ref().map_or(0, |f| f.slot));
+                        continue;
+                    }
+                    if let Some(warp) = &mut warp {
+                        if request.direction != Direction::DescendingInclusive
+                            || request.max_blocks != 1
+                        {
+                            return;
+                        }
+                        if let Err(error) =
+                            warp.receive_headers(params, blocks, state.lock().await.header_bytes)
+                        {
+                            log!(
+                                platform,
+                                Debug,
+                                log_name,
+                                "jam-warp-rejected",
+                                error = alloc::format!("{error}")
+                            );
+                            return;
+                        }
+                        continue;
+                    }
                     let mut bytes = 0;
                     for block in blocks {
                         let header_len = block.header.encode(params).len();
@@ -1050,6 +1477,42 @@ async fn drive<P: PlatformRef>(
                         fetch_size.received(bytes);
                     }
                 }
+                net::Event::WarpResponse {
+                    request_id,
+                    start_set_id,
+                    fragments,
+                } => {
+                    let Some((id, expected, _)) = warp_requested.take() else {
+                        return;
+                    };
+                    let Some(warp) = &mut warp else {
+                        return;
+                    };
+                    if id != request_id
+                        || start_set_id != expected
+                        || expected != warp.authorities.set_id()
+                    {
+                        return;
+                    }
+                    let limits = {
+                        let s = state.lock().await;
+                        finality::WarpLimits {
+                            max_fragments: 32,
+                            max_header_bytes: s.header_bytes,
+                            proof: s.proof_limits(),
+                        }
+                    };
+                    if let Err(error) = warp.advance(params, &fragments, &limits) {
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-warp-rejected",
+                            error = alloc::format!("{error}")
+                        );
+                        return;
+                    }
+                }
                 net::Event::JustificationResponse {
                     request_id,
                     target,
@@ -1062,6 +1525,21 @@ async fn drive<P: PlatformRef>(
                         return;
                     }
                     let mut s = state.lock().await;
+                    if let Some(warp) = &mut warp {
+                        if let Err(error) =
+                            warp.authenticate(params, &justification, s.proof_limits())
+                        {
+                            log!(
+                                platform,
+                                Debug,
+                                log_name,
+                                "jam-warp-rejected",
+                                error = alloc::format!("{error}")
+                            );
+                            return;
+                        }
+                        continue;
+                    }
                     s.proof_owner = None;
                     if let Err(error) = s.finalize(target, &justification) {
                         log!(
@@ -1088,15 +1566,77 @@ async fn drive<P: PlatformRef>(
                         .as_ref()
                         .is_some_and(|(id, _, _)| *id == request_id) =>
                 {
+                    if warp.is_some() {
+                        return;
+                    }
                     proof_requested = None;
                     state.lock().await.proof_owner = None;
                 }
-                net::Event::RequestFailed { request_id, .. } => {
+                net::Event::RequestFailed { request_id, reason }
+                    if warp_requested
+                        .as_ref()
+                        .is_some_and(|(id, _, _)| *id == request_id) =>
+                {
+                    if reason != net::RequestError::NoData {
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-warp-rejected",
+                            reason = alloc::format!("{reason:?}")
+                        );
+                        return;
+                    }
+                    warp_requested = None;
+                    let Some(warp) = &mut warp else {
+                        return;
+                    };
+                    warp.chain_done = true;
+                    if warp.fragments == 0 {
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-warp-fragmentless",
+                            reason = "NoData"
+                        );
+                    }
+                }
+                net::Event::RequestFailed { request_id, reason } => {
                     let Some((id, request, _)) = requested.take() else {
                         return;
                     };
                     if id != request_id {
                         return;
+                    }
+                    if warp.is_some() || reason != net::RequestError::NoData {
+                        return;
+                    }
+                    if *root_probe == Some(request.hash)
+                        && request.direction == Direction::DescendingInclusive
+                    {
+                        let mut s = state.lock().await;
+                        if let Err(error) = s.refuse_root(peer_index, request.hash) {
+                            log!(
+                                platform,
+                                Warn,
+                                log_name,
+                                "jam-anchor-unserved",
+                                reason = alloc::format!("{reason:?}"),
+                                error = alloc::format!("{error}"),
+                                hash = alloc::format!("{:?}", request.hash),
+                                slot = s.tree.finalized().slot
+                            );
+                        }
+                        return;
+                    }
+                    if request.direction == Direction::AscendingExclusive {
+                        let s = state.lock().await;
+                        if request.hash == s.tree.finalized().hash {
+                            *root_probe = Some(request.hash);
+                            local_progress = true;
+                            continue;
+                        }
                     }
                     if request.direction == Direction::DescendingInclusive {
                         repair.clear();
@@ -1115,7 +1655,7 @@ async fn drive<P: PlatformRef>(
                 }
                 net::Event::ProtocolError(net::ProtocolError::MessageTooLarge) => {
                     if requested.as_ref().is_some_and(|(_, request, _)| {
-                        request.direction == Direction::AscendingExclusive
+                        request.direction == Direction::AscendingExclusive || warp.is_some()
                     }) {
                         fetch_size.oversized();
                     }
@@ -1124,12 +1664,202 @@ async fn drive<P: PlatformRef>(
                 net::Event::ProtocolError(_) => return,
             }
         }
+        if handshaken && !warped {
+            if warp.is_none() {
+                warp = state.lock().await.reserve_warp(peer_index);
+            }
+            if let Some(w) = &mut warp {
+                if !w.chain_done && warp_requested.is_none() {
+                    let start = w.authorities.set_id();
+                    let Ok(id) = connection.request_warp(start) else {
+                        return;
+                    };
+                    warp_requested = Some((id, start, now.clone()));
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-warp-request-queued",
+                        set_id = start
+                    );
+                    local_progress = true;
+                } else if w.chain_done {
+                    if w.fragments == 0 {
+                        let mut s = state.lock().await;
+                        s.warp_owner = None;
+                        if let Err(error) = s.stop_if_unserved() {
+                            log!(
+                                platform,
+                                Warn,
+                                log_name,
+                                "jam-anchor-unserved",
+                                reason = "NoData",
+                                error = alloc::format!("{error}"),
+                                slot = s.tree.finalized().slot
+                            );
+                            return;
+                        }
+                        warp = None;
+                        warped = true;
+                        local_progress = true;
+                    } else {
+                        if w.final_head.is_none() {
+                            // Freeze the latest advertisement processed when CE153
+                            // pagination completes, not subsequent announcements.
+                            w.final_head = advertised.clone();
+                            if let Some(f) = &w.final_head {
+                                log!(
+                                    platform,
+                                    Debug,
+                                    log_name,
+                                    "jam-warp-join-selected",
+                                    advertisement = advertisement_revision,
+                                    slot = f.slot
+                                );
+                            }
+                        }
+                        if w.head.is_none() && requested.is_none() {
+                            let Some(f) = &w.final_head else {
+                                return;
+                            };
+                            // F alone: the read is at F against its signed root.
+                            let request = BlockRequest {
+                                hash: f.hash,
+                                direction: Direction::DescendingInclusive,
+                                max_blocks: 1,
+                            };
+                            let Ok(id) = connection.request_blocks(request.clone()) else {
+                                return;
+                            };
+                            requested = Some((id, request, now.clone()));
+                            local_progress = true;
+                        } else if w.head.is_some()
+                            && w.finalized.is_none()
+                            && proof_requested.is_none()
+                        {
+                            let Some(f) = &w.final_head else {
+                                return;
+                            };
+                            let Ok(id) = connection.request_justification(f.hash) else {
+                                return;
+                            };
+                            proof_requested = Some((id, f.hash, now.clone()));
+                            local_progress = true;
+                        } else if w.finalized.is_some() {
+                            if let Some(rx) = &mut w.read {
+                                match rx.try_recv() {
+                                    Ok(Some(Ok(result))) => {
+                                        let Ok(expected) = w.next_read() else {
+                                            return;
+                                        };
+                                        if result.at != expected.at
+                                            || result.root != expected.root
+                                            || result.trust != Trust::Finalized
+                                            || result.root_header != expected.root_header
+                                        {
+                                            return;
+                                        }
+                                        let before = w.items.len();
+                                        for index in [4, 6, 8, 11].into_iter().skip(before) {
+                                            let key = trie::state_key(index);
+                                            if key > result.range.complete_to {
+                                                break;
+                                            }
+                                            let Some((_, value)) = result
+                                                .range
+                                                .entries
+                                                .iter()
+                                                .find(|(k, _)| *k == key)
+                                            else {
+                                                return;
+                                            };
+                                            w.items.push((key, value.clone()));
+                                        }
+                                        if w.items.len() == before {
+                                            return;
+                                        }
+                                        w.state_responses += 1;
+                                        w.read = None;
+                                        local_progress = true;
+                                    }
+                                    Ok(None) => {}
+                                    _ => return,
+                                }
+                            }
+                            if w.items.len() == 4 {
+                                let Some(w) = warp.take() else {
+                                    return;
+                                };
+                                let count = w.fragments;
+                                let fragment_finality = w.last_final.is_some_and(|last| {
+                                    w.final_head
+                                        .as_ref()
+                                        .is_some_and(|f| f.hash == last.hash && f.slot == last.slot)
+                                });
+                                let state_responses = w.state_responses;
+                                let state_bytes: usize =
+                                    w.items.iter().map(|(_, value)| value.len()).sum();
+                                let mut s = state.lock().await;
+                                if let Err(error) = s.apply_warp(peer_index, w) {
+                                    log!(
+                                        platform,
+                                        Debug,
+                                        log_name,
+                                        "jam-warp-rejected",
+                                        error = alloc::format!("{error}")
+                                    );
+                                    return;
+                                }
+                                warp_revision = s.warp_revision;
+                                fetch_size.count =
+                                    params.epoch_len.clamp(1, 64).min(fetch_size.ceiling);
+                                cursor = Some(s.tree.finalized().hash);
+                                *root_probe = None;
+                                fallback = true;
+                                waiting_for_finality = None;
+                                repair.clear();
+                                imports.clear();
+                                announcements.clear();
+                                warped = true;
+                                local_progress = true;
+                                log!(
+                                    platform,
+                                    Debug,
+                                    log_name,
+                                    "jam-warp-applied",
+                                    set_id = s.authorities.set_id(),
+                                    slot = s.tree.finalized().slot,
+                                    fragments = count,
+                                    state_bytes = state_bytes,
+                                    state_responses = state_responses,
+                                    fragment_finality = fragment_finality
+                                );
+                            } else if w.read.is_none() {
+                                let Ok(read) = w.next_read() else {
+                                    return;
+                                };
+                                let mut s = state.lock().await;
+                                match s.reads.start(read) {
+                                    Ok(rx) => {
+                                        w.read = Some(rx);
+                                        local_progress = true;
+                                    }
+                                    Err(net::Error::Limit) => {}
+                                    Err(_) => return,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let normal_sync = warped && state.lock().await.warp_owner.is_none();
         let pause_imports = {
             let s = state.lock().await;
-            if s.tree.len() >= s.max_blocks && s.proof_owner.is_none() {
+            if normal_sync && s.tree.len() >= s.max_blocks && s.proof_owner.is_none() {
                 return;
             }
-            s.proof_owner.is_some() && s.tree.len() + 1 >= s.max_blocks
+            !normal_sync || (s.proof_owner.is_some() && s.tree.len() + 1 >= s.max_blocks)
         };
         if !pause_imports && !imports.is_empty() {
             if let Some(header) = imports.pop_front() {
@@ -1192,6 +1922,7 @@ async fn drive<P: PlatformRef>(
             }
         }
         if handshaken
+            && normal_sync
             && proof_requested.is_none()
             && state_requested.is_none()
             && let Some(advertised) = &advertised
@@ -1207,9 +1938,14 @@ async fn drive<P: PlatformRef>(
         }
         // Finality and state reads arbitrate the second slot; never enqueue a
         // third request into the connection's two-request budget.
-        if handshaken && state_requested.is_none() && proof_requested.is_none() {
+        if handshaken
+            && state_requested.is_none()
+            && proof_requested.is_none()
+            && warp_requested.is_none()
+        {
             let mut s = state.lock().await;
             if !s.stopped
+                && s.warp_owner.is_none_or(|owner| owner == peer_index)
                 && let Some(request) = s.reads.reserve(peer_index)
             {
                 match connection.request_state(request) {
@@ -1224,7 +1960,7 @@ async fn drive<P: PlatformRef>(
                 }
             }
         }
-        if handshaken && requested.is_none() && !repair_ready && imports.is_empty() {
+        if handshaken && normal_sync && requested.is_none() && !repair_ready && imports.is_empty() {
             let s = state.lock().await;
             if s.tree.len() + 1 >= s.max_blocks && s.proof_owner.is_some() {
                 // The proof already in flight must get a turn before more imports.
@@ -1232,13 +1968,19 @@ async fn drive<P: PlatformRef>(
                 // All proof candidates failed: don't deadlock on an unfinalizable fork.
                 return;
             } else {
-                let request = if let Some(header) = repair.last() {
+                let request = if let Some(hash) = *root_probe {
+                    Some(BlockRequest {
+                        hash,
+                        direction: Direction::DescendingInclusive,
+                        max_blocks: 1,
+                    })
+                } else if let Some(header) = repair.last() {
                     Some(BlockRequest {
                         hash: header.parent,
                         direction: Direction::DescendingInclusive,
                         max_blocks: 1,
                     })
-                } else if waiting_for_finality.is_none() {
+                } else if waiting_for_finality.is_none() && announcements.is_empty() {
                     let head = cursor
                         .and_then(|hash| s.tree.get(&hash))
                         .unwrap_or_else(|| s.tree.best());
@@ -1305,7 +2047,8 @@ async fn drive<P: PlatformRef>(
                         request = match kind {
                             net::SubstreamKind::Ce128 { request_id }
                             | net::SubstreamKind::Ce129 { request_id }
-                            | net::SubstreamKind::Ce130 { request_id } => Some(request_id),
+                            | net::SubstreamKind::Ce130 { request_id }
+                            | net::SubstreamKind::Ce153 { request_id } => Some(request_id),
                             _ => None,
                         };
                         if connection.substream_opened(id, kind).is_err() {
@@ -1317,6 +2060,7 @@ async fn drive<P: PlatformRef>(
                             net::SubstreamKind::Ce128 { .. }
                                 | net::SubstreamKind::Ce129 { .. }
                                 | net::SubstreamKind::Ce130 { .. }
+                                | net::SubstreamKind::Ce153 { .. }
                         )
                     }
                     SubstreamDirection::Inbound => {
