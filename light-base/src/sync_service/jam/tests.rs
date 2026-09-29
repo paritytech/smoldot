@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 use super::*;
-use super::{connection::*, reads::*};
+use super::{connection::*, reads::*, warp::*};
 use crate::{
     AddChainConfig, AddChainConfigJsonRpc, Client, jam_webtransport_cert,
     platform::{self, MultiStreamAddress, SubstreamDirection},
@@ -22,7 +22,7 @@ use smoldot::{
     jam::{
         codec,
         crypto::blake2b_256,
-        finality::Justification,
+        finality::{self, Justification},
         net,
         trie::{self, StateRequest, StateResponse},
         types::{BlockRequest, Direction, Final, Handshake, Hash, SealingSequence},
@@ -36,6 +36,7 @@ mod connection;
 mod grandpa;
 mod reads;
 mod rpc;
+mod warp;
 
 impl Default for StateReads {
     fn default() -> Self {
@@ -51,10 +52,16 @@ async fn drive<P: PlatformRef>(
     peer_index: usize,
     state: &Arc<async_lock::Mutex<State>>,
     transport: P::MultiStream,
-    fetch_size: &mut FetchSize,
+    (fetch_size, root_probe): (&mut FetchSize, &mut Option<Hash>),
 ) {
     drive_connection(
-        platform, log_name, params, peer_index, state, transport, fetch_size,
+        platform,
+        log_name,
+        params,
+        peer_index,
+        state,
+        transport,
+        (fetch_size, root_probe),
     )
     .await;
 }
@@ -104,6 +111,11 @@ fn root_config() -> Config {
         authorities: AuthoritySet::from_checkpoint(&params, 0, vec![[0; 32]; 6], vec![[0; 32]; 6])
             .unwrap(),
         max_blocks: 4,
+        tree_config: tree::Config {
+            max_blocks: NonZeroUsize::new(4).unwrap(),
+            max_bytes: usize::MAX,
+            max_epoch_records: NonZeroUsize::new(8).unwrap(),
+        },
         params,
         peers: Vec::new(),
         header_bytes: 4096,
@@ -123,11 +135,19 @@ fn state(config: Config) -> State {
         max_blocks: config.max_blocks,
         proof_owner: None,
         proof_attempts: Vec::new(),
+        tree_config: config.tree_config,
+        warp_owner: None,
+        warp_revision: 0,
+        root_refusals: None,
+        peer_count: config.peers.len(),
     }
 }
 
+/// [`root_config`]'s state, with two peers.
 fn root_state() -> State {
-    state(root_config())
+    let mut state = state(root_config());
+    state.peer_count = 2;
+    state
 }
 
 /// `header` with the light state `post_state` after it, as if verified.
@@ -170,10 +190,22 @@ struct IoState {
     params: Option<Params>,
     reject_batch_above: Option<u32>,
     proofs: BTreeMap<Hash, Vec<u8>>,
+    warps: BTreeMap<u32, Vec<u8>>,
+    warp_requests: Vec<u32>,
+    bad_warp_once: bool,
+    warp_resets: VecDeque<Reset>,
+    /// The platform reports no reset codes, as Firefox does.
+    codeless: bool,
+    proof_resets: VecDeque<Reset>,
+    block_resets: VecDeque<(Direction, Reset)>,
+    logs: Vec<String>,
+    log_fields: Vec<(String, BTreeMap<String, String>)>,
     proof_requests: Vec<Hash>,
     preferred_child: Option<(Hash, Hash)>,
     no_blocks: usize,
     fork_announcement: Option<Vec<u8>>,
+    join_announcement: Option<Vec<u8>>,
+    announce_during_join: bool,
     event_driven: bool,
     changed: Arc<event_listener::Event>,
     executor: Option<Arc<smol::Executor<'static>>>,
@@ -227,16 +259,37 @@ impl Control {
     /// The scripted CE 130 response for `target`.
     fn proof(&mut self, target: Hash) -> Result<Vec<u8>, Reset> {
         self.io.proof_requests.push(target);
-        self.io
-            .proofs
-            .get(&target)
-            .cloned()
-            .ok_or(Reset(Some(6), "no justification"))
+        if let Some(reason) = self.io.proof_resets.pop_front() {
+            return Err(reason);
+        }
+        let response = self.io.proofs.get(&target).cloned();
+        response.ok_or(Reset(Some(6), "no justification"))
+    }
+
+    /// The scripted CE 153 response from set `start`.
+    fn warp(&mut self, start: u32) -> Result<Vec<u8>, Reset> {
+        self.io.warp_requests.push(start);
+        if let Some(reason) = self.io.warp_resets.pop_front() {
+            return Err(reason);
+        }
+        let response = self.io.warps.get(&start).cloned();
+        let mut response = response.ok_or(Reset(Some(6), "no warp fragments"))?;
+        if self.io.bad_warp_once {
+            self.io.bad_warp_once = false;
+            response[5] ^= 1; // Authenticated header parent, not the frame/count.
+        }
+        Ok(response)
     }
 
     /// The scripted CE 128 response to `request`.
     fn blocks(&mut self, request: BlockRequest) -> Result<Vec<u8>, Reset> {
         assert!((1..=64).contains(&request.max_blocks));
+        let reset = self.io.block_resets.front();
+        if reset.is_some_and(|(direction, _)| *direction == request.direction) {
+            let (_, reason) = self.io.block_resets.pop_front().unwrap();
+            self.requests.push(request);
+            return Err(reason);
+        }
         let mut payload = Vec::new();
         let mut hash = request.hash;
         for _ in 0..request.max_blocks.min(64) {
@@ -413,11 +466,18 @@ impl PlatformRef for FakePlatform {
         _: platform::LogLevel,
         _: &'a str,
         message: &'a str,
-        _: impl Iterator<Item = (&'a str, &'a dyn core::fmt::Display)>,
+        fields: impl Iterator<Item = (&'a str, &'a dyn core::fmt::Display)>,
     ) {
-        if message == "jam-block-request-queued" {
+        if message == "jam-block-request-queued" || message == "jam-warp-request-queued" {
             self.0.lock().unwrap().queued = true;
         }
+        self.0.lock().unwrap().io.logs.push(message.into());
+        self.0.lock().unwrap().io.log_fields.push((
+            message.into(),
+            fields
+                .map(|(key, value)| (key.into(), value.to_string()))
+                .collect(),
+        ));
     }
     fn client_name(&self) -> Cow<'_, str> {
         "fake".into()
@@ -533,6 +593,9 @@ impl PlatformRef for FakePlatform {
                 128 => c.blocks(BlockRequest::decode(&stream.outgoing[5..]).unwrap())?,
                 129 => c.state(stream.outgoing[5..].to_vec())?,
                 130 => c.proof(stream.outgoing[5..37].try_into().unwrap())?,
+                153 => c.warp(u32::from_le_bytes(
+                    stream.outgoing[5..9].try_into().unwrap(),
+                ))?,
                 kind => panic!("no scripted response for stream kind {kind}"),
             };
             drop(c);
@@ -541,6 +604,15 @@ impl PlatformRef for FakePlatform {
         }
         if !stream.ce {
             let mut c = stream.control.lock().unwrap();
+            if (c
+                .requests
+                .iter()
+                .any(|r| r.direction == Direction::AscendingExclusive)
+                || (c.io.announce_during_join && !c.io.state_requests.is_empty()))
+                && let Some(frame) = c.io.join_announcement.take()
+            {
+                stream.incoming.extend(frame);
+            }
             if c.io.no_blocks >= 2
                 && let Some(frame) = c.io.fork_announcement.take()
             {
@@ -563,7 +635,7 @@ impl PlatformRef for FakePlatform {
         Ok(Access(&mut stream.rw))
     }
     fn stream_reset_code(&self, error: &Reset) -> Option<u32> {
-        error.0
+        error.0.filter(|_| !self.0.lock().unwrap().io.codeless)
     }
     fn wait_read_write_again<'a>(
         &self,
@@ -790,7 +862,7 @@ async fn drive_peer(
     params: &Params,
     state: &Arc<async_lock::Mutex<State>>,
     peer: usize,
-    fetch_size: &mut FetchSize,
+    (fetch_size, probe): (&mut FetchSize, &mut Option<Hash>),
 ) {
     let address = MultiStreamAddress::WebTransport {
         ip: "127.0.0.1".parse().unwrap(),
@@ -799,10 +871,8 @@ async fn drive_peer(
     };
     let connected = platform.connect_multistream(address).await;
     let transport = connected.connection;
-    drive(
-        platform, "scripted", params, peer, state, transport, fetch_size,
-    )
-    .await;
+    let budget = (fetch_size, probe);
+    drive(platform, "scripted", params, peer, state, transport, budget).await;
 }
 
 /// A connection to the scripted peer, without dialing.
@@ -967,6 +1037,38 @@ fn synthetic_driver(blocks: usize, capacity: usize) -> (FakePlatform, Config, Ve
         }
     }
     (platform, config, headers)
+}
+
+/// The proof of a framed CE 129 response.
+fn state_response(frame: &[u8]) -> StateResponse {
+    let n = usize::try_from(u32::from_le_bytes(frame[..4].try_into().unwrap())).unwrap();
+    let limits = trie::ResponseLimits {
+        max_nodes: 496,
+        max_entries: 32768,
+        max_value_bytes: FRAME_BYTES,
+        max_total_bytes: FRAME_BYTES + 496 * 64,
+    };
+    StateResponse::decode(&frame[4..4 + n], &frame[8 + n..], &limits).unwrap()
+}
+
+/// [`drive_peer`] from one-block batches that may grow to `ceiling`, with no
+/// root probe.
+async fn drive_scripted(
+    platform: &FakePlatform,
+    params: &Params,
+    state: &Arc<async_lock::Mutex<State>>,
+    peer: usize,
+    ceiling: u32,
+) {
+    let mut fetch = FetchSize { count: 1, ceiling };
+    drive_peer(platform, params, state, peer, (&mut fetch, &mut None)).await;
+}
+
+/// The fields of each `message` the platform logged.
+fn logged(platform: &FakePlatform, message: &str) -> Vec<BTreeMap<String, String>> {
+    let c = platform.0.lock().unwrap();
+    let logs = c.io.log_fields.iter().filter(|(m, _)| m == message);
+    logs.map(|(_, fields)| fields.clone()).collect()
 }
 
 fn driver_state(config: Config) -> Arc<async_lock::Mutex<State>> {

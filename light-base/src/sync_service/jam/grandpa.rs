@@ -8,6 +8,7 @@ use super::{
     FRAME_BYTES, Notification, State,
     connection::{Conn, InFlight},
     log::{End, Hex, Opt, Tag, Token, event, request_ended},
+    warp::warp_token,
 };
 use crate::{log, platform::PlatformRef};
 use alloc::vec::Vec;
@@ -36,6 +37,7 @@ impl State {
     /// mark. Advertisements trigger fetching but never supply authority state.
     pub(super) fn reserve_proof(&mut self, peer: usize, advertised: &Final) -> Option<Hash> {
         if self.stopped
+            || self.warp_owner.is_some()
             || self.proof_owner.is_some()
             || advertised.slot <= self.tree.finalized().slot()
         {
@@ -110,7 +112,8 @@ impl State {
 }
 
 impl<P: PlatformRef> Conn<'_, P> {
-    /// Handles a CE 130 response.
+    /// Handles a CE 130 response: the justification of the warp join's head,
+    /// else of a finality target.
     pub(super) async fn justification_response(
         &mut self,
         request_id: net::RequestId,
@@ -132,6 +135,28 @@ impl<P: PlatformRef> Conn<'_, P> {
             bytes = justification.len()
         );
         let mut s = self.state.lock().await;
+        if let Some(warp) = &mut self.warp {
+            if let Err(error) = warp.authenticate(self.params, &justification, s.proof_limits()) {
+                event!(
+                    self,
+                    "jam-warp-rejected",
+                    slot = self.peer_index,
+                    step = "justification",
+                    req = r.tag.req,
+                    error = warp_token(&error)
+                );
+                return Err(End::WarpRejected);
+            }
+            event!(
+                self,
+                "jam-warp-justification-verified",
+                slot = self.peer_index,
+                req = r.tag.req,
+                hash = Hex(&target),
+                set_id = warp.authorities.set_id()
+            );
+            return Ok(());
+        }
         s.proof_owner = None;
         if let Err(error) = s.finalize(target, &justification) {
             event!(
@@ -171,6 +196,9 @@ impl<P: PlatformRef> Conn<'_, P> {
                 "failed",
                 error = ?reason
             );
+        }
+        if self.warp.is_some() {
+            return Err(End::JustificationFailed);
         }
         self.state.lock().await.proof_owner = None;
         Ok(())

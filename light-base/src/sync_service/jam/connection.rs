@@ -4,8 +4,9 @@
 //! each connection's streams, requests and deadlines until it ends.
 
 use super::{
-    FRAME_BYTES, IDLE_TIMEOUT, Peer, State, TIMEOUT,
-    log::{End, Tag, Token, elapsed_ms, event, request_ended},
+    FRAME_BYTES, IDLE_TIMEOUT, Peer, State, TIMEOUT, WARP_BYTES,
+    log::{End, Opt, Tag, Token, elapsed_ms, event, request_ended},
+    warp::{Warp, warp_step},
 };
 use crate::{
     jam_webtransport_cert, log,
@@ -30,6 +31,7 @@ pub(super) async fn peer_loop<P: PlatformRef>(
 ) {
     let mut backoff = 1;
     let mut fetch_size = FetchSize::default();
+    let mut root_probe = None;
     loop {
         if state.lock().await.stopped {
             future::pending::<()>().await;
@@ -66,13 +68,20 @@ pub(super) async fn peer_loop<P: PlatformRef>(
                 peer_index,
                 &state,
                 connected.connection,
-                &mut fetch_size,
+                (&mut fetch_size, &mut root_probe),
             )
             .await;
             let mut s = state.lock().await;
             s.reads.release(peer_index, false);
             if s.proof_owner.is_some_and(|(owner, _)| owner == peer_index) {
                 s.proof_owner = None;
+            }
+            if s.warp_owner == Some(peer_index) {
+                s.warp_owner = None;
+            }
+            if s.stopped {
+                drop(s);
+                continue;
             }
             drop(s);
             if platform.now() - started >= Duration::from_secs(60) {
@@ -181,6 +190,7 @@ pub(super) struct Conn<'a, P: PlatformRef> {
     pub(super) state: &'a Arc<async_lock::Mutex<State>>,
     transport: P::MultiStream,
     pub(super) fetch_size: &'a mut FetchSize,
+    pub(super) root_probe: &'a mut Option<Hash>,
     pub(super) connection: net::Connection,
     streams: Vec<Stream<P>>,
     opening: Option<(net::SubstreamKind, P::Instant)>,
@@ -191,6 +201,8 @@ pub(super) struct Conn<'a, P: PlatformRef> {
     pub(super) peer_slot: u32,
     /// A fallback cursor can traverse known headers without changing local best.
     pub(super) cursor: Option<Hash>,
+    // The root probe is retained by peer_loop across transient failures. The
+    // remaining cursors and repair buffers belong to this connection only.
     pub(super) fallback: bool,
     pub(super) waiting_for_finality: Option<u32>,
     pub(super) repair: Vec<Header>,
@@ -201,6 +213,11 @@ pub(super) struct Conn<'a, P: PlatformRef> {
     pub(super) proof_requested: Option<InFlight<P::Instant, Hash>>,
     pub(super) state_requested: Option<InFlight<P::Instant, ()>>,
     pub(super) advertised: Option<Final>,
+    pub(super) advertisement_revision: u64,
+    pub(super) warped: bool,
+    pub(super) warp: Option<Warp>,
+    pub(super) warp_requested: Option<InFlight<P::Instant, u32>>,
+    pub(super) warp_revision: u64,
     /// Resets without a code since the last response.
     resets_without_code: u8,
     /// This turn did work that may leave more to do without a new I/O event.
@@ -215,7 +232,7 @@ pub(super) async fn drive_connection<P: PlatformRef>(
     peer_index: usize,
     state: &Arc<async_lock::Mutex<State>>,
     transport: P::MultiStream,
-    fetch_size: &mut FetchSize,
+    (fetch_size, root_probe): (&mut FetchSize, &mut Option<Hash>),
 ) -> End {
     let handshake = {
         let s = state.lock().await;
@@ -227,11 +244,15 @@ pub(super) async fn drive_connection<P: PlatformRef>(
             leaves: s.tree.leaves().into_iter().take(8).collect(),
         }
     };
+    if root_probe.is_some_and(|hash| hash != handshake.final_.hash) {
+        *root_probe = None;
+    }
     let Ok(connection) = net::Connection::new(
         params.clone(),
         handshake,
         net::Limits {
             max_message_size: FRAME_BYTES,
+            max_warp_message_size: WARP_BYTES,
             max_body_bytes: FRAME_BYTES,
             max_leaves_in_handshake: 8,
             max_pending_requests: 2,
@@ -249,6 +270,7 @@ pub(super) async fn drive_connection<P: PlatformRef>(
         state,
         transport,
         fetch_size,
+        root_probe,
         connection,
         streams: Vec::new(),
         opening: None,
@@ -268,6 +290,11 @@ pub(super) async fn drive_connection<P: PlatformRef>(
         proof_requested: None,
         state_requested: None,
         advertised: None,
+        advertisement_revision: 0,
+        warped: false,
+        warp: None,
+        warp_requested: None,
+        warp_revision: state.lock().await.warp_revision,
         resets_without_code: 0,
         local_progress: false,
     };
@@ -288,6 +315,15 @@ impl<P: PlatformRef> Conn<'_, P> {
         // In particular, never retain the shared tree lock across this yield: RPC
         // consumers and the other peer must be able to run between notifications.
         future::yield_now().await;
+        {
+            let s = self.state.lock().await;
+            if s.stopped {
+                return Err(End::Stopped);
+            }
+            if s.warp_revision != self.warp_revision {
+                return Err(End::WarpRevision);
+            }
+        }
         self.local_progress = false;
         let now = self.platform.now();
         self.check_deadlines(&now).await?;
@@ -305,27 +341,40 @@ impl<P: PlatformRef> Conn<'_, P> {
         if self.resets_without_code >= RESETS_WITHOUT_CODE {
             return Err(End::ResetsWithoutCode);
         }
+        if self.handshaken && !self.warped {
+            self.warp_turn(&now).await?;
+        }
+        let normal_sync = self.warped && self.state.lock().await.warp_owner.is_none();
         let pause_imports = {
             let s = self.state.lock().await;
-            if s.tree.len() >= s.max_blocks && s.proof_owner.is_none() {
+            if normal_sync && s.tree.len() >= s.max_blocks && s.proof_owner.is_none() {
                 return Err(End::TreeFull);
             }
-            s.proof_owner.is_some() && s.tree.len() + 1 >= s.max_blocks
+            !normal_sync || (s.proof_owner.is_some() && s.tree.len() + 1 >= s.max_blocks)
         };
         if !pause_imports && !self.imports.is_empty() {
             self.import_next(&now).await?;
         } else if !pause_imports && self.requested.is_none() {
             self.import_repaired(&now).await?;
         }
-        if self.handshaken && self.proof_requested.is_none() && self.state_requested.is_none() {
+        if self.handshaken
+            && normal_sync
+            && self.proof_requested.is_none()
+            && self.state_requested.is_none()
+        {
             self.request_justification().await?;
         }
         // Finality and state reads arbitrate the second slot; never enqueue a
         // third request into the connection's two-request budget.
-        if self.handshaken && self.state_requested.is_none() && self.proof_requested.is_none() {
+        if self.handshaken
+            && self.state_requested.is_none()
+            && self.proof_requested.is_none()
+            && self.warp_requested.is_none()
+        {
             self.request_state().await?;
         }
         if self.handshaken
+            && normal_sync
             && self.requested.is_none()
             && !self.repair_ready
             && self.imports.is_empty()
@@ -361,6 +410,10 @@ impl<P: PlatformRef> Conn<'_, P> {
                 InFlight::timed_out(&self.proof_requested, now),
                 End::JustificationTimeout,
             ),
+            (
+                InFlight::timed_out(&self.warp_requested, now),
+                End::WarpTimeout,
+            ),
         ];
         if let Some((id, end)) = timed_out.into_iter().find_map(|(id, end)| Some((id?, end))) {
             let _ = self
@@ -393,24 +446,58 @@ impl<P: PlatformRef> Conn<'_, P> {
         while index < self.streams.len() {
             let stream = &mut self.streams[index];
             let request = stream.request;
-            let (mut access, reset) = match self.platform.read_write_access(stream.stream.as_mut())
+            let (mut access, error) = match self.platform.read_write_access(stream.stream.as_mut())
             {
                 Ok(access) => (Some(access), None),
                 Err(error) => (
                     None,
-                    Some(classify_reset(self.platform.stream_reset_code(&error))),
+                    Some((
+                        alloc::format!("{error}"),
+                        self.platform.stream_reset_code(&error),
+                    )),
                 ),
             };
-            if access.is_none() {
+            if let Some((message, code)) = error {
+                let reason = classify_reset(code);
+                // Which of this connection's requests the stream carried.
+                let owner = [
+                    (
+                        "state",
+                        InFlight::holding(&self.state_requested, request).map(|r| r.tag),
+                    ),
+                    (
+                        "block",
+                        InFlight::holding(&self.requested, request).map(|r| r.tag),
+                    ),
+                    (
+                        "justification",
+                        InFlight::holding(&self.proof_requested, request).map(|r| r.tag),
+                    ),
+                    (
+                        "warp",
+                        InFlight::holding(&self.warp_requested, request).map(|r| r.tag),
+                    ),
+                ]
+                .into_iter()
+                .find_map(|(kind, tag)| Some((kind, tag?.req)));
+                event!(
+                    self,
+                    "jam-stream-reset",
+                    slot = self.peer_index,
+                    stream = owner.map_or("other", |(kind, _)| kind),
+                    req = Opt(owner.map(|(_, req)| req)),
+                    reason = ?reason,
+                    message = message
+                );
                 drop(access);
-                if reset == Some(net::RequestError::ResetWithoutCode) {
+                if reason == net::RequestError::ResetWithoutCode {
                     self.resets_without_code += 1;
                 }
-                if InFlight::holds(&self.state_requested, request) {
-                    if let Some(event) = self
-                        .connection
-                        .substream_reset(stream.id, reset.unwrap_or(net::RequestError::Rejected))
-                    {
+                if InFlight::holds(&self.state_requested, request)
+                    || InFlight::holds(&self.requested, request)
+                    || InFlight::holds(&self.warp_requested, request)
+                {
+                    if let Some(event) = self.connection.substream_reset(stream.id, reason) {
                         events.push(event);
                     }
                     self.streams.remove(index);
@@ -418,29 +505,19 @@ impl<P: PlatformRef> Conn<'_, P> {
                     continue;
                 }
                 if let Some(r) = InFlight::holding(&self.proof_requested, request) {
-                    let _ = self
-                        .connection
-                        .cancel_request(r.id, net::RequestError::Rejected);
+                    if self.warp.is_some() {
+                        return Err(End::StreamReset);
+                    }
+                    let _ = self.connection.cancel_request(r.id, reason);
                     request_ended!(
                         self,
                         "jam-justification-request-ended",
                         r,
                         "failed",
-                        error = ?net::RequestError::Rejected
+                        error = ?reason
                     );
                     self.proof_requested = None;
                     proof_unavailable = true;
-                    self.streams.remove(index);
-                    self.local_progress = true;
-                    continue;
-                }
-                if InFlight::holds(&self.requested, request) {
-                    if let Some(event) = self
-                        .connection
-                        .substream_reset(stream.id, net::RequestError::Rejected)
-                    {
-                        events.push(event);
-                    }
                     self.streams.remove(index);
                     self.local_progress = true;
                     continue;
@@ -454,6 +531,8 @@ impl<P: PlatformRef> Conn<'_, P> {
             drop(access);
             let incoming_limit = if InFlight::holds(&self.state_requested, request) {
                 FRAME_BYTES + 496 * 64 + 8
+            } else if InFlight::holds(&self.warp_requested, request) {
+                WARP_BYTES + 4
             } else {
                 FRAME_BYTES + 4
             };
@@ -497,6 +576,7 @@ impl<P: PlatformRef> Conn<'_, P> {
                     net::Event::BlockResponse { .. }
                         | net::Event::StateResponse { .. }
                         | net::Event::JustificationResponse { .. }
+                        | net::Event::WarpResponse { .. }
                 )
             );
             if response {
@@ -541,6 +621,14 @@ impl<P: PlatformRef> Conn<'_, P> {
             net::Event::BlockResponse { request_id, blocks } => {
                 self.block_response(request_id, blocks).await
             }
+            net::Event::WarpResponse {
+                request_id,
+                start_set_id,
+                fragments,
+            } => {
+                self.warp_response(request_id, start_set_id, fragments)
+                    .await
+            }
             net::Event::JustificationResponse {
                 request_id,
                 target,
@@ -553,6 +641,11 @@ impl<P: PlatformRef> Conn<'_, P> {
                 if InFlight::holds(&self.proof_requested, Some(request_id)) =>
             {
                 self.justification_failed(reason).await
+            }
+            net::Event::RequestFailed { request_id, reason }
+                if InFlight::holds(&self.warp_requested, Some(request_id)) =>
+            {
+                self.warp_failed(reason)
             }
             net::Event::RequestFailed { request_id, reason } => {
                 self.block_failed(request_id, reason).await
@@ -638,7 +731,8 @@ impl<P: PlatformRef> Conn<'_, P> {
                 request = match kind {
                     net::SubstreamKind::Ce128 { request_id }
                     | net::SubstreamKind::Ce129 { request_id }
-                    | net::SubstreamKind::Ce130 { request_id } => Some(request_id),
+                    | net::SubstreamKind::Ce130 { request_id }
+                    | net::SubstreamKind::Ce153 { request_id } => Some(request_id),
                     _ => None,
                 };
                 if self.connection.substream_opened(id, kind).is_err() {
@@ -650,6 +744,7 @@ impl<P: PlatformRef> Conn<'_, P> {
                     net::SubstreamKind::Ce128 { .. }
                         | net::SubstreamKind::Ce129 { .. }
                         | net::SubstreamKind::Ce130 { .. }
+                        | net::SubstreamKind::Ce153 { .. }
                 )
             }
             SubstreamDirection::Inbound => {
@@ -705,6 +800,8 @@ impl<P: PlatformRef> Conn<'_, P> {
                     End::StateTimeout,
                 )
             }),
+            self.warp_requested
+                .map(|r| ("jam-warp-request-ended", r.tag, r.queued, End::WarpTimeout)),
         ];
         for (name, tag, queued, timeout) in pending.into_iter().flatten() {
             event!(
@@ -716,6 +813,19 @@ impl<P: PlatformRef> Conn<'_, P> {
                 outcome = outcome(timeout),
                 reason = end.as_str(),
                 elapsed_ms = elapsed_ms(self.platform, &queued)
+            );
+        }
+        // A rejection already said where the join failed.
+        if let Some(w) = &self.warp
+            && !matches!(end, End::WarpRejected | End::WarpFailed)
+        {
+            event!(
+                self,
+                "jam-warp-abandoned",
+                slot = self.peer_index,
+                step = warp_step(w),
+                fragments = w.fragments,
+                reason = end.as_str()
             );
         }
     }

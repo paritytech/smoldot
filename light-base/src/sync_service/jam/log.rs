@@ -7,11 +7,13 @@
 //
 //     jam-<area>-<what>[; key=value, key=value, ...]
 //
-// logged at `Debug`. A value is one token without `, ` or `=` (see
-// [`Token`]; `-` when the field does not apply). `slot=` is the connection
-// slot, except on the lines that carry a block slot and name the connection
-// `conn=`. `req=` ties together the lines about one request; its outcome line
-// adds `outcome=` and `elapsed_ms=`.
+// logged at `Debug`, except `jam-anchor-unserved` at `Warn`. A value is one
+// token without `, ` or `=` (see [`Token`]; `-` when the field does not
+// apply), except the free-text `message=` of `jam-stream-reset`, always the
+// last field, and the byte-list `hash=` of `jam-anchor-unserved`. `slot=` is
+// the connection slot, except on the lines that carry a block slot and name
+// the connection `conn=`. `req=` ties together the lines about one request;
+// its outcome line adds `outcome=` and `elapsed_ms=`.
 
 use super::reads::Trust;
 use crate::platform::PlatformRef;
@@ -197,12 +199,15 @@ pub(super) fn state_response_bytes(response: &StateResponse) -> usize {
 #[strum(serialize_all = "kebab-case")]
 pub(super) enum End {
     Setup,
+    Stopped,
+    WarpRevision,
     HandshakeTimeout,
     Idle,
     StreamOpenTimeout,
     StateTimeout,
     BlockTimeout,
     JustificationTimeout,
+    WarpTimeout,
     StreamTimeout,
     StreamReset,
     ResetsWithoutCode,
@@ -211,8 +216,17 @@ pub(super) enum End {
     UnexpectedResponse,
     StateRejected,
     StateFailed,
+    StateUnavailable,
+    StateCancelled,
+    BlockFailed,
+    JustificationFailed,
+    WarpFailed,
+    WarpRejected,
+    WarpInvalid,
     FinalityRejected,
+    RootRefused,
     RootUnextendable,
+    AnchorUnserved,
     MessageTooLarge,
     ProtocolError,
     RequestRefused,

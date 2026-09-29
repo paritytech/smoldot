@@ -10,9 +10,103 @@ use crate::jam::types::{
 use alloc::vec;
 use rstest::rstest;
 
+#[test]
+fn ce153_wire_fin_fragmentation_and_separate_budget() {
+    for chunk in [1, 3, 17, 8192] {
+        let mut c = connected();
+        let id = sent(&mut c, Req::Warp(0x04030201));
+        // Larger than the ordinary stream budget; raw bytes remain unverified.
+        let payload = vec![42; 6000];
+        for part in frame(&payload).chunks(chunk) {
+            let progress = c.read_write(2, part, false, &mut []);
+            assert_eq!(progress.read, part.len());
+            assert!(progress.event.is_none());
+        }
+        assert_eq!(
+            c.read_write(2, &[], true, &mut []).event,
+            Some(Event::WarpResponse {
+                request_id: id,
+                start_set_id: 0x04030201,
+                fragments: payload,
+            })
+        );
+        assert!(c.substream_reset(2, RequestError::Rejected).is_none());
+    }
+    for (wire, error) in [
+        (
+            8193u32.to_le_bytes().to_vec(),
+            ProtocolError::MessageTooLarge,
+        ),
+        (vec![1, 0, 0, 0], ProtocolError::UnexpectedFin),
+        (
+            [frame(&[0]), vec![0]].concat(),
+            ProtocolError::TrailingResponse,
+        ),
+    ] {
+        let mut c = connected();
+        sent(&mut c, Req::Warp(0));
+        assert_eq!(
+            c.read_write(2, &wire, true, &mut []).event,
+            Some(Event::ProtocolError(error))
+        );
+    }
+    let mut c = connected();
+    sent(&mut c, Req::Justification([42; 32]));
+    assert_eq!(
+        c.read_write(2, &4097u32.to_le_bytes(), false, &mut [])
+            .event,
+        Some(Event::ProtocolError(ProtocolError::MessageTooLarge))
+    );
+}
+
+#[test]
+fn ce153_reset_cancel_open_failure_and_shared_pending_budget() {
+    let mut c = connected();
+    let vector: serde_json::Value =
+        serde_json::from_str(include_str!("../finality/fixtures/polkajam-warp.json")).unwrap();
+    assert_eq!(vector["no_data"]["streamErrorCode"], 6);
+    let frame = test_support::json_bytes(&vector["no_data"]["request_frame_hex"]);
+    let id = sent(
+        &mut c,
+        Req::Warp(u32::from_le_bytes(frame[4..].try_into().unwrap())),
+    );
+    let proof = c.request_justification([1; 32]).unwrap();
+    assert_eq!(c.request_warp(4), Err(Error::Limit));
+    assert_eq!(c.request_blocks(request()), Err(Error::Limit));
+    assert_eq!(
+        c.substream_reset(2, RequestError::NoData),
+        Some(Event::RequestFailed {
+            request_id: id,
+            reason: RequestError::NoData
+        })
+    );
+    c.cancel_request(proof, RequestError::Cancelled).unwrap();
+    let id = c.request_warp(9).unwrap();
+    let kind = c.desired_outgoing_substreams().unwrap();
+    assert_eq!(
+        c.outgoing_open_failed(kind),
+        Ok(Event::RequestFailed {
+            request_id: id,
+            reason: RequestError::OpenFailed
+        })
+    );
+    let id = sent(&mut c, Req::Warp(9));
+    assert_eq!(
+        c.cancel_request(id, RequestError::Timeout).unwrap(),
+        (
+            Some(2),
+            Event::RequestFailed {
+                request_id: id,
+                reason: RequestError::Timeout
+            }
+        )
+    );
+}
+
 fn limits() -> Limits {
     Limits {
         max_message_size: 4096,
+        max_warp_message_size: 8192,
         max_body_bytes: 32,
         max_leaves_in_handshake: 2,
         max_pending_requests: 2,
@@ -225,6 +319,7 @@ enum Req {
     Blocks(BlockRequest),
     Justification(Hash),
     State(StateRequest),
+    Warp(u32),
 }
 
 impl Req {
@@ -234,6 +329,7 @@ impl Req {
             Req::Blocks(request) => (128, request.encode().to_vec()),
             Req::Justification(target) => (130, target.to_vec()),
             Req::State(request) => (129, request.encode().to_vec()),
+            Req::Warp(start_set_id) => (153, start_set_id.to_le_bytes().to_vec()),
         };
         [vec![kind], frame(&payload)].concat()
     }
@@ -252,6 +348,10 @@ impl Req {
             Req::State(request) => {
                 let id = c.request_state(request).unwrap();
                 (id, SubstreamKind::Ce129 { request_id: id })
+            }
+            Req::Warp(start_set_id) => {
+                let id = c.request_warp(start_set_id).unwrap();
+                (id, SubstreamKind::Ce153 { request_id: id })
             }
         }
     }
@@ -817,6 +917,7 @@ fn request_lifecycle_cleanup_and_reservation_accounting() {
 #[rstest]
 #[case::blocks(Req::Blocks(request()), Req::Justification([42; 32]))]
 #[case::justification(Req::Justification([42; 32]), Req::Blocks(request()))]
+#[case::warp(Req::Warp(0), Req::Blocks(request()))]
 fn typed_resets_preserve_reason_and_release_request(
     #[case] reset: Req,
     #[case] queued: Req,
