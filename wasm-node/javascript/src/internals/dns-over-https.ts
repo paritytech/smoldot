@@ -43,11 +43,12 @@ const PROVIDERS: ReadonlyArray<Provider> = [
 /**
  * Delay after which the next provider is also queried when the previous one hasn't answered yet.
  *
- * Short enough that a slow or unreachable provider doesn't eat up the time budget of the
- * connection attempt, long enough that a healthy provider usually answers before a second
- * request is sent.
+ * A warm answer from a healthy provider takes a few tens of milliseconds and arrives well before
+ * this delay, so only one provider is normally asked. A cold lookup or a slow mobile link may
+ * exceed it, which merely costs one redundant request that is aborted as soon as the first
+ * answer arrives.
  */
-const PROVIDER_STAGGER_MS = 500;
+const PROVIDER_STAGGER_MS = 250;
 
 const IPV4_REGEX = /^\d{1,3}(\.\d{1,3}){3}$/;
 
