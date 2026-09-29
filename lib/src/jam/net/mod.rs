@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-//! Bounded, sans-io JAMNP-S UP0, block-sequence CE128 and CE130 initiator.
+//! Bounded, sans-io JAMNP-S UP0, block-sequence CE128, CE130 and CE153 initiator.
 //!
 //! The transport supplies authenticated bidirectional streams. Only their opener
 //! sends a kind byte. Call [`Connection::desired_outgoing_substreams`], then report
@@ -21,14 +21,17 @@
 //! are structurally decoded, NOT consensus-verified. Extrinsics are structurally
 //! delimited and retained as opaque bodies; their commitments are not checked.
 //!
-//! Memory is O(max_streams * max_message_size + max_pending_requests), plus decoded
-//! objects bounded by the frame and Params. Output backpressure retains at most
+//! Memory holds at most `max_streams` frames, each bounded by the larger of
+//! `max_message_size` and `max_warp_message_size`, plus `max_pending_requests`
+//! request records and decoded objects bounded by the frame and Params.
+//! Output backpressure retains at most
 //! one outgoing frame per stream. The caller must bound transport buffers and
 //! event retention, and enforce open, handshake, response and idle deadlines via
 //! cancellation/reset APIs or dropping the connection. No I/O or clock is owned.
 
 mod ce128;
 mod ce130;
+mod ce153;
 mod framing;
 mod up0;
 
@@ -51,6 +54,8 @@ pub struct RequestId(u64);
 pub struct Limits {
     /// Maximum payload bytes, excluding kind and LE32 prefix, in either direction.
     pub max_message_size: usize,
+    /// Separate CE153 payload budget; does not enlarge other streams' frames.
+    pub max_warp_message_size: usize,
     /// Maximum aggregate opaque body bytes in one returned block sequence.
     pub max_body_bytes: usize,
     /// Maximum local or remote handshake leaves.
@@ -67,6 +72,7 @@ pub enum SubstreamKind {
     Up0,
     Ce128 { request_id: RequestId },
     Ce130 { request_id: RequestId },
+    Ce153 { request_id: RequestId },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +136,12 @@ pub enum Event {
         target: Hash,
         justification: Vec<u8>,
     },
+    /// Raw, untrusted CE153 bytes, emitted only after FIN.
+    WarpResponse {
+        request_id: RequestId,
+        start_set_id: u32,
+        fragments: Vec<u8>,
+    },
     RequestFailed {
         request_id: RequestId,
         reason: RequestError,
@@ -160,6 +172,7 @@ struct Pending {
 enum Request {
     Block(BlockRequest),
     Justification(Hash),
+    Warp(u32),
 }
 
 impl Request {
@@ -167,6 +180,7 @@ impl Request {
         match self {
             Self::Block(_) => SubstreamKind::Ce128 { request_id },
             Self::Justification(_) => SubstreamKind::Ce130 { request_id },
+            Self::Warp(_) => SubstreamKind::Ce153 { request_id },
         }
     }
 }
@@ -176,6 +190,7 @@ enum Stream {
     Up0(up0::Up0),
     Ce128(Box<ce128::Ce128>),
     Ce130(Box<ce130::Ce130>),
+    Ce153(Box<ce153::Ce153>),
 }
 #[derive(PartialEq, Eq)]
 enum UpState {
@@ -272,7 +287,9 @@ impl Connection {
                 self.up = UpState::Active;
                 Stream::Up0(stream)
             }
-            SubstreamKind::Ce128 { request_id } | SubstreamKind::Ce130 { request_id } => {
+            SubstreamKind::Ce128 { request_id }
+            | SubstreamKind::Ce130 { request_id }
+            | SubstreamKind::Ce153 { request_id } => {
                 let position = self
                     .pending
                     .iter()
@@ -289,6 +306,10 @@ impl Connection {
                     )),
                     Request::Justification(target) => Stream::Ce130(Box::new(
                         ce130::Ce130::new(request_id, *target, self.limits.max_message_size)
+                            .map_err(Error::Protocol)?,
+                    )),
+                    Request::Warp(start) => Stream::Ce153(Box::new(
+                        ce153::Ce153::new(request_id, *start, self.limits.max_warp_message_size)
                             .map_err(Error::Protocol)?,
                     )),
                 };
@@ -309,7 +330,9 @@ impl Connection {
             SubstreamKind::Up0 if self.up == UpState::Opening => {
                 Ok(self.fail(ProtocolError::Up0Lost))
             }
-            SubstreamKind::Ce128 { request_id } | SubstreamKind::Ce130 { request_id } => {
+            SubstreamKind::Ce128 { request_id }
+            | SubstreamKind::Ce130 { request_id }
+            | SubstreamKind::Ce153 { request_id } => {
                 let position = self
                     .pending
                     .iter()
@@ -362,6 +385,11 @@ impl Connection {
         self.queue_request(Request::Justification(target))
     }
 
+    /// Queues a CE153 request sharing the pending-request budget with CE128/130.
+    pub fn request_warp(&mut self, start_set_id: u32) -> Result<RequestId, Error> {
+        self.queue_request(Request::Warp(start_set_id))
+    }
+
     fn queue_request(&mut self, request: Request) -> Result<RequestId, Error> {
         if self.closed {
             return Err(Error::Closed);
@@ -369,7 +397,7 @@ impl Connection {
         let active = self
             .streams
             .iter()
-            .filter(|(_, s)| matches!(s, Stream::Ce128(_) | Stream::Ce130(_)))
+            .filter(|(_, s)| matches!(s, Stream::Ce128(_) | Stream::Ce130(_) | Stream::Ce153(_)))
             .count();
         if active.saturating_add(self.pending.len()) >= self.limits.max_pending_requests {
             return Err(Error::Limit);
@@ -433,6 +461,7 @@ impl Connection {
             .position(|(_, s)| match s {
                 Stream::Ce128(c) => c.id == request_id,
                 Stream::Ce130(c) => c.id == request_id,
+                Stream::Ce153(c) => c.id == request_id,
                 _ => false,
             })
             .ok_or(Error::InvalidState)?;
@@ -448,6 +477,10 @@ impl Connection {
             Stream::Incoming => None,
             Stream::Up0(_) => Some(self.fail(ProtocolError::Up0Lost)),
             Stream::Ce130(c) => Some(Event::RequestFailed {
+                request_id: c.id,
+                reason,
+            }),
+            Stream::Ce153(c) => Some(Event::RequestFailed {
                 request_id: c.id,
                 reason,
             }),
@@ -523,6 +556,16 @@ impl Connection {
                     ce.read(&mut remaining, peer_fin, self.limits.max_message_size)
                 }
             }
+            Stream::Ce153(ce) => {
+                progress.written = ce.writer.write(output);
+                if ce.writer.is_empty() && !ce.fin_sent {
+                    ce.fin_sent = true;
+                    progress.finish_write = true;
+                    Ok(None)
+                } else {
+                    ce.read(&mut remaining, peer_fin, self.limits.max_warp_message_size)
+                }
+            }
             Stream::Ce128(ce) => {
                 progress.written = ce.writer.write(output);
                 if ce.writer.is_empty() && !ce.fin_sent {
@@ -543,6 +586,7 @@ impl Connection {
                     Some(
                         Event::BlockResponse { .. }
                             | Event::JustificationResponse { .. }
+                            | Event::WarpResponse { .. }
                             | Event::RequestFailed { .. }
                     )
                 ) {

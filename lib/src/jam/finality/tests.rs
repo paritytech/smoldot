@@ -5,6 +5,359 @@ use crate::jam::types::EpochMark;
 use alloc::vec;
 use ed25519_zebra::{SigningKey, VerificationKey};
 
+fn warp_limits() -> WarpLimits {
+    WarpLimits {
+        max_fragments: 32,
+        max_header_bytes: 256 * 1024,
+        proof: Limits {
+            max_bytes: 1024 * 1024,
+            max_ancestry_headers: 64,
+            max_ancestry_steps: 4096,
+        },
+    }
+}
+
+fn warp_bytes(params: &Params, fragments: &[WarpFragment]) -> Vec<u8> {
+    let mut bytes = codec::encode_natural(u64::try_from(fragments.len()).unwrap());
+    for fragment in fragments {
+        bytes.extend(fragment.header.encode(params));
+        bytes.extend(encode(&fragment.justification));
+    }
+    bytes
+}
+
+#[test]
+fn warp_dense_indexes_skipped_epochs_and_atomic_rejections() {
+    let params = params();
+    let a = keys(1);
+    let b = keys(11);
+    let c = keys(21);
+    let initial = AuthoritySet::from_checkpoint(&params, 0, public(&a), public(&a)).unwrap();
+    let mut state = initial.clone();
+    let mut chain = Vec::new();
+    for (index, slot, signing, next) in [(0, 12, &a, &b), (1, 120, &a, &c), (2, 132, &b, &a)] {
+        let mut h = header([0; 32], slot);
+        mark(&mut h, next);
+        let fragment = WarpFragment {
+            justification: proof(&h, index, signing),
+            header: h,
+        };
+        let before = state.clone();
+        let mut bad = fragment.clone();
+        bad.justification.set_id += 1;
+        assert!(matches!(
+            state.advance_warp(&params, &bad, limits()),
+            Err(Error::WrongSetId { .. })
+        ));
+        let mut bad = fragment.clone();
+        bad.header.epoch_mark = None;
+        assert_eq!(
+            state.advance_warp(&params, &bad, limits()),
+            Err(Error::MissingEpochMark)
+        );
+        let mut bad = fragment.clone();
+        bad.header.prior_state_root[0] ^= 1;
+        assert_eq!(
+            state.advance_warp(&params, &bad, limits()),
+            Err(Error::TargetMismatch)
+        );
+        let mut bad = fragment.clone();
+        bad.justification.precommits[0].signature[0] ^= 1;
+        assert_eq!(
+            state.advance_warp(&params, &bad, limits()),
+            Err(Error::BadSignature)
+        );
+        assert_eq!(state, before);
+        state = state.advance_warp(&params, &fragment, limits()).unwrap();
+        chain.push(fragment);
+    }
+    assert_eq!(state.set_id(), 3);
+    assert_eq!(state.current(), public(&c));
+    assert!(matches!(
+        initial.advance_warp(&params, &chain[1], limits()),
+        Err(Error::WrongSetId { .. })
+    ));
+    let wire = warp_bytes(&params, &chain);
+    let decoded = decode_warp_response(&params, &wire, &warp_limits()).unwrap();
+    assert_eq!(decoded.len(), 3);
+    let mut limits = warp_limits();
+    limits.max_header_bytes = chain[0].header.encode(&params).len() - 1;
+    assert_eq!(
+        decode_warp_response(&params, &wire, &limits).unwrap_err(),
+        Error::ResourceLimit
+    );
+    limits = warp_limits();
+    limits.proof.max_bytes = encode(&chain[0].justification).len() - 1;
+    assert_eq!(
+        decode_warp_response(&params, &wire, &limits).unwrap_err(),
+        Error::ResourceLimit
+    );
+    for end in 0..wire.len() {
+        assert!(decode_warp_response(&params, &wire[..end], &warp_limits()).is_err());
+    }
+    let mut bad = wire.clone();
+    bad[0] = 33;
+    assert_eq!(
+        decode_warp_response(&params, &bad, &warp_limits()).unwrap_err(),
+        Error::Decode(DecodeError::LengthLimit)
+    );
+    for i in 0..wire.len() {
+        let mut mutated = wire.clone();
+        mutated[i] ^= 0x80;
+        let _ = decode_warp_response(&params, &mutated, &warp_limits());
+    }
+    let mut trailing = wire;
+    trailing.push(0);
+    assert_eq!(
+        decode_warp_response(&params, &trailing, &warp_limits()).unwrap_err(),
+        Error::Decode(DecodeError::TrailingBytes)
+    );
+}
+
+#[test]
+fn warp_full_parameter_32_fragment_budget() {
+    let mut params = params();
+    params.max_validators = 1023;
+    params.core_count = 341;
+    params.epoch_len = 600;
+    params.epoch_tail_start = 500;
+    let keys: Vec<_> = (0..1023u32)
+        .map(|index| {
+            let mut seed = [42; 32];
+            seed[..4].copy_from_slice(&index.to_le_bytes());
+            SigningKey::from(seed)
+        })
+        .collect();
+    let public = public(&keys);
+    let mut state = AuthoritySet::from_checkpoint(&params, 0, public.clone(), public).unwrap();
+    let mut chain = Vec::new();
+    for index in 0..32 {
+        let mut h = header([0; 32], (index + 1) * 600);
+        mark(&mut h, &keys);
+        chain.push(WarpFragment {
+            justification: proof(&h, index, &keys),
+            header: h,
+        });
+    }
+    let bytes = warp_bytes(&params, &chain);
+    assert!(bytes.len() <= 8 * 1024 * 1024);
+    drop(chain);
+    #[cfg(feature = "std")]
+    let started = std::time::Instant::now();
+    let decoded = decode_warp_response(&params, &bytes, &warp_limits()).unwrap();
+    for fragment in decoded {
+        state = state
+            .advance_warp(&params, &fragment, warp_limits().proof)
+            .unwrap();
+    }
+    assert_eq!(state.set_id(), 32);
+    #[cfg(feature = "std")]
+    std::println!(
+        "synthetic full-parameter warp: bytes={} bytes/fragment={} decode+verify/fragment={:?}",
+        bytes.len(),
+        (bytes.len() - 1) / 32,
+        started.elapsed() / 32
+    );
+}
+
+#[test]
+fn d1_proofs_assembled_as_warp_are_not_live_ce153_captures() {
+    use crate::jam::{
+        chain_spec::JamChainSpec,
+        state::{LightState, PreviousEpoch, TailEvidence},
+        verify::{verified_genesis, verify_header},
+    };
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/polkajam-grandpa.json")).unwrap();
+    let spec = JamChainSpec::from_json_bytes(fixture["spec"].to_string().as_bytes()).unwrap();
+    let params = spec.params();
+    let headers: Vec<_> = fixture["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| {
+            Header::decode(
+                params,
+                &hex::decode(value.as_str().unwrap().trim_start_matches("0x")).unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    let mut chain = Vec::new();
+    for value in fixture["justifications"].as_array().unwrap() {
+        let justification = Justification::decode(
+            params,
+            &hex::decode(value.as_str().unwrap()).unwrap(),
+            warp_limits().proof,
+        )
+        .unwrap();
+        let header = headers
+            .iter()
+            .find(|h| h.hash(params) == justification.target().hash)
+            .unwrap();
+        if header.epoch_mark.is_some() {
+            chain.push(WarpFragment {
+                header: header.clone(),
+                justification,
+            });
+        }
+    }
+    assert_eq!(chain.len(), 3);
+    let bytes = warp_bytes(params, &chain);
+    let decoded = decode_warp_response(params, &bytes, &warp_limits()).unwrap();
+    // Prefix boundaries round-trip to exactly the source header/proof pairs.
+    let mut offset = 1;
+    for fragment in &decoded {
+        let header = fragment.header.encode(params);
+        let proof = encode(&fragment.justification);
+        assert_eq!(&bytes[offset..offset + header.len()], header);
+        offset += header.len();
+        assert_eq!(&bytes[offset..offset + proof.len()], proof);
+        offset += proof.len();
+    }
+    assert_eq!(offset, bytes.len());
+    for index in 0..bytes.len() {
+        let mut mutated = bytes.clone();
+        mutated[index] ^= 0x80;
+        let _ = decode_warp_response(params, &mutated, &warp_limits());
+    }
+    let mut authorities = AuthoritySet::from_genesis(params, spec.genesis_header()).unwrap();
+    for fragment in &decoded {
+        assert_eq!(
+            fragment.header.hash(params),
+            fragment.justification.target().hash
+        );
+        authorities = authorities
+            .advance_warp(params, fragment, warp_limits().proof)
+            .unwrap();
+    }
+    assert_eq!(authorities.set_id(), 3);
+    let mut parent = verified_genesis(
+        params,
+        spec.genesis_header().clone(),
+        LightState::from_anchor(params, spec.genesis_light_state()).unwrap(),
+    );
+    let entropy = parent.post_state.entropy();
+    let mut previous = PreviousEpoch {
+        eta1: entropy[1],
+        eta2: entropy[2],
+        pending: parent.post_state.epoch().pending.clone(),
+    };
+    for h in headers {
+        let verified = verify_header(params, &parent, h.clone(), 1_900_000_000).unwrap();
+        if let Some(mark) = &h.epoch_mark {
+            let output = crypto::bandersnatch_vrf_output(&h.entropy_source).unwrap();
+            let derived = LightState::after_set_change(
+                params,
+                &previous,
+                &h,
+                &output.0,
+                &TailEvidence {
+                    parent_slot: parent.slot,
+                    tickets_mark: parent.post_state.pending_tickets().map(<[_]>::to_vec),
+                },
+            )
+            .unwrap();
+            assert_eq!(derived, verified.post_state);
+            previous = PreviousEpoch {
+                eta1: mark.entropy,
+                eta2: mark.tickets_entropy,
+                pending: mark.validators.clone(),
+            };
+            parent = verified_genesis(params, h, derived);
+        } else {
+            parent = verified;
+        }
+    }
+}
+
+#[test]
+fn captured_ce153_boundaries_authority_chain_and_mutations() {
+    use crate::jam::chain_spec::JamChainSpec;
+    let vector: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/polkajam-warp.json")).unwrap();
+    let spec = JamChainSpec::from_json_bytes(vector["spec"].to_string().as_bytes()).unwrap();
+    let params = spec.params();
+    let frame = hex::decode(vector["exchange"]["response_frame_hex"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        usize::try_from(u32::from_le_bytes(frame[..4].try_into().unwrap())).unwrap(),
+        frame.len() - 4
+    );
+    let bytes = &frame[4..];
+    let fragments = decode_warp_response(params, bytes, &warp_limits()).unwrap();
+    let records = vector["exchange"]["fragments"].as_array().unwrap();
+    assert!(fragments.len() >= 3);
+    assert_eq!(fragments.len(), records.len());
+    let mut authorities = AuthoritySet::from_genesis(params, spec.genesis_header()).unwrap();
+    let mut offset = codec::encode_natural(u64::try_from(fragments.len()).unwrap()).len();
+    for (fragment, record) in fragments.iter().zip(records) {
+        assert_eq!(
+            offset,
+            usize::try_from(record["start"].as_u64().unwrap()).unwrap()
+        );
+        let header = fragment.header.encode(params);
+        assert_eq!(&bytes[offset..offset + header.len()], header);
+        offset += header.len();
+        assert_eq!(
+            offset,
+            usize::try_from(record["proof_start"].as_u64().unwrap()).unwrap()
+        );
+        let proof = encode(&fragment.justification);
+        assert_eq!(&bytes[offset..offset + proof.len()], proof);
+        offset += proof.len();
+        assert_eq!(
+            offset,
+            usize::try_from(record["fragment_end"].as_u64().unwrap()).unwrap()
+        );
+        assert_eq!(
+            hex::encode(fragment.header.hash(params)),
+            record["hash"].as_str().unwrap()
+        );
+        assert_eq!(
+            fragment.header.hash(params),
+            fragment.justification.target().hash
+        );
+        authorities = authorities
+            .advance_warp(params, fragment, warp_limits().proof)
+            .unwrap();
+    }
+    assert_eq!(offset, bytes.len());
+    assert_eq!(
+        u64::from(authorities.set_id()),
+        vector["inferred_set_id"].as_u64().unwrap()
+    );
+    let expected: Vec<_> = fragments
+        .last()
+        .unwrap()
+        .header
+        .epoch_mark
+        .as_ref()
+        .unwrap()
+        .validators
+        .iter()
+        .map(|(_, key)| *key)
+        .collect();
+    assert_eq!(authorities.next(), expected);
+    let expected: Vec<_> = fragments[fragments.len() - 2]
+        .header
+        .epoch_mark
+        .as_ref()
+        .unwrap()
+        .validators
+        .iter()
+        .map(|(_, key)| *key)
+        .collect();
+    assert_eq!(authorities.current(), expected);
+    for index in 0..bytes.len() {
+        let mut mutated = bytes.to_vec();
+        mutated[index] ^= 0x80;
+        let _ = decode_warp_response(params, &mutated, &warp_limits());
+    }
+    for end in 0..bytes.len() {
+        assert!(decode_warp_response(params, &bytes[..end], &warp_limits()).is_err());
+    }
+}
+
 fn params() -> Params {
     let mut params = Params::from_protocol_parameters(&{
         let mut bytes = [0; 122];

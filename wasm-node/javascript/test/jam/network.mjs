@@ -25,7 +25,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 /** A5 capture base; see fixtures/local-network.md. */
-export const POLKAJAM_COMMIT = '8ceedf46c4828137c8835e4227d7f3a62ada0463';
+export const POLKAJAM_COMMIT = '1445c6cebf0557aa7f2d7ade851364f880f303c9';
 
 /** The only executable needed during a run. */
 export const REQUIRED_BINARIES = ['polkajam'];

@@ -52,7 +52,11 @@ impl<'a> Decoder<'a> {
         Self { bytes }
     }
 
-    fn take(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
+    pub(crate) fn remaining(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    pub(crate) fn take(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
         let (value, rest) = self
             .bytes
             .split_at_checked(len)

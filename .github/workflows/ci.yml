@@ -217,7 +217,7 @@ jobs:
     # builds the pinned PolkaJam binaries and is the slow case.
     timeout-minutes: 15
     env:
-      POLKAJAM_COMMIT: 8ceedf46c4828137c8835e4227d7f3a62ada0463
+      POLKAJAM_COMMIT: 1445c6cebf0557aa7f2d7ade851364f880f303c9
     steps:
     - uses: actions/checkout@v6
     - uses: dtolnay/rust-toolchain@1.93.0

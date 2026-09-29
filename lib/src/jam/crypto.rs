@@ -76,6 +76,18 @@ pub fn bandersnatch_vrf_verify(
     Ok(VrfOutput(bytes))
 }
 
+/// Returns `banderout(signature)` without verifying the proof. Only sound when
+/// the signature's header is authenticated by other means, such as finality.
+pub fn bandersnatch_vrf_output(signature: &[u8; 96]) -> Result<VrfOutput, VrfError> {
+    let output: bandersnatch::Output = decode_canonical::<_, 32>(&signature[..32])?;
+    if output.0.is_zero() {
+        return Err(VrfError::InvalidEncoding);
+    }
+    let mut bytes = [0; 32];
+    bytes.copy_from_slice(&output.hash()[..32]);
+    Ok(VrfOutput(bytes))
+}
+
 fn decode_canonical<T: CanonicalDeserialize + CanonicalSerialize, const N: usize>(
     bytes: &[u8],
 ) -> Result<T, VrfError> {

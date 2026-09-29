@@ -97,7 +97,7 @@ for WebTransport); no HTTP server is started.
 
 ## Pinned PolkaJam
 
-`POLKAJAM_COMMIT = 8ceedf46c4828137c8835e4227d7f3a62ada0463` (A5 capture base,
+`POLKAJAM_COMMIT = 1445c6cebf0557aa7f2d7ade851364f880f303c9` (A5 capture base,
 `polkajam 0.1.29 / GP 0.8.0`). The checked-in spec was generated at that pin
 with `SKIP_PVM_BUILDS=1`. Binary provenance is not checked during a run.
 Regenerate and diff the spec whenever the pin changes, following

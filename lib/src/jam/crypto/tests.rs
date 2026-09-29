@@ -90,6 +90,16 @@ fn signed() -> ([u8; 32], [u8; 96]) {
 fn canonical_encodings() {
     let (public, signature) = signed();
     assert!(bandersnatch_vrf_verify(&public, b"context", b"aux", &signature).is_ok());
+    assert_eq!(
+        bandersnatch_vrf_output(&signature),
+        bandersnatch_vrf_verify(&public, b"context", b"aux", &signature)
+    );
+    let mut proof_ignored = signature;
+    proof_ignored[32..].fill(255);
+    assert_eq!(
+        bandersnatch_vrf_output(&proof_ignored),
+        bandersnatch_vrf_output(&signature)
+    );
     for range in [0..32, 32..64, 64..96] {
         let mut bad = signature;
         bad[range].fill(255);
@@ -126,6 +136,10 @@ fn canonical_encodings() {
         );
         let mut bad_signature = signature;
         bad_signature[..32].copy_from_slice(&bad);
+        assert_eq!(
+            bandersnatch_vrf_output(&bad_signature),
+            Err(VrfError::InvalidEncoding)
+        );
         assert_eq!(
             bandersnatch_vrf_verify(&public, b"context", b"aux", &bad_signature),
             Err(VrfError::InvalidEncoding)
@@ -206,6 +220,7 @@ fn a5_real_seals_and_entropy() {
         let output = bandersnatch_vrf_verify(&public, &context, &aux, &seal)
             .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         assert_eq!(output.0.as_slice(), field("seal_vrf_output"));
+        assert_eq!(bandersnatch_vrf_output(&seal), Ok(output));
         if entry.get("key").is_none() {
             assert_eq!(output.0, bytes::<32>(entry["id"].as_str().unwrap()));
         }
@@ -215,6 +230,7 @@ fn a5_real_seals_and_entropy() {
         assert!(field("entropy_aux_hex").is_empty());
         let output = bandersnatch_vrf_verify(&public, &entropy_context, &[], &entropy).unwrap();
         assert_eq!(output.0.as_slice(), field("entropy_vrf_output"));
+        assert_eq!(bandersnatch_vrf_output(&entropy), Ok(output));
         tampering(&public, &entropy_context, &[], &entropy);
     }
     assert!(fallback > 0 && tickets > 0);

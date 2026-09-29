@@ -6,6 +6,171 @@ use crate::jam::types::{Direction, Final, Header};
 use alloc::vec;
 use rstest::rstest;
 
+fn open_warp(c: &mut Connection, start: u32) -> RequestId {
+    let id = c.request_warp(start).unwrap();
+    let kind = SubstreamKind::Ce153 { request_id: id };
+    assert_eq!(c.desired_outgoing_substreams(), Some(kind));
+    c.substream_opened(2, kind).unwrap();
+    let mut expected = vec![153];
+    expected.extend(frame(&start.to_le_bytes()));
+    assert_eq!(drain(c, 2, 1), (expected, true));
+    id
+}
+
+#[test]
+fn ce153_wire_fin_fragmentation_and_separate_budget() {
+    for chunk in [1, 3, 17, 8192] {
+        let mut c = connection();
+        open_up(&mut c);
+        let id = open_warp(&mut c, 0x04030201);
+        // Larger than the ordinary stream budget; raw bytes remain unverified.
+        let payload = vec![42; 6000];
+        for part in frame(&payload).chunks(chunk) {
+            let progress = c.read_write(2, part, false, &mut []);
+            assert_eq!(progress.read, part.len());
+            assert!(progress.event.is_none());
+        }
+        assert_eq!(
+            c.read_write(2, &[], true, &mut []).event,
+            Some(Event::WarpResponse {
+                request_id: id,
+                start_set_id: 0x04030201,
+                fragments: payload,
+            })
+        );
+        assert!(c.substream_reset(2, RequestError::Rejected).is_none());
+    }
+    for (wire, error) in [
+        (
+            8193u32.to_le_bytes().to_vec(),
+            ProtocolError::MessageTooLarge,
+        ),
+        (vec![1, 0, 0, 0], ProtocolError::UnexpectedFin),
+        (
+            [frame(&[0]), vec![0]].concat(),
+            ProtocolError::TrailingResponse,
+        ),
+    ] {
+        let mut c = connection();
+        open_up(&mut c);
+        open_warp(&mut c, 0);
+        assert_eq!(
+            c.read_write(2, &wire, true, &mut []).event,
+            Some(Event::ProtocolError(error))
+        );
+    }
+    let mut c = connection();
+    open_up(&mut c);
+    open_justification(&mut c);
+    drain(&mut c, 2, 64);
+    assert_eq!(
+        c.read_write(2, &4097u32.to_le_bytes(), false, &mut [])
+            .event,
+        Some(Event::ProtocolError(ProtocolError::MessageTooLarge))
+    );
+}
+
+#[test]
+fn ce153_reset_cancel_open_failure_and_shared_pending_budget() {
+    let mut c = connection();
+    open_up(&mut c);
+    let vector: serde_json::Value =
+        serde_json::from_str(include_str!("../finality/fixtures/polkajam-warp.json")).unwrap();
+    assert_eq!(vector["no_data"]["streamErrorCode"], 6);
+    let request_frame =
+        hex::decode(vector["no_data"]["request_frame_hex"].as_str().unwrap()).unwrap();
+    let request_payload: [u8; 4] = request_frame[4..].try_into().unwrap();
+    let id = open_warp(&mut c, u32::from_le_bytes(request_payload));
+    let proof = c.request_justification([1; 32]).unwrap();
+    assert_eq!(c.request_warp(4), Err(Error::Limit));
+    assert_eq!(c.request_blocks(request()), Err(Error::Limit));
+    assert_eq!(
+        c.substream_reset(2, RequestError::NoData),
+        Some(Event::RequestFailed {
+            request_id: id,
+            reason: RequestError::NoData
+        })
+    );
+    c.cancel_request(proof, RequestError::Cancelled).unwrap();
+    let id = c.request_warp(9).unwrap();
+    let kind = c.desired_outgoing_substreams().unwrap();
+    assert_eq!(
+        c.outgoing_open_failed(kind),
+        Ok(Event::RequestFailed {
+            request_id: id,
+            reason: RequestError::OpenFailed
+        })
+    );
+    let id = open_warp(&mut c, 9);
+    assert_eq!(
+        c.cancel_request(id, RequestError::Timeout).unwrap(),
+        (
+            Some(2),
+            Event::RequestFailed {
+                request_id: id,
+                reason: RequestError::Timeout
+            }
+        )
+    );
+}
+
+#[test]
+fn captured_ce153_response_is_delivered_only_after_fin() {
+    let vector: serde_json::Value =
+        serde_json::from_str(include_str!("../finality/fixtures/polkajam-warp.json")).unwrap();
+    let bytes = hex::decode(vector["exchange"]["response_frame_hex"].as_str().unwrap()).unwrap();
+    let mut c = connection();
+    c.limits.max_warp_message_size = 8 * 1024 * 1024;
+    open_up(&mut c);
+    let id = open_warp(&mut c, 0);
+    for part in bytes.chunks(17) {
+        let progress = c.read_write(2, part, false, &mut []);
+        assert_eq!(progress.read, part.len());
+        assert!(progress.event.is_none());
+    }
+    assert_eq!(
+        c.read_write(2, &[], true, &mut []).event,
+        Some(Event::WarpResponse {
+            request_id: id,
+            start_set_id: 0,
+            fragments: bytes[4..].to_vec(),
+        })
+    );
+}
+
+#[rstest]
+#[case::proof(false)]
+#[case::warp(true)]
+fn typed_proof_and_warp_resets_preserve_reason_and_release_request(
+    #[case] warp: bool,
+    #[values(RequestError::NoData, RequestError::Transient)] reason: RequestError,
+) {
+    let mut c = connection();
+    open_up(&mut c);
+    let request_id = if warp {
+        open_warp(&mut c, 0)
+    } else {
+        let id = open_justification(&mut c);
+        drain(&mut c, 2, 1);
+        id
+    };
+    let block_id = c.request_blocks(request()).unwrap();
+    assert_eq!(c.request_blocks(request()), Err(Error::Limit));
+    assert_eq!(
+        c.substream_reset(2, reason),
+        Some(Event::RequestFailed { request_id, reason })
+    );
+    assert_eq!(c.substream_reset(2, reason), None);
+    assert_eq!(c.streams.len(), 1);
+    assert_eq!(
+        c.desired_outgoing_substreams(),
+        Some(SubstreamKind::Ce128 {
+            request_id: block_id
+        })
+    );
+    assert!(c.request_blocks(request()).is_ok());
+}
+
 fn params() -> Params {
     let mut p = Params::from_protocol_parameters(&{
         let mut bytes = [0; 122];
@@ -21,6 +186,7 @@ fn params() -> Params {
 fn limits() -> Limits {
     Limits {
         max_message_size: 4096,
+        max_warp_message_size: 8192,
         max_body_bytes: 32,
         max_leaves_in_handshake: 2,
         max_pending_requests: 2,

@@ -20,6 +20,21 @@ use core::num::NonZeroU32;
 /// A validator's Bandersnatch and Ed25519 public keys, as carried by an epoch mark.
 pub type ValidatorPair = (BandersnatchPublic, Ed25519Public);
 
+/// Epoch history inherited from the anchor or previous finalized epoch mark.
+#[derive(Clone, Debug)]
+pub struct PreviousEpoch {
+    pub eta1: Hash,
+    pub eta2: Hash,
+    pub pending: Vec<ValidatorPair>,
+}
+
+/// Evidence authenticated by the target's parent hash chain, not peer claims.
+#[derive(Clone, Debug)]
+pub struct TailEvidence {
+    pub parent_slot: u32,
+    pub tickets_mark: Option<Vec<Ticket>>,
+}
+
 /// Light Safrole state after some header. See the module documentation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EpochState {
@@ -48,6 +63,9 @@ pub struct LightState {
 /// divide out of bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateError {
+    MissingEpochMark,
+    EpochEntropyMismatch,
+    InvalidParentEpoch,
     /// `Params::epoch_len` is zero, so slots cannot be mapped to epochs.
     ZeroEpochLength,
     /// `Params::max_validators` is zero, so epoch marks would carry no validators.
@@ -65,6 +83,9 @@ pub enum StateError {
 impl core::fmt::Display for StateError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
+            Self::MissingEpochMark => "missing epoch mark",
+            Self::EpochEntropyMismatch => "epoch history does not match the mark",
+            Self::InvalidParentEpoch => "parent is not in an earlier epoch",
             Self::ZeroEpochLength => "epoch length is zero",
             Self::ZeroValidatorCount => "validator count is zero",
             Self::EmptyValidatorSet => "empty validator set",
@@ -78,6 +99,66 @@ impl core::fmt::Display for StateError {
 impl core::error::Error for StateError {}
 
 impl LightState {
+    /// Derives state from a finality-authenticated set-change header and tail.
+    /// This does not verify seals or finality.
+    pub fn after_set_change(
+        params: &Params,
+        previous: &PreviousEpoch,
+        target: &super::types::Header,
+        vrf_output: &Hash,
+        tail: &TailEvidence,
+    ) -> Result<Self, StateError> {
+        let epoch_len = epoch_len(params)?;
+        let mark = target
+            .epoch_mark
+            .as_ref()
+            .ok_or(StateError::MissingEpochMark)?;
+        if mark.tickets_entropy != previous.eta1 {
+            return Err(StateError::EpochEntropyMismatch);
+        }
+        if !params.is_valid_validator_count(previous.pending.len())
+            || !params.is_valid_validator_count(mark.validators.len())
+        {
+            return Err(StateError::InvalidValidatorCount);
+        }
+        let parent_epoch = tail.parent_slot / epoch_len;
+        let target_epoch = target.slot / epoch_len;
+        if parent_epoch >= target_epoch {
+            return Err(StateError::InvalidParentEpoch);
+        }
+        if tail
+            .tickets_mark
+            .as_ref()
+            .is_some_and(|tickets| !has_len(tickets, epoch_len))
+        {
+            return Err(StateError::SealingLength);
+        }
+        let sealing = match &tail.tickets_mark {
+            Some(tickets)
+                if parent_epoch.checked_add(1) == Some(target_epoch)
+                    && tail.parent_slot % epoch_len >= params.epoch_tail_start =>
+            {
+                SealingSequence::Tickets(tickets.clone())
+            }
+            _ => SealingSequence::Keys(fallback_key_sequence(
+                params,
+                &previous.eta1,
+                &previous.pending,
+            )?),
+        };
+        let mut state = Self::from_parts(
+            [mark.entropy, mark.entropy, previous.eta1, previous.eta2],
+            previous.pending.clone(),
+            mark.validators.clone(),
+            sealing,
+            None,
+            target.slot,
+        );
+        state.accumulate_entropy(vrf_output);
+        state.validate(params)?;
+        Ok(state)
+    }
+
     /// Constructs trusted state components. Call `validate` to check their shape.
     pub fn from_parts(
         entropy: [Hash; 4],
@@ -380,6 +461,228 @@ mod tests {
             transfer_memo_size: 128,
             max_exports: 3072,
         }
+    }
+
+    #[test]
+    fn set_change_derivation_modes_history_and_typed_errors() {
+        use crate::jam::types::{EpochMark, Header};
+        let params = tiny_params();
+        let previous = PreviousEpoch {
+            eta1: [1; 32],
+            eta2: [2; 32],
+            pending: vec![([3; 32], [4; 32]); 6],
+        };
+        let mut target = Header {
+            parent: [0; 32],
+            prior_state_root: [0; 32],
+            extrinsic_hash: [0; 32],
+            slot: 12,
+            epoch_mark: Some(EpochMark {
+                entropy: [5; 32],
+                tickets_entropy: previous.eta1,
+                validators: vec![([6; 32], [7; 32]); 6],
+            }),
+            tickets_mark: None,
+            author_index: 0,
+            entropy_source: [0; 96],
+            offenders_mark: vec![],
+            seal: [0; 96],
+        };
+        let tickets = vec![
+            Ticket {
+                id: [9; 32],
+                attempt: 1
+            };
+            12
+        ];
+        for (slot, parent_slot, winners, use_tickets) in [
+            (12, 11, true, true),
+            (12, 9, true, false),
+            (36, 11, true, false),
+            (12, 11, false, false),
+        ] {
+            target.slot = slot;
+            let tail = TailEvidence {
+                parent_slot,
+                tickets_mark: winners.then(|| tickets.clone()),
+            };
+            let state =
+                LightState::after_set_change(&params, &previous, &target, &[8; 32], &tail).unwrap();
+            assert_eq!(
+                state.entropy(),
+                [
+                    blake2b_256(&[[5; 32], [8; 32]].concat()),
+                    [5; 32],
+                    [1; 32],
+                    [2; 32]
+                ]
+            );
+            assert_eq!(state.epoch().active, previous.pending);
+            assert_eq!(
+                state.epoch().pending,
+                target.epoch_mark.as_ref().unwrap().validators
+            );
+            assert_eq!(state.slot(), slot);
+            assert_eq!(state.pending_tickets(), None);
+            assert_eq!(
+                state.epoch().sealing,
+                if use_tickets {
+                    SealingSequence::Tickets(tickets.clone())
+                } else {
+                    SealingSequence::Keys(
+                        fallback_key_sequence(&params, &previous.eta1, &previous.pending).unwrap(),
+                    )
+                }
+            );
+        }
+        target.slot = 12;
+        let mut tail = TailEvidence {
+            parent_slot: 11,
+            tickets_mark: Some(vec![]),
+        };
+        assert_eq!(
+            LightState::after_set_change(&params, &previous, &target, &[0; 32], &tail),
+            Err(StateError::SealingLength)
+        );
+        tail.tickets_mark = None;
+        tail.parent_slot = 12;
+        assert_eq!(
+            LightState::after_set_change(&params, &previous, &target, &[0; 32], &tail),
+            Err(StateError::InvalidParentEpoch)
+        );
+        tail.parent_slot = 11;
+        target.epoch_mark.as_mut().unwrap().tickets_entropy = [99; 32];
+        assert_eq!(
+            LightState::after_set_change(&params, &previous, &target, &[0; 32], &tail),
+            Err(StateError::EpochEntropyMismatch)
+        );
+        target.epoch_mark.as_mut().unwrap().tickets_entropy = previous.eta1;
+        target.epoch_mark.as_mut().unwrap().validators.pop();
+        assert_eq!(
+            LightState::after_set_change(&params, &previous, &target, &[0; 32], &tail),
+            Err(StateError::InvalidValidatorCount)
+        );
+        target.epoch_mark = None;
+        assert_eq!(
+            LightState::after_set_change(&params, &previous, &target, &[0; 32], &tail),
+            Err(StateError::MissingEpochMark)
+        );
+        let mut zero = params;
+        zero.epoch_len = 0;
+        assert_eq!(
+            LightState::after_set_change(&zero, &previous, &target, &[0; 32], &tail),
+            Err(StateError::ZeroEpochLength)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires external A5 vectors through JAM_A5_FIXTURES"]
+    fn a5_set_change_derivation_matches_recorded_states_and_verifies_successors() {
+        use crate::jam::{
+            crypto::bandersnatch_vrf_output,
+            types::Header,
+            verify::{verified_genesis, verify_header},
+        };
+        use serde_json::Value;
+        let root = std::env::var_os("JAM_A5_FIXTURES")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                "/home/sebastian/work/repos/jam-light-client-planning/fixtures".into()
+            });
+        let load = |path: &std::path::Path| -> Value {
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        };
+        let bytes = |v: &Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
+        let params = Params::from_protocol_parameters(&bytes(
+            &load(&root.join("params.json"))["protocol_parameters"],
+        ))
+        .unwrap();
+        let decode_state = |v: &Value| {
+            let items: Vec<([u8; 31], Vec<u8>)> = v["state_items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| {
+                    (
+                        bytes(&item["key_hex"]).try_into().unwrap(),
+                        bytes(&item["value_hex"]),
+                    )
+                })
+                .collect();
+            LightState::from_anchor(
+                &params,
+                &GenesisLightState::from_state_items(
+                    &params,
+                    items.iter().map(|(k, v)| (k, v.as_slice())),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let genesis = load(&root.join("genesis-state.json"));
+        let mut parent = verified_genesis(
+            &params,
+            Header::decode(&params, &bytes(&genesis["header_hex"])).unwrap(),
+            decode_state(&genesis["light_state"]),
+        );
+        let mut previous = PreviousEpoch {
+            eta1: parent.post_state.entropy()[1],
+            eta2: parent.post_state.entropy()[2],
+            pending: parent.post_state.epoch().pending.clone(),
+        };
+        let mut paths: Vec<_> = std::fs::read_dir(root.join("headers"))
+            .unwrap()
+            .map(|p| p.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .collect();
+        paths.sort();
+        let mut history: Vec<Header> = Vec::new();
+        let (mut ticket, mut fallback, mut skipped) = (0, 0, 0);
+        for path in paths {
+            let fixture = load(&path);
+            let header = Header::decode(&params, &bytes(&fixture["header_hex"])).unwrap();
+            let verified = verify_header(&params, &parent, header.clone(), 1_900_000_000).unwrap();
+            if let Some(mark) = &header.epoch_mark {
+                let tickets_mark = history
+                    .iter()
+                    .rev()
+                    .take_while(|h| {
+                        h.slot / params.epoch_len == parent.slot / params.epoch_len
+                            && h.slot % params.epoch_len >= params.epoch_tail_start
+                    })
+                    .find_map(|h| h.tickets_mark.clone());
+                let state = LightState::after_set_change(
+                    &params,
+                    &previous,
+                    &header,
+                    &bandersnatch_vrf_output(&header.entropy_source).unwrap().0,
+                    &TailEvidence {
+                        parent_slot: parent.slot,
+                        tickets_mark,
+                    },
+                )
+                .unwrap();
+                assert_eq!(state, decode_state(&fixture["post_light_state"]));
+                assert_eq!(state, verified.post_state);
+                match state.epoch().sealing {
+                    SealingSequence::Tickets(_) => ticket += 1,
+                    SealingSequence::Keys(_) => fallback += 1,
+                }
+                skipped += usize::from(
+                    header.slot / params.epoch_len > parent.slot / params.epoch_len + 1,
+                );
+                previous = PreviousEpoch {
+                    eta1: mark.entropy,
+                    eta2: mark.tickets_entropy,
+                    pending: mark.validators.clone(),
+                };
+                parent = verified_genesis(&params, header.clone(), state);
+            } else {
+                parent = verified;
+            }
+            history.push(header);
+        }
+        assert!(ticket > 0 && fallback > 0 && skipped > 0);
     }
 
     fn validator(seed: u8) -> ValidatorKey {

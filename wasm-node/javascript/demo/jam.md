@@ -38,7 +38,7 @@ runs the dedicated GRANDPA acceptance and proof capture.
   After editing Rust or JavaScript, stop the demo, run `npm run demo:jam:rebuild`,
   and reload the page.
 - **The `polkajam` executable, already built.** The spec is pinned to
-  `8ceedf46c4828137c8835e4227d7f3a62ada0463`. The harness looks in
+`1445c6cebf0557aa7f2d7ade851364f880f303c9`. The harness looks in
   `POLKAJAM_BIN_DIR` if set, otherwise on `PATH`, and stops if it is missing.
   The harness never clones or builds binaries. Build once in a PolkaJam checkout:
 

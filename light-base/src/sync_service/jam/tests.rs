@@ -64,6 +64,15 @@ fn root_state() -> State {
         max_blocks: 4,
         proof_owner: None,
         proof_attempts: Vec::new(),
+        tree_config: tree::Config {
+            max_blocks: NonZeroUsize::new(4).unwrap(),
+            max_bytes: usize::MAX,
+            max_epoch_records: NonZeroUsize::new(8).unwrap(),
+        },
+        warp_owner: None,
+        warp_revision: 0,
+        root_refusals: None,
+        peer_count: 2,
         params,
         subscribers: Vec::new(),
         stopped: false,
@@ -130,6 +139,14 @@ struct IoState {
     params: Option<Params>,
     reject_batch_above: Option<u32>,
     proofs: BTreeMap<Hash, Vec<u8>>,
+    warps: BTreeMap<u32, Vec<u8>>,
+    warp_requests: Vec<u32>,
+    bad_warp_once: bool,
+    warp_resets: VecDeque<&'static str>,
+    proof_resets: VecDeque<&'static str>,
+    block_resets: VecDeque<(Direction, &'static str)>,
+    logs: Vec<String>,
+    log_fields: Vec<(String, BTreeMap<String, String>)>,
     proof_requests: Vec<Hash>,
     preferred_child: Option<(Hash, Hash)>,
     no_blocks: usize,
@@ -252,11 +269,18 @@ impl PlatformRef for FakePlatform {
         _: platform::LogLevel,
         _: &'a str,
         message: &'a str,
-        _: impl Iterator<Item = (&'a str, &'a dyn core::fmt::Display)>,
+        fields: impl Iterator<Item = (&'a str, &'a dyn core::fmt::Display)>,
     ) {
-        if message == "jam-block-request-queued" {
+        if message == "jam-block-request-queued" || message == "jam-warp-request-queued" {
             self.0.lock().unwrap().queued = true;
         }
+        self.0.lock().unwrap().io.logs.push(message.into());
+        self.0.lock().unwrap().io.log_fields.push((
+            message.into(),
+            fields
+                .map(|(key, value)| (key.into(), value.to_string()))
+                .collect(),
+        ));
     }
     fn client_name(&self) -> Cow<'_, str> {
         "fake".into()
@@ -408,9 +432,33 @@ impl PlatformRef for FakePlatform {
             let hash: Hash = stream.outgoing[5..37].try_into().unwrap();
             let mut c = stream.control.lock().unwrap();
             c.io.proof_requests.push(hash);
+            if let Some(reason) = c.io.proof_resets.pop_front() {
+                return Err(reason);
+            }
             let Some(response) = c.io.proofs.get(&hash).cloned() else {
-                return Err("no justification");
+                return Err("jamnp-stream-reset:6 no justification");
             };
+            stream.incoming = response.into();
+            stream.response_started = true;
+        }
+        if stream.ce
+            && !stream.response_started
+            && stream.rw.write_bytes_queueable.is_none()
+            && stream.outgoing[0] == 153
+        {
+            let start = u32::from_le_bytes(stream.outgoing[5..9].try_into().unwrap());
+            let mut c = stream.control.lock().unwrap();
+            c.io.warp_requests.push(start);
+            if let Some(reason) = c.io.warp_resets.pop_front() {
+                return Err(reason);
+            }
+            let Some(mut response) = c.io.warps.get(&start).cloned() else {
+                return Err("jamnp-stream-reset:6 no warp fragments");
+            };
+            if c.io.bad_warp_once {
+                c.io.bad_warp_once = false;
+                response[5] ^= 1; // Authenticated header parent, not the frame/count.
+            }
             stream.incoming = response.into();
             stream.response_started = true;
         }
@@ -419,6 +467,16 @@ impl PlatformRef for FakePlatform {
             let request = BlockRequest::decode(&stream.outgoing[5..]).unwrap();
             assert!((1..=64).contains(&request.max_blocks));
             let mut control = stream.control.lock().unwrap();
+            if control
+                .io
+                .block_resets
+                .front()
+                .is_some_and(|(direction, _)| *direction == request.direction)
+            {
+                let (_, reason) = control.io.block_resets.pop_front().unwrap();
+                control.requests.push(request);
+                return Err(reason);
+            }
             let mut payload = Vec::new();
             let mut hash = request.hash;
             for _ in 0..request.max_blocks.min(64) {
@@ -464,7 +522,7 @@ impl PlatformRef for FakePlatform {
             control.requests.push(request);
             if payload.is_empty() {
                 control.io.no_blocks += 1;
-                return Err("no block");
+                return Err("jamnp-stream-reset:6 no block");
             }
             stream.incoming = if oversize {
                 u32::try_from(FRAME_BYTES + 1)
@@ -537,7 +595,7 @@ fn fixture(name: &str) -> Value {
     serde_json::from_slice(&std::fs::read(root.join(name)).unwrap()).unwrap()
 }
 fn bytes(value: &Value) -> Vec<u8> {
-    hex::decode(value.as_str().unwrap()).unwrap()
+    hex::decode(value.as_str().unwrap().trim_start_matches("0x")).unwrap()
 }
 fn fixture_setup() -> (FakePlatform, String, Hash, Vec<u8>) {
     let mut spec = fixture("chain-spec.polkajam.json");
@@ -883,6 +941,7 @@ fn all_foreground_requests_are_answered_without_substrate_handles() {
                 header_bytes: 4096,
                 authorities: state.authorities,
                 max_blocks: 4,
+                tree_config: state.tree_config,
             },
         ));
         assert!(service.serialize_chain_information().await.is_none());
@@ -1062,6 +1121,11 @@ fn external_verified_tree_memory_and_full_preserve_fixed_anchor() {
         max_blocks: config.max_blocks,
         proof_owner: None,
         proof_attempts: Vec::new(),
+        tree_config: config.tree_config,
+        warp_owner: None,
+        warp_revision: 0,
+        root_refusals: None,
+        peer_count: config.peers.len(),
     };
     for index in 0..36 {
         let header = Header::decode(
@@ -1098,6 +1162,11 @@ fn external_verified_tree_memory_and_full_preserve_fixed_anchor() {
         max_blocks: 2,
         proof_owner: None,
         proof_attempts: Vec::new(),
+        tree_config: state.tree_config,
+        warp_owner: None,
+        warp_revision: 0,
+        root_refusals: None,
+        peer_count: 2,
     };
     let snapshot = full.subscribe(16, false);
     let first = Header::decode(
@@ -2422,6 +2491,11 @@ fn external_captured_finality_requests_are_deduplicated_and_notifications_follow
         max_blocks: config.max_blocks,
         proof_owner: None,
         proof_attempts: Vec::new(),
+        tree_config: config.tree_config,
+        warp_owner: None,
+        warp_revision: 0,
+        root_refusals: None,
+        peer_count: config.peers.len(),
     };
     for encoded in fixture["headers"].as_array().unwrap() {
         let header = Header::decode(
@@ -2526,6 +2600,1129 @@ fn synthetic_driver(blocks: usize, capacity: usize) -> (FakePlatform, Config, Ve
     (platform, config, headers)
 }
 
+#[test]
+fn captured_warp_reanchors_and_finalizes_captured_suffix_in_two_batches() {
+    smol::block_on(async {
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../../lib/src/jam/finality/fixtures/polkajam-warp.json"
+        ))
+        .unwrap();
+        let spec = JamChainSpec::from_json_bytes(vector["spec"].to_string().as_bytes()).unwrap();
+        let config = Config::from_spec(&spec).unwrap();
+        let params = config.params.clone();
+        let records = vector["exchange"]["fragments"].as_array().unwrap();
+        let target =
+            Header::decode(&params, &bytes(&records.last().unwrap()["header_hex"])).unwrap();
+        let suffix: Vec<_> = vector["suffix"]["headers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| Header::decode(&params, &bytes(&record["header_hex"])).unwrap())
+            .collect();
+        let tip = suffix.last().unwrap();
+        let (platform, _, _, _) = d7_setup(true);
+        {
+            let mut c = platform.0.lock().unwrap();
+            c.responses.clear();
+            c.io.proofs.clear();
+            c.io.params = Some(params.clone());
+            c.io.warps = BTreeMap::from([(0, bytes(&vector["exchange"]["response_frame_hex"]))]);
+            for record in vector["tail_exchanges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .chain(vector["suffix"]["exchanges"].as_array().unwrap())
+            {
+                let frame = bytes(&record["response_frame_hex"]);
+                if record["kind"] == 128 {
+                    let block =
+                        smoldot::jam::types::Block::decode(&params, &frame[4..], FRAME_BYTES)
+                            .unwrap();
+                    c.responses.insert(block.header.hash(&params), frame);
+                } else if record["kind"] == 130 {
+                    c.io.proofs.insert(tip.hash(&params), frame);
+                }
+            }
+            c.handshake = framed(
+                Handshake {
+                    final_: Final {
+                        hash: tip.hash(&params),
+                        slot: tip.slot,
+                    },
+                    leaves: vec![],
+                }
+                .encode(),
+            );
+        }
+        let state = driver_state(config);
+        let old = state.lock().await.subscribe(16, false);
+        future::or(
+            async {
+                d7_drive(&platform, &params, &state, 0, 64).await;
+                panic!("captured warp disconnected");
+            },
+            future::or(
+                async {
+                    while !old.new_blocks.is_closed() {
+                        future::yield_now().await;
+                    }
+                    let follow = {
+                        let mut s = state.lock().await;
+                        assert_eq!(s.tree.finalized().hash, target.hash(&params));
+                        assert_eq!(
+                            u64::from(s.authorities.set_id()),
+                            vector["inferred_set_id"].as_u64().unwrap()
+                        );
+                        s.subscribe(16, false)
+                    };
+                    assert_eq!(
+                        blake2b_256(&follow.finalized_block_scale_encoded_header),
+                        target.hash(&params)
+                    );
+                    loop {
+                        if matches!(
+                            follow.new_blocks.recv().await.unwrap(),
+                            Notification::Finalized { .. }
+                        ) && state.lock().await.tree.finalized().hash == tip.hash(&params)
+                        {
+                            break;
+                        }
+                    }
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(10)).await;
+                    panic!("captured warp timed out");
+                },
+            ),
+        )
+        .await;
+        let c = platform.0.lock().unwrap();
+        assert!(c.io.logs.iter().any(|log| log == "jam-warp-applied"));
+        let requests: Vec<_> = c
+            .requests
+            .iter()
+            .filter(|r| r.direction == Direction::AscendingExclusive)
+            .collect();
+        assert!(!requests.is_empty() && requests.len() <= 2);
+        assert_eq!(requests[0].hash, target.hash(&params));
+        assert!(
+            requests.iter().all(|r| r.hash == target.hash(&params)
+                || suffix.iter().any(|h| h.hash(&params) == r.hash))
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires external D14 signed synthetic corpus"]
+fn external_warp_paginates_32_then_short_batch_or_no_data() {
+    smol::block_on(async {
+        for no_data in [false, true] {
+            let (platform, config, headers) = synthetic_driver(600, 32);
+            let params = config.params.clone();
+            let mut fragments = Vec::new();
+            {
+                let mut c = platform.0.lock().unwrap();
+                for h in headers.iter().filter(|h| h.epoch_mark.is_some()) {
+                    let mut fragment = h.encode(&params);
+                    fragment.extend_from_slice(&c.io.proofs[&h.hash(&params)][4..]);
+                    fragments.push((h.clone(), fragment));
+                }
+                assert!(fragments.len() > 32);
+                c.io.warps.clear();
+                for (index, batch) in fragments.chunks(32).enumerate() {
+                    if no_data && index != 0 {
+                        break;
+                    }
+                    let mut payload =
+                        smoldot::jam::codec::encode_natural(u64::try_from(batch.len()).unwrap());
+                    for (_, fragment) in batch {
+                        payload.extend(fragment);
+                    }
+                    c.io.warps
+                        .insert(u32::try_from(index * 32).unwrap(), framed(payload));
+                }
+            }
+            let target = if no_data {
+                &fragments[31].0
+            } else {
+                &fragments.last().unwrap().0
+            };
+            let state = driver_state(config);
+            let old = state.lock().await.subscribe(16, false);
+            future::or(
+                async {
+                    d7_drive(&platform, &params, &state, 0, 64).await;
+                    panic!("paginated warp disconnected");
+                },
+                future::or(
+                    async {
+                        while !old.new_blocks.is_closed() {
+                            future::yield_now().await;
+                        }
+                        assert_eq!(
+                            state.lock().await.tree.finalized().hash,
+                            target.hash(&params)
+                        );
+                    },
+                    async {
+                        smol::Timer::after(Duration::from_secs(10)).await;
+                        panic!("paginated warp timed out");
+                    },
+                ),
+            )
+            .await;
+            assert_eq!(platform.0.lock().unwrap().io.warp_requests, vec![0, 32]);
+            if no_data {
+                assert_reset_log(
+                    &platform,
+                    "jamnp-stream-reset:6 no warp fragments",
+                    "NoData",
+                );
+            }
+        }
+    });
+}
+
+/// Assembled from D1's live CE130 proofs and headers, NOT a live CE153 capture.
+fn d7_setup(pruned: bool) -> (FakePlatform, Config, Vec<Header>, Header) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../lib/src/jam/finality/fixtures/polkajam-grandpa.json");
+    let fixture: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let spec = JamChainSpec::from_json_bytes(fixture["spec"].to_string().as_bytes()).unwrap();
+    let config = Config::from_spec(&spec).unwrap();
+    let params = &config.params;
+    let headers: Vec<_> = fixture["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| Header::decode(params, &bytes(h)).unwrap())
+        .collect();
+    let limits = finality::Limits {
+        max_bytes: FRAME_BYTES,
+        max_ancestry_headers: 64,
+        max_ancestry_steps: 4096,
+    };
+    let mut fragments = Vec::new();
+    let mut proofs = BTreeMap::new();
+    for value in fixture["justifications"].as_array().unwrap() {
+        let raw = bytes(value);
+        let proof = Justification::decode(params, &raw, limits).unwrap();
+        let header = headers
+            .iter()
+            .find(|h| h.hash(params) == proof.target().hash)
+            .unwrap();
+        if header.epoch_mark.is_some() {
+            fragments.push((header.clone(), raw.clone()));
+        }
+        proofs.insert(proof.target().hash, framed(raw));
+    }
+    assert_eq!(fragments.len(), 3);
+    let target = fragments.last().unwrap().0.clone();
+    let mut response = smoldot::jam::codec::encode_natural(u64::try_from(fragments.len()).unwrap());
+    for (header, proof) in fragments {
+        response.extend(header.encode(params));
+        response.extend(proof);
+    }
+    let mut responses = BTreeMap::new();
+    let tail_floor = target.slot / params.epoch_len * params.epoch_len
+        - (params.epoch_len - params.epoch_tail_start + 1);
+    for header in &headers {
+        // Keep only the authenticated previous tail and the suffix above T.
+        if !pruned || header.slot >= tail_floor {
+            let mut block = header.encode(params);
+            block.extend([0; 7]);
+            responses.insert(header.hash(params), framed(block));
+        }
+    }
+    let tip = &headers[headers.len() - 2]; // Last fixture header has no captured proof.
+    let platform = FakePlatform(Arc::new(Mutex::new(Control {
+        handshake: framed(
+            Handshake {
+                final_: Final {
+                    hash: tip.hash(params),
+                    slot: tip.slot,
+                },
+                leaves: vec![],
+            }
+            .encode(),
+        ),
+        responses,
+        requests: vec![],
+        attempts: 0,
+        fail_first: false,
+        supported: true,
+        pins: vec![],
+        disconnect: false,
+        starve: false,
+        queued: false,
+        clock_shift: Duration::ZERO,
+        io: IoState {
+            params: Some(params.clone()),
+            proofs,
+            warps: BTreeMap::from([(0, framed(response))]),
+            ..IoState::default()
+        },
+    })));
+    (platform, config, headers, target)
+}
+
+async fn d7_drive(
+    platform: &FakePlatform,
+    params: &Params,
+    state: &Arc<async_lock::Mutex<State>>,
+    peer: usize,
+    ceiling: u32,
+) {
+    let connected = platform
+        .connect_multistream(MultiStreamAddress::WebTransport {
+            ip: "127.0.0.1".parse().unwrap(),
+            port: 4433,
+            cert_hashes: Cow::Owned(vec![[1; 32]; 3]),
+        })
+        .await;
+    drive(
+        platform,
+        "warp-scripted",
+        params,
+        peer,
+        state,
+        connected.connection,
+        (&mut FetchSize { count: 1, ceiling }, &mut None),
+    )
+    .await;
+}
+
+#[test]
+fn assembled_warp_reanchors_stops_followers_then_imports_and_finalizes() {
+    smol::block_on(async {
+        let (platform, config, headers, target) = d7_setup(true);
+        let params = config.params.clone();
+        let state = driver_state(config);
+        let old = state.lock().await.subscribe(16, false);
+        let mut oracle = state.lock().await.tree.finalized().clone();
+        for header in headers.iter().take_while(|h| h.slot <= target.slot) {
+            oracle = smoldot::jam::verify::verify_header(
+                &params,
+                &oracle,
+                header.clone(),
+                1_900_000_000,
+            )
+            .unwrap();
+        }
+        future::or(
+            async {
+                d7_drive(&platform, &params, &state, 0, 1).await;
+                panic!("warp driver disconnected");
+            },
+            future::or(
+                async {
+                    loop {
+                        if old.new_blocks.is_closed() {
+                            break;
+                        }
+                        future::yield_now().await;
+                    }
+                    let follow = {
+                        let mut s = state.lock().await;
+                        assert_eq!(s.tree.finalized().hash, target.hash(&params));
+                        assert_eq!(s.tree.finalized().post_state, oracle.post_state);
+                        assert_eq!(s.authorities.set_id(), 3);
+                        s.subscribe(16, false)
+                    };
+                    assert_eq!(
+                        blake2b_256(&follow.finalized_block_scale_encoded_header),
+                        target.hash(&params)
+                    );
+                    loop {
+                        if matches!(
+                            follow.new_blocks.recv().await.unwrap(),
+                            Notification::Finalized { .. }
+                        ) && state.lock().await.tree.finalized().slot > target.slot
+                        {
+                            break;
+                        }
+                    }
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(10)).await;
+                    panic!("warp timeout");
+                },
+            ),
+        )
+        .await;
+        let c = platform.0.lock().unwrap();
+        assert!(c.io.logs.iter().any(|s| s == "jam-warp-applied"));
+        assert_eq!(c.io.warp_requests, vec![0]);
+        assert!(
+            c.requests
+                .iter()
+                .any(|r| r.direction == Direction::DescendingInclusive)
+        );
+        let ascending: Vec<_> = c
+            .requests
+            .iter()
+            .filter(|r| r.direction == Direction::AscendingExclusive)
+            .collect();
+        assert_eq!(ascending[0].hash, target.hash(&params));
+        assert!(ascending.iter().all(|r| {
+            headers
+                .iter()
+                .any(|h| h.hash(&params) == r.hash && h.slot >= target.slot)
+        }));
+    });
+}
+
+#[test]
+fn warp_no_data_keeps_anchor_and_ordinary_sync_works() {
+    smol::block_on(async {
+        let (platform, config, _, _) = d7_setup(false);
+        platform.0.lock().unwrap().io.warps.clear();
+        let params = config.params.clone();
+        let root = config.tree.finalized().hash;
+        let state = driver_state(config);
+        let follow = state.lock().await.subscribe(16, false);
+        future::or(
+            async {
+                d7_drive(&platform, &params, &state, 0, 64).await;
+                panic!("ordinary sync disconnected");
+            },
+            future::or(
+                async {
+                    loop {
+                        if matches!(
+                            follow.new_blocks.recv().await.unwrap(),
+                            Notification::Block(_)
+                        ) {
+                            break;
+                        }
+                    }
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(10)).await;
+                    panic!("ordinary timeout");
+                },
+            ),
+        )
+        .await;
+        let s = state.lock().await;
+        assert_eq!(s.warp_revision, 0);
+        assert!(!follow.new_blocks.is_closed());
+        let c = platform.0.lock().unwrap();
+        assert_eq!(c.requests[0].hash, root);
+        assert_eq!(c.io.warp_requests, vec![0]);
+        assert!(!c.io.logs.iter().any(|s| s == "jam-warp-applied"));
+        drop(c);
+        assert_reset_log(
+            &platform,
+            "jamnp-stream-reset:6 no warp fragments",
+            "NoData",
+        );
+    });
+}
+
+#[test]
+fn tampered_warp_releases_reservation_and_other_peer_completes() {
+    smol::block_on(async {
+        let (platform, mut config, _, _) = d7_setup(true);
+        platform.0.lock().unwrap().io.bad_warp_once = true;
+        let peer = config.peers.remove(0);
+        let params = config.params.clone();
+        let state = driver_state(config);
+        state.lock().await.peer_count = 2;
+        future::or(
+            future::or(
+                peer_loop(&platform, "bad-peer", &peer, 0, &params, state.clone()),
+                peer_loop(&platform, "good-peer", &peer, 1, &params, state.clone()),
+            ),
+            future::or(
+                async {
+                    loop {
+                        if state.lock().await.warp_revision == 1 {
+                            break;
+                        }
+                        future::yield_now().await;
+                    }
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(10)).await;
+                    panic!("failover timeout");
+                },
+            ),
+        )
+        .await;
+        let c = platform.0.lock().unwrap();
+        assert_eq!(c.attempts, 2);
+        assert!(c.io.logs.iter().any(|s| s == "jam-warp-rejected"));
+        assert!(c.io.logs.iter().any(|s| s == "jam-warp-applied"));
+    });
+}
+
+#[test]
+fn ascending_no_data_at_available_root_waits_for_a_child_instead_of_stopping() {
+    smol::block_on(async {
+        let (platform, config, headers, _) = d7_setup(false);
+        let params = config.params.clone();
+        let root = config.tree.finalized().clone();
+        {
+            let mut c = platform.0.lock().unwrap();
+            c.io.warps.clear();
+            c.io.proofs.clear();
+            c.responses.clear();
+            let mut block = root.encoded.clone();
+            block.extend([0; 7]);
+            c.responses.insert(root.hash, framed(block));
+            c.handshake = framed(
+                Handshake {
+                    final_: Final {
+                        hash: root.hash,
+                        slot: root.slot,
+                    },
+                    leaves: vec![Final {
+                        hash: [99; 32],
+                        slot: headers.last().unwrap().slot,
+                    }],
+                }
+                .encode(),
+            );
+        }
+        let state = driver_state(config);
+        state.lock().await.peer_count = 2;
+        assert!(state.lock().await.refuse_root(1, root.hash).is_ok());
+        let follow = state.lock().await.subscribe(16, false);
+        future::or(
+            async {
+                d7_drive(&platform, &params, &state, 0, 64).await;
+                panic!("available root disconnected");
+            },
+            future::or(
+                async {
+                    loop {
+                        if platform.0.lock().unwrap().requests.iter().any(|r| {
+                            r.direction == Direction::DescendingInclusive && r.hash == root.hash
+                        }) {
+                            break;
+                        }
+                        future::yield_now().await;
+                    }
+                    smol::Timer::after(Duration::from_millis(20)).await;
+                    assert!(!state.lock().await.stopped);
+                    {
+                        let mut c = platform.0.lock().unwrap();
+                        c.io.no_blocks = 2;
+                        c.io.fork_announcement = Some(framed(
+                            smoldot::jam::types::Announcement {
+                                header: headers[0].clone(),
+                                final_: Final {
+                                    hash: root.hash,
+                                    slot: root.slot,
+                                },
+                            }
+                            .encode(&params),
+                        ));
+                    }
+                    assert!(matches!(
+                        follow.new_blocks.recv().await.unwrap(),
+                        Notification::Block(_)
+                    ));
+                    assert!(!state.lock().await.stopped);
+                    assert!(state.lock().await.root_refusals.is_none());
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(10)).await;
+                    panic!("root availability timeout");
+                },
+            ),
+        )
+        .await;
+    });
+}
+
+#[test]
+fn all_peers_refusing_warp_and_root_stop_without_reconnecting() {
+    smol::block_on(async {
+        let (platform, mut config, _, _) = d7_setup(false);
+        {
+            let mut c = platform.0.lock().unwrap();
+            c.io.warps.clear();
+            c.responses.clear();
+        }
+        let peer = config.peers.remove(0);
+        let params = config.params.clone();
+        let root = config.tree.finalized().hash;
+        let state = driver_state(config);
+        state.lock().await.peer_count = 2;
+        let follow = state.lock().await.subscribe(16, false);
+        future::or(
+            future::or(
+                peer_loop(&platform, "unserved-0", &peer, 0, &params, state.clone()),
+                peer_loop(&platform, "unserved-1", &peer, 1, &params, state.clone()),
+            ),
+            future::or(
+                async {
+                    loop {
+                        if state.lock().await.stopped {
+                            break;
+                        }
+                        future::yield_now().await;
+                    }
+                    assert!(follow.new_blocks.is_closed());
+                    assert_eq!(state.lock().await.tree.finalized().hash, root);
+                    let attempts = platform.0.lock().unwrap().attempts;
+                    smol::Timer::after(Duration::from_millis(1200)).await;
+                    assert_eq!(platform.0.lock().unwrap().attempts, attempts);
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(10)).await;
+                    panic!("terminal timeout");
+                },
+            ),
+        )
+        .await;
+        let c = platform.0.lock().unwrap();
+        assert_eq!(c.attempts, 2);
+        assert!(c.io.logs.iter().any(|s| s == "jam-anchor-unserved"));
+        assert!(c.io.log_fields.iter().any(|(message, fields)| {
+            message == "jam-anchor-unserved"
+                && fields.get("reason").map(String::as_str) == Some("NoData")
+        }));
+    });
+}
+
+#[test]
+fn reset_classifier_requires_the_exact_transport_code() {
+    for code in 0..=8 {
+        let expected = match code {
+            6 => net::RequestError::NoData,
+            2..=5 => net::RequestError::Transient,
+            _ => net::RequestError::Rejected,
+        };
+        assert_eq!(
+            classify_reset(&alloc::format!(
+                "jamnp-stream-reset:{code} original message"
+            )),
+            expected
+        );
+    }
+    assert_eq!(
+        classify_reset("jamnp-stream-reset:6 "),
+        net::RequestError::NoData
+    );
+    for message in [
+        "no block",
+        "streamErrorCode: 6",
+        "jamnp-stream-reset:6",
+        " jamnp-stream-reset:6 missing",
+        "jamnp-stream-reset:60 missing",
+        "jamnp-stream-reset:+6 missing",
+        "jamnp-stream-reset:06 missing",
+        "jamnp-stream-reset:6.0 missing",
+        "jamnp-stream-reset:6\tmissing",
+        "jamnp-stream-reset:999999999999999999999 missing",
+    ] {
+        assert_eq!(
+            classify_reset(message),
+            net::RequestError::Rejected,
+            "{message}"
+        );
+    }
+}
+
+fn assert_reset_log(platform: &FakePlatform, raw: &str, reason: &str) {
+    assert!(
+        platform
+            .0
+            .lock()
+            .unwrap()
+            .io
+            .log_fields
+            .iter()
+            .any(|(message, fields)| {
+                message == "jam-stream-reset"
+                    && fields.get("reason").map(String::as_str) == Some(reason)
+                    && fields.get("message").map(String::as_str) == Some(raw)
+            })
+    );
+}
+
+#[test]
+fn non_no_data_root_probes_reconnect_without_counting_and_later_succeed() {
+    for (raw, reason) in [
+        ("jamnp-stream-reset:2 busy", "Transient"),
+        ("jamnp-stream-reset:4 rate limited", "Transient"),
+        ("uncoded reset", "Rejected"),
+    ] {
+        smol::block_on(async {
+            let (first, mut config, _, _) = d7_setup(false);
+            let (second, _, _, _) = d7_setup(false);
+            let platforms = [&first, &second];
+            let peer = config.peers.remove(0);
+            let params = config.params.clone();
+            let root = config.tree.finalized().clone();
+            for platform in platforms {
+                let mut c = platform.0.lock().unwrap();
+                c.io.warps.clear();
+                c.responses.clear();
+                c.io.block_resets
+                    .push_back((Direction::DescendingInclusive, raw));
+            }
+            let state = driver_state(config);
+            state.lock().await.peer_count = 2;
+            let follow = state.lock().await.subscribe(16, false);
+            future::or(
+                future::or(
+                    peer_loop(&first, "probe-0", &peer, 0, &params, state.clone()),
+                    peer_loop(&second, "probe-1", &peer, 1, &params, state.clone()),
+                ),
+                future::or(
+                    async {
+                        loop {
+                            if platforms.iter().all(|p| {
+                                p.0.lock()
+                                    .unwrap()
+                                    .io
+                                    .logs
+                                    .iter()
+                                    .any(|s| s == "jam-reconnect")
+                            }) {
+                                break;
+                            }
+                            future::yield_now().await;
+                        }
+                        assert!(!state.lock().await.stopped);
+                        assert!(state.lock().await.root_refusals.is_none());
+                        assert!(!follow.new_blocks.is_closed());
+                        for platform in platforms {
+                            assert_reset_log(platform, raw, reason);
+                            let mut c = platform.0.lock().unwrap();
+                            assert_eq!(c.attempts, 1);
+                            assert_eq!(c.requests.len(), 2);
+                            let mut block = root.encoded.clone();
+                            block.extend([0; 7]);
+                            c.responses.insert(root.hash, framed(block));
+                        }
+                        loop {
+                            if platforms
+                                .iter()
+                                .all(|p| p.0.lock().unwrap().requests.len() >= 3)
+                            {
+                                break;
+                            }
+                            future::yield_now().await;
+                        }
+                        // Let the successful root response reach the driver. A lost
+                        // probe would issue another ascending request before this one.
+                        smol::Timer::after(Duration::from_millis(100)).await;
+                        for platform in platforms {
+                            let c = platform.0.lock().unwrap();
+                            assert_eq!(c.attempts, 2);
+                            assert_eq!(c.requests.len(), 3);
+                            assert_eq!(c.requests[0].direction, Direction::AscendingExclusive);
+                            assert!(c.requests[1..].iter().all(|r| r.hash == root.hash
+                                && r.direction == Direction::DescendingInclusive));
+                            assert!(!c.io.logs.iter().any(|s| s == "jam-anchor-unserved"));
+                        }
+                        assert!(!state.lock().await.stopped);
+                        assert!(state.lock().await.root_refusals.is_none());
+                        assert!(!follow.new_blocks.is_closed());
+                    },
+                    async {
+                        smol::Timer::after(Duration::from_secs(10)).await;
+                        panic!("root probe retry timed out: {raw}");
+                    },
+                ),
+            )
+            .await;
+        });
+    }
+}
+
+#[test]
+fn uncoded_root_ascending_reset_drops_connection_without_arming_probe() {
+    smol::block_on(async {
+        let (platform, config, _, _) = d7_setup(false);
+        let params = config.params.clone();
+        let root = config.tree.finalized().hash;
+        {
+            let mut c = platform.0.lock().unwrap();
+            c.io.warps.clear();
+            c.io.block_resets
+                .push_back((Direction::AscendingExclusive, "uncoded ascending reset"));
+        }
+        let state = driver_state(config);
+        let mut probe = None;
+        let connected = platform
+            .connect_multistream(MultiStreamAddress::WebTransport {
+                ip: "127.0.0.1".parse().unwrap(),
+                port: 4433,
+                cert_hashes: Cow::Owned(vec![[1; 32]; 3]),
+            })
+            .await;
+        future::or(
+            drive(
+                &platform,
+                "uncoded",
+                &params,
+                0,
+                &state,
+                connected.connection,
+                (&mut FetchSize::default(), &mut probe),
+            ),
+            async {
+                smol::Timer::after(Duration::from_secs(10)).await;
+                panic!("uncoded reset did not disconnect");
+            },
+        )
+        .await;
+        assert_eq!(probe, None);
+        assert!(state.lock().await.root_refusals.is_none());
+        assert!(!state.lock().await.stopped);
+        let c = platform.0.lock().unwrap();
+        assert_eq!(c.requests.len(), 1);
+        assert_eq!(c.requests[0].hash, root);
+        assert_eq!(c.requests[0].direction, Direction::AscendingExclusive);
+        assert_eq!(c.io.live_connections, 0);
+        drop(c);
+        assert_reset_log(&platform, "uncoded ascending reset", "Rejected");
+    });
+}
+
+#[test]
+fn reconnect_discards_retained_probe_after_finalized_root_changes() {
+    smol::block_on(async {
+        let (platform, config, headers, _) = d7_setup(false);
+        let params = config.params.clone();
+        let old_root = config.tree.finalized().hash;
+        let state = driver_state(config);
+        let mut probe = Some(old_root);
+        // Another peer finalizes while this peer's root probe awaits reconnect.
+        let new_root = {
+            let mut s = state.lock().await;
+            for header in headers {
+                let hash = header.hash(&params);
+                s.insert(header, 1_900_000_000).unwrap();
+                let proof = platform.0.lock().unwrap().io.proofs.get(&hash).cloned();
+                if let Some(proof) = proof {
+                    s.finalize(hash, &proof[4..]).unwrap();
+                    break;
+                }
+            }
+            s.tree.finalized().hash
+        };
+        assert_ne!(new_root, old_root);
+        {
+            let mut c = platform.0.lock().unwrap();
+            // Do not let a successful warp clear the probe instead of drive's
+            // entry check. Stop at the first ordinary ascending request.
+            c.io.warps.clear();
+            c.io.block_resets
+                .push_back((Direction::AscendingExclusive, "scripted reconnect reset"));
+        }
+        let connected = platform
+            .connect_multistream(MultiStreamAddress::WebTransport {
+                ip: "127.0.0.1".parse().unwrap(),
+                port: 4433,
+                cert_hashes: Cow::Owned(vec![[1; 32]; 3]),
+            })
+            .await;
+        future::or(
+            drive(
+                &platform,
+                "stale-probe",
+                &params,
+                0,
+                &state,
+                connected.connection,
+                (&mut FetchSize::default(), &mut probe),
+            ),
+            async {
+                smol::Timer::after(Duration::from_secs(10)).await;
+                panic!("stale-probe reconnect did not finish");
+            },
+        )
+        .await;
+        assert_eq!(probe, None);
+        assert!(state.lock().await.root_refusals.is_none());
+        let c = platform.0.lock().unwrap();
+        assert_eq!(c.requests.len(), 1);
+        assert!(c.requests.iter().all(|request| request.hash != old_root));
+        assert_eq!(c.requests[0].hash, new_root);
+        assert_eq!(c.requests[0].direction, Direction::AscendingExclusive);
+    });
+}
+
+#[test]
+fn warp_rate_limit_drops_connection_and_other_peer_completes() {
+    smol::block_on(async {
+        let (limited, mut config, _, _) = d7_setup(true);
+        let (serving, _, _, _) = d7_setup(true);
+        limited
+            .0
+            .lock()
+            .unwrap()
+            .io
+            .warp_resets
+            .push_back("jamnp-stream-reset:4 rate limited");
+        let peer = config.peers.remove(0);
+        let params = config.params.clone();
+        let state = driver_state(config);
+        state.lock().await.peer_count = 2;
+        future::or(
+            peer_loop(&limited, "limited", &peer, 0, &params, state.clone()),
+            future::or(
+                async {
+                    loop {
+                        if limited
+                            .0
+                            .lock()
+                            .unwrap()
+                            .io
+                            .logs
+                            .iter()
+                            .any(|s| s == "jam-reconnect")
+                        {
+                            break;
+                        }
+                        future::yield_now().await;
+                    }
+                    assert_eq!(state.lock().await.warp_owner, None);
+                    assert_eq!(state.lock().await.warp_revision, 0);
+                    assert!(
+                        limited.0.lock().unwrap().requests.is_empty(),
+                        "rate limit must not enter warp tail or ordinary sync"
+                    );
+                    future::or(
+                        peer_loop(&serving, "serving", &peer, 1, &params, state.clone()),
+                        async {
+                            while state.lock().await.warp_revision == 0 {
+                                future::yield_now().await;
+                            }
+                        },
+                    )
+                    .await;
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(10)).await;
+                    panic!("warp rate limit failover timed out");
+                },
+            ),
+        )
+        .await;
+        assert_eq!(state.lock().await.warp_revision, 1);
+        assert!(!state.lock().await.stopped);
+        assert_reset_log(&limited, "jamnp-stream-reset:4 rate limited", "Transient");
+        let c = limited.0.lock().unwrap();
+        assert_eq!(c.attempts, 1);
+        assert_eq!(c.io.live_connections, 0);
+        assert_eq!(c.io.warp_requests, [0]);
+        assert!(
+            c.io.log_fields
+                .iter()
+                .any(|(message, fields)| message == "jam-warp-rejected"
+                    && fields.get("reason").map(String::as_str) == Some("Transient"))
+        );
+        assert!(
+            serving
+                .0
+                .lock()
+                .unwrap()
+                .io
+                .logs
+                .iter()
+                .any(|s| s == "jam-warp-applied")
+        );
+    });
+}
+
+#[test]
+fn typed_proof_resets_release_reservation_without_disconnecting() {
+    for (raw, reason) in [
+        ("jamnp-stream-reset:6 no proof", "NoData"),
+        ("jamnp-stream-reset:2 busy proof", "Transient"),
+    ] {
+        smol::block_on(async {
+            let (platform, config, headers, _) = d7_setup(false);
+            let params = config.params.clone();
+            let root_slot = config.tree.finalized().slot;
+            let tip = &headers[headers.len() - 2];
+            {
+                let mut c = platform.0.lock().unwrap();
+                c.io.warps.clear();
+                c.io.proof_resets.push_back(raw);
+            }
+            let state = driver_state(config);
+            future::or(
+                async {
+                    d7_drive(&platform, &params, &state, 0, 1).await;
+                    panic!("proof reset disconnected: {raw}");
+                },
+                future::or(
+                    async {
+                        while state.lock().await.tree.best().slot < tip.slot {
+                            future::yield_now().await;
+                        }
+                    },
+                    async {
+                        smol::Timer::after(Duration::from_secs(10)).await;
+                        panic!("proof retry timed out: {raw}");
+                    },
+                ),
+            )
+            .await;
+            assert_reset_log(&platform, raw, reason);
+            let mut s = state.lock().await;
+            assert_eq!(s.tree.finalized().slot, root_slot);
+            assert!(s.proof_owner.is_none());
+            // The first unavailable set-change proof still blocks finality,
+            // but another peer remains free to serve it.
+            assert!(
+                s.reserve_proof(
+                    1,
+                    &Final {
+                        hash: tip.hash(&params),
+                        slot: tip.slot
+                    }
+                )
+                .is_some()
+            );
+            let c = platform.0.lock().unwrap();
+            assert_eq!(c.attempts, 1);
+            assert_eq!(c.io.proof_requests.len(), 1);
+        });
+    }
+}
+
+#[test]
+fn warp_reservation_and_refusals_are_snapshot_scoped() {
+    let mut s = root_state();
+    let root = s.tree.finalized().hash;
+    s.proof_owner = Some((0, root));
+    assert!(s.reserve_warp(1).is_none());
+    s.proof_owner = None;
+    assert!(s.reserve_warp(0).is_some());
+    assert!(s.reserve_warp(1).is_none());
+    assert_eq!(
+        s.reserve_proof(
+            1,
+            &Final {
+                hash: root,
+                slot: 10
+            }
+        ),
+        None
+    );
+    s.warp_owner = None;
+    assert!(s.refuse_root(0, root).is_ok());
+    assert!(s.refuse_root(0, root).is_ok());
+    assert!(s.refuse_root(1, [99; 32]).is_ok());
+    assert_eq!(
+        s.refuse_root(1, root),
+        Err(AnchorUnserved {
+            hash: root,
+            slot: s.tree.finalized().slot
+        })
+    );
+}
+
+#[test]
+fn warp_tail_authenticates_every_batch_and_mark_placement() {
+    use smoldot::jam::types::Ticket;
+    let mut s = root_state();
+    s.params.epoch_len = 12;
+    s.params.epoch_tail_start = 10;
+    let p = &s.params;
+    let mut h9 = Header::decode(p, &s.tree.finalized().encoded).unwrap();
+    h9.slot = 9;
+    let mut h10 = h9.clone();
+    h10.slot = 10;
+    h10.parent = h9.hash(p);
+    h10.tickets_mark = Some(vec![
+        Ticket {
+            id: [1; 32],
+            attempt: 0
+        };
+        12
+    ]);
+    let mut h11 = h9.clone();
+    h11.slot = 11;
+    h11.parent = h10.hash(p);
+    let mut target = h9.clone();
+    target.slot = 12;
+    target.parent = h11.hash(p);
+    let make = || {
+        let mut w = Warp::new(&s);
+        w.target = Some(target.clone());
+        w.chain_done = true;
+        w.prepare_tail(&s).unwrap();
+        w
+    };
+    let mut w = make();
+    let mut bad = h11.clone();
+    bad.parent[0] ^= 1;
+    assert!(matches!(w.tail_header(p, bad), Err(WarpError::InvalidTail)));
+    let mut w = make();
+    for h in [&h11, &h10] {
+        w.tail_header(p, h.clone()).unwrap();
+        assert!(!w.tail.as_ref().unwrap().done);
+    }
+    w.tail_header(p, h9.clone()).unwrap();
+    let tail = w.tail.unwrap();
+    assert!(tail.done);
+    assert_eq!(tail.scanned, 3);
+    assert_eq!(tail.evidence.unwrap().tickets_mark, h10.tickets_mark);
+    // Root-parent fast path uses the trusted anchor's post-state, without I/O.
+    let mut w = Warp::new(&s);
+    target.parent = s.tree.finalized().hash;
+    w.target = Some(target);
+    w.prepare_tail(&s).unwrap();
+    assert!(w.tail.unwrap().done);
+}
+
+#[test]
+fn staged_warp_failure_is_atomic_and_root_parent_needs_no_tail_fetch() {
+    smol::block_on(async {
+        let (platform, config, headers, _) = d7_setup(false);
+        let params = config.params.clone();
+        let state = driver_state(config);
+        let mut s = state.lock().await;
+        let root = s.tree.finalized().clone();
+        let authorities = s.authorities.clone();
+        let follower = s.subscribe(16, false);
+        let payload = platform.0.lock().unwrap().io.warps[&0][4..].to_vec();
+        let limits = finality::WarpLimits {
+            max_fragments: 32,
+            max_header_bytes: s.header_bytes,
+            proof: s.proof_limits(),
+        };
+        let first = finality::decode_warp_response(&params, &payload, &limits)
+            .unwrap()
+            .remove(0);
+        let mut one = vec![1];
+        one.extend(first.header.encode(&params));
+        let proof_frame = platform.0.lock().unwrap().io.proofs[&first.header.hash(&params)].clone();
+        one.extend_from_slice(&proof_frame[4..]);
+        let mut w = s.reserve_warp(0).unwrap();
+        w.advance(&params, &one, &limits).unwrap();
+        w.prepare_tail(&s).unwrap();
+        assert!(w.tail.as_ref().unwrap().done);
+        assert_eq!(w.tail.as_ref().unwrap().scanned, 0);
+        w.previous.eta1[0] ^= 1;
+        assert!(matches!(s.apply_warp(0, w), Err(WarpError::State(_))));
+        assert_eq!(s.tree.finalized(), &root);
+        assert_eq!(s.authorities, authorities);
+        assert!(!follower.new_blocks.is_closed());
+        s.warp_owner = None;
+        let mut w = s.reserve_warp(0).unwrap();
+        w.advance(&params, &one, &limits).unwrap();
+        w.prepare_tail(&s).unwrap();
+        s.tree_config.max_bytes = 1;
+        assert!(matches!(s.apply_warp(0, w), Err(WarpError::Tree(_))));
+        assert_eq!(s.tree.finalized(), &root);
+        assert_eq!(s.authorities, authorities);
+        assert!(!follower.new_blocks.is_closed());
+        assert_eq!(first.header, headers[0]);
+    });
+}
+
 fn driver_state(config: Config) -> Arc<async_lock::Mutex<State>> {
     Arc::new(async_lock::Mutex::new(State {
         #[cfg(test)]
@@ -2539,6 +3736,11 @@ fn driver_state(config: Config) -> Arc<async_lock::Mutex<State>> {
         max_blocks: config.max_blocks,
         proof_owner: None,
         proof_attempts: vec![],
+        tree_config: config.tree_config,
+        warp_owner: None,
+        warp_revision: 0,
+        root_refusals: None,
+        peer_count: config.peers.len(),
     }))
 }
 
@@ -2651,6 +3853,7 @@ fn external_full_parameter_1200_blocks_interleave_finality() {
             )
             .unwrap(),
             max_blocks: limits.max_blocks.get(),
+            tree_config: limits,
         };
         let state = driver_state(config);
         state.lock().await.test_verifier = Some(|params, parent, header| {
@@ -2762,7 +3965,7 @@ async fn scripted_drive(
         0,
         state,
         connected.connection,
-        &mut FetchSize::default(),
+        (&mut FetchSize::default(), &mut None),
     )
     .await;
 }
@@ -3002,7 +4205,7 @@ fn external_oversized_batch_retries_with_persistent_lower_ceiling() {
                     0,
                     &state,
                     connected.connection,
-                    &mut size,
+                    (&mut size, &mut None),
                 ),
                 async {
                     smol::Timer::after(Duration::from_secs(10)).await;
@@ -3031,7 +4234,7 @@ fn external_oversized_batch_retries_with_persistent_lower_ceiling() {
                     0,
                     &state,
                     connected.connection,
-                    &mut size,
+                    (&mut size, &mut None),
                 )
                 .await;
                 panic!("resized batch disconnected");
