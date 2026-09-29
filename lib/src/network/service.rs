@@ -2290,7 +2290,7 @@ where
                                         .connections_by_peer_id
                                         .range(
                                             (peer_index, ConnectionId::MIN)
-                                                ..=(peer_index, ConnectionId::MIN),
+                                                ..=(peer_index, ConnectionId::MAX),
                                         )
                                         .any(|(_, c)| {
                                             let state = self.inner.connection_state(*c);
