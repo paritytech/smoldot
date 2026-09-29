@@ -161,14 +161,14 @@ fn external_full_parameter_1200_blocks_interleave_finality() {
             )
             .unwrap(),
             max_blocks: limits.max_blocks.get(),
+            tree_config: limits,
         };
         let state = driver_state(config);
         let subscription = state.lock().await.subscribe(16, false);
         let mut imported = Vec::new();
         let mut peak_nodes = 0;
         let mut peak_bytes = 0;
-        let mut fetch = FetchSize::default();
-        let driver = drive_peer(&platform, &params, &state, 0, &mut fetch);
+        let driver = drive_scripted(&platform, &params, &state, 0, 64);
         while_driving(30, "full-parameter catch-up", driver, async {
             loop {
                 if let Notification::Block(block) = subscription.new_blocks.recv().await.unwrap() {
@@ -211,8 +211,7 @@ fn external_ascending_600_blocks_interleaves_finality_without_reconnect() {
         let state = driver_state(config);
         let subscription = state.lock().await.subscribe(16, false);
         let mut imported = Vec::new();
-        let mut fetch = FetchSize::default();
-        let driver = drive_peer(&platform, &params, &state, 0, &mut fetch);
+        let driver = drive_scripted(&platform, &params, &state, 0, 64);
         while_driving(30, "600-block catch-up", driver, async {
             loop {
                 if let Notification::Block(block) = subscription.new_blocks.recv().await.unwrap() {
@@ -265,8 +264,7 @@ fn external_dead_first_child_escapes_through_bounded_announcement_repair() {
             c.io.fork_announcement = Some(announcement_frame(&params, headers[9].clone(), genesis));
         }
         let state = driver_state(config);
-        let mut fetch = FetchSize::default();
-        let driver = drive_peer(&platform, &params, &state, 0, &mut fetch);
+        let driver = drive_scripted(&platform, &params, &state, 0, 64);
         let tip = headers[9].hash(&params);
         let recovered = yield_until(async || state.lock().await.tree.best().hash() == tip);
         while_driving(15, "fork recovery", driver, recovered).await;
@@ -300,8 +298,7 @@ fn external_full_unfinalizable_tree_exits_instead_of_deadlocking() {
         let params = config.params.clone();
         platform.0.lock().unwrap().io.proofs.clear();
         let state = driver_state(config);
-        let mut fetch = FetchSize::default();
-        let driver = drive_peer(&platform, &params, &state, 0, &mut fetch);
+        let driver = drive_scripted(&platform, &params, &state, 0, 64);
         within(10, "exit of the full unfinalizable tree", driver).await;
         let s = state.lock().await;
         assert_eq!(s.tree.len(), 4);
@@ -324,15 +321,16 @@ fn external_oversized_batch_retries_with_persistent_lower_ceiling() {
             count: 8,
             ceiling: 64,
         };
+        let mut probe = None;
         for expected in [4, 2] {
-            let driver = drive_peer(&platform, &params, &state, 0, &mut size);
+            let driver = drive_peer(&platform, &params, &state, 0, (&mut size, &mut probe));
             within(10, "end of the driver on an oversized response", driver).await;
             assert_eq!(size.count, expected);
             assert_eq!(state.lock().await.tree.len(), 1);
         }
         let tip = headers[9].hash(&params);
         let caught_up = yield_until(async || state.lock().await.tree.best().hash() == tip);
-        let driver = drive_peer(&platform, &params, &state, 0, &mut size);
+        let driver = drive_peer(&platform, &params, &state, 0, (&mut size, &mut probe));
         while_driving(10, "catch-up in resized batches", driver, caught_up).await;
         assert_eq!(size.count, 2);
         let c = platform.0.lock().unwrap();

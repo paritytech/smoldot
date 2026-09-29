@@ -216,7 +216,7 @@ fn state_read_scripted_driver_retries_proof_nodata_and_transient() {
                     future::yield_now().await;
                 }
             };
-            let mut fetch = FetchSize::default();
+            let (mut fetch, mut probe) = (FetchSize::default(), None);
             let connection = fake_connection(&platform);
             let driver = drive(
                 &platform,
@@ -225,7 +225,7 @@ fn state_read_scripted_driver_retries_proof_nodata_and_transient() {
                 0,
                 &state,
                 connection,
-                &mut fetch,
+                (&mut fetch, &mut probe),
             );
             future::or(driver, released).await;
             // The teardown cleanup of `peer_loop`; also covers an opening
@@ -236,7 +236,7 @@ fn state_read_scripted_driver_retries_proof_nodata_and_transient() {
             if failure != Transient {
                 assert!(state.lock().await.reads.reserve(0).is_none());
             }
-            let mut fetch = FetchSize::default();
+            let (mut fetch, mut probe) = (FetchSize::default(), None);
             let connection = fake_connection(&platform);
             let driver = drive(
                 &platform,
@@ -245,7 +245,7 @@ fn state_read_scripted_driver_retries_proof_nodata_and_transient() {
                 peer,
                 &state,
                 connection,
-                &mut fetch,
+                (&mut fetch, &mut probe),
             );
             let result = while_driving(10, "state read", driver, async {
                 rx.await.unwrap().unwrap()
@@ -317,10 +317,10 @@ fn three_resets_without_code_in_a_row_end_the_connection() {
             }
             future::pending().await
         };
-        let mut fetch = FetchSize::default();
+        let budget = (&mut FetchSize::default(), &mut None);
         let connection = fake_connection(&platform);
         let driver = drive_connection(
-            &platform, "codeless", &params, 0, &state, connection, &mut fetch,
+            &platform, "codeless", &params, 0, &state, connection, budget,
         );
         let end = within(10, "resets without a code", future::or(driver, reads)).await;
         assert_eq!(end.as_str(), "resets-without-code");

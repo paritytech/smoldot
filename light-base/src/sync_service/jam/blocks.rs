@@ -6,7 +6,8 @@
 use super::{
     InsertFailure, REPAIR_LIMIT,
     connection::{Conn, InFlight},
-    log::{End, Hex, Tag, direction_str, event, request_ended},
+    log::{End, Hex, Opt, Tag, direction_str, event, request_ended},
+    warp::warp_token,
 };
 use crate::{log, platform::PlatformRef};
 use alloc::vec::Vec;
@@ -18,6 +19,7 @@ use smoldot::jam::{
 impl<P: PlatformRef> Conn<'_, P> {
     /// Takes the peer's handshake: its finalized head and leaves.
     pub(super) async fn handshake(&mut self, h: Handshake) {
+        self.advertisement_revision = 1;
         self.handshaken = true;
         self.advertised = Some(h.final_.clone());
         self.peer_slot = h
@@ -31,6 +33,10 @@ impl<P: PlatformRef> Conn<'_, P> {
 
     /// Takes an announcement: a new head and the peer's finalized head.
     pub(super) async fn announcement(&mut self, a: Announcement) -> Result<(), End> {
+        let Some(revision) = self.advertisement_revision.checked_add(1) else {
+            return Err(End::Limit);
+        };
+        self.advertisement_revision = revision;
         event!(
             self,
             "jam-announcement",
@@ -59,7 +65,8 @@ impl<P: PlatformRef> Conn<'_, P> {
         Ok(())
     }
 
-    /// Handles a CE 128 response: headers to repair or import.
+    /// Handles a CE 128 response: a root probe's answer, the warp join's
+    /// head, else headers to repair or import.
     pub(super) async fn block_response(
         &mut self,
         request_id: net::RequestId,
@@ -80,6 +87,46 @@ impl<P: PlatformRef> Conn<'_, P> {
                 .sum::<usize>()
         );
         let request = r.expected;
+        if *self.root_probe == Some(request.hash)
+            && request.direction == Direction::DescendingInclusive
+        {
+            *self.root_probe = None;
+            self.state.lock().await.root_refusals = None;
+            self.waiting_for_finality = Some(self.advertised.as_ref().map_or(0, |f| f.slot));
+            return Ok(());
+        }
+        if let Some(warp) = &mut self.warp {
+            if request.direction != Direction::DescendingInclusive || request.max_blocks != 1 {
+                return Err(End::UnexpectedResponse);
+            }
+            if let Err(error) =
+                warp.receive_headers(self.params, blocks, self.state.lock().await.header_bytes)
+            {
+                event!(
+                    self,
+                    "jam-warp-rejected",
+                    slot = self.peer_index,
+                    step = "head",
+                    req = r.tag.req,
+                    error = warp_token(&error)
+                );
+                return Err(End::WarpRejected);
+            }
+            event!(
+                self,
+                "jam-warp-head-fetched",
+                slot = self.peer_index,
+                req = r.tag.req,
+                hash = Hex(&request.hash),
+                block_slot = Opt(warp.head.as_ref().map(|head| head.slot)),
+                authenticated = if warp.finalized.is_some() {
+                    "by-fragment"
+                } else {
+                    "needs-justification"
+                }
+            );
+            return Ok(());
+        }
         let mut bytes = 0;
         for block in blocks {
             let header_len = block.header.encode(self.params).len();
@@ -116,6 +163,41 @@ impl<P: PlatformRef> Conn<'_, P> {
         };
         request_ended!(self, "jam-block-request-ended", r, "failed", error = ?reason);
         let request = r.expected;
+        if self.warp.is_some()
+            || !matches!(
+                reason,
+                net::RequestError::NoData | net::RequestError::ResetWithoutCode
+            )
+        {
+            return Err(End::BlockFailed);
+        }
+        if *self.root_probe == Some(request.hash)
+            && request.direction == Direction::DescendingInclusive
+        {
+            let mut s = self.state.lock().await;
+            if let Err(error) = s.refuse_root(self.peer_index, request.hash) {
+                log!(
+                    self.platform,
+                    Warn,
+                    self.log_name,
+                    "jam-anchor-unserved",
+                    reason = ?reason,
+                    error = error,
+                    hash = ?request.hash,
+                    slot = s.tree.finalized().slot()
+                );
+                return Err(End::AnchorUnserved);
+            }
+            return Err(End::RootRefused);
+        }
+        if request.direction == Direction::AscendingExclusive {
+            let s = self.state.lock().await;
+            if request.hash == s.tree.finalized().hash() {
+                *self.root_probe = Some(request.hash);
+                self.local_progress = true;
+                return Ok(());
+            }
+        }
         if request.direction == Direction::DescendingInclusive {
             self.repair.clear();
             self.repair_ready = false;
@@ -137,7 +219,7 @@ impl<P: PlatformRef> Conn<'_, P> {
     /// batch size first when that response was blocks.
     pub(super) fn message_too_large(&mut self) -> Result<(), End> {
         if let Some(r) = &self.requested
-            && r.expected.direction == Direction::AscendingExclusive
+            && (r.expected.direction == Direction::AscendingExclusive || self.warp.is_some())
         {
             let before = self.fetch_size.count;
             self.fetch_size.oversized();
@@ -245,8 +327,8 @@ impl<P: PlatformRef> Conn<'_, P> {
         Ok(())
     }
 
-    /// Requests the next blocks: the parent of a repair header, or an
-    /// ascending batch from the cursor or the best block.
+    /// Requests the next blocks: the finalized root, the parent of a repair
+    /// header, or an ascending batch from the cursor or the best block.
     pub(super) async fn request_blocks(&mut self) -> Result<(), End> {
         let s = self.state.lock().await;
         if s.tree.len() + 1 >= s.max_blocks && s.proof_owner.is_some() {
@@ -257,7 +339,16 @@ impl<P: PlatformRef> Conn<'_, P> {
             // All proof candidates failed: don't deadlock on an unfinalizable fork.
             return Err(End::TreeFull);
         }
-        let request = if let Some(header) = self.repair.last() {
+        let request = if let Some(hash) = *self.root_probe {
+            Some((
+                BlockRequest {
+                    hash,
+                    direction: Direction::DescendingInclusive,
+                    max_blocks: 1,
+                },
+                "root-probe",
+            ))
+        } else if let Some(header) = self.repair.last() {
             Some((
                 BlockRequest {
                     hash: header.parent,
@@ -266,7 +357,7 @@ impl<P: PlatformRef> Conn<'_, P> {
                 },
                 "repair",
             ))
-        } else if self.waiting_for_finality.is_none() {
+        } else if self.waiting_for_finality.is_none() && self.announcements.is_empty() {
             let head = self
                 .cursor
                 .and_then(|hash| s.tree.get(&hash))

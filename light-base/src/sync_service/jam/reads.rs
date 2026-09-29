@@ -49,6 +49,16 @@ pub(crate) struct StateReadResult {
     pub range: VerifiedRange,
 }
 
+impl StateReadResult {
+    /// Whether this is the result of `read`: same block, root, trust and root header.
+    pub(super) fn answers(&self, read: &StateRead) -> bool {
+        self.at == read.at
+            && self.root == read.root
+            && self.trust == read.trust
+            && self.root_header == read.root_header
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StateReadError {
     Unavailable,
@@ -97,6 +107,14 @@ impl StateReads {
             || read.request.max_size == 0
         {
             return Err(net::Error::InvalidRequest);
+        }
+        if self.owner.is_none()
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|(_, tx)| tx.is_canceled())
+        {
+            self.pending = None;
         }
         if self.pending.is_some() || self.owner.is_some() {
             return Err(net::Error::Limit);
@@ -170,10 +188,7 @@ impl StateReads {
 }
 
 impl State {
-    /// Convenience for consumers: wait (None) until the best chain has an
-    /// authenticated child of the finalized head. This does not choose a root
-    /// inside the read verifier. Finalized-child reads instead come from callers
-    /// retaining that child's finality evidence, because the tree prunes its parent.
+    /// Wait until the best chain has an authenticated child of the finalized head.
     #[allow(dead_code)] // No production consumer yet.
     pub(super) fn finalized_read(
         &self,
@@ -263,10 +278,12 @@ impl<P: PlatformRef> Conn<'_, P> {
             .await
             .reads
             .release(self.peer_index, reason == net::RequestError::Transient);
-        if !matches!(
-            reason,
-            net::RequestError::NoData | net::RequestError::ResetWithoutCode
-        ) {
+        if self.warp.is_some()
+            || !matches!(
+                reason,
+                net::RequestError::NoData | net::RequestError::ResetWithoutCode
+            )
+        {
             return Err(End::StateFailed);
         }
         Ok(())
@@ -276,6 +293,7 @@ impl<P: PlatformRef> Conn<'_, P> {
     pub(super) async fn request_state(&mut self) -> Result<(), End> {
         let mut s = self.state.lock().await;
         if !s.stopped
+            && s.warp_owner.is_none_or(|owner| owner == self.peer_index)
             && let Some(request) = s.reads.reserve(self.peer_index)
         {
             let trust = s.reads.pending.as_ref().map(|(read, _)| read.trust);

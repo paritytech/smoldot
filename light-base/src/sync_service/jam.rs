@@ -3,10 +3,11 @@
 //! Header-only JAM synchronization with verified GRANDPA root advancement.
 //!
 //! Memory is bounded: the header tree and its rebuild copy share [`TREE_BYTES`]
-//! and hold at most 4096 headers, a response is at most [`FRAME_BYTES`], each
-//! connection keeps at most [`REPAIR_LIMIT`] repair headers and as many
-//! announcements, and at most [`MAX_SUBSCRIBERS`] subscriber queues hold at
-//! most 1 MiB each.
+//! and hold at most 4096 headers, a response is at most [`FRAME_BYTES`] and a
+//! warp response [`WARP_BYTES`], each connection keeps at most [`REPAIR_LIMIT`]
+//! repair headers and as many announcements, and at most [`MAX_SUBSCRIBERS`]
+//! subscriber queues hold at most 1 MiB each. A block larger than
+//! [`FRAME_BYTES`] cannot be fetched, which stalls sync at it.
 
 use super::{BlockNotification, Notification, SubscribeAll};
 use crate::{
@@ -30,11 +31,15 @@ use smoldot::jam::{
 
 const TREE_BYTES: usize = 16 * 1024 * 1024;
 const FRAME_BYTES: usize = 1024 * 1024;
+const WARP_BYTES: usize = 8 * 1024 * 1024;
 const REPAIR_LIMIT: usize = 8;
 const MAX_SUBSCRIBERS: usize = 8;
 const MAX_PEERS: usize = 2;
 const TIMEOUT: Duration = Duration::from_secs(20);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+/// Upper bound on a state read response, enough for the warp join's `C(4)` to
+/// `C(11)` range at full parameters.
+const STATE_READ_BYTES: u32 = 800_000;
 
 /// Why a JAM chain cannot be added.
 #[derive(Debug, derive_more::Display, derive_more::Error)]
@@ -75,6 +80,7 @@ pub(crate) struct Config {
     header_bytes: usize,
     authorities: AuthoritySet,
     max_blocks: usize,
+    tree_config: tree::Config,
 }
 
 struct Peer {
@@ -121,6 +127,7 @@ impl Config {
             authorities,
             max_blocks: max_blocks.get(),
             header_bytes,
+            tree_config: limits,
         })
     }
 
@@ -181,6 +188,12 @@ struct State {
     proof_owner: Option<(usize, Hash)>,
     /// Attempted configured peers per retained target. Never grows beyond the tree.
     proof_attempts: Vec<(Hash, u8)>,
+    tree_config: tree::Config,
+    warp_owner: Option<usize>,
+    warp_revision: u64,
+    /// Refusals apply only to this exact finalized root, by distinct peers.
+    root_refusals: Option<(Hash, u8)>,
+    peer_count: usize,
 }
 
 #[derive(Debug)]
@@ -221,6 +234,7 @@ impl State {
             return Err(InsertFailure::ResourceLimit);
         }
         let hash = header.hash(&self.params);
+        let extends_root = header.parent == self.tree.finalized().hash();
         let result =
             self.tree
                 .verify(header.parent, header, now)
@@ -229,8 +243,16 @@ impl State {
                     tree::VerifySuccess::AlreadyKnown => Ok(tree::Insert::AlreadyKnown),
                 });
         match result {
-            Ok(tree::Insert::AlreadyKnown) => Ok(()),
+            Ok(tree::Insert::AlreadyKnown) => {
+                if extends_root {
+                    self.root_refusals = None;
+                }
+                Ok(())
+            }
             Ok(tree::Insert::Inserted { evicted, .. }) => {
+                if extends_root {
+                    self.root_refusals = None;
+                }
                 if !evicted.is_empty() {
                     self.subscribers.clear();
                 }
@@ -319,6 +341,11 @@ async fn run<P: PlatformRef>(
         max_blocks: config.max_blocks,
         proof_owner: None,
         proof_attempts: Vec::new(),
+        tree_config: config.tree_config,
+        warp_owner: None,
+        warp_revision: 0,
+        root_refusals: None,
+        peer_count: config.peers.len(),
     }));
     let foreground = async {
         while let Ok(request) = rx.recv().await {
@@ -364,6 +391,7 @@ mod connection;
 mod grandpa;
 mod log;
 mod reads;
+mod warp;
 
 #[cfg(all(test, feature = "std"))]
 mod tests;

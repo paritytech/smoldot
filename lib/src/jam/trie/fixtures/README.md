@@ -21,3 +21,7 @@
   bootnode is split into JIP-4's `bootnodes` and `bootnodes_p256` lists, with
   `spec_sha256` (of the spec as sorted, compact JSON) recomputed; everything
   else is as captured.
+- `polkajam-join.json`: the join exchanges of `ce129.capture` (CE 130 and
+  CE 128 for F, the reads at F one by one and as one range, and F's child),
+  cut unchanged, with the epoch-boundary headers `0004` to `0006` of the
+  library's PolkaJam capture and the posterior states they lead to.
