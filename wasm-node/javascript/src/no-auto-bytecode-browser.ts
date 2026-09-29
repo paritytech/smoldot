@@ -249,7 +249,7 @@ function connect(config: ConnectionConfig): Connection {
         // Browsers expose no DNS API, so a multiaddress with a domain name is resolved over
         // DNS-over-HTTPS. Resolution is started here and is only awaited in
         // `onnegotiationneeded`, where the IP is actually needed.
-        let target: Promise<{ targetIp: string, ipVersion: string }>;
+        let target: Promise<{ targetIp: string, ipVersion: 4 | 6 }>;
         if ("targetIp" in config.address) {
             target = Promise.resolve({ targetIp: config.address.targetIp, ipVersion: config.address.ipVersion });
         } else {
@@ -264,7 +264,7 @@ function connect(config: ConnectionConfig): Connection {
             target = resolveDnsOverHttps(hostname, family, controller.signal).then(
                 (ip) => {
                     finished();
-                    return { targetIp: ip, ipVersion: ip.includes(':') ? '6' : '4' };
+                    return { targetIp: ip, ipVersion: ip.includes(':') ? 6 : 4 };
                 },
                 (error) => {
                     finished();
@@ -472,7 +472,7 @@ function connect(config: ConnectionConfig): Connection {
 
                 // The answer needs the literal IP address of the remote, resolution was already stared.
                 let targetIp: string;
-                let ipVersion: string;
+                let ipVersion: 4 | 6;
                 try {
                     ({ targetIp, ipVersion } = await target);
                 } catch (error) {

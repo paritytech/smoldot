@@ -76,7 +76,7 @@ export type Event =
 export type ParsedMultiaddr =
     { ty: "tcp", hostname: string, port: number } |
     { ty: "websocket", url: string } |
-    { ty: "webrtc", targetPort: number, ipVersion: string, targetIp: string, remoteTlsCertificateSha256: Uint8Array } |
+    { ty: "webrtc", targetPort: number, ipVersion: 4 | 6, targetIp: string, remoteTlsCertificateSha256: Uint8Array } |
     // WebRTC requires a literal IP address; the platform must resolve `hostname` before
     // connecting. `family` restricts the address family, or is `undefined` for either.
     { ty: "webrtc", targetPort: number, hostname: string, family: 4 | 6 | undefined, remoteTlsCertificateSha256: Uint8Array };
@@ -347,14 +347,14 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                     const targetPort = buffer.readUInt16BE(mem, addrPtr + 1);
                     const remoteTlsCertificateSha256 = mem.slice(addrPtr + 3, addrPtr + 35);
                     const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 35);
-                    address = { ty: "webrtc", ipVersion: '4', remoteTlsCertificateSha256, targetIp, targetPort }
+                    address = { ty: "webrtc", ipVersion: 4, remoteTlsCertificateSha256, targetIp, targetPort }
                     break;
                 }
                 case 17: {
                     const targetPort = buffer.readUInt16BE(mem, addrPtr + 1);
                     const remoteTlsCertificateSha256 = mem.slice(addrPtr + 3, addrPtr + 35);
                     const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 35);
-                    address = { ty: "webrtc", ipVersion: '6', remoteTlsCertificateSha256, targetIp, targetPort }
+                    address = { ty: "webrtc", ipVersion: 6, remoteTlsCertificateSha256, targetIp, targetPort }
                     break;
                 }
                 case 18: {

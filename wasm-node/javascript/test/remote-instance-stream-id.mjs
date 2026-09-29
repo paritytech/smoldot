@@ -34,7 +34,7 @@ const WEBSOCKET_ADDRESS = { ty: "websocket", url: "ws://127.0.0.1:1" };
 const WEBRTC_ADDRESS = {
   ty: "webrtc",
   targetPort: 1,
-  ipVersion: "4",
+  ipVersion: 4,
   targetIp: "127.0.0.1",
   remoteTlsCertificateSha256: new Uint8Array(32),
 };
