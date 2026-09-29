@@ -70,6 +70,7 @@ pub(super) async fn peer_loop<P: PlatformRef>(
             )
             .await;
             let mut s = state.lock().await;
+            s.reads.release(peer_index, false);
             if s.proof_owner.is_some_and(|(owner, _)| owner == peer_index) {
                 s.proof_owner = None;
             }
@@ -116,6 +117,22 @@ impl FetchSize {
         self.ceiling = self.count;
     }
 }
+
+/// The request error of a stream reset, from the peer's application error
+/// code if the platform reported one.
+pub(super) fn classify_reset(code: Option<u32>) -> net::RequestError {
+    match code {
+        Some(6) => net::RequestError::NoData,
+        Some(2..=5) => net::RequestError::Transient,
+        Some(_) => net::RequestError::Rejected,
+        None => net::RequestError::ResetWithoutCode,
+    }
+}
+
+/// Resets without a code in a row, with no response in between, that end a
+/// connection. Such a reset is taken as `NoData` where that is a normal
+/// answer, so this bounds a peer that fails every request that way.
+const RESETS_WITHOUT_CODE: u8 = 3;
 
 /// A request in flight on one connection.
 pub(super) struct InFlight<I, T> {
@@ -182,7 +199,10 @@ pub(super) struct Conn<'a, P: PlatformRef> {
     pub(super) announcements: VecDeque<Header>,
     pub(super) requested: Option<InFlight<P::Instant, BlockRequest>>,
     pub(super) proof_requested: Option<InFlight<P::Instant, Hash>>,
+    pub(super) state_requested: Option<InFlight<P::Instant, ()>>,
     pub(super) advertised: Option<Final>,
+    /// Resets without a code since the last response.
+    resets_without_code: u8,
     /// This turn did work that may leave more to do without a new I/O event.
     pub(super) local_progress: bool,
 }
@@ -246,7 +266,9 @@ pub(super) async fn drive_connection<P: PlatformRef>(
         announcements: VecDeque::new(),
         requested: None,
         proof_requested: None,
+        state_requested: None,
         advertised: None,
+        resets_without_code: 0,
         local_progress: false,
     };
     let end = loop {
@@ -278,6 +300,11 @@ impl<P: PlatformRef> Conn<'_, P> {
         for event in self.read_write(&now).await? {
             self.handle(event).await?;
         }
+        // Checked after the events, so that a reset whose handling ends the
+        // connection anyway keeps that reason.
+        if self.resets_without_code >= RESETS_WITHOUT_CODE {
+            return Err(End::ResetsWithoutCode);
+        }
         let pause_imports = {
             let s = self.state.lock().await;
             if s.tree.len() >= s.max_blocks && s.proof_owner.is_none() {
@@ -290,8 +317,13 @@ impl<P: PlatformRef> Conn<'_, P> {
         } else if !pause_imports && self.requested.is_none() {
             self.import_repaired(&now).await?;
         }
-        if self.handshaken && self.proof_requested.is_none() {
+        if self.handshaken && self.proof_requested.is_none() && self.state_requested.is_none() {
             self.request_justification().await?;
+        }
+        // Finality and state reads arbitrate the second slot; never enqueue a
+        // third request into the connection's two-request budget.
+        if self.handshaken && self.state_requested.is_none() && self.proof_requested.is_none() {
+            self.request_state().await?;
         }
         if self.handshaken
             && self.requested.is_none()
@@ -320,6 +352,10 @@ impl<P: PlatformRef> Conn<'_, P> {
         // This deadline starts while the request is still queued, before a stream
         // reservation exists. Peer-created streams cannot starve it indefinitely.
         let timed_out = [
+            (
+                InFlight::timed_out(&self.state_requested, now),
+                End::StateTimeout,
+            ),
             (InFlight::timed_out(&self.requested, now), End::BlockTimeout),
             (
                 InFlight::timed_out(&self.proof_requested, now),
@@ -330,6 +366,13 @@ impl<P: PlatformRef> Conn<'_, P> {
             let _ = self
                 .connection
                 .cancel_request(id, net::RequestError::Timeout);
+            if end == End::StateTimeout {
+                self.state
+                    .lock()
+                    .await
+                    .reads
+                    .release(self.peer_index, false);
+            }
             return Err(end);
         }
         if self
@@ -350,9 +393,30 @@ impl<P: PlatformRef> Conn<'_, P> {
         while index < self.streams.len() {
             let stream = &mut self.streams[index];
             let request = stream.request;
-            let mut access = self.platform.read_write_access(stream.stream.as_mut()).ok();
+            let (mut access, reset) = match self.platform.read_write_access(stream.stream.as_mut())
+            {
+                Ok(access) => (Some(access), None),
+                Err(error) => (
+                    None,
+                    Some(classify_reset(self.platform.stream_reset_code(&error))),
+                ),
+            };
             if access.is_none() {
                 drop(access);
+                if reset == Some(net::RequestError::ResetWithoutCode) {
+                    self.resets_without_code += 1;
+                }
+                if InFlight::holds(&self.state_requested, request) {
+                    if let Some(event) = self
+                        .connection
+                        .substream_reset(stream.id, reset.unwrap_or(net::RequestError::Rejected))
+                    {
+                        events.push(event);
+                    }
+                    self.streams.remove(index);
+                    self.local_progress = true;
+                    continue;
+                }
                 if let Some(r) = InFlight::holding(&self.proof_requested, request) {
                     let _ = self
                         .connection
@@ -388,7 +452,12 @@ impl<P: PlatformRef> Conn<'_, P> {
                 None => return Err(End::Transport),
             };
             drop(access);
-            if rw.incoming_buffer.len() > FRAME_BYTES + 4 || rw.write_bytes_queued > 65536 {
+            let incoming_limit = if InFlight::holds(&self.state_requested, request) {
+                FRAME_BYTES + 496 * 64 + 8
+            } else {
+                FRAME_BYTES + 4
+            };
+            if rw.incoming_buffer.len() > incoming_limit || rw.write_bytes_queued > 65536 {
                 return Err(End::Limit);
             }
             let mut output = [0; 4096];
@@ -422,15 +491,20 @@ impl<P: PlatformRef> Conn<'_, P> {
             if progress.read != 0 {
                 self.last_activity = now.clone();
             }
+            let response = matches!(
+                &progress.event,
+                Some(
+                    net::Event::BlockResponse { .. }
+                        | net::Event::StateResponse { .. }
+                        | net::Event::JustificationResponse { .. }
+                )
+            );
+            if response {
+                self.resets_without_code = 0;
+            }
             let retired = progress.reset
-                || matches!(
-                    &progress.event,
-                    Some(
-                        net::Event::BlockResponse { .. }
-                            | net::Event::JustificationResponse { .. }
-                            | net::Event::RequestFailed { .. }
-                    )
-                );
+                || response
+                || matches!(&progress.event, Some(net::Event::RequestFailed { .. }));
             drop(rw);
             if let Some(event) = progress.event {
                 events.push(event);
@@ -450,6 +524,15 @@ impl<P: PlatformRef> Conn<'_, P> {
     /// Handles one event of the connection.
     async fn handle(&mut self, event: net::Event) -> Result<(), End> {
         match event {
+            net::Event::StateResponse {
+                request_id,
+                response,
+            } => self.state_response(request_id, response).await,
+            net::Event::RequestFailed { request_id, reason }
+                if InFlight::holds(&self.state_requested, Some(request_id)) =>
+            {
+                self.state_failed(reason).await
+            }
             net::Event::HandshakeReceived(h) => {
                 self.handshake(h).await;
                 Ok(())
@@ -554,6 +637,7 @@ impl<P: PlatformRef> Conn<'_, P> {
                 };
                 request = match kind {
                     net::SubstreamKind::Ce128 { request_id }
+                    | net::SubstreamKind::Ce129 { request_id }
                     | net::SubstreamKind::Ce130 { request_id } => Some(request_id),
                     _ => None,
                 };
@@ -563,7 +647,9 @@ impl<P: PlatformRef> Conn<'_, P> {
                 }
                 matches!(
                     kind,
-                    net::SubstreamKind::Ce128 { .. } | net::SubstreamKind::Ce130 { .. }
+                    net::SubstreamKind::Ce128 { .. }
+                        | net::SubstreamKind::Ce129 { .. }
+                        | net::SubstreamKind::Ce130 { .. }
                 )
             }
             SubstreamDirection::Inbound => {
@@ -609,6 +695,14 @@ impl<P: PlatformRef> Conn<'_, P> {
                     r.tag,
                     r.queued,
                     End::JustificationTimeout,
+                )
+            }),
+            self.state_requested.map(|r| {
+                (
+                    "jam-state-request-ended",
+                    r.tag,
+                    r.queued,
+                    End::StateTimeout,
                 )
             }),
         ];

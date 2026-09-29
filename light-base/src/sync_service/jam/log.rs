@@ -13,12 +13,16 @@
 // `conn=`. `req=` ties together the lines about one request; its outcome line
 // adds `outcome=` and `elapsed_ms=`.
 
+use super::reads::Trust;
 use crate::platform::PlatformRef;
 use core::{
     fmt,
     sync::atomic::{AtomicU32, Ordering},
 };
-use smoldot::jam::types::Direction;
+use smoldot::jam::{
+    trie::{self, StateRequest, StateResponse},
+    types::Direction,
+};
 
 /// Logs one event of the connection `$conn`, at `Debug`.
 macro_rules! event {
@@ -129,11 +133,63 @@ impl fmt::Display for Token<'_> {
     }
 }
 
+/// `C<n>` for the state key of item `n`, else the key in hex.
+struct Key<'a>(&'a trie::StateKey);
+
+impl fmt::Display for Key<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if *self.0 == trie::state_key(self.0[0]) {
+            write!(f, "C{}", self.0[0])
+        } else {
+            Hex(self.0).fmt(f)
+        }
+    }
+}
+
+/// A state request's key range: `C8`, or `C4..C11`.
+pub(super) struct Keys<'a>(pub(super) &'a StateRequest);
+
+impl fmt::Display for Keys<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.start == self.0.end {
+            Key(&self.0.start).fmt(f)
+        } else {
+            write!(f, "{}..{}", Key(&self.0.start), Key(&self.0.end))
+        }
+    }
+}
+
 pub(super) fn direction_str(direction: &Direction) -> &'static str {
     match direction {
         Direction::AscendingExclusive => "ascending",
         Direction::DescendingInclusive => "descending",
     }
+}
+
+pub(super) fn trust_str(trust: Trust) -> &'static str {
+    match trust {
+        Trust::Finalized => "finalized",
+        Trust::Authenticated => "authenticated",
+    }
+}
+
+/// What a state read is for: the warp join reads against a finalized root,
+/// the `C(8)` refresh against an authenticated child's prior root.
+pub(super) fn read_purpose(trust: Trust) -> &'static str {
+    match trust {
+        Trust::Finalized => "warp-join",
+        Trust::Authenticated => "discovery",
+    }
+}
+
+/// Wire size of a CE 129 response: proof nodes, keys and values.
+pub(super) fn state_response_bytes(response: &StateResponse) -> usize {
+    response.nodes.len() * 64
+        + response
+            .entries
+            .iter()
+            .map(|(_, value)| 31 + value.len())
+            .sum::<usize>()
 }
 
 /// Why a connection ended.
@@ -144,13 +200,17 @@ pub(super) enum End {
     HandshakeTimeout,
     Idle,
     StreamOpenTimeout,
+    StateTimeout,
     BlockTimeout,
     JustificationTimeout,
     StreamTimeout,
     StreamReset,
+    ResetsWithoutCode,
     Transport,
     Limit,
     UnexpectedResponse,
+    StateRejected,
+    StateFailed,
     FinalityRejected,
     RootUnextendable,
     MessageTooLarge,
@@ -168,9 +228,9 @@ impl End {
 
 #[cfg(test)]
 mod tests {
-    use super::{End, Hex, Opt, Token};
+    use super::{End, Hex, Key, Keys, Opt, Token};
     use alloc::string::ToString as _;
-    use smoldot::jam::{codec::DecodeError, finality, net};
+    use smoldot::jam::{codec::DecodeError, finality, net, trie};
 
     #[test]
     fn tokens_are_variant_paths_without_separators() {
@@ -183,6 +243,10 @@ mod tests {
         assert_eq!(Token(&decode).to_string(), "Decode(LengthLimit)");
         let item = net::ProtocolError::Decode(DecodeError::InvalidDiscriminant(3));
         assert_eq!(Token(&item).to_string(), "Decode(InvalidDiscriminant(3))");
+        assert_eq!(
+            Token(&trie::ProofError::RootMismatch).to_string(),
+            "RootMismatch"
+        );
     }
 
     #[test]
@@ -190,6 +254,17 @@ mod tests {
         assert_eq!(Hex(&[0xab, 0x01]).to_string(), "0xab01");
         assert_eq!(Opt::<u64>(None).to_string(), "-");
         assert_eq!(Opt(Some(7)).to_string(), "7");
+        assert_eq!(Key(&trie::state_key(8)).to_string(), "C8");
+        let mut odd = trie::state_key(8);
+        odd[30] = 1;
+        assert!(Key(&odd).to_string().starts_with("0x08"));
+        let request = trie::StateRequest {
+            block: [0; 32],
+            start: trie::state_key(4),
+            end: trie::state_key(11),
+            max_size: 1,
+        };
+        assert_eq!(Keys(&request).to_string(), "C4..C11");
         assert_eq!(End::JustificationTimeout.as_str(), "justification-timeout");
     }
 }

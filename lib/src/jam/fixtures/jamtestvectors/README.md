@@ -17,3 +17,4 @@ CC0 1.0 (`LICENSE`). Paths follow the upstream repository.
   Paper 0.7.1 epoch mark without a validator count). Each header's parent is
   the BLAKE2b-256 hash of the previous record's bytes. The six other traces
   use the same parameters and header kinds and are left out.
+- `trie/trie.json`: the state-trie root vectors, unchanged.
