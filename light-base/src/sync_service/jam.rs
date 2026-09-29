@@ -17,6 +17,7 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 use connection::peer_loop;
 use core::{net::IpAddr, num::NonZeroUsize, time::Duration};
 use futures_lite::{StreamExt as _, future};
+use reads::StateReads;
 use smoldot::jam::{
     chain_spec::{self, JamChainSpec},
     finality::{self, AuthoritySet},
@@ -168,6 +169,7 @@ fn memory_limits(params: &Params) -> Result<(usize, tree::Config), ConfigError> 
 }
 
 struct State {
+    reads: StateReads,
     tree: HeaderTree,
     params: Params,
     subscribers: Vec<async_channel::Sender<Notification>>,
@@ -307,6 +309,7 @@ async fn run<P: PlatformRef>(
     rx: async_channel::Receiver<SubscribeRequest>,
 ) {
     let state = Arc::new(async_lock::Mutex::new(State {
+        reads: StateReads::new(config.peers.len()),
         tree: config.tree,
         params: config.params.clone(),
         subscribers: Vec::new(),
@@ -360,6 +363,7 @@ mod blocks;
 mod connection;
 mod grandpa;
 mod log;
+mod reads;
 
 #[cfg(all(test, feature = "std"))]
 mod tests;

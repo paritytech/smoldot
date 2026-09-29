@@ -8,5 +8,6 @@ pub mod state;
 #[cfg(test)]
 mod test_support;
 pub mod tree;
+pub mod trie;
 pub mod types;
 pub mod verify;

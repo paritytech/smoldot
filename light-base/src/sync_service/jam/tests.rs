@@ -2,8 +2,8 @@
 
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-use super::connection::*;
 use super::*;
+use super::{connection::*, reads::*};
 use crate::{
     AddChainConfig, AddChainConfigJsonRpc, Client, jam_webtransport_cert,
     platform::{self, MultiStreamAddress, SubstreamDirection},
@@ -23,6 +23,8 @@ use smoldot::{
         codec,
         crypto::blake2b_256,
         finality::Justification,
+        net,
+        trie::{self, StateRequest, StateResponse},
         types::{BlockRequest, Direction, Final, Handshake, Hash, SealingSequence},
         verify::VerifiedHeader,
     },
@@ -32,7 +34,14 @@ use std::{collections::BTreeMap, sync::Mutex, time::Instant};
 
 mod connection;
 mod grandpa;
+mod reads;
 mod rpc;
+
+impl Default for StateReads {
+    fn default() -> Self {
+        Self::new(MAX_PEERS)
+    }
+}
 
 /// [`drive_connection`], discarding its end reason.
 async fn drive<P: PlatformRef>(
@@ -104,6 +113,7 @@ fn root_config() -> Config {
 /// The driver state for `config`, as [`run`] builds it.
 fn state(config: Config) -> State {
     State {
+        reads: StateReads::default(),
         tree: config.tree,
         params: config.params,
         subscribers: Vec::new(),
@@ -155,6 +165,8 @@ struct Control {
 
 #[derive(Default)]
 struct IoState {
+    state_responses: VecDeque<Result<Vec<u8>, Reset>>,
+    state_requests: Vec<Vec<u8>>,
     params: Option<Params>,
     reject_batch_above: Option<u32>,
     proofs: BTreeMap<Hash, Vec<u8>>,
@@ -203,6 +215,15 @@ impl core::fmt::Display for Reset {
 }
 
 impl Control {
+    /// The next scripted CE 129 response.
+    fn state(&mut self, request: Vec<u8>) -> Result<Vec<u8>, Reset> {
+        self.io.state_requests.push(request);
+        self.io
+            .state_responses
+            .pop_front()
+            .expect("unscripted state read")
+    }
+
     /// The scripted CE 130 response for `target`.
     fn proof(&mut self, target: Hash) -> Result<Vec<u8>, Reset> {
         self.io.proof_requests.push(target);
@@ -510,6 +531,7 @@ impl PlatformRef for FakePlatform {
             let mut c = stream.control.lock().unwrap();
             let response = match stream.outgoing[0] {
                 128 => c.blocks(BlockRequest::decode(&stream.outgoing[5..]).unwrap())?,
+                129 => c.state(stream.outgoing[5..].to_vec())?,
                 130 => c.proof(stream.outgoing[5..37].try_into().unwrap())?,
                 kind => panic!("no scripted response for stream kind {kind}"),
             };
@@ -781,6 +803,32 @@ async fn drive_peer(
         platform, "scripted", params, peer, state, transport, fetch_size,
     )
     .await;
+}
+
+/// A connection to the scripted peer, without dialing.
+fn fake_connection(platform: &FakePlatform) -> FakeConnection {
+    platform.0.lock().unwrap().io.live_connections += 1;
+    FakeConnection {
+        control: platform.0.clone(),
+        streams: VecDeque::new(),
+        number: 0,
+        dead: false,
+    }
+}
+
+/// A one-leaf trie holding `C(8) = value`: its root and the CE 129 response.
+fn active_set_trie(value: &[u8]) -> (Hash, Vec<u8>) {
+    let key = trie::state_key(8);
+    let mut node = [0; 64];
+    node[0] = 0xc0;
+    node[1..32].copy_from_slice(&key);
+    node[32..].copy_from_slice(&blake2b_256(value));
+    let mut entries = key.to_vec();
+    entries.extend(codec::encode_natural(u64::try_from(value.len()).unwrap()));
+    entries.extend(value);
+    let mut response = framed(node.to_vec());
+    response.extend(framed(entries));
+    (blake2b_256(&node), response)
 }
 
 fn add_chain(
