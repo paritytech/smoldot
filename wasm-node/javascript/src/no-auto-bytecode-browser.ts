@@ -245,11 +245,10 @@ function connect(config: ConnectionConfig): Connection {
             dnsAbort: null,
         };
 
-        // SDP session needs the literal IP address of the remote.
-        // Browsers expose no DNS API, so a multiaddress with a domain name is first resolved
-        // over DNS-over-HTTPS, concurrently with the certificate generation. Resolution is
-        // bounded in time, an unresponsive resolver doesn't keep the connection attempt
-        // pending forever.
+        // The SDP answer needs the literal IP address of the remote.
+        // Browsers expose no DNS API, so a multiaddress with a domain name is resolved over
+        // DNS-over-HTTPS. Resolution is started here and is only awaited in
+        // `onnegotiationneeded`, where the IP is actually needed.
         let target: Promise<{ targetIp: string, ipVersion: string }>;
         if ("targetIp" in config.address) {
             target = Promise.resolve({ targetIp: config.address.targetIp, ipVersion: config.address.ipVersion });
@@ -304,6 +303,19 @@ function connect(config: ConnectionConfig): Connection {
             state.dataChannels.clear();
 
             state.pc!.close();  // Not necessarily necessary, but it doesn't hurt to do so.
+        };
+
+        // Due to <https://bugzilla.mozilla.org/show_bug.cgi?id=1659672>,
+        // connections from Firefox to a localhost WebRTC server always fail:
+        // Firefox gathers no loopback ICE candidate.
+        // 
+        // Returns `true` if the connection was refused, in which case the caller must stop.
+        const refuseIfFirefoxLoopback = (ip: string): boolean => {
+            if ((ip !== '127.0.0.1' && ip !== '::1') || navigator.userAgent.indexOf('Firefox') === -1)
+                return false;
+            killAllJs();
+            config.onConnectionReset("Firefox can't connect to a localhost WebRTC server");
+            return true;
         };
 
         // Function that configures a newly-opened channel and adds it to the map. Used for both
@@ -376,36 +388,10 @@ function connect(config: ConnectionConfig): Connection {
             if (state.pc === null)
                 return;
 
-            // Wait for the DNS resolution of the target, if any.
-            let targetIp: string;
-            let ipVersion: string;
-            try {
-                ({ targetIp, ipVersion } = await target);
-            } catch (error) {
-                // `reset()` might have been called while we were waiting,
-                // in which case nothing must be reported.
-                if (state.pc === null)
-                    return;
-                killAllJs();
-                config.onConnectionReset("DNS resolution failed: " + (error instanceof Error ? error.message : String(error)));
+            // A literal loopback address can be refused before anything is created. A domain
+            // name is checked once resolved, in `onnegotiationneeded`.
+            if ("targetIp" in config.address && refuseIfFirefoxLoopback(config.address.targetIp))
                 return;
-            }
-            if (state.pc === null)
-                return;
-
-            // Due to <https://bugzilla.mozilla.org/show_bug.cgi?id=1659672>, connections from
-            // Firefox to a localhost WebRTC server always fails. Since this bug has been opened
-            // for three years at the time of writing, it is unlikely to be fixed in the short
-            // term. In order to provider better user feedback, we straight up refuse connecting
-            // and stop the connection.
-            // Note that this is just a hint. Failing to detect this will lead to the WebRTC
-            // handshake  timing out.
-            // TODO: eventually remove this if the Firefox bug is fixed
-            if ((targetIp == 'localhost' || targetIp == '127.0.0.1' || targetIp == '::1') && navigator.userAgent.indexOf('Firefox') !== -1) {
-                killAllJs();
-                config.onConnectionReset("Firefox can't connect to a localhost WebRTC server");
-                return;
-            }
 
             // Create a new WebRTC connection.
             state.pc = new RTCPeerConnection({ certificates: [localCertificate] });
@@ -483,6 +469,25 @@ function connect(config: ConnectionConfig): Connection {
                 sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:' + ufragPwd);
                 sdpOffer = sdpOffer.replace(/^a=ice-pwd.*$/m, 'a=ice-pwd:' + ufragPwd);
                 await state.pc!.setLocalDescription({ type: 'offer', sdp: sdpOffer });
+
+                // The answer needs the literal IP address of the remote, resolution was already stared.
+                let targetIp: string;
+                let ipVersion: string;
+                try {
+                    ({ targetIp, ipVersion } = await target);
+                } catch (error) {
+                    // `reset()` aborts the resolution, and a failure reported through
+                    // `onconnectionstatechange` closes the connection.
+                    if (state.pc!.signalingState === "closed")
+                        return;
+                    killAllJs();
+                    config.onConnectionReset("DNS resolution failed: " + (error instanceof Error ? error.message : String(error)));
+                    return;
+                }
+                if (state.pc!.signalingState === "closed")
+                    return;
+                if (refuseIfFirefoxLoopback(targetIp))
+                    return;
 
                 // Transform certificate hash into fingerprint (upper-hex; each byte separated by ":").
                 const fingerprint = Array.from(remoteTlsCertificateSha256).map((n) => ("0" + n.toString(16)).slice(-2).toUpperCase()).join(':');
