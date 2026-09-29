@@ -30,6 +30,19 @@ use core::{cmp, mem, time::Duration};
 /// Maximum size of the byte pipe between the two connection tasks.
 const BUF: usize = 65536;
 
+/// Asserts how many events of the given side match the pattern.
+macro_rules! assert_count {
+    ($events:expr, $side:expr, $pattern:pat, $expected:expr) => {
+        assert_eq!(
+            $events
+                .iter()
+                .filter(|(s, e)| *s == $side && matches!(e, $pattern))
+                .count(),
+            $expected
+        )
+    };
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Side {
     Alice,
@@ -42,8 +55,8 @@ struct Node {
     chain_id: ChainId,
     task: Option<SingleStreamConnectionTask<Duration>>,
     conn_id: ConnectionId,
-    /// [`PeerId`] of the other side, known once the handshake has finished.
-    remote: Option<PeerId>,
+    /// [`PeerId`] of the other side.
+    remote: PeerId,
 }
 
 /// Two nodes (Alice the initiator, Bob the responder) connected by an encrypted byte pipe. Bytes
@@ -96,6 +109,8 @@ fn make_node(
         })
         .unwrap();
 
+    let remote = peer_id_of(remote_noise_key);
+
     // The expected `PeerId` is what registers the connection under the peer, the way the light
     // client always dials.
     let (conn_id, task) = network.add_single_stream_connection(
@@ -105,7 +120,7 @@ fn make_node(
             noise_key,
         },
         Vec::new(),
-        Some(peer_id_of(remote_noise_key)),
+        Some(remote.clone()),
         (),
     );
 
@@ -114,7 +129,7 @@ fn make_node(
         chain_id,
         task: Some(task),
         conn_id,
-        remote: None,
+        remote,
     }
 }
 
@@ -139,9 +154,9 @@ impl Harness {
             wake_b: None,
         };
 
-        harness.pump();
-        assert!(harness.alice.remote.is_some(), "Alice handshake");
-        assert!(harness.bob.remote.is_some(), "Bob handshake");
+        let events = harness.pump();
+        assert_count!(events, Side::Alice, Event::HandshakeFinished { .. }, 1);
+        assert_count!(events, Side::Bob, Event::HandshakeFinished { .. }, 1);
         harness
     }
 
@@ -207,7 +222,9 @@ impl Harness {
                 &mut self.wake_b,
             ),
         };
-        let Some(task) = task else {
+        // A reset task must not read or write again. Its remaining messages are exchanged with
+        // the coordinator until it exits.
+        let Some(task) = task.filter(|t| !t.is_reset_called()) else {
             return false;
         };
         let out_len_before = outgoing.len();
@@ -229,12 +246,19 @@ impl Harness {
         read != 0 || outgoing.len() != out_len_before
     }
 
+    /// Pulls every pending event of the given side, answering each [`Event::GossipInDesired`]
+    /// with a link of its own, the way the light client does.
     fn next_events(&mut self, side: Side) -> Vec<Event<()>> {
         let node = self.node(side);
         let mut events = Vec::new();
         while let Some(event) = node.network.next_event() {
-            if let Event::HandshakeFinished { peer_id, .. } = &event {
-                node.remote = Some(peer_id.clone());
+            if let Event::GossipInDesired {
+                peer_id,
+                chain_id,
+                kind,
+            } = &event
+            {
+                node.network.gossip_open(*chain_id, peer_id, *kind).unwrap();
             }
             events.push(event);
         }
@@ -283,121 +307,46 @@ impl Harness {
         events
     }
 
-    /// Runs the system, answering every [`Event::GossipInDesired`] with a
-    /// [`GossipKind::ConsensusTransactions`] link of its own, the way the light client does.
-    fn pump_accepting_gossip(&mut self) -> Vec<(Side, Event<()>)> {
-        let mut all_events = Vec::new();
-        loop {
-            let events = self.pump();
-            if events.is_empty() {
-                break;
-            }
-            for (side, event) in &events {
-                if let Event::GossipInDesired {
-                    peer_id,
-                    chain_id,
-                    kind,
-                } = event
-                {
-                    self.node(*side)
-                        .network
-                        .gossip_open(*chain_id, peer_id, *kind)
-                        .unwrap();
-                }
-            }
-            all_events.extend(events);
-        }
-        all_events
-    }
-
     /// Resets the connection task of the given side, the way a dropped socket does, and runs
     /// the shutdown to completion. Returns every event produced along the way.
     fn reset(&mut self, side: Side) -> Vec<(Side, Event<()>)> {
         self.node(side).task.as_mut().unwrap().reset();
-
-        // A reset task must not read or write again, so its messages are exchanged by hand
-        // until the coordinator acknowledges the shutdown and the task exits.
-        let mut events = Vec::new();
-        for _ in 0..16 {
-            if self.node(side).task.is_none() {
-                break;
-            }
-            self.drain_conn_to_coord(side);
-            for event in self.next_events(side) {
-                events.push((side, event));
-            }
-            self.deliver_coord_to_conn(side);
-        }
+        let events = self.pump();
         assert!(self.node(side).task.is_none(), "reset task didn't exit");
-
-        events.extend(self.pump());
         events
     }
 
-    /// Alice's [`PeerId`], as seen by Bob.
-    fn alice_id(&self) -> PeerId {
-        self.bob.remote.clone().unwrap()
-    }
-
-    /// Bob's [`PeerId`], as seen by Alice.
-    fn bob_id(&self) -> PeerId {
-        self.alice.remote.clone().unwrap()
-    }
-
-    /// Opens a [`GossipKind::ConsensusTransactions`] link from Alice to Bob, accepted by Bob,
-    /// and returns the events produced along the way.
-    fn open_block_announces_link(&mut self) -> Vec<(Side, Event<()>)> {
-        let bob = self.bob_id();
+    /// Opens a gossip link from Alice to Bob, accepted by Bob, and returns the events produced
+    /// along the way.
+    fn open_gossip_link(&mut self) -> Vec<(Side, Event<()>)> {
         self.alice
             .network
-            .gossip_open(self.alice.chain_id, &bob, GossipKind::ConsensusTransactions)
+            .gossip_open(
+                self.alice.chain_id,
+                &self.alice.remote,
+                GossipKind::ConsensusTransactions,
+            )
             .unwrap();
-        let events = self.pump_accepting_gossip();
-        assert!(count(&events, Side::Alice, is_gossip_connected) == 1);
-        assert!(count(&events, Side::Bob, is_gossip_connected) == 1);
+        let events = self.pump();
+        assert_count!(events, Side::Alice, Event::GossipConnected { .. }, 1);
+        assert_count!(events, Side::Bob, Event::GossipConnected { .. }, 1);
         events
     }
 }
 
-fn count(
-    events: &[(Side, Event<()>)],
-    side: Side,
-    predicate: impl Fn(&Event<()>) -> bool,
-) -> usize {
-    events
-        .iter()
-        .filter(|(s, e)| *s == side && predicate(e))
-        .count()
-}
-
-fn is_gossip_connected(event: &Event<()>) -> bool {
-    matches!(event, Event::GossipConnected { .. })
-}
-
-fn is_gossip_disconnected(event: &Event<()>) -> bool {
-    matches!(event, Event::GossipDisconnected { .. })
-}
-
-fn is_statement_connected(event: &Event<()>) -> bool {
-    matches!(event, Event::StatementProtocolConnected { .. })
-}
-
-/// Opening a block announces link reports on both sides.
+/// Opening a gossip link reports on both sides.
 #[test]
-fn block_announces_link_opens() {
+fn gossip_link_opens() {
     let mut harness = Harness::connected(false, false);
-    let alice = harness.alice_id();
-    let bob = harness.bob_id();
-
-    harness.open_block_announces_link();
+    harness.open_gossip_link();
     assert!(harness.alice.network.gossip_is_connected(
         harness.alice.chain_id,
-        &bob,
+        &harness.alice.remote,
         GossipKind::ConsensusTransactions
     ));
     assert!(harness.bob.network.gossip_is_connected(
         harness.bob.chain_id,
-        &alice,
+        &harness.bob.remote,
         GossipKind::ConsensusTransactions
     ));
 }
@@ -406,27 +355,34 @@ fn block_announces_link_opens() {
 #[test]
 fn statement_substream_follows_block_announces() {
     let mut harness = Harness::connected(true, true);
-    let bob = harness.bob_id();
-    let chain_id = harness.alice.chain_id;
 
-    let events = harness.open_block_announces_link();
-    assert_eq!(count(&events, Side::Alice, is_statement_connected), 1);
+    let events = harness.open_gossip_link();
+    assert_count!(
+        events,
+        Side::Alice,
+        Event::StatementProtocolConnected { .. },
+        1
+    );
 
     harness
         .alice
         .network
-        .gossip_close(chain_id, &bob, GossipKind::ConsensusTransactions)
+        .gossip_close(
+            harness.alice.chain_id,
+            &harness.alice.remote,
+            GossipKind::ConsensusTransactions,
+        )
         .unwrap();
     let events = harness.pump();
-    assert_eq!(count(&events, Side::Bob, is_gossip_disconnected), 1);
+    assert_count!(events, Side::Bob, Event::GossipDisconnected { .. }, 1);
 }
 
-/// Losing the connection ends the block announces link with one event.
+/// Losing the connection ends the gossip link with one event.
 #[test]
-fn block_announces_link_lost_with_connection() {
+fn gossip_link_lost_with_connection() {
     let mut harness = Harness::connected(false, false);
-    harness.open_block_announces_link();
+    harness.open_gossip_link();
 
     let events = harness.reset(Side::Alice);
-    assert_eq!(count(&events, Side::Alice, is_gossip_disconnected), 1);
+    assert_count!(events, Side::Alice, Event::GossipDisconnected { .. }, 1);
 }
