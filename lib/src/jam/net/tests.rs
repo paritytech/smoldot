@@ -74,6 +74,172 @@ fn connection() -> Connection {
     Connection::new(params(), handshake(), limits()).unwrap()
 }
 
+fn state_request() -> StateRequest {
+    StateRequest {
+        block: [1; 32],
+        start: [0; 31],
+        end: [255; 31],
+        max_size: 2000,
+    }
+}
+
+fn open_state(c: &mut Connection) -> RequestId {
+    open_up(c);
+    let id = c.request_state(state_request()).unwrap();
+    let kind = SubstreamKind::Ce129 { request_id: id };
+    assert_eq!(c.desired_outgoing_substreams(), Some(kind));
+    c.substream_opened(2, kind).unwrap();
+    let (bytes, fin) = drain(c, 2, 7);
+    assert!(fin);
+    assert_eq!(bytes[0], 129);
+    assert_eq!(&bytes[5..], &state_request().encode());
+    id
+}
+
+#[test]
+fn state_two_messages_then_fin_fragmented() {
+    for width in [1, 3, 64, 1024] {
+        let mut c = connection();
+        let id = open_state(&mut c);
+        let mut wire = frame(&[]);
+        wire.extend(frame(&[]));
+        for chunk in wire.chunks(width) {
+            let progress = c.read_write(2, chunk, false, &mut []);
+            assert_eq!(progress.read, chunk.len());
+            assert!(progress.event.is_none());
+        }
+        assert_eq!(
+            c.read_write(2, &[], true, &mut []).event,
+            Some(Event::StateResponse {
+                request_id: id,
+                response: StateResponse {
+                    nodes: vec![],
+                    entries: vec![]
+                }
+            })
+        );
+    }
+}
+
+#[test]
+fn state_framing_failures_and_shared_budget() {
+    for wire in [
+        vec![],
+        frame(&[]),
+        [frame(&[]), frame(&[]), frame(&[])].concat(),
+        [frame(&[0]), frame(&[])].concat(),
+    ] {
+        let mut c = connection();
+        open_state(&mut c);
+        assert!(matches!(
+            c.read_write(2, &wire, true, &mut []).event,
+            Some(Event::ProtocolError(_))
+        ));
+    }
+    let mut c = connection();
+    let id = open_state(&mut c);
+    c.request_justification([2; 32]).unwrap();
+    assert_eq!(c.request_blocks(request()), Err(Error::Limit));
+    assert_eq!(
+        c.substream_reset(2, RequestError::NoData),
+        Some(Event::RequestFailed {
+            request_id: id,
+            reason: RequestError::NoData
+        })
+    );
+    assert!(c.request_blocks(request()).is_ok());
+    let mut c = connection();
+    open_state(&mut c);
+    assert!(matches!(
+        c.read_write(2, &4097u32.to_le_bytes(), false, &mut [])
+            .event,
+        Some(Event::ProtocolError(ProtocolError::MessageTooLarge))
+    ));
+}
+
+#[test]
+fn state_each_message_has_its_own_budget_and_fin_is_mandatory() {
+    let mut c = connection();
+    let id = open_state(&mut c);
+    let mut node = [0; 64];
+    node[0] = 0xc0;
+    let mut entries = vec![0; 31];
+    entries.extend(crate::jam::codec::encode_natural(4000));
+    entries.extend(vec![7; 4000]);
+    let wire = [frame(&node), frame(&entries)].concat();
+    assert!(c.read_write(2, &wire, false, &mut []).event.is_none());
+    assert!(
+        matches!(c.read_write(2, &[], true, &mut []).event, Some(Event::StateResponse { request_id, .. }) if request_id == id)
+    );
+}
+
+#[test]
+fn captured_ce129_frames_and_no_data_reset() {
+    let capture: serde_json::Value =
+        serde_json::from_str(include_str!("../trie/fixtures/polkajam-ce129.json")).unwrap();
+    for item in capture["exchanges"].as_array().unwrap() {
+        for width in [1, 7, 1024] {
+            let request = hex::decode(item["request_frame_hex"].as_str().unwrap()).unwrap();
+            let request = StateRequest {
+                block: request[4..36].try_into().unwrap(),
+                start: request[36..67].try_into().unwrap(),
+                end: request[67..98].try_into().unwrap(),
+                max_size: u32::from_le_bytes(request[98..102].try_into().unwrap()),
+            };
+            let mut c = Connection::new(
+                params(),
+                handshake(),
+                Limits {
+                    max_message_size: 1024 * 1024,
+                    ..limits()
+                },
+            )
+            .unwrap();
+            open_up(&mut c);
+            let id = c.request_state(request.clone()).unwrap();
+            assert_eq!(
+                c.desired_outgoing_substreams(),
+                Some(SubstreamKind::Ce129 { request_id: id })
+            );
+            c.substream_opened(2, SubstreamKind::Ce129 { request_id: id })
+                .unwrap();
+            let (sent, fin) = drain(&mut c, 2, width);
+            assert!(fin);
+            assert_eq!(sent[0], 129);
+            assert_eq!(hex::encode(&sent[1..]), item["request_frame_hex"]);
+            if item["reset"] == true {
+                assert_eq!(item["streamErrorCode"], 6);
+                assert!(item.get("response_frame_hex").is_none());
+                assert_eq!(
+                    c.substream_reset(2, RequestError::NoData),
+                    Some(Event::RequestFailed {
+                        request_id: id,
+                        reason: RequestError::NoData
+                    })
+                );
+                assert!(c.request_state(request).is_ok());
+            } else {
+                let wire = hex::decode(item["response_frame_hex"].as_str().unwrap()).unwrap();
+                assert!(feed(&mut c, 2, &wire, width).is_empty());
+                let Some(Event::StateResponse {
+                    request_id,
+                    response,
+                }) = c.read_write(2, &[], true, &mut []).event
+                else {
+                    panic!("missing CE129 response on FIN")
+                };
+                assert_eq!(request_id, id);
+                let root = hex::decode(item["root"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap();
+                let verified = crate::jam::trie::verify_range(&root, &request, &response).unwrap();
+                assert_eq!(hex::encode(verified.complete_to), item["complete_to"]);
+            }
+        }
+    }
+}
+
 fn open_up(c: &mut Connection) {
     assert_eq!(c.desired_outgoing_substreams(), Some(SubstreamKind::Up0));
     c.substream_opened(1, SubstreamKind::Up0).unwrap();

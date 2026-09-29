@@ -18,7 +18,10 @@
 //! Another 4 MiB covers the single shared proof, decoded witnesses, verifier
 //! scratch space, current/next authorities and transition copies. At most 4096
 //! attempted-target records, including vector growth slack, fit in 512 KiB.
-//! The conservative chain-task allowance rounds up to approximately 77 MiB.
+//! State reads share the two pending CE slots with blocks and finality proofs.
+//! One shared read retains at most 1 MiB of entries and 31 KiB of boundary nodes plus its verified
+//! copy; allow another 4 MiB for entry metadata, proof indexing and frame staging.
+//! The conservative chain-task allowance rounds up to approximately 81 MiB.
 //! One RPC frontend separately allows two 4 MiB pin maps, a temporary snapshot
 //! below 8 MiB, 16 responses (each below about 1 MiB), and 32 64-KiB requests:
 //! allow another 36 MiB including collection/staging overhead. The two pin maps
@@ -48,6 +51,7 @@ use smoldot::jam::{
     params::Params,
     state::LightState,
     tree::{self, HeaderTree},
+    trie::{self, StateRequest, StateResponse, VerifiedRange},
     types::{BlockRequest, Direction, Final, GenesisLightState, Handshake, Hash, Header},
     verify::verified_genesis,
 };
@@ -163,6 +167,7 @@ fn memory_limits(params: &Params) -> Result<(usize, tree::Config), String> {
 }
 
 struct State {
+    reads: StateReads,
     #[cfg(test)]
     test_verifier: Option<
         fn(
@@ -184,6 +189,159 @@ struct State {
     proof_attempts: Vec<(Hash, u8)>,
 }
 
+/// Trust of the caller-authenticated header carrying this posterior state root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Standalone primitive; production consumers arrive in D3/D7.
+pub(crate) enum Trust {
+    Finalized,
+    Authenticated,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct StateRead {
+    pub at: Hash,
+    pub root: Hash,
+    pub trust: Trust,
+    /// Header whose posterior root `root` is: the read block itself when a
+    /// GRANDPA target signs it (the warp join), or its child when the root is
+    /// that child's prior state root (`State::finalized_read`).
+    pub root_header: Option<Hash>,
+    pub request: StateRequest,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // Returned to the future in-process consumers, not RPC.
+pub(crate) struct StateReadResult {
+    pub at: Hash,
+    pub root: Hash,
+    pub trust: Trust,
+    pub root_header: Option<Hash>,
+    pub range: VerifiedRange,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StateReadError {
+    Unavailable,
+}
+
+struct StateReads {
+    pending: Option<(
+        StateRead,
+        futures_channel::oneshot::Sender<Result<StateReadResult, StateReadError>>,
+    )>,
+    owner: Option<usize>,
+    attempts: u8,
+    peers: usize,
+}
+
+#[cfg(test)]
+impl Default for StateReads {
+    fn default() -> Self {
+        Self::new(MAX_PEERS)
+    }
+}
+
+impl StateReads {
+    fn new(peers: usize) -> Self {
+        Self {
+            pending: None,
+            owner: None,
+            attempts: 0,
+            peers: peers.min(MAX_PEERS),
+        }
+    }
+
+    fn finish_exhausted(&mut self) {
+        if self.owner.is_none()
+            && (0..self.peers).all(|peer| self.attempts & (1u8 << peer) != 0)
+            && let Some((_, tx)) = self.pending.take()
+        {
+            let _ = tx.send(Err(StateReadError::Unavailable));
+        }
+    }
+    /// Bounded in-process API: caller supplies the authenticated root and trust.
+    /// Dropping the receiver cancels the read at the next reservation/response.
+    #[allow(dead_code)] // No production consumer until D3/D7; exercised by tests.
+    fn start(
+        &mut self,
+        read: StateRead,
+    ) -> Result<
+        futures_channel::oneshot::Receiver<Result<StateReadResult, StateReadError>>,
+        net::Error,
+    > {
+        if read.at != read.request.block
+            || read.request.start > read.request.end
+            || read.request.max_size == 0
+        {
+            return Err(net::Error::InvalidRequest);
+        }
+        if self.pending.is_some() || self.owner.is_some() {
+            return Err(net::Error::Limit);
+        }
+        let (tx, rx) = futures_channel::oneshot::channel();
+        self.pending = Some((read, tx));
+        self.attempts = 0;
+        self.finish_exhausted();
+        Ok(rx)
+    }
+
+    fn reserve(&mut self, peer: usize) -> Option<StateRequest> {
+        if peer >= self.peers || self.owner.is_some() {
+            return None;
+        }
+        let (read, tx) = self.pending.as_ref()?;
+        if tx.is_canceled() {
+            self.pending = None;
+            return None;
+        }
+        let bit = 1u8 << peer;
+        if self.attempts & bit != 0 {
+            return None;
+        }
+        self.attempts |= bit;
+        self.owner = Some(peer);
+        Some(read.request.clone())
+    }
+
+    fn release(&mut self, peer: usize, transient: bool) {
+        if self.owner == Some(peer) {
+            self.owner = None;
+            if transient && peer < MAX_PEERS {
+                self.attempts &= !(1u8 << peer);
+            }
+            self.finish_exhausted();
+        }
+    }
+
+    fn received(&mut self, peer: usize, response: &StateResponse) -> Result<(), trie::ProofError> {
+        if self.owner != Some(peer) {
+            return Err(trie::ProofError::InvalidRange);
+        }
+        self.owner = None;
+        let (read, _) = self
+            .pending
+            .as_ref()
+            .ok_or(trie::ProofError::InvalidRange)?;
+        let range = match trie::verify_range(&read.root, &read.request, response) {
+            Ok(range) => range,
+            Err(error) => {
+                self.finish_exhausted();
+                return Err(error);
+            }
+        };
+        if let Some((read, tx)) = self.pending.take() {
+            let _ = tx.send(Ok(StateReadResult {
+                at: read.at,
+                root: read.root,
+                trust: read.trust,
+                root_header: read.root_header,
+                range,
+            }));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 enum InsertFailure {
     ResourceLimit,
@@ -191,6 +349,37 @@ enum InsertFailure {
 }
 
 impl State {
+    /// Convenience for consumers: wait (None) until the best chain has an
+    /// authenticated child of the finalized head. This does not choose a root
+    /// inside the read verifier. Finalized-child reads instead come from callers
+    /// retaining that child's finality evidence, because the tree prunes its parent.
+    #[allow(dead_code)] // D3/D7 consumer API.
+    fn finalized_read(
+        &self,
+        start: trie::StateKey,
+        end: trie::StateKey,
+        max_size: u32,
+    ) -> Option<StateRead> {
+        let at = self.tree.finalized().hash;
+        let child = self
+            .tree
+            .ancestors(&self.tree.best().hash)
+            .find(|child| child.parent == at)?;
+        let root = child.encoded.get(32..64)?.try_into().ok()?;
+        Some(StateRead {
+            at,
+            root,
+            trust: Trust::Authenticated,
+            root_header: Some(child.hash),
+            request: StateRequest {
+                block: at,
+                start,
+                end,
+                max_size,
+            },
+        })
+    }
+
     fn proof_limits(&self) -> finality::Limits {
         let witnesses = (FRAME_BYTES / self.header_bytes).max(1);
         finality::Limits {
@@ -357,6 +546,7 @@ pub(super) async fn run<P: PlatformRef>(
     rx: async_channel::Receiver<ToBackground>,
 ) {
     let state = Arc::new(async_lock::Mutex::new(State {
+        reads: StateReads::new(config.peers.len()),
         #[cfg(test)]
         test_verifier: None,
         tree: config.tree,
@@ -480,6 +670,7 @@ async fn peer_loop<P: PlatformRef>(
             )
             .await;
             let mut s = state.lock().await;
+            s.reads.release(peer_index, false);
             if s.proof_owner.is_some_and(|(owner, _)| owner == peer_index) {
                 s.proof_owner = None;
             }
@@ -524,6 +715,20 @@ impl FetchSize {
     fn oversized(&mut self) {
         self.count = (self.count / 2).max(1);
         self.ceiling = self.count;
+    }
+}
+
+/// F5's classifier, unchanged from the saved D7 change. Kept here so D2 can
+/// stand alone below D7 without interpreting numbers in browser prose.
+fn classify_reset(message: &str) -> net::RequestError {
+    match message
+        .strip_prefix("jamnp-stream-reset:")
+        .and_then(|message| message.split_once(' '))
+        .map(|(code, _)| code)
+    {
+        Some("6") => net::RequestError::NoData,
+        Some("2" | "3" | "4" | "5") => net::RequestError::Transient,
+        _ => net::RequestError::Rejected,
     }
 }
 
@@ -576,6 +781,7 @@ async fn drive<P: PlatformRef>(
     let mut announcements = VecDeque::new();
     let mut requested: Option<(net::RequestId, BlockRequest, P::Instant)> = None;
     let mut proof_requested: Option<(net::RequestId, Hash, P::Instant)> = None;
+    let mut state_requested: Option<(net::RequestId, P::Instant)> = None;
     let mut advertised: Option<Final> = None;
     loop {
         // A turn performs bounded protocol work and at most one ancestry insertion.
@@ -597,6 +803,13 @@ async fn drive<P: PlatformRef>(
         }
         // This deadline starts while the request is still queued, before a stream
         // reservation exists. Peer-created streams cannot starve it indefinitely.
+        if let Some((id, when)) = &state_requested
+            && now.clone() - when.clone() >= TIMEOUT
+        {
+            let _ = connection.cancel_request(*id, net::RequestError::Timeout);
+            state.lock().await.reads.release(peer_index, false);
+            return;
+        }
         if let Some((id, _, when)) = &requested
             && now.clone() - when.clone() >= TIMEOUT
         {
@@ -627,9 +840,25 @@ async fn drive<P: PlatformRef>(
         while index < streams.len() {
             let stream = &mut streams[index];
             let request = stream.request;
-            let mut access = platform.read_write_access(stream.stream.as_mut()).ok();
+            let (mut access, reset) = match platform.read_write_access(stream.stream.as_mut()) {
+                Ok(access) => (Some(access), None),
+                Err(error) => (None, Some(classify_reset(&alloc::format!("{error}")))),
+            };
             if access.is_none() {
                 drop(access);
+                if state_requested
+                    .as_ref()
+                    .is_some_and(|(id, _)| request == Some(*id))
+                {
+                    if let Some(event) = connection
+                        .substream_reset(stream.id, reset.unwrap_or(net::RequestError::Rejected))
+                    {
+                        events.push(event);
+                    }
+                    streams.remove(index);
+                    local_progress = true;
+                    continue;
+                }
                 if let Some((id, _, _)) = &proof_requested
                     && request == Some(*id)
                 {
@@ -659,7 +888,15 @@ async fn drive<P: PlatformRef>(
                 None => return,
             };
             drop(access);
-            if rw.incoming_buffer.len() > FRAME_BYTES + 4 || rw.write_bytes_queued > 65536 {
+            let incoming_limit = if state_requested
+                .as_ref()
+                .is_some_and(|(id, _)| request == Some(*id))
+            {
+                FRAME_BYTES + 496 * 64 + 8
+            } else {
+                FRAME_BYTES + 4
+            };
+            if rw.incoming_buffer.len() > incoming_limit || rw.write_bytes_queued > 65536 {
                 return;
             }
             let mut output = [0; 4096];
@@ -698,6 +935,7 @@ async fn drive<P: PlatformRef>(
                     &progress.event,
                     Some(
                         net::Event::BlockResponse { .. }
+                            | net::Event::StateResponse { .. }
                             | net::Event::JustificationResponse { .. }
                             | net::Event::RequestFailed { .. }
                     )
@@ -717,6 +955,42 @@ async fn drive<P: PlatformRef>(
         }
         for event in events {
             match event {
+                net::Event::StateResponse {
+                    request_id,
+                    response,
+                } => {
+                    if !state_requested
+                        .take()
+                        .is_some_and(|(id, _)| id == request_id)
+                    {
+                        return;
+                    }
+                    if let Err(error) = state.lock().await.reads.received(peer_index, &response) {
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-state-rejected",
+                            error = alloc::format!("{error:?}")
+                        );
+                        return;
+                    }
+                }
+                net::Event::RequestFailed { request_id, reason }
+                    if state_requested
+                        .as_ref()
+                        .is_some_and(|(id, _)| *id == request_id) =>
+                {
+                    state_requested = None;
+                    state
+                        .lock()
+                        .await
+                        .reads
+                        .release(peer_index, reason == net::RequestError::Transient);
+                    if reason != net::RequestError::NoData {
+                        return;
+                    }
+                }
                 net::Event::HandshakeReceived(h) => {
                     handshaken = true;
                     advertised = Some(h.final_.clone());
@@ -919,6 +1193,7 @@ async fn drive<P: PlatformRef>(
         }
         if handshaken
             && proof_requested.is_none()
+            && state_requested.is_none()
             && let Some(advertised) = &advertised
         {
             let mut s = state.lock().await;
@@ -928,6 +1203,25 @@ async fn drive<P: PlatformRef>(
                 };
                 proof_requested = Some((id, target, platform.now()));
                 local_progress = true;
+            }
+        }
+        // Finality and state reads arbitrate the second slot; never enqueue a
+        // third request into the connection's two-request budget.
+        if handshaken && state_requested.is_none() && proof_requested.is_none() {
+            let mut s = state.lock().await;
+            if !s.stopped
+                && let Some(request) = s.reads.reserve(peer_index)
+            {
+                match connection.request_state(request) {
+                    Ok(id) => {
+                        state_requested = Some((id, platform.now()));
+                        local_progress = true;
+                    }
+                    Err(_) => {
+                        s.reads.release(peer_index, true);
+                        return;
+                    }
+                }
             }
         }
         if handshaken && requested.is_none() && !repair_ready && imports.is_empty() {
@@ -1010,6 +1304,7 @@ async fn drive<P: PlatformRef>(
                         };
                         request = match kind {
                             net::SubstreamKind::Ce128 { request_id }
+                            | net::SubstreamKind::Ce129 { request_id }
                             | net::SubstreamKind::Ce130 { request_id } => Some(request_id),
                             _ => None,
                         };
@@ -1019,7 +1314,9 @@ async fn drive<P: PlatformRef>(
                         }
                         matches!(
                             kind,
-                            net::SubstreamKind::Ce128 { .. } | net::SubstreamKind::Ce130 { .. }
+                            net::SubstreamKind::Ce128 { .. }
+                                | net::SubstreamKind::Ce129 { .. }
+                                | net::SubstreamKind::Ce130 { .. }
                         )
                     }
                     SubstreamDirection::Inbound => {

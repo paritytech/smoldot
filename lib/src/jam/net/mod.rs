@@ -28,6 +28,7 @@
 //! cancellation/reset APIs or dropping the connection. No I/O or clock is owned.
 
 mod ce128;
+mod ce129;
 mod ce130;
 mod framing;
 mod up0;
@@ -35,6 +36,7 @@ mod up0;
 use crate::jam::{
     codec::DecodeError,
     params::Params,
+    trie::{StateRequest, StateResponse},
     types::{Announcement, Block, BlockRequest, Handshake, Hash},
 };
 use alloc::{boxed::Box, vec::Vec};
@@ -66,6 +68,7 @@ pub struct Limits {
 pub enum SubstreamKind {
     Up0,
     Ce128 { request_id: RequestId },
+    Ce129 { request_id: RequestId },
     Ce130 { request_id: RequestId },
 }
 
@@ -117,6 +120,11 @@ pub enum RequestError {
 // owns a Vec, so the largest variant is the announcement rather than a block.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    /// Decoded but unverified state proof, emitted only after both messages and FIN.
+    StateResponse {
+        request_id: RequestId,
+        response: StateResponse,
+    },
     HandshakeReceived(Handshake),
     Announcement(Announcement),
     BlockResponse {
@@ -158,6 +166,7 @@ struct Pending {
     opening: bool,
 }
 enum Request {
+    State(StateRequest),
     Block(BlockRequest),
     Justification(Hash),
 }
@@ -165,6 +174,7 @@ enum Request {
 impl Request {
     fn kind(&self, request_id: RequestId) -> SubstreamKind {
         match self {
+            Self::State(_) => SubstreamKind::Ce129 { request_id },
             Self::Block(_) => SubstreamKind::Ce128 { request_id },
             Self::Justification(_) => SubstreamKind::Ce130 { request_id },
         }
@@ -172,6 +182,7 @@ impl Request {
 }
 
 enum Stream {
+    Ce129(Box<ce129::Ce129>),
     Incoming,
     Up0(up0::Up0),
     Ce128(Box<ce128::Ce128>),
@@ -272,13 +283,19 @@ impl Connection {
                 self.up = UpState::Active;
                 Stream::Up0(stream)
             }
-            SubstreamKind::Ce128 { request_id } | SubstreamKind::Ce130 { request_id } => {
+            SubstreamKind::Ce128 { request_id }
+            | SubstreamKind::Ce129 { request_id }
+            | SubstreamKind::Ce130 { request_id } => {
                 let position = self
                     .pending
                     .iter()
                     .position(|p| p.id == request_id && p.opening && p.request.kind(p.id) == kind)
                     .ok_or(Error::InvalidState)?;
                 let stream = match &self.pending[position].request {
+                    Request::State(request) => Stream::Ce129(Box::new(
+                        ce129::Ce129::new(request_id, request, self.limits.max_message_size)
+                            .map_err(Error::Protocol)?,
+                    )),
                     Request::Block(request) => Stream::Ce128(Box::new(
                         ce128::Ce128::new(
                             request_id,
@@ -309,7 +326,9 @@ impl Connection {
             SubstreamKind::Up0 if self.up == UpState::Opening => {
                 Ok(self.fail(ProtocolError::Up0Lost))
             }
-            SubstreamKind::Ce128 { request_id } | SubstreamKind::Ce130 { request_id } => {
+            SubstreamKind::Ce128 { request_id }
+            | SubstreamKind::Ce129 { request_id }
+            | SubstreamKind::Ce130 { request_id } => {
                 let position = self
                     .pending
                     .iter()
@@ -362,6 +381,28 @@ impl Connection {
         self.queue_request(Request::Justification(target))
     }
 
+    /// Queues a bounded CE129 exchange sharing the CE128/130 pending budget.
+    /// The server may exceed max_size for its first entry; the hard frame and
+    /// aggregate response budget still apply independently.
+    pub fn request_state(&mut self, mut request: StateRequest) -> Result<RequestId, Error> {
+        if request.start > request.end || request.max_size == 0 {
+            return Err(Error::InvalidRequest);
+        }
+        if self.limits.max_message_size < 98 {
+            return Err(Error::Limit);
+        }
+        // Server size excludes natural prefixes. Every entry costs at least 31
+        // server-counted bytes, and its prefix is at most nine bytes.
+        let budget = self.limits.max_message_size.min(1024 * 1024) / 40 * 31;
+        request.max_size = request
+            .max_size
+            .min(u32::try_from(budget).map_err(|_| Error::Limit)?);
+        if request.max_size == 0 {
+            return Err(Error::Limit);
+        }
+        self.queue_request(Request::State(request))
+    }
+
     fn queue_request(&mut self, request: Request) -> Result<RequestId, Error> {
         if self.closed {
             return Err(Error::Closed);
@@ -369,7 +410,7 @@ impl Connection {
         let active = self
             .streams
             .iter()
-            .filter(|(_, s)| matches!(s, Stream::Ce128(_) | Stream::Ce130(_)))
+            .filter(|(_, s)| matches!(s, Stream::Ce128(_) | Stream::Ce129(_) | Stream::Ce130(_)))
             .count();
         if active.saturating_add(self.pending.len()) >= self.limits.max_pending_requests {
             return Err(Error::Limit);
@@ -431,6 +472,7 @@ impl Connection {
             .streams
             .iter()
             .position(|(_, s)| match s {
+                Stream::Ce129(c) => c.id == request_id,
                 Stream::Ce128(c) => c.id == request_id,
                 Stream::Ce130(c) => c.id == request_id,
                 _ => false,
@@ -445,6 +487,10 @@ impl Connection {
     pub fn substream_reset(&mut self, id: SubstreamId, reason: RequestError) -> Option<Event> {
         let position = self.streams.iter().position(|(other, _)| *other == id)?;
         match self.streams.remove(position).1 {
+            Stream::Ce129(c) => Some(Event::RequestFailed {
+                request_id: c.id,
+                reason,
+            }),
             Stream::Incoming => None,
             Stream::Up0(_) => Some(self.fail(ProtocolError::Up0Lost)),
             Stream::Ce130(c) => Some(Event::RequestFailed {
@@ -508,6 +554,16 @@ impl Connection {
             }
         }
         let result = match &mut self.streams[position].1 {
+            Stream::Ce129(ce) => {
+                progress.written = ce.writer.write(output);
+                if ce.writer.is_empty() && !ce.fin_sent {
+                    ce.fin_sent = true;
+                    progress.finish_write = true;
+                    Ok(None)
+                } else {
+                    ce.read(&mut remaining, peer_fin, self.limits.max_message_size)
+                }
+            }
             Stream::Incoming => Ok(None),
             Stream::Up0(up) => {
                 progress.written = up.writer.write(output);
@@ -542,6 +598,7 @@ impl Connection {
                     event,
                     Some(
                         Event::BlockResponse { .. }
+                            | Event::StateResponse { .. }
                             | Event::JustificationResponse { .. }
                             | Event::RequestFailed { .. }
                     )

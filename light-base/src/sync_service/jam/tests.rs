@@ -47,6 +47,7 @@ fn root_state() -> State {
         0,
     );
     State {
+        reads: StateReads::default(),
         #[cfg(test)]
         test_verifier: None,
         tree: HeaderTree::new(
@@ -69,6 +70,115 @@ fn root_state() -> State {
         stopped: false,
         header_bytes: 4096,
     }
+}
+
+#[test]
+fn state_reads_provenance_retry_and_transient() {
+    smol::block_on(async {
+        for trust in [Trust::Finalized, Trust::Authenticated] {
+            let mut reads = StateReads::default();
+            let key = trie::state_key(8);
+            let mut node = [0; 64];
+            node[0] = 0x81;
+            node[1..32].copy_from_slice(&key);
+            node[32] = 7;
+            let root = smoldot::jam::crypto::blake2b_256(&node);
+            let read = StateRead {
+                root_header: Some([3; 32]),
+                at: [9; 32],
+                root,
+                trust,
+                request: StateRequest {
+                    block: [9; 32],
+                    start: key,
+                    end: key,
+                    max_size: 4000,
+                },
+            };
+            let result = reads.start(read.clone()).unwrap();
+            assert!(reads.start(read.clone()).is_err());
+            assert!(reads.reserve(0).is_some());
+            assert!(reads.reserve(1).is_none());
+            reads.release(0, true);
+            assert!(reads.reserve(0).is_some());
+            let bad = StateResponse {
+                nodes: vec![node],
+                entries: vec![(key, vec![8])],
+            };
+            assert!(reads.received(0, &bad).is_err());
+            assert!(reads.reserve(0).is_none());
+            assert!(reads.reserve(1).is_some());
+            let good = StateResponse {
+                nodes: vec![node],
+                entries: vec![(key, vec![7])],
+            };
+            reads.received(1, &good).unwrap();
+            let result = result.await.unwrap().unwrap();
+            assert_eq!(result.root_header, read.root_header);
+            assert_eq!(
+                (result.at, result.root, result.trust),
+                (read.at, root, trust)
+            );
+            assert_eq!(result.range.entries, good.entries);
+        }
+        let mut reads = StateReads::default();
+        let req = StateRequest {
+            block: [9; 32],
+            start: [0; 31],
+            end: [0; 31],
+            max_size: 1,
+        };
+        let _rx = reads
+            .start(StateRead {
+                root_header: None,
+                at: req.block,
+                root: [0; 32],
+                trust: Trust::Finalized,
+                request: req,
+            })
+            .unwrap();
+        assert!(reads.reserve(0).is_some());
+        reads.release(0, false); // NoData: another peer, not the refusing peer.
+        assert!(reads.reserve(0).is_none());
+        assert!(reads.reserve(1).is_some());
+        assert_eq!(
+            classify_reset("jamnp-stream-reset:6 missing"),
+            net::RequestError::NoData
+        );
+        assert_eq!(
+            classify_reset("jamnp-stream-reset:3 busy"),
+            net::RequestError::Transient
+        );
+        assert_eq!(classify_reset("error 6"), net::RequestError::Rejected);
+    });
+}
+
+#[test]
+fn state_read_exhaustion_frees_slot() {
+    smol::block_on(async {
+        for peers in 0..=2 {
+            let mut reads = StateReads::new(peers);
+            let read = StateRead {
+                at: [0; 32],
+                root: [0; 32],
+                trust: Trust::Finalized,
+                root_header: None,
+                request: StateRequest {
+                    block: [0; 32],
+                    start: [0; 31],
+                    end: [0; 31],
+                    max_size: 1,
+                },
+            };
+            let rx = reads.start(read.clone()).unwrap();
+            for peer in 0..peers {
+                assert!(reads.reserve(peer).is_some());
+                reads.release(peer, false);
+            }
+            assert_eq!(rx.await.unwrap().unwrap_err(), StateReadError::Unavailable);
+            assert!(reads.start(read).is_ok());
+        }
+    });
 }
 
 #[test]
@@ -127,6 +237,8 @@ struct Control {
 
 #[derive(Default)]
 struct IoState {
+    state_responses: VecDeque<Result<Vec<u8>, &'static str>>,
+    state_requests: Vec<Vec<u8>>,
     params: Option<Params>,
     reject_batch_above: Option<u32>,
     proofs: BTreeMap<Hash, Vec<u8>>,
@@ -399,6 +511,20 @@ impl PlatformRef for FakePlatform {
         stream.rw.write_bytes_queued = 0;
         if stream.rw.write_bytes_queueable.is_some() {
             stream.rw.write_bytes_queueable = Some(7);
+        }
+        if stream.ce
+            && !stream.response_started
+            && stream.rw.write_bytes_queueable.is_none()
+            && stream.outgoing[0] == 129
+        {
+            let mut c = stream.control.lock().unwrap();
+            c.io.state_requests.push(stream.outgoing[5..].to_vec());
+            stream.incoming =
+                c.io.state_responses
+                    .pop_front()
+                    .expect("unscripted state read")?
+                    .into();
+            stream.response_started = true;
         }
         if stream.ce
             && !stream.response_started
@@ -1057,6 +1183,7 @@ fn external_verified_tree_memory_and_full_preserve_fixed_anchor() {
     let parsed = JamChainSpec::from_json_bytes(spec.as_bytes()).unwrap();
     let config = Config::from_spec(&parsed).unwrap();
     let mut state = State {
+        reads: StateReads::default(),
         #[cfg(test)]
         test_verifier: None,
         tree: config.tree,
@@ -1084,6 +1211,7 @@ fn external_verified_tree_memory_and_full_preserve_fixed_anchor() {
     assert!(measured * 2 < TREE_BYTES);
     let anchor = state.tree.finalized().clone();
     let mut full = State {
+        reads: StateReads::default(),
         #[cfg(test)]
         test_verifier: None,
         tree: HeaderTree::new(
@@ -2417,6 +2545,7 @@ fn external_captured_finality_requests_are_deduplicated_and_notifications_follow
     let spec = JamChainSpec::from_json_bytes(fixture["spec"].to_string().as_bytes()).unwrap();
     let config = Config::from_spec(&spec).unwrap();
     let mut state = State {
+        reads: StateReads::default(),
         #[cfg(test)]
         test_verifier: None,
         tree: config.tree,
@@ -2534,6 +2663,7 @@ fn synthetic_driver(blocks: usize, capacity: usize) -> (FakePlatform, Config, Ve
 
 fn driver_state(config: Config) -> Arc<async_lock::Mutex<State>> {
     Arc::new(async_lock::Mutex::new(State {
+        reads: StateReads::default(),
         #[cfg(test)]
         test_verifier: None,
         tree: config.tree,
@@ -2546,6 +2676,209 @@ fn driver_state(config: Config) -> Arc<async_lock::Mutex<State>> {
         proof_owner: None,
         proof_attempts: vec![],
     }))
+}
+
+#[test]
+fn state_read_scripted_driver_retries_proof_nodata_and_transient() {
+    smol::block_on(async {
+        for failure in [0, 1, 2, 3] {
+            let state = Arc::new(async_lock::Mutex::new(root_state()));
+            let params = state.lock().await.params.clone();
+            let final_ = Final {
+                hash: state.lock().await.tree.finalized().hash,
+                slot: 0,
+            };
+            let platform = FakePlatform(Arc::new(Mutex::new(Control {
+                handshake: framed(
+                    Handshake {
+                        final_: final_.clone(),
+                        leaves: vec![],
+                    }
+                    .encode(),
+                ),
+                responses: Default::default(),
+                requests: vec![],
+                attempts: 0,
+                fail_first: false,
+                supported: true,
+                pins: vec![],
+                disconnect: false,
+                starve: false,
+                queued: false,
+                clock_shift: Duration::ZERO,
+                io: IoState::default(),
+            })));
+            let key = trie::state_key(8);
+            let value = vec![7; 336 * 6 + 2];
+            let mut node = [0; 64];
+            node[0] = 0xc0;
+            node[1..32].copy_from_slice(&key);
+            node[32..].copy_from_slice(&smoldot::jam::crypto::blake2b_256(&value));
+            let root = smoldot::jam::crypto::blake2b_256(&node);
+            let mut entries = key.to_vec();
+            entries.extend(smoldot::jam::codec::encode_natural(
+                u64::try_from(value.len()).unwrap(),
+            ));
+            entries.extend(&value);
+            let mut good = framed(node.to_vec());
+            good.extend(framed(entries));
+            let first = match failure {
+                0 => {
+                    let mut bad = good.clone();
+                    *bad.last_mut().unwrap() ^= 1;
+                    Ok(bad)
+                }
+                1 => Err("jamnp-stream-reset:6 no state"),
+                _ => Err("jamnp-stream-reset:3 busy"),
+            };
+            if failure == 3 {
+                let mut control = platform.0.lock().unwrap();
+                control.io.stall_outbound = true;
+                control.io.state_responses = [Ok(good)].into();
+            } else {
+                platform.0.lock().unwrap().io.state_responses = [first, Ok(good)].into();
+            }
+            // Authenticate two scripted headers, finalize the first with a real
+            // signature, and read its state against the second's prior root.
+            let read = {
+                use smoldot::identity::keystore::{KeyNamespace, Keystore};
+                let keys = Keystore::new(None, [42; 32]).await.unwrap();
+                let public = keys
+                    .generate_ed25519(KeyNamespace::Grandpa, false)
+                    .await
+                    .unwrap();
+                let mut s = state.lock().await;
+                assert!(s.finalized_read(key, key, 4000).is_none());
+                s.authorities =
+                    AuthoritySet::from_checkpoint(&params, 0, vec![public; 6], vec![public; 6])
+                        .unwrap();
+                let mut header = Header::decode(&params, &s.tree.finalized().encoded).unwrap();
+                let mut target = [0; 32];
+                for slot in 1..=2 {
+                    let parent = s.tree.best().clone();
+                    header.parent = parent.hash;
+                    header.slot = slot;
+                    header.prior_state_root = root;
+                    let verified =
+                        verified_genesis(&params, header.clone(), parent.post_state.clone());
+                    if slot == 1 {
+                        target = verified.hash;
+                    }
+                    s.tree.insert_verified(parent.hash, verified).unwrap();
+                }
+                let mut payload = b"jam_grandpa_vote".to_vec();
+                payload.push(1);
+                payload.extend(target);
+                payload.extend(root);
+                payload.extend(1u32.to_le_bytes());
+                payload.extend(1u64.to_le_bytes());
+                payload.extend(0u32.to_le_bytes());
+                let signature = keys
+                    .sign(KeyNamespace::Grandpa, &public, &payload)
+                    .await
+                    .unwrap();
+                let mut proof = 1u64.to_le_bytes().to_vec();
+                proof.extend(0u32.to_le_bytes());
+                proof.extend(target);
+                proof.extend(root);
+                proof.extend(1u32.to_le_bytes());
+                proof.push(1);
+                proof.extend(target);
+                proof.extend(root);
+                proof.extend(1u32.to_le_bytes());
+                proof.extend(signature);
+                proof.extend(public);
+                proof.push(0);
+                s.finalize(target, &proof).unwrap();
+                let read = s.finalized_read(key, key, 4000).unwrap();
+                assert_eq!(read.at, target);
+                assert_eq!(read.root, root);
+                assert_eq!(read.root_header, Some(s.tree.best().hash));
+                read
+            };
+            let rx = state.lock().await.reads.start(read.clone()).unwrap();
+            // Run failing peer first. NoData leaves the connection alive, so end
+            // that turn as soon as it releases the shared reservation.
+            let connection = || {
+                platform.0.lock().unwrap().io.live_connections += 1;
+                FakeConnection {
+                    control: platform.0.clone(),
+                    streams: VecDeque::new(),
+                    number: 0,
+                    dead: false,
+                }
+            };
+            let mut fetch = FetchSize::default();
+            future::or(
+                drive(
+                    &platform,
+                    "state-test",
+                    &params,
+                    0,
+                    &state,
+                    connection(),
+                    &mut fetch,
+                ),
+                async {
+                    let mut shifted = false;
+                    loop {
+                        if failure == 3 {
+                            let owner = state.lock().await.reads.owner;
+                            if owner.is_some() && !shifted {
+                                platform.0.lock().unwrap().clock_shift = Duration::from_secs(21);
+                                shifted = true;
+                            }
+                            if shifted && owner.is_none() {
+                                break;
+                            }
+                        } else if !platform.0.lock().unwrap().io.state_requests.is_empty()
+                            && state.lock().await.reads.owner.is_none()
+                        {
+                            break;
+                        }
+                        future::yield_now().await;
+                    }
+                },
+            )
+            .await;
+            // Same connection teardown cleanup as peer_loop (also covers an
+            // opening deadline firing before the queued read's deadline).
+            state.lock().await.reads.release(0, false);
+            platform.0.lock().unwrap().io.stall_outbound = false;
+            let peer = if failure == 2 { 0 } else { 1 };
+            if failure != 2 {
+                assert!(state.lock().await.reads.reserve(0).is_none());
+            }
+            let mut fetch = FetchSize::default();
+            let result = future::or(
+                async {
+                    drive(
+                        &platform,
+                        "state-test",
+                        &params,
+                        peer,
+                        &state,
+                        connection(),
+                        &mut fetch,
+                    )
+                    .await;
+                    panic!("successful driver exited")
+                },
+                async { rx.await.unwrap().unwrap() },
+            )
+            .await;
+            assert_eq!(
+                (result.at, result.root, result.trust),
+                (read.at, read.root, read.trust)
+            );
+            assert_eq!(result.range.entries, vec![(key, value)]);
+            assert_eq!(result.root_header, read.root_header);
+            assert_eq!(
+                platform.0.lock().unwrap().io.state_requests,
+                vec![read.request.encode().to_vec(); if failure == 3 { 1 } else { 2 }]
+            );
+        }
+    });
 }
 
 #[test]
