@@ -19,19 +19,24 @@
 //! over an in-memory encrypted byte pipe, the same way `collection::tests` does.
 
 use super::{
-    ChainConfig, ChainId, ChainNetwork, Config, ConnectionId, Event, GossipKind, PeerId,
-    SingleStreamConnectionTask, SingleStreamHandshakeKind, peer_id,
+    ChainConfig, ChainId, ChainNetwork, CloseGossipError, Config, ConnectionId, Event, GossipKind,
+    NotificationsOutErr, OpenGossipError, PeerId, RemoveChainError, SendTopicAffinityError,
+    SingleStreamConnectionTask, SingleStreamHandshakeKind, established, peer_id,
 };
 use crate::libp2p::{connection::noise::NoiseKey, read_write::ReadWrite};
-use crate::network::codec::Role;
+use crate::network::codec::{self, Role};
 use alloc::vec::Vec;
 use core::{cmp, mem, time::Duration};
 
 /// Maximum size of the byte pipe between the two connection tasks.
 const BUF: usize = 65536;
 
-/// Asserts how many events of the given side match the pattern.
+/// Asserts how many events of the given side match the pattern. The short form names the side
+/// and the event variant without their type.
 macro_rules! assert_count {
+    ($events:expr, $side:ident, $event:ident, $expected:expr) => {
+        assert_count!($events, Side::$side, Event::$event { .. }, $expected)
+    };
     ($events:expr, $side:expr, $pattern:pat, $expected:expr) => {
         assert_eq!(
             $events
@@ -155,8 +160,8 @@ impl Harness {
         };
 
         let events = harness.pump();
-        assert_count!(events, Side::Alice, Event::HandshakeFinished { .. }, 1);
-        assert_count!(events, Side::Bob, Event::HandshakeFinished { .. }, 1);
+        assert_count!(events, Alice, HandshakeFinished, 1);
+        assert_count!(events, Bob, HandshakeFinished, 1);
         harness
     }
 
@@ -328,8 +333,8 @@ impl Harness {
             )
             .unwrap();
         let events = self.pump();
-        assert_count!(events, Side::Alice, Event::GossipConnected { .. }, 1);
-        assert_count!(events, Side::Bob, Event::GossipConnected { .. }, 1);
+        assert_count!(events, Alice, GossipConnected, 1);
+        assert_count!(events, Bob, GossipConnected, 1);
         events
     }
 }
@@ -351,31 +356,37 @@ fn gossip_link_opens() {
     ));
 }
 
-/// The statement substream opens along with the block announces substream, and closing the
-/// gossip link with both open still reaches the remote side.
+/// Without a statement link, the statement substream follows the block announces substream.
 #[test]
 fn statement_substream_follows_block_announces() {
     let mut harness = Harness::connected(true, true);
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
 
     let events = harness.open_gossip_link();
-    assert_count!(
-        events,
-        Side::Alice,
-        Event::StatementProtocolConnected { .. },
-        1
+    assert_count!(events, Alice, StatementProtocolConnected, 1);
+    assert!(
+        harness
+            .alice
+            .network
+            .gossip_is_connected(chain_id, &bob, GossipKind::Statement)
     );
 
     harness
         .alice
         .network
-        .gossip_close(
-            harness.alice.chain_id,
-            &harness.alice.remote,
-            GossipKind::ConsensusTransactions,
-        )
+        .gossip_close(chain_id, &bob, GossipKind::ConsensusTransactions)
         .unwrap();
+    assert!(
+        !harness
+            .alice
+            .network
+            .gossip_is_connected(chain_id, &bob, GossipKind::Statement)
+    );
+
     let events = harness.pump();
-    assert_count!(events, Side::Bob, Event::GossipDisconnected { .. }, 1);
+    assert_count!(events, Bob, GossipDisconnected, 1);
+    assert_count!(events, Alice, StatementProtocolDisconnected, 0);
 }
 
 /// Losing the connection on one side ends that side's gossip link with one event. The other
@@ -386,6 +397,674 @@ fn gossip_link_lost_with_connection() {
     harness.open_gossip_link();
 
     let events = harness.reset(Side::Alice);
-    assert_count!(events, Side::Alice, Event::GossipDisconnected { .. }, 1);
-    assert_count!(events, Side::Bob, Event::GossipDisconnected { .. }, 0);
+    assert_count!(events, Alice, GossipDisconnected, 1);
+    assert_count!(events, Bob, GossipDisconnected, 0);
+}
+
+/// Opening a statement link needs no block announces substream, and reports through the
+/// statement events only. Statements flow only once the outbound substream is open.
+#[test]
+fn statement_link_opens_without_block_announces() {
+    let mut harness = Harness::connected(true, true);
+    let alice = harness.bob.remote.clone();
+    let bob = harness.alice.remote.clone();
+
+    // Bob accepts the inbound statement substream because it desires Alice under that kind.
+    harness.bob.network.gossip_insert_desired(
+        harness.bob.chain_id,
+        alice.clone(),
+        GossipKind::Statement,
+    );
+    harness
+        .alice
+        .network
+        .gossip_open(harness.alice.chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+
+    let events = harness.pump();
+    assert_count!(
+        events,
+        Side::Alice,
+        Event::StatementProtocolConnected {
+            version: codec::StatementProtocolVersion::V2,
+            ..
+        },
+        1
+    );
+    assert_count!(events, Alice, GossipConnected, 0);
+    assert_count!(events, Bob, GossipConnected, 0);
+
+    let alice_network = &harness.alice.network;
+    assert!(alice_network.gossip_is_connected(harness.alice.chain_id, &bob, GossipKind::Statement));
+    assert!(!alice_network.gossip_is_connected(
+        harness.alice.chain_id,
+        &bob,
+        GossipKind::ConsensusTransactions
+    ));
+    assert!(
+        alice_network
+            .gossip_connected_peers(harness.alice.chain_id, GossipKind::Statement)
+            .any(|p| *p == bob)
+    );
+    assert_eq!(
+        alice_network
+            .gossip_connected_peers(harness.alice.chain_id, GossipKind::ConsensusTransactions)
+            .count(),
+        0
+    );
+
+    // Until Bob opens its own statement substream, it can't send and drops Alice's
+    // notifications, the way it drops block announces from a peer it has no outbound
+    // substream with.
+    let filter = codec::AffinityFilter::new(0, 0.01, 8);
+    assert!(matches!(
+        harness
+            .bob
+            .network
+            .send_topic_affinity(&alice, harness.bob.chain_id, &filter),
+        Err(SendTopicAffinityError::NoConnection)
+    ));
+    harness
+        .alice
+        .network
+        .send_topic_affinity(&bob, harness.alice.chain_id, &filter)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Bob, StatementTopicAffinityReceived, 0);
+
+    harness
+        .bob
+        .network
+        .gossip_open(harness.bob.chain_id, &alice, GossipKind::Statement)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Bob, StatementProtocolConnected, 1);
+
+    harness
+        .alice
+        .network
+        .send_topic_affinity(&bob, harness.alice.chain_id, &filter)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Bob, StatementTopicAffinityReceived, 1);
+
+    assert!(matches!(
+        harness
+            .alice
+            .network
+            .gossip_open(harness.alice.chain_id, &bob, GossipKind::Statement),
+        Err(OpenGossipError::AlreadyOpened)
+    ));
+}
+
+/// A peer without the statement protocol makes the link fail after the V2 to V1 fallback, and
+/// the peer goes back to the list of desired peers to open.
+#[test]
+fn statement_link_refused_by_unsupported_protocol() {
+    let mut harness = Harness::connected(true, false);
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
+
+    harness
+        .alice
+        .network
+        .gossip_insert_desired(chain_id, bob.clone(), GossipKind::Statement);
+    assert!(
+        harness
+            .alice
+            .network
+            .connected_unopened_gossip_desired()
+            .any(|(p, c, k)| *p == bob && c == chain_id && k == GossipKind::Statement)
+    );
+
+    harness
+        .alice
+        .network
+        .gossip_open(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    assert_eq!(
+        harness
+            .alice
+            .network
+            .connected_unopened_gossip_desired()
+            .count(),
+        0
+    );
+
+    let events = harness.pump();
+    assert_count!(
+        events,
+        Side::Alice,
+        Event::StatementProtocolOpenFailed {
+            error: NotificationsOutErr::Substream(
+                established::NotificationsOutErr::ProtocolNotAvailable
+            ),
+            ..
+        },
+        1
+    );
+    assert_count!(events, Alice, StatementProtocolConnected, 0);
+    assert!(matches!(
+        harness
+            .alice
+            .network
+            .gossip_close(chain_id, &bob, GossipKind::Statement),
+        Err(CloseGossipError::NotOpen)
+    ));
+    assert!(
+        harness
+            .alice
+            .network
+            .connected_unopened_gossip_desired()
+            .any(|(p, c, k)| *p == bob && c == chain_id && k == GossipKind::Statement)
+    );
+}
+
+/// A peer that supports the statement protocol but refuses a statement-only substream, which is
+/// what a full node without slots for it does, makes the link fail without a retry.
+#[test]
+fn statement_link_refused_by_peer_policy() {
+    let mut harness = Harness::connected(true, true);
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
+
+    harness
+        .alice
+        .network
+        .gossip_open(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+
+    let events = harness.pump();
+    assert_count!(events, Alice, StatementProtocolOpenFailed, 1);
+    assert_count!(
+        events,
+        Side::Alice,
+        Event::StatementProtocolOpenFailed {
+            error: NotificationsOutErr::Substream(
+                established::NotificationsOutErr::RefusedHandshake
+            ),
+            ..
+        },
+        1
+    );
+    assert_count!(events, Alice, StatementProtocolConnected, 0);
+    assert!(
+        !harness
+            .alice
+            .network
+            .gossip_is_connected(chain_id, &bob, GossipKind::Statement)
+    );
+    assert!(matches!(
+        harness
+            .alice
+            .network
+            .gossip_close(chain_id, &bob, GossipKind::Statement),
+        Err(CloseGossipError::NotOpen)
+    ));
+}
+
+/// The remote closing the statement substream ends the link with an event and no reopen.
+#[test]
+fn statement_link_closed_by_remote() {
+    let mut harness = Harness::connected(true, true);
+    let alice = harness.bob.remote.clone();
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
+
+    harness.bob.network.gossip_insert_desired(
+        harness.bob.chain_id,
+        alice.clone(),
+        GossipKind::Statement,
+    );
+    harness
+        .alice
+        .network
+        .gossip_insert_desired(chain_id, bob.clone(), GossipKind::Statement);
+    harness
+        .alice
+        .network
+        .gossip_open(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Alice, StatementProtocolConnected, 1);
+
+    harness
+        .bob
+        .network
+        .gossip_close(harness.bob.chain_id, &alice, GossipKind::Statement)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Alice, StatementProtocolDisconnected, 1);
+    assert_count!(events, Alice, StatementProtocolConnected, 0);
+    assert!(matches!(
+        harness
+            .alice
+            .network
+            .gossip_close(chain_id, &bob, GossipKind::Statement),
+        Err(CloseGossipError::NotOpen)
+    ));
+    assert!(
+        harness
+            .alice
+            .network
+            .connected_unopened_gossip_desired()
+            .any(|(p, c, k)| *p == bob && c == chain_id && k == GossipKind::Statement)
+    );
+}
+
+/// With both kinds on one peer, closing the block announces link keeps the statement link, on
+/// both sides, and the statement substream still carries notifications.
+#[test]
+fn statement_link_survives_block_announces_close() {
+    let mut harness = Harness::connected(true, true);
+    let alice = harness.bob.remote.clone();
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
+
+    let events = harness.open_gossip_link();
+    assert_count!(events, Alice, StatementProtocolConnected, 1);
+    assert_count!(events, Bob, StatementProtocolConnected, 1);
+
+    harness
+        .alice
+        .network
+        .gossip_insert_desired(chain_id, bob.clone(), GossipKind::Statement);
+    harness.bob.network.gossip_insert_desired(
+        harness.bob.chain_id,
+        alice.clone(),
+        GossipKind::Statement,
+    );
+    // The existing statement substreams anchor the links: nothing is left to open.
+    assert_eq!(
+        harness
+            .alice
+            .network
+            .connected_unopened_gossip_desired()
+            .count(),
+        0
+    );
+
+    harness
+        .alice
+        .network
+        .gossip_close(chain_id, &bob, GossipKind::ConsensusTransactions)
+        .unwrap();
+    assert!(
+        harness
+            .alice
+            .network
+            .gossip_is_connected(chain_id, &bob, GossipKind::Statement)
+    );
+
+    let events = harness.pump();
+    assert_count!(events, Bob, GossipDisconnected, 1);
+    assert_count!(events, Alice, StatementProtocolDisconnected, 0);
+    assert_count!(events, Bob, StatementProtocolDisconnected, 0);
+    // The statement substreams stayed open rather than being closed and reopened.
+    assert_count!(events, Alice, StatementProtocolConnected, 0);
+    assert_count!(events, Bob, StatementProtocolConnected, 0);
+    assert!(harness.bob.network.gossip_is_connected(
+        harness.bob.chain_id,
+        &alice,
+        GossipKind::Statement
+    ));
+
+    let filter = codec::AffinityFilter::new(0, 0.01, 8);
+    harness
+        .alice
+        .network
+        .send_topic_affinity(&bob, chain_id, &filter)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Bob, StatementTopicAffinityReceived, 1);
+}
+
+/// Opening a statement link on a peer whose statement substream follows the block announces
+/// substream turns that substream into the anchor of the link.
+#[test]
+fn opening_statement_link_adopts_following_substream() {
+    let mut harness = Harness::connected(true, true);
+    let alice = harness.bob.remote.clone();
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
+
+    harness.open_gossip_link();
+    harness.bob.network.gossip_insert_desired(
+        harness.bob.chain_id,
+        alice.clone(),
+        GossipKind::Statement,
+    );
+
+    assert!(matches!(
+        harness
+            .alice
+            .network
+            .gossip_open(chain_id, &bob, GossipKind::Statement),
+        Err(OpenGossipError::AlreadyOpened)
+    ));
+    assert!(
+        harness
+            .alice
+            .network
+            .opened_gossip_undesired()
+            .any(|(p, c, k)| *p == bob && c == chain_id && k == GossipKind::Statement)
+    );
+
+    harness
+        .alice
+        .network
+        .gossip_close(chain_id, &bob, GossipKind::ConsensusTransactions)
+        .unwrap();
+    assert!(
+        harness
+            .alice
+            .network
+            .gossip_is_connected(chain_id, &bob, GossipKind::Statement)
+    );
+
+    let events = harness.pump();
+    assert_count!(events, Bob, GossipDisconnected, 1);
+    assert_count!(events, Alice, StatementProtocolDisconnected, 0);
+    assert_count!(events, Alice, StatementProtocolConnected, 0);
+
+    let filter = codec::AffinityFilter::new(0, 0.01, 8);
+    harness
+        .alice
+        .network
+        .send_topic_affinity(&bob, chain_id, &filter)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Bob, StatementTopicAffinityReceived, 1);
+
+    harness
+        .alice
+        .network
+        .gossip_close(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    assert_eq!(harness.alice.network.opened_gossip_undesired().count(), 0);
+}
+
+/// A block announces link opened on top of a statement link reuses the statement substream.
+#[test]
+fn block_announces_link_reuses_statement_link() {
+    let mut harness = Harness::connected(true, true);
+    let alice = harness.bob.remote.clone();
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
+
+    harness.bob.network.gossip_insert_desired(
+        harness.bob.chain_id,
+        alice.clone(),
+        GossipKind::Statement,
+    );
+    harness
+        .alice
+        .network
+        .gossip_open(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Alice, StatementProtocolConnected, 1);
+
+    let events = harness.open_gossip_link();
+    assert_count!(events, Alice, StatementProtocolConnected, 0);
+    assert_count!(events, Alice, StatementProtocolDisconnected, 0);
+    assert!(
+        harness
+            .alice
+            .network
+            .gossip_is_connected(chain_id, &bob, GossipKind::Statement)
+    );
+    assert!(matches!(
+        harness
+            .alice
+            .network
+            .gossip_open(chain_id, &bob, GossipKind::Statement),
+        Err(OpenGossipError::AlreadyOpened)
+    ));
+}
+
+/// Removing a peer from the desired peers of every chain keeps its statement link as an
+/// undesired but open link, the same way the per-chain removal does.
+#[test]
+fn removing_desire_from_all_chains_keeps_statement_link() {
+    let mut harness = Harness::connected(true, true);
+    let alice = harness.bob.remote.clone();
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
+
+    harness.bob.network.gossip_insert_desired(
+        harness.bob.chain_id,
+        alice.clone(),
+        GossipKind::Statement,
+    );
+    harness
+        .alice
+        .network
+        .gossip_insert_desired(chain_id, bob.clone(), GossipKind::Statement);
+    harness
+        .alice
+        .network
+        .gossip_open(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Alice, StatementProtocolConnected, 1);
+
+    harness
+        .alice
+        .network
+        .gossip_remove_desired_all(&bob, GossipKind::Statement);
+    assert!(
+        harness
+            .alice
+            .network
+            .opened_gossip_undesired()
+            .any(|(p, c, k)| *p == bob && c == chain_id && k == GossipKind::Statement)
+    );
+
+    harness
+        .bob
+        .network
+        .gossip_close(harness.bob.chain_id, &alice, GossipKind::Statement)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Alice, StatementProtocolDisconnected, 1);
+    assert_count!(events, Alice, StatementProtocolConnected, 0);
+    assert_eq!(harness.alice.network.opened_gossip_undesired().count(), 0);
+}
+
+/// Removing a chain refuses while a statement link is open, and forgets a pending one. Closing
+/// a pending link yields no event.
+#[test]
+fn remove_chain_forgets_statement_links() {
+    let mut harness = Harness::connected(true, true);
+    let alice = harness.bob.remote.clone();
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
+
+    harness.bob.network.gossip_insert_desired(
+        harness.bob.chain_id,
+        alice.clone(),
+        GossipKind::Statement,
+    );
+    harness
+        .alice
+        .network
+        .gossip_open(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Alice, StatementProtocolConnected, 1);
+    assert!(matches!(
+        harness.alice.network.remove_chain(chain_id),
+        Err(RemoveChainError::InUse)
+    ));
+
+    harness
+        .alice
+        .network
+        .gossip_close(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    harness.pump();
+
+    harness
+        .alice
+        .network
+        .gossip_open(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    harness
+        .alice
+        .network
+        .gossip_close(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Alice, StatementProtocolConnected, 0);
+    assert_count!(events, Alice, StatementProtocolDisconnected, 0);
+    assert_count!(events, Alice, StatementProtocolOpenFailed, 0);
+
+    harness
+        .alice
+        .network
+        .gossip_open(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    assert_eq!(harness.alice.network.opened_gossip_undesired().count(), 1);
+    harness.alice.network.remove_chain(chain_id).unwrap();
+    assert_eq!(harness.alice.network.opened_gossip_undesired().count(), 0);
+}
+
+/// Losing the connection ends the statement link with one event, and the peer waits for a
+/// new connection rather than a new open.
+#[test]
+fn statement_link_lost_with_connection() {
+    let mut harness = Harness::connected(true, true);
+    let alice = harness.bob.remote.clone();
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
+
+    harness.bob.network.gossip_insert_desired(
+        harness.bob.chain_id,
+        alice.clone(),
+        GossipKind::Statement,
+    );
+    harness
+        .alice
+        .network
+        .gossip_insert_desired(chain_id, bob.clone(), GossipKind::Statement);
+    harness
+        .alice
+        .network
+        .gossip_open(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Alice, StatementProtocolConnected, 1);
+
+    let events = harness.reset(Side::Alice);
+    assert_count!(events, Alice, StatementProtocolDisconnected, 1);
+    assert_count!(events, Alice, StatementProtocolConnected, 0);
+    assert_count!(events, Alice, Disconnected, 1);
+    assert_eq!(
+        harness
+            .alice
+            .network
+            .connected_unopened_gossip_desired()
+            .count(),
+        0
+    );
+    assert!(
+        harness
+            .alice
+            .network
+            .unconnected_desired()
+            .any(|p| *p == bob)
+    );
+}
+
+/// Losing the connection while the statement link is pending reports the open as failed, so
+/// the caller is never left waiting.
+#[test]
+fn pending_statement_link_fails_on_connection_shutdown() {
+    let mut harness = Harness::connected(true, true);
+    let bob = harness.alice.remote.clone();
+
+    harness
+        .alice
+        .network
+        .gossip_open(harness.alice.chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    let events = harness.reset(Side::Alice);
+    assert_count!(
+        events,
+        Side::Alice,
+        Event::StatementProtocolOpenFailed {
+            error: NotificationsOutErr::ConnectionShutdown,
+            ..
+        },
+        1
+    );
+    assert_count!(events, Alice, StatementProtocolConnected, 0);
+    assert_count!(events, Alice, StatementProtocolDisconnected, 0);
+}
+
+/// A peer desired under both kinds gets its statement link from the block announces link, so
+/// there is nothing left to open for the statement kind. Closing the statement link leaves the
+/// block announces link alone.
+#[test]
+fn block_announces_link_anchors_desired_statement_link() {
+    let mut harness = Harness::connected(true, true);
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
+
+    harness.alice.network.gossip_insert_desired(
+        chain_id,
+        bob.clone(),
+        GossipKind::ConsensusTransactions,
+    );
+    harness
+        .alice
+        .network
+        .gossip_insert_desired(chain_id, bob.clone(), GossipKind::Statement);
+    assert_eq!(
+        harness
+            .alice
+            .network
+            .connected_unopened_gossip_desired()
+            .count(),
+        2
+    );
+
+    let events = harness.open_gossip_link();
+    assert_count!(events, Alice, StatementProtocolConnected, 1);
+    assert_eq!(
+        harness
+            .alice
+            .network
+            .connected_unopened_gossip_desired()
+            .count(),
+        0
+    );
+    assert!(matches!(
+        harness
+            .alice
+            .network
+            .gossip_open(chain_id, &bob, GossipKind::Statement),
+        Err(OpenGossipError::AlreadyOpened)
+    ));
+
+    harness
+        .alice
+        .network
+        .gossip_close(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    assert!(harness.alice.network.gossip_is_connected(
+        chain_id,
+        &bob,
+        GossipKind::ConsensusTransactions
+    ));
+    let events = harness.pump();
+    assert_count!(events, Alice, GossipDisconnected, 0);
+    assert_count!(events, Bob, GossipDisconnected, 0);
+    assert!(
+        !harness
+            .alice
+            .network
+            .gossip_is_connected(chain_id, &bob, GossipKind::Statement)
+    );
 }
