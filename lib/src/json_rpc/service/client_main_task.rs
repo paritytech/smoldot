@@ -441,6 +441,7 @@ impl ClientMainTask {
                 | methods::MethodCall::rpc_methods { .. }
                 | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
                 | methods::MethodCall::sudo_unstable_version { .. }
+                | methods::MethodCall::sudo_unstable_metrics { .. }
                 | methods::MethodCall::chainHead_v1_body { .. }
                 | methods::MethodCall::chainHead_v1_call { .. }
                 | methods::MethodCall::chainHead_v1_continue { .. }
