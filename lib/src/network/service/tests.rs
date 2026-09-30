@@ -389,7 +389,8 @@ fn statement_substream_follows_block_announces() {
     assert_count!(events, Alice, StatementProtocolDisconnected, 0);
 }
 
-/// Losing the connection ends the gossip link with one event.
+/// Losing the connection on one side ends that side's gossip link with one event. The other
+/// side is never told, the way a dropped socket looks from the outside.
 #[test]
 fn gossip_link_lost_with_connection() {
     let mut harness = Harness::connected(false, false);
@@ -397,6 +398,7 @@ fn gossip_link_lost_with_connection() {
 
     let events = harness.reset(Side::Alice);
     assert_count!(events, Alice, GossipDisconnected, 1);
+    assert_count!(events, Bob, GossipDisconnected, 0);
 }
 
 /// Opening a statement link needs no block announces substream, and reports through the
