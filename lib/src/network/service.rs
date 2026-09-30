@@ -4325,33 +4325,14 @@ where
             })
             .ok_or(OpenGossipError::NoConnection)?;
 
-        // Accept inbound substreams. A statement link only concerns the statement substreams.
-        let all_protocols = [
-            NotificationsProtocol::BlockAnnounces {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Transactions {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Grandpa {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Statement {
-                chain_index: chain_id.0,
-                version: codec::StatementProtocolVersion::V1,
-            },
-            NotificationsProtocol::Statement {
-                chain_index: chain_id.0,
-                version: codec::StatementProtocolVersion::V2,
-            },
-        ];
-        let protocols_to_accept: &[NotificationsProtocol] = match kind {
-            GossipKind::ConsensusTransactions => &all_protocols[..],
-            GossipKind::Statement => &all_protocols[3..],
-        };
+        // Accept inbound substreams. A statement link only concerns the statement substreams,
+        // while a consensus link also carries the statement substreams that follow it.
+        let protocols_to_accept = (kind == GossipKind::ConsensusTransactions)
+            .then(|| consensus_transactions_protocols(chain_id.0))
+            .into_iter()
+            .flatten()
+            .chain(statement_protocols(chain_id.0));
         for (protocol, in_substream_id) in protocols_to_accept
-            .iter()
-            .copied()
             .flat_map(|protocol| {
                 self.notification_substreams_by_peer_id
                     .range(
@@ -4505,36 +4486,22 @@ where
         // error at the end.
         let mut has_closed_something = false;
 
-        // Close all substreams, pending or open.
-        let all_protocols = [
-            NotificationsProtocol::BlockAnnounces {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Transactions {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Grandpa {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Statement {
-                chain_index: chain_id.0,
-                version: codec::StatementProtocolVersion::V1,
-            },
-            NotificationsProtocol::Statement {
-                chain_index: chain_id.0,
-                version: codec::StatementProtocolVersion::V2,
-            },
-        ];
-        let protocols_to_close: &[NotificationsProtocol] = match kind {
-            GossipKind::ConsensusTransactions
-                if self.statement_link_wanted(chain_id.0, peer_index) =>
-            {
-                &all_protocols[..3]
-            }
-            GossipKind::ConsensusTransactions => &all_protocols[..],
-            GossipKind::Statement => &all_protocols[3..],
-        };
-        for protocol in protocols_to_close.iter().copied() {
+        // Close all substreams, pending or open. Closing a consensus link also closes the
+        // statement substreams following it, unless a statement link is wanted with the peer.
+        let close_consensus_transactions = kind == GossipKind::ConsensusTransactions;
+        let close_statement =
+            kind == GossipKind::Statement || !self.statement_link_wanted(chain_id.0, peer_index);
+        let protocols_to_close = close_consensus_transactions
+            .then(|| consensus_transactions_protocols(chain_id.0))
+            .into_iter()
+            .flatten()
+            .chain(
+                close_statement
+                    .then(|| statement_protocols(chain_id.0))
+                    .into_iter()
+                    .flatten(),
+            );
+        for protocol in protocols_to_close {
             for (substream_id, direction, state) in self
                 .notification_substreams_by_peer_id
                 .range(
@@ -5699,6 +5666,15 @@ pub enum GossipKind {
 impl GossipKind {
     const MIN: Self = GossipKind::ConsensusTransactions;
     const MAX: Self = GossipKind::Statement;
+}
+
+/// Notifications protocols of a consensus and transactions link of the given chain.
+fn consensus_transactions_protocols(chain_index: usize) -> [NotificationsProtocol; 3] {
+    [
+        NotificationsProtocol::BlockAnnounces { chain_index },
+        NotificationsProtocol::Transactions { chain_index },
+        NotificationsProtocol::Grandpa { chain_index },
+    ]
 }
 
 /// Both versions of the statement protocol of the given chain.
