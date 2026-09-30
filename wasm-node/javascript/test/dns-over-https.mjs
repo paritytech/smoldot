@@ -231,7 +231,7 @@ test("a malformed answer counts as a failure of that provider", async (t) => {
   t.deepEqual(urls, [QUAD9("A"), CLOUDFLARE("A")]);
   const { fetchImpl: garbage } = fakeFetch(() => ({ body: new Uint8Array([1, 2, 3]) }));
   await t.throwsAsync(resolveDnsOverHttps("example.com", 4, signal(), garbage), {
-    message: "doh.dns.sb: malformed answer",
+    message: "dns.google: malformed answer",
   });
 });
 
@@ -246,7 +246,7 @@ test("/dns/ falls back to AAAA records when there is no A record", async (t) => 
     asksFor(url, "A") ? answer([]) : answer([AAAA([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1])]),
   );
   t.is(await resolveDnsOverHttps("example.com", undefined, signal(), fetchImpl), "2001:db8::1");
-  t.deepEqual(urls, [QUAD9("A"), CLOUDFLARE("A"), GOOGLE("A"), DNSSB("A"), QUAD9("AAAA")]);
+  t.deepEqual(urls, [QUAD9("A"), CLOUDFLARE("A"), DNSSB("A"), GOOGLE("A"), QUAD9("AAAA")]);
 });
 
 test("/dns6/ never asks for A records", async (t) => {
@@ -258,9 +258,9 @@ test("/dns6/ never asks for A records", async (t) => {
 test("rejects with the last provider's error when every provider fails", async (t) => {
   const { urls, fetchImpl } = fakeFetch(() => new Error("network down"));
   await t.throwsAsync(resolveDnsOverHttps("example.com", 4, signal(), fetchImpl), {
-    message: "doh.dns.sb: network down",
+    message: "dns.google: network down",
   });
-  t.deepEqual(urls, [QUAD9("A"), CLOUDFLARE("A"), GOOGLE("A"), DNSSB("A")]);
+  t.deepEqual(urls, [QUAD9("A"), CLOUDFLARE("A"), DNSSB("A"), GOOGLE("A")]);
 });
 
 test("localhost resolves to the loopback address without any request", async (t) => {
