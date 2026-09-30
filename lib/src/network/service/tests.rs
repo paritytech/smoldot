@@ -351,7 +351,8 @@ fn gossip_link_opens() {
     ));
 }
 
-/// The statement substream opens after the block announces substream and closes with it.
+/// The statement substream opens along with the block announces substream, and closing the
+/// gossip link with both open still reaches the remote side.
 #[test]
 fn statement_substream_follows_block_announces() {
     let mut harness = Harness::connected(true, true);
@@ -377,7 +378,8 @@ fn statement_substream_follows_block_announces() {
     assert_count!(events, Side::Bob, Event::GossipDisconnected { .. }, 1);
 }
 
-/// Losing the connection ends the gossip link with one event.
+/// Losing the connection on one side ends that side's gossip link with one event. The other
+/// side is never told, the way a dropped socket looks from the outside.
 #[test]
 fn gossip_link_lost_with_connection() {
     let mut harness = Harness::connected(false, false);
@@ -385,4 +387,5 @@ fn gossip_link_lost_with_connection() {
 
     let events = harness.reset(Side::Alice);
     assert_count!(events, Side::Alice, Event::GossipDisconnected { .. }, 1);
+    assert_count!(events, Side::Bob, Event::GossipDisconnected { .. }, 0);
 }
