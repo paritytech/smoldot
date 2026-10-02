@@ -93,6 +93,15 @@ pub struct Config<'a, TParams> {
     /// If `true`, then [`StorageChanges::trie_changes_iter_ordered`] will return `Some`.
     /// Passing `None` requires fewer calculation and fewer storage accesses.
     pub calculate_trie_changes: bool,
+
+    /// If `true`, the roots of the child tries modified by the call are calculated once it has
+    /// finished and written to the main trie diff. Required if the [`StorageChanges`] are used
+    /// after the call. Pass `false` if only the output is needed, as calculating these roots can
+    /// require storage that a call proof doesn't contain.
+    ///
+    /// Has no effect if [`Config::calculate_trie_changes`] is `true`, as calculating the trie
+    /// changes requires these roots.
+    pub calculate_child_tries_roots_on_finish: bool,
 }
 
 /// Start running the WebAssembly virtual machine.
@@ -134,6 +143,8 @@ pub fn run(
         root_calculation: None,
         max_log_level: config.max_log_level,
         calculate_trie_changes: config.calculate_trie_changes,
+        calculate_child_tries_roots_on_finish: config.calculate_child_tries_roots_on_finish
+            || config.calculate_trie_changes,
     }
     .run())
 }
@@ -182,6 +193,10 @@ impl StorageChanges {
     ///
     /// Returns `None` if the runtime hasn't modified this entry in the main trie, and `Some(None)`
     /// if the runtime has removed the storage item of this entry.
+    ///
+    /// The new roots of the child tries that the runtime call has modified are included only if
+    /// [`Config::calculate_child_tries_roots_on_finish`] or [`Config::calculate_trie_changes`]
+    /// was `true`.
     pub fn main_trie_diff_get(&self, key: &[u8]) -> Option<Option<&[u8]>> {
         self.inner
             .trie_diffs
@@ -198,6 +213,10 @@ impl StorageChanges {
     /// > **Note**: This function is equivalent to
     /// >           [`StorageChanges::storage_changes_iter_unordered`], except that it only returns
     /// >           changes made to the main trie.
+    ///
+    /// The new roots of the child tries that the runtime call has modified are included only if
+    /// [`Config::calculate_child_tries_roots_on_finish`] or [`Config::calculate_trie_changes`]
+    /// was `true`.
     pub fn main_trie_storage_changes_iter_unordered(
         &self,
     ) -> impl Iterator<Item = (&[u8], Option<&[u8]>)> + Clone {
@@ -237,6 +256,10 @@ impl StorageChanges {
     ///
     /// Each value is either `Some` if the runtime overwrites this value, or `None` if it erases
     /// the underlying value.
+    ///
+    /// The new roots of the child tries that the runtime call has modified are included only if
+    /// [`Config::calculate_child_tries_roots_on_finish`] or [`Config::calculate_trie_changes`]
+    /// was `true`.
     pub fn storage_changes_iter_unordered(
         &self,
     ) -> impl Iterator<Item = (Option<&[u8]>, &[u8], Option<&[u8]>)> + Clone {
@@ -314,6 +337,10 @@ impl StorageChanges {
     }
 
     /// Returns a diff of the main trie.
+    ///
+    /// The diff reflects the new roots of the child tries that the runtime call has modified
+    /// only if [`Config::calculate_child_tries_roots_on_finish`] or
+    /// [`Config::calculate_trie_changes`] was `true`.
     // TODO: weird API, necessary to turn this object back to a value for Config::storage_changes
     pub fn into_main_trie_diff(mut self) -> storage_diff::TrieDiff {
         self.inner
@@ -1322,6 +1349,10 @@ struct Inner {
 
     /// See [`Config::calculate_trie_changes`].
     calculate_trie_changes: bool,
+
+    /// See [`Config::calculate_child_tries_roots_on_finish`]. Always `true` if
+    /// [`Inner::calculate_trie_changes`] is `true`.
+    calculate_child_tries_roots_on_finish: bool,
 }
 
 /// See [`Inner::pending_storage_changes`].
@@ -1485,9 +1516,12 @@ impl Inner {
             // recalculate the trie root hash of every single child trie that has been modified
             // since the previous trie root hash calculation.
             // This is also done if execution is finished, in order for the diff provided as
-            // output to be accurate.
+            // output to be accurate, unless the API user has opted out of it.
             {
                 let trie_to_flush: Option<Option<either::Either<_, &[u8]>>> = match &self.vm {
+                    host::HostVm::Finished(_) if !self.calculate_child_tries_roots_on_finish => {
+                        None
+                    }
                     host::HostVm::Finished(_) => {
                         if let Some(child_trie) = self
                             .pending_storage_changes
@@ -1597,9 +1631,11 @@ impl Inner {
                 host::HostVm::Finished(finished) => {
                     debug_assert!(self.transactions_stack.is_empty()); // Guaranteed by `host`.
                     debug_assert!(
-                        self.pending_storage_changes
-                            .stale_child_tries_root_hashes
-                            .is_empty()
+                        !self.calculate_child_tries_roots_on_finish
+                            || self
+                                .pending_storage_changes
+                                .stale_child_tries_root_hashes
+                                .is_empty()
                             || (!self.calculate_trie_changes
                                 && self
                                     .pending_storage_changes
