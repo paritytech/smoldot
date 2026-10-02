@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Runtime calls (`state_call`, `chainHead_v1_call`, and the runtime calls smoldot makes itself) that write several entries to a child trie, such as a dry run of a smart contract call through `ContractsApi_call`, no longer fail with an inaccessible storage error depending on where the new keys land in the trie. Once such a call had finished, smoldot calculated the new root of every child trie the call had modified, although nothing used it, and this needs trie nodes and storage values that the runtime never read. A full node doesn't calculate these roots when it executes a runtime call, so the call proof it serves doesn't contain them: smoldot treated that proof as invalid, banned the peer that had served it, and tried again with other peers, which failed in the same way.
+
 ## 3.6.0 - 2026-09-16
 
 ### Added

@@ -500,6 +500,7 @@ impl ChainInformationBuild {
                     runtime_call::StorageProofSizeBehavior::proof_recording_disabled(),
                 storage_main_trie_changes: Default::default(),
                 calculate_trie_changes: false,
+                calculate_child_tries_roots_on_finish: false,
             });
 
             let vm = match vm_start_result {

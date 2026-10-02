@@ -330,6 +330,7 @@ pub fn spawn_requests_handler(config: Config) {
                                 storage_proof_size_behavior: executor::runtime_call::StorageProofSizeBehavior::proof_recording_disabled(),
                                 storage_main_trie_changes: Default::default(),
                                 calculate_trie_changes: false,
+                                calculate_child_tries_roots_on_finish: false,
                             }) {
                                 Ok(c) => c,
                                 Err(_) => {
