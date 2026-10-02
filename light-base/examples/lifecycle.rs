@@ -63,6 +63,7 @@ fn main() {
         .add_chain(smoldot_light::AddChainConfig {
             specification: &relay_spec,
             json_rpc: rpc.clone(),
+            max_pending_transactions: NonZero::<u32>::new(256).unwrap(),
             potential_relay_chains: iter::empty(),
             database_content: "",
             user_data: (),
@@ -80,6 +81,7 @@ fn main() {
             json_rpc: rpc,
             database_content: "",
             user_data: (),
+            max_pending_transactions: NonZero::<u32>::new(256).unwrap(),
             potential_relay_chains: [relay].into_iter(),
             statement_protocol_config: None,
         })

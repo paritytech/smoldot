@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- A chain now holds up to 256 transactions submitted through the JSON-RPC API at the same time, instead of 64. A transaction is held from its submission until it is finalized or dropped, and one submitted beyond the limit is dropped immediately (`transactionWatch_v1_submitAndWatch` reports `dropped` with "transactions pool full", and `transaction_v1_broadcast` silently never broadcasts it), so the previous limit capped what one client could submit at 64 transactions per finality delay. Rust users of `smoldot-light` set the limit per chain through `AddChainConfig::max_pending_transactions`.
+
 ## 3.6.0 - 2026-09-16
 
 ### Added
