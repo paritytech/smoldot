@@ -40,6 +40,7 @@ fn main() {
         .add_chain(smoldot_light::AddChainConfig {
             specification: include_str!("../../demo-chain-specs/ksmcc3.json"),
             json_rpc: smoldot_light::AddChainConfigJsonRpc::Disabled,
+            max_pending_transactions: NonZero::<u32>::new(256).unwrap(),
             potential_relay_chains: iter::empty(),
             database_content: "",
             user_data: (),
@@ -58,6 +59,7 @@ fn main() {
                 max_pending_requests: NonZero::<u32>::new(128).unwrap(),
                 max_subscriptions: 1024,
             },
+            max_pending_transactions: NonZero::<u32>::new(256).unwrap(),
             potential_relay_chains: [kusama_chain_id].into_iter(),
             database_content: "",
             user_data: (),

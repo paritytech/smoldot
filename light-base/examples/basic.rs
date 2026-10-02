@@ -65,6 +65,9 @@ fn main() {
             },
 
             // This field is necessary only if adding a parachain.
+            // Maximum number of transactions submitted through the JSON-RPC API that the client
+            // holds at the same time, from their submission until they are finalized or dropped.
+            max_pending_transactions: NonZero::<u32>::new(256).unwrap(),
             potential_relay_chains: iter::empty(),
 
             // After a chain has been added, it is possible to extract a "database" (in the form of a
@@ -116,6 +119,7 @@ fn main() {
             // usage of the same smoldot client without interfering with each other. If there is
             // only one API user (like is the case here), passing the list of all chains that have
             // previously been created is completely appropriate.
+            max_pending_transactions: NonZero::<u32>::new(256).unwrap(),
             potential_relay_chains: [polkadot_chain_id].into_iter(),
             statement_protocol_config: None,
         })

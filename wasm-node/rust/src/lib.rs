@@ -146,6 +146,8 @@ fn add_chain(
                         smoldot_light::platform::PlatformRef::fill_random_bytes(&platform::PLATFORM_REF, &mut seed_bytes);
                         smoldot_light::StatementProtocolConfig::new(max_seen, statement_store_false_positive_rate, u128::from_le_bytes(seed_bytes), Duration::from_millis(u64::from(statement_store_affinity_update_interval_ms)))
                     }),
+                    // TODO: make configurable through `AddChainOptions`
+                    max_pending_transactions: NonZero::<u32>::new(256).unwrap(),
                 }) {
                 Ok(c) => c,
                 Err(error) => {
