@@ -76,7 +76,10 @@ export type Event =
 export type ParsedMultiaddr =
     { ty: "tcp", hostname: string, port: number } |
     { ty: "websocket", url: string } |
-    { ty: "webrtc", targetPort: number, ipVersion: string, targetIp: string, remoteTlsCertificateSha256: Uint8Array };
+    { ty: "webrtc", targetPort: number, ipVersion: 4 | 6, targetIp: string, remoteTlsCertificateSha256: Uint8Array } |
+    // WebRTC requires a literal IP address; the platform must resolve `hostname` before
+    // connecting. `family` restricts the address family, or is `undefined` for either.
+    { ty: "webrtc", targetPort: number, hostname: string, family: 4 | 6 | undefined, remoteTlsCertificateSha256: Uint8Array };
 
 export interface Instance {
     request: (request: string, chainId: number) => number,
@@ -292,7 +295,8 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                     return config.forbidWss ? 0 : 1
                 }
                 case 16:
-                case 17: {
+                case 17:
+                case 18: {
                     return config.forbidWebRtc ? 0 : 1
                 }
                 default:
@@ -343,14 +347,23 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                     const targetPort = buffer.readUInt16BE(mem, addrPtr + 1);
                     const remoteTlsCertificateSha256 = mem.slice(addrPtr + 3, addrPtr + 35);
                     const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 35);
-                    address = { ty: "webrtc", ipVersion: '4', remoteTlsCertificateSha256, targetIp, targetPort }
+                    address = { ty: "webrtc", ipVersion: 4, remoteTlsCertificateSha256, targetIp, targetPort }
                     break;
                 }
                 case 17: {
                     const targetPort = buffer.readUInt16BE(mem, addrPtr + 1);
                     const remoteTlsCertificateSha256 = mem.slice(addrPtr + 3, addrPtr + 35);
                     const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 35);
-                    address = { ty: "webrtc", ipVersion: '6', remoteTlsCertificateSha256, targetIp, targetPort }
+                    address = { ty: "webrtc", ipVersion: 6, remoteTlsCertificateSha256, targetIp, targetPort }
+                    break;
+                }
+                case 18: {
+                    const targetPort = buffer.readUInt16BE(mem, addrPtr + 1);
+                    const familyByte = buffer.readUInt8(mem, addrPtr + 3);
+                    const family = familyByte === 4 ? 4 : familyByte === 6 ? 6 : undefined;
+                    const remoteTlsCertificateSha256 = mem.slice(addrPtr + 4, addrPtr + 36);
+                    const hostname = buffer.utf8BytesToString(mem, addrPtr + 36, addrLen - 36);
+                    address = { ty: "webrtc", targetPort, hostname, family, remoteTlsCertificateSha256 }
                     break;
                 }
                 default:
