@@ -34,11 +34,11 @@ const QUERY = {
   AAAA: "AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAAcAAE",
 };
 
-const QUAD9 = (type) => `https://dns.quad9.net/dns-query?dns=${QUERY[type]}`;
 const CLOUDFLARE = (type) => `https://cloudflare-dns.com/dns-query?dns=${QUERY[type]}`;
-const GOOGLE = (type) => `https://dns.google/dns-query?dns=${QUERY[type]}`;
+const QUAD9 = (type) => `https://dns.quad9.net/dns-query?dns=${QUERY[type]}`;
 const DNSSB = (type) => `https://doh.dns.sb/dns-query?dns=${QUERY[type]}`;
-const isQuad9 = (url) => url.startsWith("https://dns.quad9.net/");
+const GOOGLE = (type) => `https://dns.google/dns-query?dns=${QUERY[type]}`;
+const isCloudflare = (url) => url.startsWith("https://cloudflare-dns.com/");
 const asksFor = (url, type) => url.endsWith(QUERY[type]);
 
 const u16 = (n) => [n >> 8, n & 0xff];
@@ -211,24 +211,24 @@ test("parseDnsMessageAnswer throws on malformed messages", (t) => {
 test("requests carry the wire-format query and ask for a DNS message back", async (t) => {
   const { urls, headers, fetchImpl } = fakeFetch(() => answer([A("1.2.3.4")]));
   t.is(await resolveDnsOverHttps("example.com", 4, signal(), fetchImpl), "1.2.3.4");
-  t.deepEqual(urls, [QUAD9("A")]);
+  t.deepEqual(urls, [CLOUDFLARE("A")]);
   t.deepEqual(headers, [{ accept: "application/dns-message" }]);
 });
 
 test("falls back to the next provider when the first one fails", async (t) => {
   const { urls, fetchImpl } = fakeFetch((url) =>
-    isQuad9(url) ? { status: 502, body: null } : answer([A("1.2.3.4")]),
+    isCloudflare(url) ? { status: 502, body: null } : answer([A("1.2.3.4")]),
   );
   t.is(await resolveDnsOverHttps("example.com", 4, signal(), fetchImpl), "1.2.3.4");
-  t.deepEqual(urls, [QUAD9("A"), CLOUDFLARE("A")]);
+  t.deepEqual(urls, [CLOUDFLARE("A"), QUAD9("A")]);
 });
 
 test("a malformed answer counts as a failure of that provider", async (t) => {
   const { urls, fetchImpl } = fakeFetch((url) =>
-    isQuad9(url) ? { body: new Uint8Array([1, 2, 3]) } : answer([A("1.2.3.4")]),
+    isCloudflare(url) ? { body: new Uint8Array([1, 2, 3]) } : answer([A("1.2.3.4")]),
   );
   t.is(await resolveDnsOverHttps("example.com", 4, signal(), fetchImpl), "1.2.3.4");
-  t.deepEqual(urls, [QUAD9("A"), CLOUDFLARE("A")]);
+  t.deepEqual(urls, [CLOUDFLARE("A"), QUAD9("A")]);
   const { fetchImpl: garbage } = fakeFetch(() => ({ body: new Uint8Array([1, 2, 3]) }));
   await t.throwsAsync(resolveDnsOverHttps("example.com", 4, signal(), garbage), {
     message: "dns.google: malformed answer",
@@ -238,7 +238,7 @@ test("a malformed answer counts as a failure of that provider", async (t) => {
 test("/dns/ asks for A records first and stops at the first answer", async (t) => {
   const { urls, fetchImpl } = fakeFetch(() => answer([A("1.2.3.4"), A("5.6.7.8")]));
   t.is(await resolveDnsOverHttps("example.com", undefined, signal(), fetchImpl), "1.2.3.4");
-  t.deepEqual(urls, [QUAD9("A")]);
+  t.deepEqual(urls, [CLOUDFLARE("A")]);
 });
 
 test("/dns/ falls back to AAAA records when there is no A record", async (t) => {
@@ -246,13 +246,13 @@ test("/dns/ falls back to AAAA records when there is no A record", async (t) => 
     asksFor(url, "A") ? answer([]) : answer([AAAA([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1])]),
   );
   t.is(await resolveDnsOverHttps("example.com", undefined, signal(), fetchImpl), "2001:db8::1");
-  t.deepEqual(urls, [QUAD9("A"), CLOUDFLARE("A"), DNSSB("A"), GOOGLE("A"), QUAD9("AAAA")]);
+  t.deepEqual(urls, [CLOUDFLARE("A"), QUAD9("A"), DNSSB("A"), GOOGLE("A"), CLOUDFLARE("AAAA")]);
 });
 
 test("/dns6/ never asks for A records", async (t) => {
   const { urls, fetchImpl } = fakeFetch(() => answer([AAAA([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1])]));
   t.is(await resolveDnsOverHttps("example.com", 6, signal(), fetchImpl), "2001:db8::1");
-  t.deepEqual(urls, [QUAD9("AAAA")]);
+  t.deepEqual(urls, [CLOUDFLARE("AAAA")]);
 });
 
 test("rejects with the last provider's error when every provider fails", async (t) => {
@@ -260,7 +260,7 @@ test("rejects with the last provider's error when every provider fails", async (
   await t.throwsAsync(resolveDnsOverHttps("example.com", 4, signal(), fetchImpl), {
     message: "dns.google: network down",
   });
-  t.deepEqual(urls, [QUAD9("A"), CLOUDFLARE("A"), DNSSB("A"), GOOGLE("A")]);
+  t.deepEqual(urls, [CLOUDFLARE("A"), QUAD9("A"), DNSSB("A"), GOOGLE("A")]);
 });
 
 test("localhost resolves to the loopback address without any request", async (t) => {
@@ -300,40 +300,40 @@ test("an aborted signal rejects without any request", async (t) => {
 });
 
 test("a provider that doesn't answer in time is overtaken by the next one", async (t) => {
-  const quad9 = deferred();
+  const cloudflare = deferred();
   const { urls, signals, fetchImpl } = fakeFetch((url) =>
-    isQuad9(url) ? quad9.promise : answer([A("5.6.7.8")]),
+    isCloudflare(url) ? cloudflare.promise : answer([A("5.6.7.8")]),
   );
   const result = resolveDnsOverHttps("example.com", 4, signal(), fetchImpl, STAGGER_MS);
   t.is(await result, "5.6.7.8");
-  t.deepEqual(urls, [QUAD9("A"), CLOUDFLARE("A")]);
+  t.deepEqual(urls, [CLOUDFLARE("A"), QUAD9("A")]);
   // The loser is cancelled, and its late answer changes nothing.
   t.true(signals[0].aborted);
-  quad9.resolve(answer([A("1.2.3.4")]));
+  cloudflare.resolve(answer([A("1.2.3.4")]));
   await sleep(STAGGER_MS * 4);
   t.is(await result, "5.6.7.8");
-  t.deepEqual(urls, [QUAD9("A"), CLOUDFLARE("A")]);
+  t.deepEqual(urls, [CLOUDFLARE("A"), QUAD9("A")]);
 });
 
 test("a failure starts the next provider without waiting for the stagger", async (t) => {
   const { urls, fetchImpl } = fakeFetch((url) =>
-    isQuad9(url) ? new Error("network down") : answer([A("5.6.7.8")]),
+    isCloudflare(url) ? new Error("network down") : answer([A("5.6.7.8")]),
   );
   // A stagger far longer than the test timeout: the second request must not depend on it.
   t.is(await resolveDnsOverHttps("example.com", 4, signal(), fetchImpl, 60_000), "5.6.7.8");
-  t.deepEqual(urls, [QUAD9("A"), CLOUDFLARE("A")]);
+  t.deepEqual(urls, [CLOUDFLARE("A"), QUAD9("A")]);
 });
 
 test("the first answer wins while several providers are in flight", async (t) => {
-  const quad9 = deferred();
+  const cloudflare = deferred();
   const { urls, signals, fetchImpl } = fakeFetch((url) => {
-    if (isQuad9(url)) return quad9.promise;
-    // Cloudflare has just been started because of the stagger; Quad9 answers now, Cloudflare never.
-    quad9.resolve(answer([A("1.2.3.4")]));
+    if (isCloudflare(url)) return cloudflare.promise;
+    // Quad9 has just been started because of the stagger; Cloudflare answers now, Quad9 never.
+    cloudflare.resolve(answer([A("1.2.3.4")]));
     return deferred().promise;
   });
   t.is(await resolveDnsOverHttps("example.com", 4, signal(), fetchImpl, STAGGER_MS), "1.2.3.4");
-  t.deepEqual(urls, [QUAD9("A"), CLOUDFLARE("A")]);
+  t.deepEqual(urls, [CLOUDFLARE("A"), QUAD9("A")]);
   t.true(signals[1].aborted);
 });
 
@@ -341,18 +341,18 @@ test("no second request when the first provider answers within the stagger", asy
   const { urls, fetchImpl } = fakeFetch(() => answer([A("1.2.3.4")]));
   t.is(await resolveDnsOverHttps("example.com", 4, signal(), fetchImpl, STAGGER_MS), "1.2.3.4");
   await sleep(STAGGER_MS * 4);
-  t.deepEqual(urls, [QUAD9("A")]);
+  t.deepEqual(urls, [CLOUDFLARE("A")]);
 });
 
 test("aborting the signal while a request is pending rejects and starts nothing else", async (t) => {
   const controller = new AbortController();
   const { urls, signals, fetchImpl } = fakeFetch(() => deferred().promise);
   const result = resolveDnsOverHttps("example.com", undefined, controller.signal, fetchImpl, STAGGER_MS);
-  t.deepEqual(urls, [QUAD9("A")]);
+  t.deepEqual(urls, [CLOUDFLARE("A")]);
   controller.abort();
   await t.throwsAsync(result, { message: /aborted/ });
   t.true(signals[0].aborted);
   // Neither the next provider nor the AAAA lookup is started afterwards.
   await sleep(STAGGER_MS * 4);
-  t.deepEqual(urls, [QUAD9("A")]);
+  t.deepEqual(urls, [CLOUDFLARE("A")]);
 });

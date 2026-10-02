@@ -34,8 +34,8 @@ interface Provider {
  * failed. The first answer wins and the other requests are aborted.
  */
 const PROVIDERS: ReadonlyArray<Provider> = [
-    { host: 'dns.quad9.net', url: 'https://dns.quad9.net/dns-query' },
     { host: 'cloudflare-dns.com', url: 'https://cloudflare-dns.com/dns-query' },
+    { host: 'dns.quad9.net', url: 'https://dns.quad9.net/dns-query' },
     { host: 'doh.dns.sb', url: 'https://doh.dns.sb/dns-query' },
     { host: 'dns.google', url: 'https://dns.google/dns-query' },
 ];
