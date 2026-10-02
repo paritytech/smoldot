@@ -196,6 +196,9 @@ pub fn build_block(config: Config) -> BlockBuild {
         storage_proof_size_behavior: runtime_call::StorageProofSizeBehavior::Unimplemented,
         max_log_level: config.max_log_level,
         calculate_trie_changes: config.calculate_trie_changes,
+        // Each call of the block building process starts from the main trie diff of the
+        // previous one, which must then hold the new roots of the child tries it modified.
+        calculate_child_tries_roots_on_finish: true,
     });
 
     let vm = match init_result {
@@ -349,6 +352,7 @@ impl BlockBuild {
                             runtime_call::StorageProofSizeBehavior::Unimplemented,
                         max_log_level: shared.max_log_level,
                         calculate_trie_changes: shared.calculate_trie_changes,
+                        calculate_child_tries_roots_on_finish: true,
                     });
 
                     inner = Inner::Runtime(match init_result {
@@ -549,6 +553,7 @@ impl InherentExtrinsics {
             storage_main_trie_changes: self.storage_changes.into_main_trie_diff(),
             max_log_level: self.shared.max_log_level,
             calculate_trie_changes: self.shared.calculate_trie_changes,
+            calculate_child_tries_roots_on_finish: true,
         });
 
         let vm = match init_result {
@@ -581,6 +586,7 @@ impl ApplyExtrinsic {
             storage_main_trie_changes: self.storage_changes.into_main_trie_diff(),
             max_log_level: self.shared.max_log_level,
             calculate_trie_changes: self.shared.calculate_trie_changes,
+            calculate_child_tries_roots_on_finish: true,
         });
 
         self.shared.stage = Stage::ApplyExtrinsic(extrinsic);
@@ -605,6 +611,7 @@ impl ApplyExtrinsic {
             storage_main_trie_changes: self.storage_changes.into_main_trie_diff(),
             max_log_level: self.shared.max_log_level,
             calculate_trie_changes: self.shared.calculate_trie_changes,
+            calculate_child_tries_roots_on_finish: true,
         });
 
         let vm = match init_result {
