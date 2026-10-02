@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DecodeError"],"fn":["decode","encode"],"struct":["Bs58DecodeError","ChainPrefix","Decoded","PrefixTooLargeError"]};

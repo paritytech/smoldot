@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error","ResumeOutcome","StorageValue"],"fn":["prefix_scan"],"struct":["Config","PrefixScan"]};

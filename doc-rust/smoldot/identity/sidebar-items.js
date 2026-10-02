@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["keystore","seed_phrase","ss58"]};

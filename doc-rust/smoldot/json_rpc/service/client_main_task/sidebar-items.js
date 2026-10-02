@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Event","SendRequestErrorCause","TrySendRequestErrorCause","WaitNextResponseError"],"fn":["client_main_task"],"struct":["ClientMainTask","Config","RequestProcess","SendRequestError","SerializedRequestsIo","Subscription","SubscriptionStartProcess","TrySendRequestError"]};
