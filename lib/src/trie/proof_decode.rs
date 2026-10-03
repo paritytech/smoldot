@@ -1885,8 +1885,7 @@ fn compact_proof_compute_merkle<'a, I: Iterator<Item = &'a [u8]>>(
     let mut current = loop {
         let decoded = trie_node::decode(node_bytes).ok()?;
 
-        let partial_key = decoded.partial_key.clone();
-        for pk_nibble in partial_key.clone() {
+        for pk_nibble in decoded.partial_key.clone() {
             if key_pos >= key.len() {
                 return None;
             }
@@ -1913,7 +1912,12 @@ fn compact_proof_compute_merkle<'a, I: Iterator<Item = &'a [u8]>>(
                 return None;
             }
             let new_storage_value = inject_compact_value(expected_value, state_version);
-            break compact_encode_node(partial_key, new_children, new_storage_value, is_root)?;
+            break compact_encode_node(
+                decoded.partial_key,
+                new_children,
+                new_storage_value,
+                is_root,
+            )?;
         }
 
         let child_nibble = key[key_pos];
@@ -1940,7 +1944,7 @@ fn compact_proof_compute_merkle<'a, I: Iterator<Item = &'a [u8]>>(
         };
 
         stack.push(CompactFrame {
-            partial_key,
+            partial_key: decoded.partial_key,
             new_children,
             new_storage_value,
             descended_into: child_index,
