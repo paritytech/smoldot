@@ -376,6 +376,18 @@ export async function runE2E({ network, specPath, wrongSpecPath, report, log }) 
                 && logs.some(e => e.message.startsWith('jam-warp-fragmentless;') && e.message.includes('reason=NoData')));
             check('positive', 'Dummy makes zero CE129 requests',
                 wire.requests.every(r => r.bytes[0] !== 129));
+            // D3 (peer discovery) reads the active set only after a verified
+            // finality advance, which a Dummy network never produces. Since
+            // D18 (zombienet demo) the pool starts with the spec's bootnodes
+            // and its genesis C(8) validators, so slots may hold either; a
+            // `discovered` peer, a CE 129 discovery read or a pool merge would
+            // mean a live read happened. `npm run test:jam:discovery` covers GRANDPA.
+            const assigned = logs.filter(e => e.message.startsWith('jam-slot-assigned;'));
+            const sources = [...new Set(assigned.map(e => /source=([a-z]+)/.exec(e.message)?.[1]))];
+            check('positive', 'Dummy reads no live C(8): every slot assignment comes from the spec (bootnode or genesis), none from a live discovery read',
+                assigned.length > 0 && sources.every(source => source === 'bootnode' || source === 'genesis')
+                && !logs.some(e => /^jam-(discovery-read-started|pool-changed)/.test(e.message)),
+                `${assigned.length} assignment(s), sources ${sources.join('+')}`);
             report.wire = wire;
             const { entries: mainSessionEvents } = await jam.events('main', 'main', 0);
             check('positive', 'no finalized event after initialized for the whole session',

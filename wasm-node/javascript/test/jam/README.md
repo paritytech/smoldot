@@ -83,7 +83,10 @@ constructs genesis from the executable's embedded service blobs. See
    - **restart**: node0 is stopped (SIGINT, see Notes) and restarted against the
      same config/data directory; a `newBlock` within 60 s whose
      `parentBlockHash` was reported before the restart, followed by
-     `bestBlockChanged`.
+     `bestBlockChanged`. The client cannot route around the outage here: it
+     discovers other validators only after a verified finality advance, which
+     a Dummy network never produces, so the final phase also asserts that every
+     slot stayed on the bootnode and no `C(8)` read happened.
    - **unfollow**: `chainHead_v1_unfollow` resolves and no further follow events
      arrive for ~2 s.
    - **negative**: a second client with the corrupted-authority-set spec gets
@@ -199,3 +202,26 @@ an existing network without restarting it. `JAM_AGED_BLOCKS` changes the minimum
 age in actual blocks; `JAM_AGED_BOUND_MS` changes the catch-up deadline.
 `CHROMIUM_PATH` selects an installed browser, including on NixOS. The short
 `npm run test:jam` CI gate remains separate from this deliberate aging wait.
+
+## Peer discovery (D3)
+
+`npm run test:jam:discovery` (`discovery.mjs`) starts the demo harness
+(`demo/jam-harness.mjs`, GRANDPA finality) and drives the demo page in
+Chromium, so it exercises the page's peer list, the harness `status` and the
+kill/start buttons exactly as walkthrough steps 5 and 6 in `demo/jam.md`
+describe. A fresh client whose only bootnode is node0 must follow the chain, see
+verified finality, read the active set `C(8)` (six validators, five discovered
+besides node0) and hold node0 plus one discovered validator. At the tip, node0 is
+killed: within 120 s the harness `status` must list two connected peers of
+source `discovered`, and three verified headers and two finalized events must
+arrive. node0 is then started again and must be connected as a bootnode within
+420 s; a failed bootnode replaces a discovered peer after 30 s, doubling per
+failure to 5 minutes. Timings and every `C(8)` refresh (bytes and milliseconds)
+go to `discovery-report.json` in the runtime directory.
+
+It needs `POLKAJAM_BIN_DIR` (or `PATH`), a built browser bundle, free ports
+8080 and 40000 to 40005, and `CHROMIUM_PATH` where Playwright's browser is not
+installed. `JAM_DISCOVERY_AGE_SECONDS` ages the network before Start, so the
+client warps first and discovers afterwards. A run on a fresh network takes
+under a minute; it is not part of the 15-minute CI job, which runs the Dummy
+gate only.

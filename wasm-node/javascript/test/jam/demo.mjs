@@ -4,12 +4,18 @@
 // Browser regression for the manual frontend, with controlled RPC streams.
 // Run: node --test test/jam/demo.mjs (controlled streams only).
 // Add live warp acceptance: node test/jam/demo.mjs --live (WASM + PolkaJam).
+// `--live` also runs the attach-mode case (D18, zombienet demo): the harness
+// serves a spec it was given and manages no network.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { chromium } from 'playwright';
 import blake from 'blakejs';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { DEFAULT_RPC_PORT, JamNetwork, generateSpecs, resolveBinaries } from './network.mjs';
 
 function fixtureStart(options) {
     const queue = [];
@@ -358,5 +364,117 @@ if (process.argv.includes('--live')) test('aged harness: warp re-follow, blocks,
             assert.equal(result.code, 130, 'harness must finish its SIGINT cleanup');
             assert.match(output, /teardown complete; no PolkaJam process left behind/);
         }
+    }
+});
+
+/** Starts `demo/jam-harness.mjs` with `env` and resolves once its banner is out. */
+async function startHarness(env) {
+    const harness = spawn(process.execPath, ['demo/jam-harness.mjs'], {
+        cwd: new URL('../..', import.meta.url), env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const state = { harness, output: '' };
+    harness.stdout.on('data', chunk => { state.output += chunk; });
+    harness.stderr.on('data', chunk => { state.output += chunk; });
+    state.exited = new Promise(resolve => harness.on('exit', (code, signal) => resolve({ code, signal })));
+    const readyDeadline = Date.now() + 30000;
+    while (!state.output.includes('Ctrl-C to stop')) {
+        if (harness.exitCode !== null || harness.signalCode !== null || Date.now() > readyDeadline)
+            throw new Error('Harness did not start:\n' + state.output);
+        await delay(100);
+    }
+    state.url = state.output.match(/http:\/\/127\.0\.0\.1:\d+\/demo\/jam\.html/)?.[0];
+    return state;
+}
+
+// The zombienet flow (`just zombie-jam`, then `just demo-jam-attach`) without
+// depending on a zombienet build: our own launcher starts the network, and the
+// harness only gets its spec through `JAM_SPEC_PATH`. Two variants: the spec
+// with its node0 bootnode, and the same spec with `bootnodes` stripped, so the
+// client must find every peer in the genesis C(8).
+if (process.argv.includes('--live')) test('attach mode: spec from JAM_SPEC_PATH, with and without bootnodes, no network managed', { timeout: 420000 }, async () => {
+    const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'jam-demo-attach-'));
+    const rpcPort = DEFAULT_RPC_PORT;
+    const log = message => console.log(`[attach] ${message}`);
+    const { binDir } = await resolveBinaries();
+    const { specPath } = await generateSpecs({ runtimeDir });
+    const spec = JSON.parse(await fs.readFile(specPath, 'utf8'));
+    assert.equal(spec.bootnodes.length, 1);
+    const genesisOnlyPath = path.join(runtimeDir, 'spec-genesis-only.json');
+    await fs.writeFile(genesisOnlyPath, JSON.stringify({ ...spec, bootnodes: [] }));
+    const network = new JamNetwork({ binDir, rpcPort, runtimeDir, log, finalityMode: 'grandpa' });
+    let browser;
+    try {
+        await network.start();
+        browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH });
+        for (const [variant, file, expected] of [
+            ['with bootnodes', specPath, ['bootnode', 'genesis']],
+            ['genesis only', genesisOnlyPath, ['genesis']],
+        ]) {
+            const run = await startHarness({ JAM_SPEC_PATH: file, JAM_RPC_PORT: String(rpcPort) });
+            const page = await browser.newPage();
+            const errors = [];
+            page.on('pageerror', error => errors.push(error.message));
+            try {
+                assert.match(run.output, /attach mode: spec .*; no network is managed/);
+                assert.doesNotMatch(run.output, /runtime dir:/);
+                assert.ok(run.url, run.output);
+                await page.goto(run.url);
+                const served = await page.evaluate(async () => (await fetch('/jam-demo/spec.json')).text());
+                assert.equal(served, await fs.readFile(file, 'utf8'), 'the spec is served unchanged');
+                assert.equal(await page.evaluate(async () => (await fetch('/jam-demo/spec-wrong-authorities.json')).status), 404);
+                await page.waitForFunction(() => window.jamDemo.live().harness.status?.attach === true);
+                // The checkbox is left alone, as in the walkthrough.
+                assert.equal(await page.locator('#dev-bootnode').isChecked(), false);
+                const started = Date.now();
+                await page.locator('#start').click();
+                const sources = new Map();
+                const timings = {};
+                while (Date.now() - started < 120000) {
+                    const live = await page.evaluate(() => window.jamDemo.live());
+                    for (const peer of live.peers) if (peer.state === 'connected' && !sources.has(peer.source))
+                        sources.set(peer.source, peer.address);
+                    if (timings.block === undefined && live.blockCount > 0) timings.block = Date.now() - started;
+                    if (timings.finalized === undefined && live.finalityCount > 0) timings.finalized = Date.now() - started;
+                    if (timings.block !== undefined && timings.finalized !== undefined &&
+                        expected.every(source => sources.has(source))) break;
+                    await delay(200);
+                }
+                const live = await page.evaluate(() => window.jamDemo.live());
+                console.log(JSON.stringify({ variant, timings, sources: [...sources], warp: live.warpStatus,
+                    blocks: live.blockCount, finality: live.finalityCount }));
+                assert.ok(live.blockCount > 0 && live.finalityCount > 0, `${variant}: no block or no finality`);
+                assert.deepEqual([...sources.keys()].filter(source => source !== 'discovered').sort(), [...expected].sort(),
+                    `${variant}: peer sources ${JSON.stringify([...sources])}`);
+                // The RPC oracle works without a JamNetwork in the harness.
+                const status = live.harness.status;
+                assert.equal(status.attach, true);
+                assert.equal(status.specPath, file);
+                assert.ok(status.nodeBestBlock?.hash, JSON.stringify(status));
+                assert.match(await page.locator('#live-node-best').innerText(), /external network \(attach mode\)/);
+                // Node actions answer an error that stays next to the buttons.
+                await page.locator('#kill-node0').click();
+                await page.waitForFunction(() => document.getElementById('network-status').textContent
+                    .includes('not managed by this harness in attach mode'));
+                await delay(2500); // One status poll later, the reason is still shown.
+                assert.match(await page.locator('#network-status').innerText(), /kill-node0 FAILED: .*not managed by this harness in attach mode/);
+                assert.ok((await network.rpc('bestBlock')).slot > 0, 'the network is untouched');
+                await page.locator('#stop').click();
+                await page.waitForFunction(() => document.getElementById('status').textContent === 'Stopped');
+                assert.deepEqual(errors, []);
+            } finally {
+                await page.close();
+                run.harness.kill('SIGINT');
+                const result = await run.exited;
+                if (result.code !== 130) console.log(run.output);
+                assert.equal(result.code, 130, 'harness must finish its SIGINT cleanup');
+                assert.match(run.output, /the network was not ours and keeps running/);
+            }
+            // Ctrl-C stopped only the server.
+            assert.ok((await network.rpc('bestBlock')).slot > 0, 'the network outlives the attached harness');
+        }
+    } finally {
+        await browser?.close();
+        await network.stop();
+        await fs.rm(runtimeDir, { recursive: true, force: true });
     }
 });

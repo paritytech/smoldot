@@ -289,6 +289,7 @@ fn a5_exact_certificate_vectors() {
     for vector in &vectors {
         let id = P256PeerId::from_text(&vector.p256_id_text).unwrap();
         assert_eq!(id.to_text(), vector.p256_id_text);
+        assert_eq!(P256PeerId::from_parts(*id.x(), id.y_odd()), Ok(id));
         let der = certificate_der(&id, ValidityPeriod(vector.period));
         assert_eq!(der, decode(&vector.der_hex));
         assert_eq!(der, reference_der(&id, vector.period));
@@ -312,5 +313,44 @@ fn a5_exact_certificate_vectors() {
     assert!(keys.len() >= 2);
     for key in keys {
         assert!(pairs.iter().filter(|(k, _)| *k == key).count() >= 2);
+    }
+}
+
+/// The identities of the four A2 certificate vectors (`fixtures/cert_vector.json`, two keys
+/// with two periods each): node0's and node1's, as the dev metadata advertises them.
+const A2_VECTOR_IDENTITIES: [&str; 4] = [
+    "oqov2a57d7etnpzb6aerv64y5j622ejkkvqjencdrwln4qhnoqvqb",
+    "oqov2a57d7etnpzb6aerv64y5j622ejkkvqjencdrwln4qhnoqvqb",
+    "ordkiwj4rcxzhxrh3xbfj6dyt3utrhrxukgy6xfi3fpubv4ioerzb",
+    "ordkiwj4rcxzhxrh3xbfj6dyt3utrhrxukgy6xfi3fpubv4ioerzb",
+];
+
+#[test]
+fn from_parts_round_trips_with_text_and_rejects_points_off_the_curve() {
+    for text in A2_VECTOR_IDENTITIES {
+        let id = P256PeerId::from_text(text).unwrap();
+        let parts = P256PeerId::from_parts(*id.x(), id.y_odd()).unwrap();
+        assert_eq!(parts, id);
+        assert_eq!(parts.to_text(), text);
+        assert_eq!(parts.to_uncompressed_sec1(), id.to_uncompressed_sec1());
+        // The other parity is the negated point: valid, but a different identity.
+        let other = P256PeerId::from_parts(*id.x(), !id.y_odd()).unwrap();
+        assert_ne!(other, id);
+        assert_ne!(other.to_text(), text);
+    }
+    for seed in 1..=8 {
+        let id = key(seed);
+        assert_eq!(P256PeerId::from_parts(*id.x(), id.y_odd()), Ok(id));
+    }
+    for y_odd in [false, true] {
+        // X at or above the field modulus, and a canonical X with no square-root Y.
+        let mut no_root = [0; 32];
+        no_root[31] = 1;
+        for x in [[255; 32], no_root] {
+            assert_eq!(
+                P256PeerId::from_parts(x, y_odd),
+                Err(P256PeerIdParseError::InvalidPoint)
+            );
+        }
     }
 }

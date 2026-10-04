@@ -6,10 +6,18 @@
 //! Full genesis state is accepted; only C(4), C(6), C(8), and C(11) are decoded.
 //! This checks representations and slot consistency, not signatures, state-root
 //! commitments, or checkpoint ancestry. The caller must trust the specification.
+//!
+//! A light client needs somebody to dial. Two sources in the specification name
+//! peers with the P-256 identity a WebTransport client needs: the bootnodes
+//! (`<ed25519>+<p256>@ip:port`) and the validator metadata of the genesis
+//! active set `C(8)`. A specification with neither is rejected
+//! ([`Error::NoDialablePeer`]); the curve point itself is validated by
+//! light-base before dialing.
 
 use super::{
     codec::{self, DecodeError},
     finality::AuthoritySet,
+    metadata::ValidatorEndpoint,
     params::Params,
     types::{Ed25519Public, GenesisLightState, Header},
 };
@@ -85,6 +93,10 @@ pub enum Error {
         index: usize,
         source: BootNodeError,
     },
+    /// No bootnode carries a P-256 identity and no genesis `C(8)` validator
+    /// advertises one with a port, so there is no peer a WebTransport client
+    /// could dial.
+    NoDialablePeer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,7 +113,14 @@ pub enum BootNodeError {
 
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        core::fmt::Debug::fmt(self, f)
+        match self {
+            Self::NoDialablePeer => f.write_str(
+                "NoDialablePeer: no dialable peer in the specification: no bootnode has a \
+                 P-256 identity (`<ed25519>+<p256>@ip:port`) and no validator in the genesis \
+                 active set C(8) advertises a P-256 identity and port in its metadata",
+            ),
+            _ => core::fmt::Debug::fmt(self, f),
+        }
     }
 }
 
@@ -393,7 +412,16 @@ impl JamChainSpec {
             .map(|(index, text)| {
                 parse_bootnode(text).map_err(|source| Error::BootNode { index, source })
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<BootNode>, _>>()?;
+        let dialable_bootnode = boot_nodes.iter().any(|node| node.p256_id_text.is_some());
+        let dialable_validator = genesis_light_state
+            .active_validators
+            .iter()
+            .map(ValidatorEndpoint::from_validator)
+            .any(|endpoint| endpoint.p256.is_some() && endpoint.port != 0);
+        if !dialable_bootnode && !dialable_validator {
+            return Err(Error::NoDialablePeer);
+        }
         Ok(Self {
             id: raw.id,
             params,
@@ -421,6 +449,15 @@ impl JamChainSpec {
     }
     pub fn boot_nodes(&self) -> impl Iterator<Item = BootNode> + '_ {
         self.boot_nodes.iter().cloned()
+    }
+    /// The genesis active set `C(8)` as advertised endpoints, in set order.
+    /// Records without a P-256 identity or port are included; the caller
+    /// skips them. Like the bootnodes, these are liveness sources only.
+    pub fn genesis_validators(&self) -> impl Iterator<Item = ValidatorEndpoint> + '_ {
+        self.genesis_light_state
+            .active_validators
+            .iter()
+            .map(ValidatorEndpoint::from_validator)
     }
 }
 
@@ -521,11 +558,16 @@ mod tests {
     fn sample(slot: u32, tickets: bool) -> (Value, Header, GenesisLightState) {
         let bytes = parameters();
         let params = Params::from_protocol_parameters(&bytes).unwrap();
+        // Metadata as PolkaJam lays it out: port 0x0404, then Y parity 0 and
+        // X = [4; 32], so every validator advertises a (structurally) dialable
+        // P-256 identity.
+        let mut metadata = [4; 128];
+        metadata[18] = 0;
         let validator = ValidatorKey {
             bandersnatch: [1; 32],
             ed25519: [2; 32],
             bls: [3; 144],
-            metadata: [4; 128],
+            metadata,
         };
         let ticket = Ticket {
             id: [9; 32],
@@ -996,6 +1038,70 @@ mod tests {
         }
     }
 
+    /// Rewrites the genesis `C(8)` with `change` applied to every validator's metadata.
+    fn edit_genesis_metadata(raw: &mut Value, change: impl Fn(&mut [u8; 128])) {
+        let params = Params::from_protocol_parameters(&parameters()).unwrap();
+        let key = hex::encode(codec::state_key(8));
+        let bytes = hex::decode(raw["genesis_state"][&key].as_str().unwrap()).unwrap();
+        let mut validators = codec::decode_active_validators(&params, &bytes).unwrap();
+        for validator in &mut validators {
+            change(&mut validator.metadata);
+        }
+        raw["genesis_state"][&key] =
+            json!(hex::encode(codec::encode_active_validators(&validators)));
+    }
+
+    #[test]
+    fn genesis_validators_are_exposed_as_endpoints() {
+        let (raw, _, state) = sample(0, false);
+        let parsed = parse(&raw).unwrap();
+        assert_eq!(parsed.boot_nodes().count(), 0);
+        let endpoints: Vec<_> = parsed.genesis_validators().collect();
+        assert_eq!(endpoints.len(), state.active_validators.len());
+        for endpoint in endpoints {
+            assert_eq!(endpoint.ed25519, [2; 32]);
+            assert_eq!(endpoint.port, 0x0404);
+            assert_eq!(endpoint.p256, Some(([4; 32], false)));
+        }
+    }
+
+    #[test]
+    fn a_spec_without_any_dialable_peer_is_rejected() {
+        let ed = format!("e{}", "a".repeat(52));
+        let p256 = format!("v{}", "a".repeat(52));
+        // Genesis validators without a P-256 key (parity byte 4), or with a key
+        // but no port: neither is dialable.
+        let no_key = |metadata: &mut [u8; 128]| metadata[18] = 4;
+        let no_port = |metadata: &mut [u8; 128]| metadata[16..18].fill(0);
+        for strip in [&no_key as &dyn Fn(&mut [u8; 128]), &no_port] {
+            let (mut raw, _, _) = sample(0, false);
+            edit_genesis_metadata(&mut raw, strip);
+            for bootnodes in [json!([]), json!([format!("{ed}@127.0.0.1:1")])] {
+                raw["bootnodes"] = bootnodes;
+                let error = parse(&raw).unwrap_err();
+                assert!(matches!(error, Error::NoDialablePeer));
+                let message = error.to_string();
+                assert!(
+                    message.contains("bootnode") && message.contains("C(8)"),
+                    "{message}"
+                );
+            }
+            // One combined bootnode is enough.
+            raw["bootnodes"] = json!([format!("{ed}+{p256}@127.0.0.1:1")]);
+            let parsed = parse(&raw).unwrap();
+            assert!(
+                parsed
+                    .genesis_validators()
+                    .all(|endpoint| endpoint.port == 0 || endpoint.p256.is_none())
+            );
+        }
+        // Genesis validators alone are enough, and an Ed25519-only bootnode
+        // does not change that.
+        let (mut raw, _, _) = sample(0, false);
+        raw["bootnodes"] = json!([format!("{ed}@127.0.0.1:1")]);
+        assert!(parse(&raw).is_ok());
+    }
+
     #[test]
     #[ignore = "requires external A5 fixtures; set JAM_A5_FIXTURES or use the planning directory"]
     fn external_polkajam_fixture() {
@@ -1066,5 +1172,12 @@ mod tests {
             u64::from(spec.genesis_light_state().slot),
             expected["light_state"]["slot"].as_u64().unwrap()
         );
+        // The dev network's validators advertise ports 40000 to 40005 with P-256 ids.
+        let ports: Vec<u16> = spec
+            .genesis_validators()
+            .filter(|endpoint| endpoint.p256.is_some())
+            .map(|endpoint| endpoint.port)
+            .collect();
+        assert_eq!(ports, (40000..40006).collect::<Vec<_>>());
     }
 }

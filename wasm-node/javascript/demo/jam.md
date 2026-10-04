@@ -91,7 +91,7 @@ a secure context, which is exactly what WebTransport needs.
 | `/demo/jam.html` | this page |
 | `/jam-demo/spec.json` | the checked-in genesis with the combined browser bootnode added, re-read from disk on every request |
 | `/jam-demo/spec-wrong-authorities.json` | the same spec with a corrupted genesis authority set (step 10) |
-| `/jam-demo/control` | `POST {"action": "status" \| "kill-node0" \| "start-node0" \| "restart-node0"}` |
+| `/jam-demo/control` | `POST {"action": "status" \| "dev-bootnode" \| "kill-node0" \| "start-node0" \| "restart-node0"}`; the page also posts `{"action": "peers", ...}` with its client's connected peers, which `status` returns as `browserPeers` and summarizes in `peersLine` |
 | everything else | files under `wasm-node/javascript/` |
 
 The server binds `127.0.0.1` only and rejects non-loopback peers and foreign
@@ -115,6 +115,18 @@ endpoint. It is the independent oracle — what the network really did — and
 *Client vs node* compares it with what the client verified. That comparison is
 the most useful check on this page: it catches a client that is happily
 following nothing.
+
+*Connected peers* lists the client's two connection slots: each slot's
+address, where the candidate came from — the spec's `bootnodes` (`bootnode`),
+the spec's genesis active set `C(8)` (`genesis`), or a verified read of the
+current active set (`discovered`) — and whether it is dialing, connected (the UP0
+handshake arrived) or disconnected. *Validator set (C(8))* says how often the
+client has read the active set and what the last read cost. Both rows mirror
+the client's own `jam-slot-assigned`, `jam-peer-connected`,
+`jam-peer-disconnected` and `jam-pool-changed` log lines; the page decides
+nothing. The harness has no view of the browser's connections, so the page
+reports the list to it, and the harness prints a `browser peers:` line whenever
+it changes.
 
 **Recent blocks** is an explorer-style list of the last **20** blocks the follow
 subscription reported, newest first, with slot, epoch (`number + position`),
@@ -145,6 +157,46 @@ Reading that list is the quickest way to see a healthy chain: slots decreasing b
 exactly one down the table, each row's Parent equal to the hash of the row below
 it, the author index moving around the validator set, and an `epoch` mark on the
 row whose epoch position is 0.
+
+## With zombienet
+
+The same page can follow a network that zombienet starts, in two terminals:
+
+```sh
+# terminal 1, from the smoldot root
+ZOMBIE_CLI=<zombienet-sdk>/target/release/zombie-cli \
+POLKAJAM_BIN_DIR=<polkajam>/target/release just zombie-jam
+# terminal 2, once terminal 1 prints "network is up"
+just demo-jam-attach
+```
+
+`just zombie-jam` runs `zombie-cli spawn --provider native --dir /tmp/jam-zombie
+--node-verifier none test/jam/zombienet/tiny-grandpa.toml`: six GRANDPA
+validators `jam0`..`jam5` on ports zombienet picks, and the ordinary node
+`jam-or` with RPC on 19800. Both binaries must come from the
+`skunert/polkajam-light-client` branches of zombienet-sdk and PolkaJam: only
+those write each validator's P-256 id into the genesis `C(8)` and every
+validator into the spec's `bootnodes` as `<ed25519>+<p256>@127.0.0.1:<port>`,
+and only that PolkaJam parses the combined form. Ctrl-C in terminal 1 stops the
+network.
+
+`just demo-jam-attach` starts the harness in attach mode (`JAM_SPEC_PATH`,
+default `/tmp/jam-zombie/jam_spec.json`, and `JAM_RPC_PORT`, default 19800). It
+serves that spec unchanged, runs the node oracle against that port, and starts
+no network: **Kill/Start/Restart node0** answer `not managed by this harness in
+attach mode`, the dev-bootnode checkbox is not needed (the spec names its own
+peers), `spec-wrong-authorities.json` does not exist, and Ctrl-C stops only the
+server. Open the printed URL and press **Start** as below.
+
+The client puts every source into one candidate pool: the spec's bootnodes
+first, then the genesis `C(8)` validators (a validator that is also a bootnode
+is one candidate, the bootnode), replaced by the live `C(8)` after the first
+verified finality advance. All of them are liveness sources only; whatever they
+serve is verified the same way. A spec with neither a P-256 bootnode nor a
+P-256 id in its genesis `C(8)` is refused at load with an error naming both.
+To try a spec without bootnodes, strip its `bootnodes` and pass the copy:
+`just demo-jam-attach /abs/path/spec.json`. Killing a validator by PID
+(`pgrep -f /tmp/jam-zombie/jam0/cfg`) shows the client moving to the others.
 
 ## Checklist
 
@@ -210,34 +262,51 @@ passes about every 72 seconds and you will see several in a normal session.
    *Failure:* Header returns `null` or a non-hex value; the buttons stay enabled
    after Unpin; an error appears in the log panel and the session stops.
 
-5. **Kill node0.**
-   *Do:* press **Kill node0**.
+5. **Kill node0: the client finds the other validators.**
+   *Do:* wait until *Connected peers* lists two connected slots — slot 0
+   `bootnode 127.0.0.1:40000` and slot 1 `genesis 127.0.0.1:4000x` (a validator
+   from the spec's genesis `C(8)`, dialed from the start) — and, ideally,
+   *Validator set (C(8))* reads `6 validator(s), 5 discovered`, which happens
+   after the first verified finality advance, usually within seconds of Start.
+   Then press **Kill node0**.
    *See:* the network line reports `node0 NOT running` and one fewer node
-   process. The client stops advancing: *Blocks since Start* and *Slot* freeze
-   while *Last follow event* keeps counting up. The other five validators keep
-   producing, so *Node's own best block* keeps climbing and *Client vs node*
-   shows a gap that grows by one slot every six seconds — that is exactly the
-   reading you want: the client knows it is behind rather than pretending. The
-   browser console shows connection failures to `127.0.0.1:40000`; that is the
-   client honestly failing to reach a dead peer. **Recent blocks** stops growing:
-   the top row's Age just counts up.
-   *Failure:* **any** new block appearing while node0 is down — the client must
-   never invent one — finality may still advance from a proof already in flight.
+   process. Within a few seconds the slot that held node0 reconnects to another
+   validator, and *Connected peers* shows two non-bootnode entries (`discovered`
+   once the set has been read, `genesis` before), neither on port 40000; the
+   network line ends with the harness's own `browser peers: …` line. Blocks keep
+   arriving, *Client vs node* stays in step, and verified `finalized` events
+   continue. The browser console shows connection failures to `127.0.0.1:40000`;
+   that is the client honestly failing to reach a dead peer before moving on.
+   Nothing about trust changed: every header, finality proof and state proof a
+   discovered validator serves is verified exactly as node0's were. The client
+   found these validators in the active set `C(8)`: first in the spec's genesis
+   state, then in the finalized state, read with a verified proof; each record
+   carries the validator's address and its P-256 WebTransport identity.
+   *Failure:* *Blocks since Start* freezing for more than about ten seconds after
+   the kill although the validator set had been read; the same address in both
+   slots; *Connected peers* claiming a connection the log never showed.
+   *Note:* killing node0 *before* the first finality advance no longer freezes
+   the client: the genesis `C(8)` validators are candidates from the start. A
+   client freezes only with a spec that names no peer besides node0.
 
-6. **Restart node0.**
+6. **Start node0 again.**
    *Do:* press **Start node0** (use **Restart node0** when node0 is still alive).
-   *See:* within roughly 10–20 seconds and **without reloading the page**, blocks
-   resume, and *Client vs node* closes the gap back to zero. The catch-up is
-   real: the number of new blocks matches the number of slots that passed while
-   node0 was down, so the chain is continuous rather than resuming after a hole.
-   **Recent blocks** shows the backfill directly: when it has finished, the slots
-   at the top of the table are consecutive again across the gap. Give it time
-   before judging — Chrome backfilled within ~15 seconds of the restart here,
-   Firefox needed closer to 30, so an incomplete table a few seconds in is not
-   yet a failure.
-   *Failure:* nothing arrives within a minute; or blocks resume but the block
-   count lags far behind the slot span, meaning missed slots were skipped rather
-   than caught up.
+   *See:* blocks never stopped, so there is nothing to catch up. Within one to
+   about five minutes one slot moves back to node0: *Connected peers* shows
+   `bootnode 127.0.0.1:40000 · connected` again and the log has
+   `jam-slot-preempted`. The client prefers bootnodes, but it does not cut a
+   working connection every few seconds to probe a dead one: a failed bootnode is
+   retried in place of a genesis or discovered peer after 30 seconds, then 60, 120, 240 and
+   at most every 300 seconds.
+   If the client did freeze (a spec naming no other peer), blocks resume within
+   roughly 10–20 seconds of the restart and **without reloading the page**, and
+   *Client vs node* closes the gap back to zero; the number of new blocks matches
+   the number of slots that passed, which **Recent blocks** shows as consecutive
+   slots across the gap. Chrome backfilled within ~15 seconds here, Firefox
+   needed closer to 30.
+   *Failure:* node0 never used again within ten minutes while it runs; or, in
+   the frozen case, nothing within a minute, or a block count far behind the
+   slot span.
 
 7. **Unfollow, then Start again.**
    *Do:* press **Unfollow**, wait a few seconds, then **Stop** and **Start**.
@@ -311,15 +380,21 @@ a list of processes that survived, which would be a bug.
 ## What this does not prove
 
 - **No execution proof.** GRANDPA finality authenticates headers; it does not verify runtime execution.
-- **No state reads and no block bodies.** Headers only; `withRuntime: false`.
+- **No general state reads and no block bodies.** Headers only; `withRuntime: false`.
+  The client reads only the four items its warp join needs and the active set `C(8)`.
 - **Dev parameters only.** 6 validators, 2 cores, 6-second slots, 12-slot epochs,
   no guest services (the fixed spec has empty guest blobs). Real parameters are far larger.
 - **No chain identity.** Step 10 shows that a wrong *authority set* is
   refused. Two chains that share their genesis validators are
   indistinguishable to this client after a warp; see step 10's "What the client
   cannot detect".
-- **One bootnode.** The client is pointed at node0 alone, which is what makes
-  step 5 a clean fault injection; it is not a test of peer discovery.
+- **One bootnode, loopback validators.** The spec names node0 as its only
+  bootnode; the client finds the other five in the genesis `C(8)` and later in
+  the live one. On the dev network every validator
+  advertises `127.0.0.1`, so the browser can dial all of them; a real network
+  needs validators whose advertised addresses are reachable from the browser.
+  The P-256 identity's position in the metadata is PolkaJam's convention, not
+  yet the specification's.
 - **Not a soak test.** A few minutes in a browser says nothing about memory over
   hours; retained state remains subject to explicit resource limits.
 - **Not a security review.** The demo server, the control endpoint and the
@@ -330,7 +405,7 @@ a list of processes that survived, which would be a bug.
 DOM ids: `spec-url`, `spec-file`, `dev-bootnode`, `start`, `stop`, `header`,
 `unpin`, `unfollow`, `status`, `header-output`, `events`, `logs`, `kill-node0`,
 `start-node0`, `restart-node0`, `network-status`, and the live view's
-`live-connection`, `live-bootnode`, `live-last-event`, `live-anchor`,
+`live-connection`, `live-bootnode`, `live-peers`, `live-pool`, `live-last-event`, `live-anchor`,
 `live-reanchor`, `live-warp-status`,
 `live-count`, `live-block`, `live-parent`, `live-slot`, `live-epoch`,
 `live-marks`, `live-marks-seen`, `live-author`, `live-best`, `live-leaves`,
@@ -345,7 +420,9 @@ bounded copy of the session state) and `.live()` (the live view's values,
 including the decoded header, the tracked leaves, the block rows behind
 **Recent blocks**, and the harness status).
 The live snapshot also includes `finalized` (hash, source and optional slot),
-`finalityCount`, `lastFinalityAt`, `refollows`, `warpStatus`, the latest
+`finalityCount`, `lastFinalityAt`, `refollows`, `warpStatus`, `peers` (per
+slot: source, address, state, since), `refreshes` (the last 32 `C(8)` merges
+with their counts, bytes and milliseconds), `discoveryError`, the latest
 `initialized` anchor's decoded slot, and each row's `finality` status.
 Rendered RPC and log content uses `textContent`, never HTML.
 
@@ -382,6 +459,10 @@ POLKAJAM_BIN_DIR=/path/to/pinned/target/release node test/jam/demo.mjs --live
 
 The live case asserts one `stop`, a different second anchor, resumed blocks and
 finality, and no automatic re-follow after manual Unfollow.
+
+Steps 5 and 6 run unattended as `npm run test:jam:discovery`, which starts this
+harness, drives this page and reads the harness `status`; see
+[the test README](../test/jam/README.md).
 
 ## Firefox note
 

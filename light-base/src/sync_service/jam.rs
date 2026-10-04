@@ -46,6 +46,12 @@
 //! and the bounded 16-MiB chain-spec parsing input are outside these estimates.
 //! The external fixture test reports retained inline/vector-capacity bytes;
 //! it deliberately does not label this as a measured total heap peak.
+//! The peer pool holds at most 16 bootnodes and `max_validators` (at most 1023)
+//! genesis or discovered candidates of under 200 bytes each, below 256 KiB.
+//! The chain spec's bootnodes and its genesis `C(8)` both seed the pool; the
+//! first verified `C(8)` read replaces the genesis entries. A `C(8)`
+//! refresh is an ordinary state read through the shared slot; its decoded keys
+//! (336 bytes per validator) live only while the pool is merged.
 
 use super::{BlockNotification, Notification, SubscribeAll, SyncStatus, ToBackground};
 use crate::{
@@ -54,11 +60,13 @@ use crate::{
     platform::{MultiStreamAddress, PlatformRef, SubstreamDirection},
 };
 use alloc::{borrow::Cow, boxed::Box, collections::VecDeque, string::String, sync::Arc, vec::Vec};
-use core::{net::IpAddr, num::NonZeroUsize, pin::Pin, time::Duration};
+use core::{num::NonZeroUsize, pin::Pin, time::Duration};
+use discovery::{Acquire, Peer, Pool, Release, Source};
 use futures_lite::{StreamExt as _, future};
 use smoldot::jam::{
     chain_spec::JamChainSpec,
     finality::{self, AuthoritySet, Justification},
+    metadata::{self, ValidatorEndpoint},
     net,
     params::Params,
     state::LightState,
@@ -76,21 +84,25 @@ const MAX_SUBSCRIBERS: usize = 8;
 const MAX_PEERS: usize = 2;
 const TIMEOUT: Duration = Duration::from_secs(20);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+/// Upper bound on a `C(8)` read response; the value is at most 343,731 bytes.
+const ACTIVE_SET_READ_BYTES: u32 = 800_000;
+/// An idle slot re-checks the pool at least this often.
+const POOL_POLL: Duration = Duration::from_millis(500);
+/// A slot on a discovered peer checks this often whether a bootnode is due.
+const PREEMPT_POLL: Duration = Duration::from_secs(1);
 
 pub(crate) struct Config {
     params: Params,
     tree: HeaderTree,
+    /// The chain spec's bootnodes with a P-256 identity.
     peers: Vec<Peer>,
+    /// The genesis `C(8)` validators with a P-256 identity and a port: the
+    /// pool's initial discovered set.
+    genesis: Vec<Peer>,
     header_bytes: usize,
     authorities: AuthoritySet,
     max_blocks: usize,
     tree_config: tree::Config,
-}
-
-struct Peer {
-    identity: P256PeerId,
-    ip: IpAddr,
-    port: u16,
 }
 
 impl Config {
@@ -108,19 +120,39 @@ impl Config {
             None => AuthoritySet::from_genesis(&params, header)
                 .map_err(|e| alloc::format!("JAM genesis finality: {e}"))?,
         };
-        let mut peers = Vec::new();
+        let mut peers: Vec<Peer> = Vec::new();
         for node in spec.boot_nodes() {
             if let Some(p256_id_text) = node.p256_id_text {
                 let identity = P256PeerId::from_text(&p256_id_text)
                     .map_err(|e| alloc::format!("JAM P256 identity: {e:?}"))?;
-                if peers.len() < MAX_PEERS {
+                if peers.len() < discovery::MAX_BOOTNODES
+                    && !peers.iter().any(|peer| peer.ed25519 == node.ed25519)
+                {
                     peers.push(Peer {
                         identity,
                         ip: node.ip,
                         port: node.port,
+                        ed25519: node.ed25519,
+                        source: Source::Bootnode,
                     });
                 }
             }
+        }
+        // Liveness sources only, like bootnodes: whatever they serve is verified
+        // the same way. Records whose key is not a curve point are skipped.
+        let genesis: Vec<Peer> = spec
+            .genesis_validators()
+            .filter_map(|endpoint| Peer::discovered(&endpoint))
+            .map(|peer| Peer {
+                source: Source::Genesis,
+                ..peer
+            })
+            .collect();
+        if peers.is_empty() && genesis.is_empty() {
+            return Err(String::from(
+                "JAM chain spec has no dialable peer: no bootnode has a valid P-256 identity \
+                 and no validator in the genesis C(8) advertises a valid one with a port",
+            ));
         }
         let root = verified_genesis(&params, header.clone(), state);
         let tree = HeaderTree::new(params.clone(), root, limits)
@@ -129,6 +161,7 @@ impl Config {
             params,
             tree,
             peers,
+            genesis,
             authorities,
             max_blocks: max_blocks.get(),
             header_bytes,
@@ -208,6 +241,50 @@ struct State {
     /// Refusals apply only to this exact finalized root, by distinct peers.
     root_refusals: Option<(Hash, u8)>,
     peer_count: usize,
+    discovery: Discovery,
+}
+
+/// The peer pool and the `C(8)` refresh that feeds it.
+struct Discovery {
+    pool: Pool,
+    /// The active set has not been read since the last finalized epoch change.
+    stale: bool,
+    /// A finality advance happened while stale; read when the slot is free.
+    due: bool,
+    read: Option<DiscoveryRead>,
+}
+
+struct DiscoveryRead {
+    expected: StateRead,
+    rx: futures_channel::oneshot::Receiver<Result<StateReadResult, StateReadError>>,
+    started_ms: u128,
+}
+
+impl Discovery {
+    fn new(pool: Pool) -> Self {
+        Self {
+            pool,
+            stale: true,
+            due: false,
+            read: None,
+        }
+    }
+}
+
+/// What a discovery turn did, for the driver's log.
+#[derive(Debug, PartialEq, Eq)]
+enum DiscoveryEvent {
+    Started {
+        slot: u32,
+    },
+    Refreshed {
+        merge: discovery::Merge,
+        value_bytes: usize,
+        elapsed_ms: u128,
+    },
+    Failed {
+        reason: &'static str,
+    },
 }
 
 #[derive(Debug)]
@@ -420,7 +497,6 @@ impl Warp {
 
 /// Trust of the caller-authenticated header carrying this posterior state root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Standalone primitive; production consumers arrive in D3/D7.
 pub(crate) enum Trust {
     Finalized,
     Authenticated,
@@ -439,7 +515,6 @@ pub(crate) struct StateRead {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // Returned to the future in-process consumers, not RPC.
 pub(crate) struct StateReadResult {
     pub at: Hash,
     pub root: Hash,
@@ -490,7 +565,6 @@ impl StateReads {
     }
     /// Bounded in-process API: caller supplies the authenticated root and trust.
     /// Dropping the receiver cancels the read at the next reservation/response.
-    #[allow(dead_code)] // No production consumer until D3/D7; exercised by tests.
     fn start(
         &mut self,
         read: StateRead,
@@ -587,7 +661,6 @@ enum InsertFailure {
 
 impl State {
     /// Wait until the best chain has an authenticated child of the finalized head.
-    #[allow(dead_code)] // D3 consumer API.
     fn finalized_read(
         &self,
         start: trie::StateKey,
@@ -614,7 +687,136 @@ impl State {
         })
     }
 
+    /// One bounded step of the `C(8)` refresh: collect a finished read, give up
+    /// on one no peer is serving, or start one when it is due and the shared
+    /// read slot is free. Never blocks; header sync is unaffected either way.
+    fn discovery_turn(&mut self, now_unix: Duration) -> Option<DiscoveryEvent> {
+        if let Some(read) = &mut self.discovery.read {
+            let outcome = match read.rx.try_recv() {
+                Ok(None) => {
+                    // A reservation that ended without a result (a peer said
+                    // NoData, faulted, or its connection closed) is not retried
+                    // here: the slot stays free for warp joins and proofs, and
+                    // the next finality advance tries again.
+                    if self.reads.owner.is_some() || self.reads.attempts == 0 {
+                        return None;
+                    }
+                    Err("Released")
+                }
+                Ok(Some(Ok(result))) => Ok(result),
+                Ok(Some(Err(StateReadError::Unavailable))) => Err("Unavailable"),
+                Err(_) => Err("Cancelled"),
+            };
+            let read = self.discovery.read.take()?;
+            return Some(match outcome {
+                Ok(result) => self.apply_active_set(&read, result, now_unix),
+                Err(reason) => DiscoveryEvent::Failed { reason },
+            });
+        }
+        if !self.discovery.due || self.stopped || self.warp_owner.is_some() {
+            return None;
+        }
+        let key = trie::state_key(8);
+        // `None` until the best chain has an authenticated child; stay due.
+        let expected = self.finalized_read(key, key, ACTIVE_SET_READ_BYTES)?;
+        let rx = self.reads.start(expected.clone()).ok()?;
+        self.discovery.due = false;
+        self.discovery.read = Some(DiscoveryRead {
+            expected,
+            rx,
+            started_ms: now_unix.as_millis(),
+        });
+        Some(DiscoveryEvent::Started {
+            slot: self.tree.finalized().slot,
+        })
+    }
+
+    fn apply_active_set(
+        &mut self,
+        read: &DiscoveryRead,
+        result: StateReadResult,
+        now_unix: Duration,
+    ) -> DiscoveryEvent {
+        let expected = &read.expected;
+        if result.at != expected.at
+            || result.root != expected.root
+            || result.trust != Trust::Authenticated
+            || result.root_header != expected.root_header
+        {
+            return DiscoveryEvent::Failed {
+                reason: "Provenance",
+            };
+        }
+        let key = trie::state_key(8);
+        let Some((_, value)) = result.range.entries.iter().find(|(k, _)| *k == key) else {
+            return DiscoveryEvent::Failed { reason: "Absent" };
+        };
+        let Ok(validators) = metadata::decode_active_set(&self.params, value) else {
+            return DiscoveryEvent::Failed { reason: "Decode" };
+        };
+        let merge = self.discovery.pool.replace_discovered(
+            validators.len(),
+            validators
+                .iter()
+                .map(|key| Peer::discovered(&ValidatorEndpoint::from_validator(key))),
+        );
+        self.discovery.stale = false;
+        DiscoveryEvent::Refreshed {
+            merge,
+            value_bytes: value.len(),
+            elapsed_ms: now_unix.as_millis().saturating_sub(read.started_ms),
+        }
+    }
+
+    /// Slots in `cleared` no longer hold the peer their per-slot state
+    /// describes: forget their refusal, proof attempts and read attempt, so the
+    /// terminal stop keeps meaning "the peers held right now refused this root".
+    fn slots_changed(&mut self, cleared: u8) {
+        if cleared == 0 {
+            return;
+        }
+        if let Some((_, mask)) = &mut self.root_refusals {
+            *mask &= !cleared;
+        }
+        for (_, attempts) in &mut self.proof_attempts {
+            *attempts &= !cleared;
+        }
+        let owner = self.reads.owner.map_or(0, |owner| 1u8 << owner);
+        self.reads.attempts &= !(cleared & !owner);
+    }
+
+    /// Assigns `slot` a candidate, or says how long to wait (`None`: until the
+    /// pool changes). Clears the per-slot state of every slot whose peer changed.
+    fn acquire_candidate(&mut self, slot: usize, now: Duration) -> Result<Peer, Option<Duration>> {
+        match self.discovery.pool.acquire(slot, now) {
+            Acquire::Peer { peer, cleared } => {
+                self.slots_changed(cleared);
+                Ok(peer)
+            }
+            Acquire::Wait(wait) => Err(wait),
+        }
+    }
+
+    /// Switch `slot` to a due bootnode, only while it owns no shared work.
+    fn preempt_candidate(&mut self, slot: usize, now: Duration) -> Option<Peer> {
+        if self.stopped
+            || self.warp_owner == Some(slot)
+            || self.reads.owner == Some(slot)
+            || self.proof_owner.is_some_and(|(owner, _)| owner == slot)
+        {
+            return None;
+        }
+        let (peer, cleared) = self.discovery.pool.preempt(slot, now)?;
+        self.slots_changed(cleared);
+        Some(peer)
+    }
+
     fn reserve_warp(&mut self, peer: usize) -> Option<Warp> {
+        // Discovery yields to a warp join: a refresh that no peer is serving
+        // right now is cancelled, and retried at the next finality advance.
+        if self.reads.owner.is_none() && self.discovery.read.take().is_some() {
+            self.discovery.due = false;
+        }
         if self.reads.owner.is_none()
             && self
                 .reads
@@ -674,6 +876,10 @@ impl State {
         self.proof_attempts.clear();
         self.root_refusals = None;
         self.subscribers.clear();
+        // A new anchor may sit in a later epoch; read again after its first
+        // finality advance.
+        self.discovery.stale = true;
+        self.discovery.due = false;
         Ok(())
     }
 
@@ -774,6 +980,7 @@ impl State {
     }
 
     fn finalize(&mut self, target: Hash, bytes: &[u8]) -> Result<(), finality::Error> {
+        let before = self.tree.finalized().slot;
         let limits = self.proof_limits();
         let proof = Justification::decode(&self.params, bytes, limits)?;
         let verified = proof.verify(
@@ -787,6 +994,16 @@ impl State {
         let result = self.tree.finalize(&verified, &mut self.authorities)?;
         if result.finalized.is_empty() {
             return Ok(());
+        }
+        // The active set changes only with an epoch mark, and every epoch's
+        // first block carries one; comparing epochs also covers skipped ones.
+        let after = self.tree.finalized().slot;
+        let epoch_len = self.params.epoch_len.max(1);
+        if before / epoch_len != after / epoch_len {
+            self.discovery.stale = true;
+        }
+        if self.discovery.stale {
+            self.discovery.due = true;
         }
         let notification = Notification::Finalized {
             finalized_blocks_hashes: result.finalized,
@@ -885,8 +1102,20 @@ pub(super) async fn run<P: PlatformRef>(
     config: Config,
     rx: async_channel::Receiver<ToBackground>,
 ) {
+    // Slots keep their index for life; only their candidate changes. Without
+    // any dialable bootnode or genesis validator there is nobody to dial.
+    let slots = if config.peers.is_empty() && config.genesis.is_empty() {
+        0
+    } else {
+        MAX_PEERS
+    };
+    let pool = Pool::new(
+        config.peers,
+        config.genesis,
+        usize::from(config.params.max_validators),
+    );
     let state = Arc::new(async_lock::Mutex::new(State {
-        reads: StateReads::new(config.peers.len()),
+        reads: StateReads::new(slots),
         #[cfg(test)]
         test_verifier: None,
         tree: config.tree,
@@ -902,7 +1131,8 @@ pub(super) async fn run<P: PlatformRef>(
         warp_owner: None,
         warp_revision: 0,
         root_refusals: None,
-        peer_count: config.peers.len(),
+        peer_count: slots,
+        discovery: Discovery::new(pool),
     }));
     let foreground = async {
         while let Ok(request) = rx.recv().await {
@@ -939,7 +1169,14 @@ pub(super) async fn run<P: PlatformRef>(
     // that can immediately repoll the same child within one outer task poll.
     let (shutdown, cancelled) = async_channel::bounded::<()>(1);
     let mut peers_done = futures_util::stream::FuturesUnordered::new();
-    for (peer_index, peer) in config.peers.into_iter().enumerate() {
+    let origin = platform.now();
+    for slot in 0..slots {
+        // Assign in slot order so the first bootnodes go to the first slots.
+        let initial = state
+            .lock()
+            .await
+            .acquire_candidate(slot, Duration::ZERO)
+            .ok();
         let (done, finished) = futures_channel::oneshot::channel();
         peers_done.push(finished);
         let platform_ref = platform.clone();
@@ -947,9 +1184,18 @@ pub(super) async fn run<P: PlatformRef>(
         let params = config.params.clone();
         let state = state.clone();
         let cancelled = cancelled.clone();
+        let origin = origin.clone();
         platform.spawn_task(alloc::format!("jam-peer-{log_name}").into(), async move {
             future::or(
-                peer_loop(&platform_ref, &log_name, &peer, peer_index, &params, state),
+                slot_loop(
+                    &platform_ref,
+                    &log_name,
+                    slot,
+                    &params,
+                    state,
+                    origin,
+                    initial,
+                ),
                 async {
                     let _ = cancelled.recv().await;
                 },
@@ -965,6 +1211,230 @@ pub(super) async fn run<P: PlatformRef>(
     while peers_done.next().await.is_some() {}
 }
 
+/// One connection slot. It keeps `slot` as its `peer_index` for life and asks
+/// the pool for a candidate whenever it has none: on a failed connect or an
+/// ended connection it releases the candidate (recording the failure against
+/// that candidate) and asks again, so backoff is per candidate, not per slot.
+async fn slot_loop<P: PlatformRef>(
+    platform: &P,
+    log_name: &str,
+    slot: usize,
+    params: &Params,
+    state: Arc<async_lock::Mutex<State>>,
+    origin: P::Instant,
+    mut current: Option<Peer>,
+) {
+    let mut fetch_size = FetchSize::default();
+    let mut root_probe = None;
+    let mut previous: Option<smoldot::jam::types::Ed25519Public> = None;
+    loop {
+        if state.lock().await.stopped {
+            future::pending::<()>().await;
+        }
+        let peer = match current.take() {
+            Some(peer) => peer,
+            None => {
+                let now = platform.now() - origin.clone();
+                // Bind first: a guard in the scrutinee would be held while sleeping.
+                let acquired = state.lock().await.acquire_candidate(slot, now);
+                match acquired {
+                    Ok(peer) => peer,
+                    Err(wait) => {
+                        let wait = wait.map_or(POOL_POLL, |wait| wait.min(POOL_POLL));
+                        platform.sleep(wait.max(Duration::from_millis(1))).await;
+                        continue;
+                    }
+                }
+            }
+        };
+        log!(
+            platform,
+            Debug,
+            log_name,
+            "jam-slot-assigned",
+            slot = slot,
+            source = peer.source.as_str(),
+            address = peer.address(),
+            p256 = peer.identity.to_text()
+        );
+        if previous != Some(peer.ed25519) {
+            // The root probe describes one peer's answers, not the slot's.
+            root_probe = None;
+            previous = Some(peer.ed25519);
+        }
+        let outcome = connect_once(
+            platform,
+            log_name,
+            &peer,
+            slot,
+            params,
+            &state,
+            (&mut fetch_size, &mut root_probe),
+            Some(origin.clone()),
+        )
+        .await;
+        let now = platform.now() - origin.clone();
+        match outcome {
+            None => {
+                log!(
+                    platform,
+                    Debug,
+                    log_name,
+                    "jam-slot-unsupported",
+                    slot = slot,
+                    address = peer.address()
+                );
+                state
+                    .lock()
+                    .await
+                    .discovery
+                    .pool
+                    .release(slot, Release::Unsupported, now);
+                continue;
+            }
+            Some(Outcome { stopped: true, .. }) => continue,
+            Some(Outcome {
+                preempted: Some(next),
+                ..
+            }) => {
+                log!(
+                    platform,
+                    Debug,
+                    log_name,
+                    "jam-slot-preempted",
+                    slot = slot,
+                    from = peer.address(),
+                    to = next.address()
+                );
+                current = Some(next);
+            }
+            Some(Outcome { lasted, .. }) => {
+                state
+                    .lock()
+                    .await
+                    .discovery
+                    .pool
+                    .release(slot, Release::Ended { lasted }, now);
+            }
+        }
+        log!(platform, Debug, log_name, "jam-reconnect");
+    }
+}
+
+/// How one connection attempt ended.
+struct Outcome {
+    /// Zero when the transport never connected.
+    lasted: Duration,
+    /// The driver stopped the chain; the slot parks.
+    stopped: bool,
+    /// The pool moved this slot to this bootnode while connected.
+    preempted: Option<Peer>,
+}
+
+/// Dial `peer` once on slot `peer_index` and drive the connection until it
+/// ends, then release the proof, warp and read ownership it may hold.
+/// `None` when the platform cannot dial this address type. With `preempt`
+/// (the pool's time origin), a slot on a discovered peer may be moved to a
+/// bootnode whose retry interval has passed.
+#[allow(clippy::too_many_arguments)]
+async fn connect_once<P: PlatformRef>(
+    platform: &P,
+    log_name: &str,
+    peer: &Peer,
+    peer_index: usize,
+    params: &Params,
+    state: &Arc<async_lock::Mutex<State>>,
+    (fetch_size, root_probe): (&mut FetchSize, &mut Option<Hash>),
+    preempt: Option<P::Instant>,
+) -> Option<Outcome> {
+    let address = MultiStreamAddress::WebTransport {
+        ip: peer.ip,
+        port: peer.port,
+        cert_hashes: Cow::Owned(
+            jam_webtransport_cert::certificate_hashes(
+                &peer.identity,
+                platform.now_from_unix_epoch().as_secs(),
+            )
+            .to_vec(),
+        ),
+    };
+    if !platform.supports_connection_type((&address).into()) {
+        return None;
+    }
+    log!(platform, Debug, log_name, "jam-connect");
+    let connected = future::or(
+        async { Some(platform.connect_multistream(address).await) },
+        async {
+            platform.sleep(TIMEOUT).await;
+            None
+        },
+    )
+    .await;
+    let mut outcome = Outcome {
+        lasted: Duration::ZERO,
+        stopped: false,
+        preempted: None,
+    };
+    let Some(connected) = connected else {
+        return Some(outcome);
+    };
+    let started = platform.now();
+    let driving = async {
+        drive(
+            platform,
+            log_name,
+            params,
+            peer_index,
+            state,
+            connected.connection,
+            (fetch_size, root_probe),
+        )
+        .await;
+        None
+    };
+    outcome.preempted = match preempt {
+        Some(origin) if peer.source != Source::Bootnode => {
+            future::or(driving, async {
+                loop {
+                    platform.sleep(PREEMPT_POLL).await;
+                    let now = platform.now() - origin.clone();
+                    if let Some(next) = state.lock().await.preempt_candidate(peer_index, now) {
+                        return Some(next);
+                    }
+                }
+            })
+            .await
+        }
+        _ => driving.await,
+    };
+    outcome.lasted = platform.now() - started;
+    let mut s = state.lock().await;
+    s.reads.release(peer_index, false);
+    if s.proof_owner.is_some_and(|(owner, _)| owner == peer_index) {
+        s.proof_owner = None;
+    }
+    if s.warp_owner == Some(peer_index) {
+        s.warp_owner = None;
+    }
+    outcome.stopped = s.stopped;
+    drop(s);
+    log!(
+        platform,
+        Debug,
+        log_name,
+        "jam-peer-disconnected",
+        slot = peer_index,
+        source = peer.source.as_str(),
+        address = peer.address(),
+        lasted_ms = outcome.lasted.as_millis()
+    );
+    Some(outcome)
+}
+
+/// A connection loop pinned to one peer, with the slot-wide backoff the
+/// driver had before the pool. Scripted tests use it to drive a fixed peer
+/// on a chosen slot.
+#[cfg(test)]
 async fn peer_loop<P: PlatformRef>(
     platform: &P,
     log_name: &str,
@@ -980,57 +1450,25 @@ async fn peer_loop<P: PlatformRef>(
         if state.lock().await.stopped {
             future::pending::<()>().await;
         }
-        let address = MultiStreamAddress::WebTransport {
-            ip: peer.ip,
-            port: peer.port,
-            cert_hashes: Cow::Owned(
-                jam_webtransport_cert::certificate_hashes(
-                    &peer.identity,
-                    platform.now_from_unix_epoch().as_secs(),
-                )
-                .to_vec(),
-            ),
-        };
-        if !platform.supports_connection_type((&address).into()) {
-            return;
-        }
-        log!(platform, Debug, log_name, "jam-connect");
-        let connected = future::or(
-            async { Some(platform.connect_multistream(address).await) },
-            async {
-                platform.sleep(TIMEOUT).await;
-                None
-            },
+        let Some(outcome) = connect_once(
+            platform,
+            log_name,
+            peer,
+            peer_index,
+            params,
+            &state,
+            (&mut fetch_size, &mut root_probe),
+            None,
         )
-        .await;
-        if let Some(connected) = connected {
-            let started = platform.now();
-            drive(
-                platform,
-                log_name,
-                params,
-                peer_index,
-                &state,
-                connected.connection,
-                (&mut fetch_size, &mut root_probe),
-            )
-            .await;
-            let mut s = state.lock().await;
-            s.reads.release(peer_index, false);
-            if s.proof_owner.is_some_and(|(owner, _)| owner == peer_index) {
-                s.proof_owner = None;
-            }
-            if s.warp_owner == Some(peer_index) {
-                s.warp_owner = None;
-            }
-            if s.stopped {
-                drop(s);
-                continue;
-            }
-            drop(s);
-            if platform.now() - started >= Duration::from_secs(60) {
-                backoff = 1;
-            }
+        .await
+        else {
+            return;
+        };
+        if outcome.stopped {
+            continue;
+        }
+        if outcome.lasted >= Duration::from_secs(60) {
+            backoff = 1;
         }
         log!(platform, Debug, log_name, "jam-reconnect");
         platform.sleep(Duration::from_secs(backoff)).await;
@@ -1386,6 +1824,17 @@ async fn drive<P: PlatformRef>(
                     }
                 }
                 net::Event::HandshakeReceived(h) => {
+                    if let Some(peer) = state.lock().await.discovery.pool.held(peer_index) {
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-peer-connected",
+                            slot = peer_index,
+                            source = peer.source.as_str(),
+                            address = peer.address()
+                        );
+                    }
                     advertisement_revision = 1;
                     handshaken = true;
                     advertised = Some(h.final_.clone());
@@ -1921,6 +2370,54 @@ async fn drive<P: PlatformRef>(
                 local_progress = true;
             }
         }
+        if normal_sync {
+            let event = state
+                .lock()
+                .await
+                .discovery_turn(platform.now_from_unix_epoch());
+            match event {
+                Some(DiscoveryEvent::Started { slot }) => {
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-discovery-read-started",
+                        slot = slot
+                    );
+                    local_progress = true;
+                }
+                Some(DiscoveryEvent::Refreshed {
+                    merge,
+                    value_bytes,
+                    elapsed_ms,
+                }) => {
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-pool-changed",
+                        validators = merge.validators,
+                        usable = merge.usable,
+                        discovered = merge.discovered,
+                        added = merge.added,
+                        removed = merge.removed,
+                        retired = merge.retired,
+                        value_bytes = value_bytes,
+                        elapsed_ms = elapsed_ms
+                    );
+                }
+                Some(DiscoveryEvent::Failed { reason }) => {
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-discovery-failed",
+                        reason = reason
+                    );
+                }
+                None => {}
+            }
+        }
         if handshaken
             && normal_sync
             && proof_requested.is_none()
@@ -2083,6 +2580,8 @@ async fn drive<P: PlatformRef>(
         }
     }
 }
+
+mod discovery;
 
 #[cfg(all(test, feature = "std"))]
 mod tests;

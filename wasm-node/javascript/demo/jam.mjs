@@ -11,6 +11,10 @@ const MAX_TRACKED_BLOCKS = 256;
 const MAX_BLOCK_ROWS = 20;
 const CONTROL_URL = '/jam-demo/control';
 const POLL_MS = 2000;
+/** The client's connection slots; `MAX_PEERS` in light-base's JAM driver. */
+const MAX_PEER_SLOTS = 2;
+/** How many `C(8)` refreshes the page remembers, newest last. */
+const MAX_REFRESHES = 32;
 const entries = { events: [], logs: [] };
 let current;
 let stopping = false;
@@ -82,6 +86,7 @@ async function stop() {
     stopping = false;
     controls();
     renderLive();
+    void reportPeers(undefined);
 }
 
 function fail(run, error) {
@@ -347,6 +352,7 @@ async function start() {
         blockCount: 0, blocks: new Map(), bootnodes: [], startedAt: Date.now(),
         rows: [], headerQueue: [], finalityCount: 0,
         generation: 0, refollows: 0, followStops: [], activeBlocks: new Set(),
+        peers: [], refreshes: [],
     };
     current = run;
     for (const panel of ['events', 'logs']) {
@@ -390,15 +396,27 @@ async function start() {
             // The address is deliberately not written down here: it comes from
             // the harness that started the network, which formats it in exactly
             // one place (test/jam/network.mjs `formatBootnode`).
-            const status = await controlRequest('status');
+            let status;
+            try {
+                status = await controlRequest('dev-bootnode');
+            } catch (error) {
+                // An attached harness (zombienet) manages no node0, and its
+                // spec already names its peers: carry on with the spec as is.
+                if (current !== run) return;
+                const message = String(error && (error.message || error));
+                if (!harness.status?.attach && !message.includes('attach mode')) throw error;
+                print('logs', 'Not adding a dev bootnode: ' + message);
+            }
             if (current !== run) return;
-            const bootnode = status?.bootnode;
-            if (typeof bootnode !== 'string' || bootnode.length === 0)
-                throw new Error('The demo harness did not report a bootnode address');
-            if (spec.bootnodes !== undefined && !Array.isArray(spec.bootnodes)) throw new Error('bootnodes must be an array');
-            spec.bootnodes ??= [];
-            if (!spec.bootnodes.includes(bootnode)) spec.bootnodes.push(bootnode);
-            print('logs', "Added the running network's node0 bootnode: " + bootnode);
+            if (status !== undefined) {
+                const bootnode = status?.bootnode;
+                if (typeof bootnode !== 'string' || bootnode.length === 0)
+                    throw new Error('The demo harness did not report a bootnode address');
+                if (spec.bootnodes !== undefined && !Array.isArray(spec.bootnodes)) throw new Error('bootnodes must be an array');
+                spec.bootnodes ??= [];
+                if (!spec.bootnodes.includes(bootnode)) spec.bootnodes.push(bootnode);
+                print('logs', "Added the running network's node0 bootnode: " + bootnode);
+            }
         }
         run.bootnodes = Array.isArray(spec.bootnodes) ? spec.bootnodes.slice() : [];
         run.params = specParams(spec);
@@ -416,6 +434,7 @@ async function start() {
                     run.warpStatus = message;
                     renderLive();
                 }
+                peerLog(run, String(message));
             },
         });
         run.chain = await run.client.addChain({ chainSpec: JSON.stringify(spec) });
@@ -440,6 +459,109 @@ async function unfollow() {
         controls();
         renderLive();
     } catch (error) { fail(run, error); }
+}
+
+// --------------------------------------------------------------------------
+// Connected peers and the discovered validator set.
+//
+// The client logs every slot assignment, UP0 handshake and disconnect with the
+// peer's source (`bootnode` from the spec's bootnodes, `genesis` from the
+// spec's genesis C(8), `discovered` from a verified C(8) read), and every merge
+// of a C(8) read. This panel only mirrors
+// those lines; nothing here decides whom the client dials or trusts.
+// --------------------------------------------------------------------------
+
+const PEER_LOG = /^(jam-slot-assigned|jam-peer-connected|jam-peer-disconnected|jam-pool-changed|jam-discovery-failed)(?:; (.*))?$/;
+
+/** `k=v, k=v` as the smoldot log formatter writes fields. */
+function logFields(text) {
+    const fields = {};
+    for (const part of text.split(', ')) {
+        const at = part.indexOf('=');
+        if (at > 0) fields[part.slice(0, at)] = part.slice(at + 1);
+    }
+    return fields;
+}
+
+function peerLog(run, message) {
+    const match = PEER_LOG.exec(message);
+    if (!match) return;
+    const [, kind, rest] = match;
+    const fields = logFields(rest ?? '');
+    if (kind === 'jam-pool-changed') {
+        const number = key => Number.isFinite(Number(fields[key])) ? Number(fields[key]) : undefined;
+        run.refreshes.push({
+            at: Date.now(), validators: number('validators'), usable: number('usable'),
+            discovered: number('discovered'), added: number('added'), removed: number('removed'),
+            retired: number('retired'), valueBytes: number('value_bytes'), elapsedMs: number('elapsed_ms'),
+        });
+        if (run.refreshes.length > MAX_REFRESHES) run.refreshes.shift();
+        run.discoveryError = undefined;
+    } else if (kind === 'jam-discovery-failed') {
+        run.discoveryError = fields.reason ?? 'unknown';
+    } else {
+        const slot = Number(fields.slot);
+        if (!Number.isInteger(slot) || slot < 0 || slot >= MAX_PEER_SLOTS) return;
+        if (kind === 'jam-peer-disconnected') {
+            if (run.peers[slot]) Object.assign(run.peers[slot], { state: 'disconnected', since: Date.now() });
+        } else {
+            run.peers[slot] = {
+                slot, source: fields.source, address: fields.address,
+                state: kind === 'jam-peer-connected' ? 'connected' : 'dialing', since: Date.now(),
+            };
+        }
+    }
+    void reportPeers(run);
+    renderLive();
+}
+
+function peerList(run) {
+    return (run?.peers ?? []).filter(Boolean).map(peer => ({ ...peer }));
+}
+
+/** Tells the harness what the client is connected to, for its `status`. */
+async function reportPeers(run) {
+    if (run !== undefined && current !== run) return;
+    const last = run?.refreshes.at(-1);
+    try {
+        await controlRequest('peers', {
+            peers: peerList(run).map(({ slot, source, address, state }) => ({ slot, source, address, state })),
+            pool: last ? { validators: last.validators, discovered: last.discovered, refreshes: run.refreshes.length } : null,
+        });
+    } catch {
+        // The harness is optional; the page shows the list either way.
+    }
+}
+
+/** The two rows this panel adds to the live view, next to the bootnode row. */
+function ensurePeerRows() {
+    if (field('live-peers')) return;
+    const anchor = field('live-bootnode');
+    let after = anchor;
+    for (const [id, label] of [['live-peers', 'Connected peers'], ['live-pool', 'Validator set (C(8))']]) {
+        const dt = document.createElement('dt');
+        dt.textContent = label;
+        const dd = document.createElement('dd');
+        dd.id = id;
+        dd.textContent = '–';
+        after.after(dt, dd);
+        after = dd;
+    }
+}
+
+function renderPeers(run) {
+    ensurePeerRows();
+    const peers = peerList(run);
+    setText('live-peers', !run ? undefined : peers.length === 0 ? 'none yet' : peers.map(peer =>
+        'slot ' + peer.slot + ': ' + peer.source + ' ' + peer.address + ' · ' + peer.state + ' ' +
+        Math.round((Date.now() - peer.since) / 1000) + 's').join(' | '));
+    const last = run?.refreshes.at(-1);
+    setText('live-pool', !run ? undefined : last
+        ? last.validators + ' validator(s), ' + last.discovered + ' discovered besides the bootnodes · read ' +
+          run.refreshes.length + ' time(s), last ' + (last.valueBytes ?? '–') + ' bytes in ' + (last.elapsedMs ?? '–') + ' ms' +
+          (run.discoveryError ? ' · last refresh failed: ' + run.discoveryError : '')
+        : (run.discoveryError ? 'read failed: ' + run.discoveryError + '; retried at the next finality advance'
+            : 'not read yet: the genesis C(8) seeds the pool until the first verified finality advance'));
 }
 
 // --------------------------------------------------------------------------
@@ -593,6 +715,7 @@ function renderLive() {
     const run = current;
     setText('live-connection', connectionState(run));
     setText('live-bootnode', run?.bootnodes?.length ? run.bootnodes.join(', ') : undefined);
+    renderPeers(run);
     if (!run || run.lastEventAt === undefined) setText('live-last-event', undefined);
     else setText('live-last-event', Math.round((Date.now() - run.lastEventAt) / 1000) + 's ago');
     const anchors = run?.initialized?.anchors ?? [];
@@ -728,13 +851,14 @@ function renderBlocks(run) {
 // Harness control endpoint: the independent oracle, and the fault buttons.
 // --------------------------------------------------------------------------
 
-const harness = { status: undefined, available: false, busy: false, error: undefined };
+/** `actionNote`: the last network action's outcome, kept next to the buttons until the next one. */
+const harness = { status: undefined, available: false, busy: false, error: undefined, actionNote: undefined };
 
-async function controlRequest(action) {
+async function controlRequest(action, extra = {}) {
     const response = await fetch(CONTROL_URL, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ ...extra, action }),
     });
     let body;
     try { body = await response.json(); } catch { body = undefined; }
@@ -755,7 +879,8 @@ function renderNodeView(decoded) {
         setText('live-agreement', undefined);
         return;
     }
-    const alive = harness.status?.node0Alive ? 'node0 running' : 'node0 NOT running';
+    const alive = harness.status?.attach ? 'external network (attach mode)'
+        : harness.status?.node0Alive ? 'node0 running' : 'node0 NOT running';
     const best = nodeBest();
     if (!best) {
         setText('live-node-best', harness.status?.nodeBestBlockError
@@ -781,12 +906,18 @@ function setNetworkButtons() {
 }
 
 function describeHarness(status) {
+    const note = harness.actionNote ? ' · last action: ' + harness.actionNote : '';
+    if (status?.attach)
+        return 'Attach mode: spec ' + status.specPath + ' · RPC port ' + status.rpcPort +
+            ' · no network managed by this harness' +
+            (typeof status.peersLine === 'string' ? ' · ' + status.peersLine : '') + note;
     const all = status?.processes ?? [];
     const node0 = all.find(entry => entry.node0);
     return 'PolkaJam ' + String(status?.pinnedCommit ?? '').slice(0, 8) +
         ' · base port ' + status?.basePort + ' · RPC port ' + status?.rpcPort +
         ' · ' + all.length + ' node process(es) alive · ' +
-        (node0 ? 'node0 pid ' + node0.pid : 'node0 NOT running');
+        (node0 ? 'node0 pid ' + node0.pid : 'node0 NOT running') +
+        (typeof status?.peersLine === 'string' ? ' · ' + status.peersLine : '') + note;
 }
 
 async function poll() {
@@ -814,9 +945,13 @@ async function networkAction(action) {
     field('network-status').textContent = action + ': running…';
     try {
         harness.status = await controlRequest(action);
+        harness.actionNote = undefined;
         field('network-status').textContent = action + ': done · ' + describeHarness(harness.status);
     } catch (error) {
-        field('network-status').textContent = action + ' FAILED: ' + String(error && (error.message || error));
+        // In attach mode every node action fails by design; the reason stays
+        // next to the buttons through the next status polls.
+        harness.actionNote = action + ' FAILED: ' + String(error && (error.message || error));
+        field('network-status').textContent = harness.actionNote;
     } finally {
         harness.busy = false;
         setNetworkButtons();
@@ -867,6 +1002,9 @@ window.jamDemo = {
         initialized: current?.initialized,
         refollows: current?.refollows ?? 0,
         warpStatus: current?.warpStatus,
+        peers: peerList(current),
+        refreshes: (current?.refreshes ?? []).map(entry => ({ ...entry })),
+        discoveryError: current?.discoveryError,
         latestNewBlock: current?.latest,
         parent: current?.latest ? current.blocks.get(current.latest) ?? null : undefined,
         best: current?.best,

@@ -1,0 +1,80 @@
+# Six-validator GRANDPA PolkaJam network for the manual JAM demo, spawned by
+# `zombie-cli` (`just zombie-jam`); the demo harness then attaches to it with
+# `just demo-jam-attach`. See `demo/jam.md`, "With zombienet".
+#
+# Needs the `skunert/polkajam-light-client` branches of zombienet-sdk and
+# PolkaJam (local fork, not upstream yet):
+# - zombienet-sdk writes every validator's P-256 id into `jam_config.json`,
+#   both per validator and as a combined `<ed25519>+<p256>@ip:port` bootnode;
+# - PolkaJam's `gen-spec` writes those ids into the genesis validator set
+#   `C(8)` and the bootnodes into the spec, and its nodes parse the combined
+#   bootnode form.
+# The light client needs a validator's P-256 id to compute its WebTransport
+# certificate hashes; without the fork the spec has neither source and the
+# client rejects it at load.
+#
+# zombienet picks the P2P ports; the spec carries them. Only the ordinary node
+# serves RPC, on the port the harness's RPC oracle uses by default.
+# Native nodes get only TZ, LANG and PATH from zombienet, hence the `env`.
+
+[jamchain]
+id = "dev"
+default_command = "polkajam"
+default_args = ["--finality-mode=grandpa"]
+
+[[jamchain.nodes]]
+name = "jam0"
+mode = "validator"
+env = [
+    { name = "POLKAVM_BACKEND", value = "interpreter" },
+    { name = "RUST_LOG", value = "info" },
+]
+
+[[jamchain.nodes]]
+name = "jam1"
+mode = "validator"
+env = [
+    { name = "POLKAVM_BACKEND", value = "interpreter" },
+    { name = "RUST_LOG", value = "info" },
+]
+
+[[jamchain.nodes]]
+name = "jam2"
+mode = "validator"
+env = [
+    { name = "POLKAVM_BACKEND", value = "interpreter" },
+    { name = "RUST_LOG", value = "info" },
+]
+
+[[jamchain.nodes]]
+name = "jam3"
+mode = "validator"
+env = [
+    { name = "POLKAVM_BACKEND", value = "interpreter" },
+    { name = "RUST_LOG", value = "info" },
+]
+
+[[jamchain.nodes]]
+name = "jam4"
+mode = "validator"
+env = [
+    { name = "POLKAVM_BACKEND", value = "interpreter" },
+    { name = "RUST_LOG", value = "info" },
+]
+
+[[jamchain.nodes]]
+name = "jam5"
+mode = "validator"
+env = [
+    { name = "POLKAVM_BACKEND", value = "interpreter" },
+    { name = "RUST_LOG", value = "info" },
+]
+
+[[jamchain.nodes]]
+name = "jam-or"
+mode = "ordinary"
+rpc_port = 19800
+env = [
+    { name = "POLKAVM_BACKEND", value = "interpreter" },
+    { name = "RUST_LOG", value = "info" },
+]
