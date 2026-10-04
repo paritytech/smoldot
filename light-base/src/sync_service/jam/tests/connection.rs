@@ -373,20 +373,6 @@ fn external_invalid_identity_is_propagated_before_startup_and_capability_is_guar
             "{error}"
         );
         assert_eq!(platform.0.lock().unwrap().attempts, 0);
-        // The client dials only `bootnodes_p256`, never an Ed25519 `bootnodes` entry.
-        spec["bootnodes_p256"] = json!([]);
-        spec["bootnodes"] = json!([alloc::format!("e{}@127.0.0.1:4433", "a".repeat(52))]);
-        let ed_only = spec.to_string();
-        assert!(
-            Config::from_spec(&parse(&ed_only))
-                .unwrap()
-                .peers
-                .is_empty()
-        );
-        let added = add_chain(&mut client, &ed_only, false).unwrap();
-        smol::Timer::after(Duration::from_millis(10)).await;
-        assert_eq!(platform.0.lock().unwrap().attempts, 0);
-        let () = client.remove_chain(added.chain_id);
         platform.0.lock().unwrap().supported = false;
         let added = add_chain(&mut client, &raw, false).unwrap();
         smol::Timer::after(Duration::from_millis(10)).await;
@@ -781,9 +767,22 @@ fn event_driven_fixture(
     let mut spec: Value = serde_json::from_str(&spec).unwrap();
     let first = spec["bootnodes_p256"][0].as_str().unwrap();
     let identity = first.split_once('@').unwrap().0.to_owned();
+    // Distinct P-256 identities, the first two dev validators': the pool never
+    // gives one identity to two slots.
+    let cert = fixture("cert_vector.json");
+    let other = cert
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["validator"] == 1)
+        .unwrap();
+    let other = other["p256_id_text"].as_str().unwrap();
     spec["bootnodes_p256"] = json!(
         (0..peers)
-            .map(|index| alloc::format!("{identity}@127.0.0.1:{}", 4433 + index))
+            .map(|index| {
+                let identity = if index == 0 { identity.as_str() } else { other };
+                alloc::format!("{identity}@127.0.0.1:{}", 4433 + index)
+            })
             .collect::<Vec<_>>()
     );
     (platform, spec.to_string(), headers)

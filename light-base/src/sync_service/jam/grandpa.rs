@@ -83,6 +83,7 @@ impl State {
     }
 
     pub(super) fn finalize(&mut self, target: Hash, bytes: &[u8]) -> Result<(), finality::Error> {
+        let before = self.tree.finalized().slot();
         let limits = self.proof_limits();
         let proof = Justification::decode(&self.params, bytes, limits)?;
         let verified = proof.verify(
@@ -96,6 +97,16 @@ impl State {
         let result = self.tree.finalize(&verified, &mut self.authorities)?;
         if result.finalized.is_empty() {
             return Ok(());
+        }
+        // The active set changes only with an epoch mark, and every epoch's
+        // first block carries one; comparing epochs also covers skipped ones.
+        let after = self.tree.finalized().slot();
+        let epoch_len = self.params.epoch_len.max(1);
+        if before / epoch_len != after / epoch_len {
+            self.discovery.stale = true;
+        }
+        if self.discovery.stale {
+            self.discovery.due = true;
         }
         let notification = Notification::Finalized {
             finalized_blocks_hashes: result.finalized,

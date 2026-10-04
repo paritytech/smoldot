@@ -257,6 +257,11 @@ pub(super) fn warp_step(warp: &Warp) -> &'static str {
 
 impl State {
     pub(super) fn reserve_warp(&mut self, peer: usize) -> Option<Warp> {
+        // Discovery yields to a warp join: a refresh that no peer is serving
+        // right now is cancelled, and retried at the next finality advance.
+        if self.reads.owner.is_none() && self.discovery.read.take().is_some() {
+            self.discovery.due = false;
+        }
         if self.reads.owner.is_none()
             && self
                 .reads
@@ -316,6 +321,10 @@ impl State {
         self.proof_attempts.clear();
         self.root_refusals = None;
         self.subscribers.clear();
+        // A new anchor may sit in a later epoch; read again after its first
+        // finality advance.
+        self.discovery.stale = true;
+        self.discovery.due = false;
         Ok(())
     }
 

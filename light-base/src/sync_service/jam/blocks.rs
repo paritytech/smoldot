@@ -6,7 +6,7 @@
 use super::{
     InsertFailure, REPAIR_LIMIT,
     connection::{Conn, InFlight},
-    log::{End, Hex, Opt, Tag, direction_str, event, request_ended},
+    log::{End, Hex, Opt, Tag, direction_str, elapsed_ms, event, request_ended},
     warp::warp_token,
 };
 use crate::{log, platform::PlatformRef};
@@ -19,6 +19,17 @@ use smoldot::jam::{
 impl<P: PlatformRef> Conn<'_, P> {
     /// Takes the peer's handshake: its finalized head and leaves.
     pub(super) async fn handshake(&mut self, h: Handshake) {
+        if let Some(peer) = self.state.lock().await.discovery.pool.held(self.peer_index) {
+            event!(
+                self,
+                "jam-peer-connected",
+                slot = self.peer_index,
+                source = peer.source.as_str(),
+                address = peer.address(),
+                final_slot = h.final_.slot,
+                handshake_ms = elapsed_ms(self.platform, &self.started)
+            );
+        }
         self.advertisement_revision = 1;
         self.handshaken = true;
         self.advertised = Some(h.final_.clone());

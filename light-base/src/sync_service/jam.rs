@@ -2,6 +2,9 @@
 
 //! Header-only JAM synchronization with verified GRANDPA root advancement.
 //!
+//! Two connection slots draw peers from a pool of bootnodes and validators
+//! read from `C(8)`.
+//!
 //! Memory is bounded: the header tree and its rebuild copy share [`TREE_BYTES`]
 //! and hold at most 4096 headers, a response is at most [`FRAME_BYTES`] and a
 //! warp response [`WARP_BYTES`], each connection keeps at most [`REPAIR_LIMIT`]
@@ -12,11 +15,13 @@
 use super::{BlockNotification, Notification, SubscribeAll};
 use crate::{
     jam_webtransport_cert::{P256PeerId, P256PeerIdParseError},
+    log,
     platform::PlatformRef,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
-use connection::peer_loop;
-use core::{net::IpAddr, num::NonZeroUsize, time::Duration};
+use connection::slot_loop;
+use core::{num::NonZeroUsize, time::Duration};
+use discovery::{Discovery, Peer, Pool, Source};
 use futures_lite::{StreamExt as _, future};
 use reads::StateReads;
 use smoldot::jam::{
@@ -40,6 +45,10 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// Upper bound on a state read response, enough for the warp join's `C(4)` to
 /// `C(11)` range at full parameters.
 const STATE_READ_BYTES: u32 = 800_000;
+/// An idle slot re-checks the pool at least this often.
+const POOL_POLL: Duration = Duration::from_millis(500);
+/// A slot on a discovered peer checks this often whether a bootnode is due.
+const PREEMPT_POLL: Duration = Duration::from_secs(1);
 
 /// Why a JAM chain cannot be added.
 #[derive(Debug, derive_more::Display, derive_more::Error)]
@@ -68,6 +77,13 @@ pub enum ConfigError {
     /// The genesis header gives no valid GRANDPA authority set.
     #[display("JAM genesis finality: {_0}")]
     GenesisFinality(finality::Error),
+    /// The chain spec has no `bootnodes_p256` entry and no genesis validator
+    /// that can be dialed over WebTransport.
+    #[display(
+        "JAM chain spec has no dialable peer: it has no bootnodes_p256 entry, and no \
+         validator in the genesis C(8) advertises a valid P-256 identity with a port"
+    )]
+    NoDialablePeer,
     /// The chain is already used by too many clients.
     #[display("too many chain references")]
     TooManyReferences,
@@ -76,17 +92,15 @@ pub enum ConfigError {
 pub(crate) struct Config {
     params: Params,
     tree: HeaderTree,
+    /// The chain spec's `bootnodes_p256`.
     peers: Vec<Peer>,
+    /// The genesis `C(8)` validators with a P-256 identity and a port: the
+    /// pool's initial discovered set.
+    genesis: Vec<Peer>,
     header_bytes: usize,
     authorities: AuthoritySet,
     max_blocks: usize,
     tree_config: tree::Config,
-}
-
-struct Peer {
-    identity: P256PeerId,
-    ip: IpAddr,
-    port: u16,
 }
 
 impl Config {
@@ -105,17 +119,29 @@ impl Config {
                 AuthoritySet::from_genesis(&params, header).map_err(ConfigError::GenesisFinality)?
             }
         };
-        let mut peers = Vec::new();
+        let mut peers: Vec<Peer> = Vec::new();
         for (index, node) in spec.boot_nodes().enumerate() {
             let identity = P256PeerId::from_text(&node.p256_id_text)
                 .map_err(|source| ConfigError::P256Identity { index, source })?;
-            if peers.len() < MAX_PEERS {
-                peers.push(Peer {
-                    identity,
-                    ip: node.ip,
-                    port: node.port,
-                });
-            }
+            peers.push(Peer {
+                identity,
+                ip: node.ip,
+                port: node.port,
+                source: Source::Bootnode,
+            });
+        }
+        // Liveness sources only, like bootnodes: whatever they serve is verified
+        // the same way. Records whose key is not a curve point are skipped.
+        let genesis: Vec<Peer> = spec
+            .genesis_validators()
+            .filter_map(|endpoint| Peer::discovered(&endpoint))
+            .map(|peer| Peer {
+                source: Source::Genesis,
+                ..peer
+            })
+            .collect();
+        if peers.is_empty() && genesis.is_empty() {
+            return Err(ConfigError::NoDialablePeer);
         }
         let root = verified_genesis(&params, header.clone(), state);
         let tree = HeaderTree::new(params.clone(), root, limits)
@@ -124,6 +150,7 @@ impl Config {
             params,
             tree,
             peers,
+            genesis,
             authorities,
             max_blocks: max_blocks.get(),
             header_bytes,
@@ -194,6 +221,7 @@ struct State {
     /// Refusals apply only to this exact finalized root, by distinct peers.
     root_refusals: Option<(Hash, u8)>,
     peer_count: usize,
+    discovery: Discovery,
 }
 
 #[derive(Debug)]
@@ -330,8 +358,39 @@ async fn run<P: PlatformRef>(
     config: Config,
     rx: async_channel::Receiver<SubscribeRequest>,
 ) {
+    // Slots keep their index for life; only their candidate changes.
+    let slots = MAX_PEERS;
+    let pool = Pool::new(
+        config.peers,
+        config.genesis,
+        usize::from(config.params.max_validators),
+    );
+    // Bounded by 16 bootnodes plus `max_validators`, once per start.
+    let count = |source| pool.candidates().filter(|p| p.source == source).count();
+    log!(
+        &platform,
+        Debug,
+        &log_name,
+        "jam-pool-initial",
+        bootnodes = count(Source::Bootnode),
+        genesis = count(Source::Genesis),
+        max_discovered = config.params.max_validators,
+        slots = slots
+    );
+    for (index, peer) in pool.candidates().enumerate() {
+        log!(
+            &platform,
+            Debug,
+            &log_name,
+            "jam-pool-candidate",
+            index = index,
+            source = peer.source.as_str(),
+            address = peer.address(),
+            p256 = peer.identity.to_text()
+        );
+    }
     let state = Arc::new(async_lock::Mutex::new(State {
-        reads: StateReads::new(config.peers.len()),
+        reads: StateReads::new(slots),
         tree: config.tree,
         params: config.params.clone(),
         subscribers: Vec::new(),
@@ -345,7 +404,8 @@ async fn run<P: PlatformRef>(
         warp_owner: None,
         warp_revision: 0,
         root_refusals: None,
-        peer_count: config.peers.len(),
+        peer_count: slots,
+        discovery: Discovery::new(pool),
     }));
     let foreground = async {
         while let Ok(request) = rx.recv().await {
@@ -360,7 +420,14 @@ async fn run<P: PlatformRef>(
     // that can immediately repoll the same child within one outer task poll.
     let (shutdown, cancelled) = async_channel::bounded::<()>(1);
     let mut peers_done = futures_util::stream::FuturesUnordered::new();
-    for (peer_index, peer) in config.peers.into_iter().enumerate() {
+    let origin = platform.now();
+    for slot in 0..slots {
+        // Assign in slot order so the first bootnodes go to the first slots.
+        let initial = state
+            .lock()
+            .await
+            .acquire_candidate(slot, Duration::ZERO)
+            .ok();
         let (done, finished) = futures_channel::oneshot::channel();
         peers_done.push(finished);
         let platform_ref = platform.clone();
@@ -368,9 +435,18 @@ async fn run<P: PlatformRef>(
         let params = config.params.clone();
         let state = state.clone();
         let cancelled = cancelled.clone();
+        let origin = origin.clone();
         platform.spawn_task(alloc::format!("jam-peer-{log_name}").into(), async move {
             future::or(
-                peer_loop(&platform_ref, &log_name, &peer, peer_index, &params, state),
+                slot_loop(
+                    &platform_ref,
+                    &log_name,
+                    slot,
+                    &params,
+                    state,
+                    origin,
+                    initial,
+                ),
                 async {
                     let _ = cancelled.recv().await;
                 },
@@ -388,6 +464,7 @@ async fn run<P: PlatformRef>(
 
 mod blocks;
 mod connection;
+mod discovery;
 mod grandpa;
 mod log;
 mod reads;

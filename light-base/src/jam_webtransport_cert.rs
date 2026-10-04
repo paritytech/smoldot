@@ -26,7 +26,8 @@ const ED25519_ALGORITHM: &[u8] = &[0x30, 5, 6, 3, 0x2b, 0x65, 0x70];
 
 /// Validated P-256 public key used as a WebTransport peer identity.
 ///
-/// Constructed only through [`Self::from_text`], which validates and decompresses the curve point.
+/// Constructed only through [`Self::from_text`] or [`Self::from_parts`], which validate and
+/// decompress the curve point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct P256PeerId {
     x: [u8; 32],
@@ -74,6 +75,12 @@ impl P256PeerId {
             }
             _ => P256PeerIdParseError::BadCharacter,
         })?;
+        Self::from_parts(x, y_odd)
+    }
+
+    /// Builds an identity from its compressed parts, as validator metadata carries them:
+    /// the big-endian X coordinate and the parity of Y. Validates the curve point.
+    pub fn from_parts(x: [u8; 32], y_odd: bool) -> Result<Self, P256PeerIdParseError> {
         let mut compressed = [0; 33];
         compressed[0] = if y_odd { 3 } else { 2 };
         compressed[1..].copy_from_slice(&x);
