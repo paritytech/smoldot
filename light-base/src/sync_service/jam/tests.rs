@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 use super::*;
-use super::{connection::*, reads::*, warp::*};
+use super::{connection::*, discovery::*, reads::*, warp::*};
 use crate::{
     AddChainConfig, AddChainConfigJsonRpc, Client, jam_webtransport_cert,
     platform::{self, MultiStreamAddress, SubstreamDirection},
@@ -23,8 +23,9 @@ use smoldot::{
         codec,
         crypto::blake2b_256,
         finality::{self, Justification},
+        metadata::ValidatorEndpoint,
         net,
-        trie::{self, StateRequest, StateResponse},
+        trie::{self, StateRequest, StateResponse, VerifiedRange},
         types::{BlockRequest, Direction, Final, Handshake, Hash, SealingSequence},
         verify::VerifiedHeader,
     },
@@ -33,6 +34,7 @@ use smoldot::{
 use std::{collections::BTreeMap, sync::Mutex, time::Instant};
 
 mod connection;
+mod discovery;
 mod grandpa;
 mod reads;
 mod rpc;
@@ -41,6 +43,49 @@ mod warp;
 impl Default for StateReads {
     fn default() -> Self {
         Self::new(MAX_PEERS)
+    }
+}
+
+/// A connection loop pinned to one peer, with its own reconnect backoff.
+/// Scripted tests use it to drive a fixed peer on a chosen slot.
+async fn peer_loop<P: PlatformRef>(
+    platform: &P,
+    log_name: &str,
+    peer: &Peer,
+    peer_index: usize,
+    params: &Params,
+    state: Arc<async_lock::Mutex<State>>,
+) {
+    let mut backoff = 1;
+    let mut fetch_size = FetchSize::default();
+    let mut root_probe = None;
+    loop {
+        if state.lock().await.stopped {
+            future::pending::<()>().await;
+        }
+        let Some(outcome) = connect_once(
+            platform,
+            log_name,
+            peer,
+            peer_index,
+            params,
+            &state,
+            (&mut fetch_size, &mut root_probe),
+            None,
+        )
+        .await
+        else {
+            return;
+        };
+        if outcome.stopped {
+            continue;
+        }
+        if outcome.lasted >= Duration::from_secs(60) {
+            backoff = 1;
+        }
+        log!(platform, Debug, log_name, "jam-reconnect");
+        platform.sleep(Duration::from_secs(backoff)).await;
+        backoff = (backoff * 2).min(30);
     }
 }
 
@@ -118,6 +163,7 @@ fn root_config() -> Config {
         },
         params,
         peers: Vec::new(),
+        genesis: Vec::new(),
         header_bytes: 4096,
     }
 }
@@ -140,6 +186,7 @@ fn state(config: Config) -> State {
         warp_revision: 0,
         root_refusals: None,
         peer_count: config.peers.len(),
+        discovery: Discovery::new(Pool::new(Vec::new(), Vec::new(), 6)),
     }
 }
 
@@ -216,6 +263,9 @@ struct IoState {
     tasks_spawned: usize,
     stall_outbound: bool,
     stalled_openings: usize,
+    /// Ports whose connections die at once, and every port dialed, in order.
+    dead_ports: Vec<u16>,
+    connected_ports: Vec<u16>,
 }
 
 struct FakeConnection {
@@ -247,13 +297,13 @@ impl core::fmt::Display for Reset {
 }
 
 impl Control {
-    /// The next scripted CE 129 response.
+    /// The next scripted CE 129 response. Discovery reads `C(8)` after
+    /// finality advances; a test that did not script that read sees a peer
+    /// without the state.
     fn state(&mut self, request: Vec<u8>) -> Result<Vec<u8>, Reset> {
         self.io.state_requests.push(request);
-        self.io
-            .state_responses
-            .pop_front()
-            .expect("unscripted state read")
+        let response = self.io.state_responses.pop_front();
+        response.unwrap_or(Err(Reset(Some(6), "unscripted state read")))
     }
 
     /// The scripted CE 130 response for `target`.
@@ -493,14 +543,18 @@ impl PlatformRef for FakePlatform {
     }
     fn connect_multistream(&self, address: MultiStreamAddress) -> Self::MultiStreamConnectFuture {
         assert!(self.supports_connection_type((&address).into()));
-        let MultiStreamAddress::WebTransport { cert_hashes, .. } = address else {
+        let MultiStreamAddress::WebTransport {
+            cert_hashes, port, ..
+        } = address
+        else {
             panic!("not WebTransport")
         };
         let mut c = self.0.lock().unwrap();
         c.attempts += 1;
         c.io.live_connections += 1;
         c.pins.push(cert_hashes.into_owned());
-        let dead = c.fail_first && c.attempts == 1;
+        c.io.connected_ports.push(port);
+        let dead = (c.fail_first && c.attempts == 1) || c.io.dead_ports.contains(&port);
         let connection = FakeConnection {
             control: self.0.clone(),
             streams: VecDeque::new(),
@@ -684,11 +738,33 @@ fn bytes(value: &Value) -> Vec<u8> {
     hex::decode(value.as_str().unwrap().trim_start_matches("0x")).unwrap()
 }
 
+/// Applies `change` to the metadata of every validator in the spec's genesis
+/// `C(8)`, re-encoding the item.
+fn edit_genesis_metadata(spec: &mut Value, change: impl Fn(&mut [u8; 128])) {
+    let parsed = JamChainSpec::from_json_bytes(spec.to_string().as_bytes()).unwrap();
+    let key = hex::encode(smoldot::jam::codec::state_key(8));
+    let mut validators = parsed.genesis_light_state().active_validators.clone();
+    for validator in &mut validators {
+        change(&mut validator.metadata);
+    }
+    spec["genesis_state"][&key] = json!(hex::encode(
+        smoldot::jam::codec::encode_active_validators(&validators)
+    ));
+}
+
+/// Removes the P-256 identity from every genesis validator (parity byte 4
+/// means "no key"), so the spec's bootnodes are the only candidates.
+fn without_genesis_p256(spec: &mut Value) {
+    edit_genesis_metadata(spec, |metadata| metadata[18] = 4);
+}
+
 fn fixture_setup() -> (FakePlatform, String, Hash, Vec<u8>) {
     let mut spec = fixture("chain-spec.polkajam.json");
     let cert = fixture("cert_vector.json");
     let identity = cert[0]["p256_id_text"].as_str().unwrap();
     spec["bootnodes_p256"] = json!([alloc::format!("{identity}@127.0.0.1:4433")]);
+    // These scripted tests drive the one bootnode; genesis seeding has its own tests.
+    without_genesis_p256(&mut spec);
     let up = fixture("messages/up0.json");
     let ce = fixture("messages/ce128.json");
     let mut handshake = bytes(&up["handshake_frame_hex"]);

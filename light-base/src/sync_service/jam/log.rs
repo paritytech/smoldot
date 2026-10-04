@@ -13,7 +13,8 @@
 // last field, and the byte-list `hash=` of `jam-anchor-unserved`. `slot=` is
 // the connection slot, except on the lines that carry a block slot and name
 // the connection `conn=`. `req=` ties together the lines about one request;
-// its outcome line adds `outcome=` and `elapsed_ms=`.
+// its outcome line adds `outcome=` and `elapsed_ms=`. `reason=` of
+// `jam-peer-disconnected` is an [`End`].
 
 use super::reads::Trust;
 use crate::platform::PlatformRef;
@@ -194,10 +195,11 @@ pub(super) fn state_response_bytes(response: &StateResponse) -> usize {
             .sum::<usize>()
 }
 
-/// Why a connection ended.
+/// Why a connection ended: the `reason=` of `jam-peer-disconnected`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
 pub(super) enum End {
+    ConnectTimeout,
     Setup,
     Stopped,
     WarpRevision,
@@ -232,6 +234,7 @@ pub(super) enum End {
     RequestRefused,
     InsertFailed,
     TreeFull,
+    Preempted,
 }
 
 impl End {

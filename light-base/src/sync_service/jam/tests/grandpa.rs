@@ -152,6 +152,7 @@ fn external_full_parameter_1200_blocks_interleave_finality() {
             params: params.clone(),
             tree: HeaderTree::new(params.clone(), root, limits).unwrap(),
             peers: vec![],
+            genesis: vec![],
             header_bytes,
             authorities: AuthoritySet::from_checkpoint(
                 &params,

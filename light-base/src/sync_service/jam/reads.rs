@@ -21,7 +21,6 @@ use smoldot::jam::{
 
 /// Trust of the caller-authenticated header carrying this posterior state root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // No production consumer yet.
 pub(crate) enum Trust {
     Finalized,
     Authenticated,
@@ -40,7 +39,6 @@ pub(crate) struct StateRead {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // Returned to the future in-process consumers, not RPC.
 pub(crate) struct StateReadResult {
     pub at: Hash,
     pub root: Hash,
@@ -94,7 +92,6 @@ impl StateReads {
     }
     /// Bounded in-process API: caller supplies the authenticated root and trust.
     /// Dropping the receiver cancels the read at the next reservation/response.
-    #[allow(dead_code)] // No production consumer yet; exercised by tests.
     pub(super) fn start(
         &mut self,
         read: StateRead,
@@ -189,7 +186,6 @@ impl StateReads {
 
 impl State {
     /// Wait until the best chain has an authenticated child of the finalized head.
-    #[allow(dead_code)] // No production consumer yet.
     pub(super) fn finalized_read(
         &self,
         start: trie::StateKey,

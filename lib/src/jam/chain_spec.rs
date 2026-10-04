@@ -6,10 +6,17 @@
 //! Full genesis state is accepted; only C(4), C(6), C(8), and C(11) are decoded.
 //! This checks representations and slot consistency, not signatures, state-root
 //! commitments, or checkpoint ancestry. The caller must trust the specification.
+//!
+//! Peers with the P-256 identity a WebTransport client needs come from two
+//! sources: the `bootnodes_p256` entries (`<p256>@<ip>:<port>`, an IPv6
+//! address in brackets) and the validator metadata of the genesis active set
+//! `C(8)`. Light-base validates the curve point and refuses a specification
+//! with neither.
 
 use super::{
     codec::{self, DecodeError},
     finality::AuthoritySet,
+    metadata::ValidatorEndpoint,
     params::Params,
     types::{Ed25519Public, GenesisLightState, Header},
 };
@@ -380,7 +387,7 @@ impl JamChainSpec {
             .map(|(index, text)| {
                 parse_bootnode(text).map_err(|source| Error::BootNode { index, source })
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<BootNode>, _>>()?;
         Ok(Self {
             id: raw.id,
             params,
@@ -408,6 +415,15 @@ impl JamChainSpec {
     }
     pub fn boot_nodes(&self) -> impl Iterator<Item = BootNode> + '_ {
         self.boot_nodes.iter().cloned()
+    }
+    /// The genesis active set `C(8)` as advertised endpoints, in set order.
+    /// Records without a P-256 identity or port are included; the caller
+    /// skips them. Like the bootnodes, these are liveness sources only.
+    pub fn genesis_validators(&self) -> impl Iterator<Item = ValidatorEndpoint> + '_ {
+        self.genesis_light_state
+            .active_validators
+            .iter()
+            .map(ValidatorEndpoint::from_validator)
     }
 }
 
@@ -495,11 +511,15 @@ mod tests {
     fn sample(slot: u32, tickets: bool) -> (Value, Header, GenesisLightState) {
         let bytes = parameters();
         let params = Params::from_protocol_parameters(&bytes).unwrap();
+        // Port 0x0404, Y parity 0 and X = [4; 32]: every validator advertises a
+        // structurally dialable P-256 identity.
+        let mut metadata = [4; 128];
+        metadata[18] = 0;
         let validator = ValidatorKey {
             bandersnatch: [1; 32],
             ed25519: [2; 32],
             bls: [3; 144],
-            metadata: [4; 128],
+            metadata,
         };
         let ticket = Ticket {
             id: [9; 32],
@@ -970,6 +990,20 @@ mod tests {
     }
 
     #[test]
+    fn genesis_validators_are_exposed_as_endpoints() {
+        let (raw, _, state) = sample(0, false);
+        let parsed = parse(&raw).unwrap();
+        assert_eq!(parsed.boot_nodes().count(), 0);
+        let endpoints: Vec<_> = parsed.genesis_validators().collect();
+        assert_eq!(endpoints.len(), state.active_validators.len());
+        for endpoint in endpoints {
+            assert_eq!(endpoint.ed25519, [2; 32]);
+            assert_eq!(endpoint.port, 0x0404);
+            assert_eq!(endpoint.p256, Some(([4; 32], false)));
+        }
+    }
+
+    #[test]
     fn external_polkajam_fixture() {
         let root = test_support::fixture_dir().join("polkajam");
         let spec = JamChainSpec::from_json_bytes(
@@ -1000,5 +1034,12 @@ mod tests {
             u64::from(spec.genesis_light_state().slot),
             expected["light_state"]["slot"].as_u64().unwrap()
         );
+        // The dev network's validators advertise ports 40000 to 40005 with P-256 ids.
+        let ports: Vec<u16> = spec
+            .genesis_validators()
+            .filter(|endpoint| endpoint.p256.is_some())
+            .map(|endpoint| endpoint.port)
+            .collect();
+        assert_eq!(ports, (40000..40006).collect::<Vec<_>>());
     }
 }

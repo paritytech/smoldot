@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-//! One connection: dialing a peer again and again with backoff, and driving
-//! each connection's streams, requests and deadlines until it ends.
+//! One connection slot: the loop that takes candidates from the pool, dialing
+//! one, and driving the connection's streams, requests and deadlines until it
+//! ends.
 
 use super::{
-    FRAME_BYTES, IDLE_TIMEOUT, Peer, State, TIMEOUT, WARP_BYTES,
+    FRAME_BYTES, IDLE_TIMEOUT, POOL_POLL, PREEMPT_POLL, State, TIMEOUT, WARP_BYTES,
+    discovery::{Peer, Release, Source},
     log::{End, Opt, Tag, Token, elapsed_ms, event, request_ended},
     warp::{Warp, warp_step},
 };
@@ -21,77 +23,254 @@ use smoldot::jam::{
     types::{BlockRequest, Final, Handshake, Hash, Header},
 };
 
-pub(super) async fn peer_loop<P: PlatformRef>(
+/// One connection slot. It keeps `slot` as its `peer_index` for life and asks
+/// the pool for a candidate whenever it has none: on a failed connect or an
+/// ended connection it releases the candidate (recording the failure against
+/// that candidate) and asks again, so backoff is per candidate, not per slot.
+pub(super) async fn slot_loop<P: PlatformRef>(
+    platform: &P,
+    log_name: &str,
+    slot: usize,
+    params: &Params,
+    state: Arc<async_lock::Mutex<State>>,
+    origin: P::Instant,
+    mut current: Option<Peer>,
+) {
+    let mut fetch_size = FetchSize::default();
+    let mut root_probe = None;
+    let mut previous: Option<jam_webtransport_cert::P256PeerId> = None;
+    // Log a wait once when it starts, not once per poll.
+    let mut waiting = false;
+    loop {
+        if state.lock().await.stopped {
+            future::pending::<()>().await;
+        }
+        let peer = match current.take() {
+            Some(peer) => peer,
+            None => {
+                let now = platform.now() - origin.clone();
+                // Bind first: a guard in the scrutinee would be held while sleeping.
+                let acquired = state.lock().await.acquire_candidate(slot, now);
+                match acquired {
+                    Ok(peer) => peer,
+                    Err(wait) => {
+                        if !waiting {
+                            waiting = true;
+                            log!(
+                                platform,
+                                Debug,
+                                log_name,
+                                "jam-pool-waiting",
+                                slot = slot,
+                                ready_in_ms = Opt(wait.map(|wait| wait.as_millis()))
+                            );
+                        }
+                        let wait = wait.map_or(POOL_POLL, |wait| wait.min(POOL_POLL));
+                        platform.sleep(wait.max(Duration::from_millis(1))).await;
+                        continue;
+                    }
+                }
+            }
+        };
+        waiting = false;
+        log!(
+            platform,
+            Debug,
+            log_name,
+            "jam-slot-assigned",
+            slot = slot,
+            source = peer.source.as_str(),
+            address = peer.address(),
+            p256 = peer.identity.to_text()
+        );
+        if previous != Some(peer.identity) {
+            // The root probe describes one peer's answers, not the slot's.
+            root_probe = None;
+            previous = Some(peer.identity);
+        }
+        let outcome = connect_once(
+            platform,
+            log_name,
+            &peer,
+            slot,
+            params,
+            &state,
+            (&mut fetch_size, &mut root_probe),
+            Some(origin.clone()),
+        )
+        .await;
+        let now = platform.now() - origin.clone();
+        match outcome {
+            None => {
+                log!(
+                    platform,
+                    Debug,
+                    log_name,
+                    "jam-slot-unsupported",
+                    slot = slot,
+                    address = peer.address()
+                );
+                state
+                    .lock()
+                    .await
+                    .discovery
+                    .pool
+                    .release(slot, Release::Unsupported, now);
+                continue;
+            }
+            Some(Outcome { stopped: true, .. }) => continue,
+            Some(Outcome {
+                preempted: Some(next),
+                ..
+            }) => {
+                log!(
+                    platform,
+                    Debug,
+                    log_name,
+                    "jam-slot-preempted",
+                    slot = slot,
+                    from = peer.address(),
+                    to = next.address()
+                );
+                current = Some(next);
+            }
+            Some(Outcome { lasted, .. }) => {
+                state
+                    .lock()
+                    .await
+                    .discovery
+                    .pool
+                    .release(slot, Release::Ended { lasted }, now);
+            }
+        }
+        log!(platform, Debug, log_name, "jam-reconnect");
+    }
+}
+
+/// How one connection attempt ended.
+pub(super) struct Outcome {
+    /// Zero when the transport never connected.
+    pub(super) lasted: Duration,
+    /// The driver stopped the chain; the slot parks.
+    pub(super) stopped: bool,
+    /// The pool moved this slot to this bootnode while connected.
+    pub(super) preempted: Option<Peer>,
+}
+
+/// Dial `peer` once on slot `peer_index` and drive the connection until it
+/// ends, then release the proof, warp and read ownership it may hold.
+/// `None` when the platform cannot dial this address type. With `preempt`
+/// (the pool's time origin), a slot on a discovered peer may be moved to a
+/// bootnode whose retry interval has passed.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn connect_once<P: PlatformRef>(
     platform: &P,
     log_name: &str,
     peer: &Peer,
     peer_index: usize,
     params: &Params,
-    state: Arc<async_lock::Mutex<State>>,
-) {
-    let mut backoff = 1;
-    let mut fetch_size = FetchSize::default();
-    let mut root_probe = None;
-    loop {
-        if state.lock().await.stopped {
-            future::pending::<()>().await;
-        }
-        let address = MultiStreamAddress::WebTransport {
-            ip: peer.ip,
-            port: peer.port,
-            cert_hashes: Cow::Owned(
-                jam_webtransport_cert::certificate_hashes(
-                    &peer.identity,
-                    platform.now_from_unix_epoch().as_secs(),
-                )
-                .to_vec(),
-            ),
-        };
-        if !platform.supports_connection_type((&address).into()) {
-            return;
-        }
-        log!(platform, Debug, log_name, "jam-connect");
-        let connected = future::or(
-            async { Some(platform.connect_multistream(address).await) },
-            async {
-                platform.sleep(TIMEOUT).await;
-                None
-            },
-        )
-        .await;
-        if let Some(connected) = connected {
-            let started = platform.now();
-            drive_connection(
-                platform,
-                log_name,
-                params,
-                peer_index,
-                &state,
-                connected.connection,
-                (&mut fetch_size, &mut root_probe),
+    state: &Arc<async_lock::Mutex<State>>,
+    (fetch_size, root_probe): (&mut FetchSize, &mut Option<Hash>),
+    preempt: Option<P::Instant>,
+) -> Option<Outcome> {
+    let address = MultiStreamAddress::WebTransport {
+        ip: peer.ip,
+        port: peer.port,
+        cert_hashes: Cow::Owned(
+            jam_webtransport_cert::certificate_hashes(
+                &peer.identity,
+                platform.now_from_unix_epoch().as_secs(),
             )
-            .await;
-            let mut s = state.lock().await;
-            s.reads.release(peer_index, false);
-            if s.proof_owner.is_some_and(|(owner, _)| owner == peer_index) {
-                s.proof_owner = None;
-            }
-            if s.warp_owner == Some(peer_index) {
-                s.warp_owner = None;
-            }
-            if s.stopped {
-                drop(s);
-                continue;
-            }
-            drop(s);
-            if platform.now() - started >= Duration::from_secs(60) {
-                backoff = 1;
-            }
-        }
-        log!(platform, Debug, log_name, "jam-reconnect");
-        platform.sleep(Duration::from_secs(backoff)).await;
-        backoff = (backoff * 2).min(30);
+            .to_vec(),
+        ),
+    };
+    if !platform.supports_connection_type((&address).into()) {
+        return None;
     }
+    log!(platform, Debug, log_name, "jam-connect");
+    let connected = future::or(
+        async { Some(platform.connect_multistream(address).await) },
+        async {
+            platform.sleep(TIMEOUT).await;
+            None
+        },
+    )
+    .await;
+    let mut outcome = Outcome {
+        lasted: Duration::ZERO,
+        stopped: false,
+        preempted: None,
+    };
+    let Some(connected) = connected else {
+        log!(
+            platform,
+            Debug,
+            log_name,
+            "jam-peer-disconnected",
+            slot = peer_index,
+            source = peer.source.as_str(),
+            address = peer.address(),
+            lasted_ms = 0,
+            reason = End::ConnectTimeout.as_str()
+        );
+        return Some(outcome);
+    };
+    let started = platform.now();
+    let driving = async {
+        Err(drive_connection(
+            platform,
+            log_name,
+            params,
+            peer_index,
+            state,
+            connected.connection,
+            (fetch_size, root_probe),
+        )
+        .await)
+    };
+    let ended: Result<Peer, End> = match preempt {
+        Some(origin) if peer.source != Source::Bootnode => {
+            future::or(driving, async {
+                loop {
+                    platform.sleep(PREEMPT_POLL).await;
+                    let now = platform.now() - origin.clone();
+                    if let Some(next) = state.lock().await.preempt_candidate(peer_index, now) {
+                        return Ok(next);
+                    }
+                }
+            })
+            .await
+        }
+        _ => driving.await,
+    };
+    let reason = match &ended {
+        Ok(_) => End::Preempted,
+        Err(end) => *end,
+    };
+    outcome.preempted = ended.ok();
+    outcome.lasted = platform.now() - started;
+    let mut s = state.lock().await;
+    s.reads.release(peer_index, false);
+    if s.proof_owner.is_some_and(|(owner, _)| owner == peer_index) {
+        s.proof_owner = None;
+    }
+    if s.warp_owner == Some(peer_index) {
+        s.warp_owner = None;
+    }
+    outcome.stopped = s.stopped;
+    drop(s);
+    log!(
+        platform,
+        Debug,
+        log_name,
+        "jam-peer-disconnected",
+        slot = peer_index,
+        source = peer.source.as_str(),
+        address = peer.address(),
+        lasted_ms = outcome.lasted.as_millis(),
+        reason = reason.as_str()
+    );
+    Some(outcome)
 }
 
 pub(super) struct Stream<P: PlatformRef> {
@@ -201,7 +380,7 @@ pub(super) struct Conn<'a, P: PlatformRef> {
     pub(super) peer_slot: u32,
     /// A fallback cursor can traverse known headers without changing local best.
     pub(super) cursor: Option<Hash>,
-    // The root probe is retained by peer_loop across transient failures. The
+    // The root probe is retained by slot_loop across transient failures. The
     // remaining cursors and repair buffers belong to this connection only.
     pub(super) fallback: bool,
     pub(super) waiting_for_finality: Option<u32>,
@@ -356,6 +535,9 @@ impl<P: PlatformRef> Conn<'_, P> {
             self.import_next(&now).await?;
         } else if !pause_imports && self.requested.is_none() {
             self.import_repaired(&now).await?;
+        }
+        if normal_sync {
+            self.discovery_step().await;
         }
         if self.handshaken
             && normal_sync

@@ -173,6 +173,7 @@ fn malformed_text_and_invalid_points() {
                 P256PeerId::from_text(&coordinate_text(&x, y_odd)),
                 Err(InvalidPoint)
             );
+            assert_eq!(P256PeerId::from_parts(x, y_odd), Err(InvalidPoint));
         }
     }
 }
@@ -395,6 +396,10 @@ fn exact_certificate_vectors() {
     for vector in &vectors {
         let id = P256PeerId::from_text(&vector.p256_id_text).unwrap();
         assert_eq!(id.to_text(), vector.p256_id_text);
+        assert_eq!(P256PeerId::from_parts(*id.x(), id.y_odd()), Ok(id));
+        // The other parity is the negated point: valid, but another identity.
+        let other = P256PeerId::from_parts(*id.x(), !id.y_odd()).unwrap();
+        assert_ne!(other.to_text(), vector.p256_id_text);
         let der = certificate_der(&id, ValidityPeriod(vector.period));
         assert_eq!(der, decode(&vector.der_hex));
         assert_eq!(der, reference_der(&id, vector.period));
@@ -418,5 +423,13 @@ fn exact_certificate_vectors() {
     assert!(keys.len() >= 2);
     for key in keys {
         assert!(pairs.iter().filter(|(k, _)| *k == key).count() >= 2);
+    }
+}
+
+#[test]
+fn from_parts_round_trips_with_generated_keys() {
+    for seed in 1..=8 {
+        let id = key(seed);
+        assert_eq!(P256PeerId::from_parts(*id.x(), id.y_odd()), Ok(id));
     }
 }
