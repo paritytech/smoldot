@@ -50,6 +50,21 @@ mod substrate_compat;
 
 pub use network_service::Role;
 
+/// Coarse state of the sync service. See [`SyncService::subscribe_sync_status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncStatus {
+    /// A GrandPa warp sync is in progress.
+    WarpSyncing {
+        /// Highest block proven finalized by the warp sync fragments verified so far.
+        at: u64,
+        /// Highest best block advertised by a connected peer. Never below `at`.
+        target: u64,
+    },
+    /// The sync service is serving the chain. Sent when the initial bootstrap completes and
+    /// again at the end of every later warp sync.
+    Ready,
+}
+
 /// Configuration for a [`SyncService`].
 pub struct Config<TPlat: PlatformRef> {
     /// Name of the chain, for logging purposes.
@@ -63,6 +78,9 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Access to the platform's capabilities.
     pub platform: TPlat,
+
+    /// Metrics of the chain.
+    pub metrics: Arc<crate::metrics::ChainMetrics>,
 
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
@@ -154,6 +172,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 config_parachain.relay_chain.para_id,
                 from_foreground,
                 config.network_service.clone(),
+                config.metrics.clone(),
             )),
             ConfigChainType::SubstrateCompatible(config_substrate_compat) => {
                 Box::pin(substrate_compat::start_substrate_compatible_chain(
@@ -164,6 +183,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     config_substrate_compat.runtime_code_hint,
                     from_foreground,
                     config.network_service.clone(),
+                    config.metrics.clone(),
                 ))
             }
         };
@@ -201,6 +221,24 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
 
         self.to_background
             .send(ToBackground::SerializeChainInformation { send_back })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
+    /// Subscribes to the coarse state of the sync service. If the initial bootstrap is already
+    /// complete, the first item is [`SyncStatus::Ready`]. Afterwards, one item is sent for each
+    /// warp sync fragment that changes the progress values, and a [`SyncStatus::Ready`] each
+    /// time a warp sync ends.
+    ///
+    /// Consecutive duplicates are never sent. The channel is unbounded so that the sync service
+    /// never waits on the receiver: the receiver is expected to drain it promptly.
+    pub async fn subscribe_sync_status(&self) -> async_channel::Receiver<SyncStatus> {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .send(ToBackground::SubscribeSyncStatus { send_back })
             .await
             .unwrap();
 
@@ -344,7 +382,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         .ban_and_disconnect(
                             target,
                             network_service::BanSeverity::Low,
-                            "blocks-request-failed",
+                            network_service::BanReason::BlocksRequestFailed,
                         )
                         .await;
                     continue;
@@ -840,7 +878,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                             .ban_and_disconnect(
                                 target,
                                 network_service::BanSeverity::Low,
-                                "storage-request-failed",
+                                network_service::BanReason::StorageRequestFailed,
                             )
                             .await;
                         self.outcome_errors
@@ -866,7 +904,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         .ban_and_disconnect(
                             target,
                             network_service::BanSeverity::High,
-                            "bad-merkle-proof",
+                            network_service::BanReason::BadMerkleProof,
                         )
                         .await;
                     self.outcome_errors
@@ -892,7 +930,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                 .ban_and_disconnect(
                                     target,
                                     network_service::BanSeverity::High,
-                                    "bad-child-trie-root",
+                                    network_service::BanReason::BadChildTrieRoot,
                                 )
                                 .await;
                             self.outcome_errors
@@ -1425,5 +1463,9 @@ enum ToBackground {
     /// See [`SyncService::serialize_chain_information`].
     SerializeChainInformation {
         send_back: oneshot::Sender<Option<chain::chain_information::ValidChainInformation>>,
+    },
+    /// See [`SyncService::subscribe_sync_status`].
+    SubscribeSyncStatus {
+        send_back: oneshot::Sender<async_channel::Receiver<SyncStatus>>,
     },
 }

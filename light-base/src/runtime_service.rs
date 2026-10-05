@@ -92,6 +92,9 @@ pub struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
+    /// Metrics of the chain.
+    pub metrics: Arc<crate::metrics::ChainMetrics>,
+
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
 
@@ -126,6 +129,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         let background_task_config = BackgroundTaskConfig {
             log_target: log_target.clone(),
             platform: config.platform.clone(),
+            metrics: config.metrics,
             sync_service: config.sync_service,
             network_service: config.network_service,
             genesis_block_scale_encoded_header: config.genesis_block_scale_encoded_header,
@@ -531,7 +535,10 @@ pub enum Notification {
         /// they're not descendants of the newly-finalized block.
         ///
         /// This list contains all the siblings of the newly-finalized block and all their
-        /// descendants.
+        /// descendants that have earlier been reported in a [`BlockNotification`], either in
+        /// [`SubscribeAll::non_finalized_blocks_ancestry_order`] or in a
+        /// [`Notification::Block`]. Blocks that were discarded before their runtime was known
+        /// were never reported and are not in this list either.
         pruned_blocks: Vec<[u8; 32]>,
     },
 
@@ -772,6 +779,7 @@ struct Block {
 struct BackgroundTaskConfig<TPlat: PlatformRef> {
     log_target: String,
     platform: TPlat,
+    metrics: Arc<crate::metrics::ChainMetrics>,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     genesis_block_scale_encoded_header: Vec<u8>,
@@ -820,6 +828,7 @@ async fn run_background<TPlat: PlatformRef>(
         Background {
             log_target: config.log_target.clone(),
             platform: config.platform.clone(),
+            metrics: config.metrics.clone(),
             sync_service: config.sync_service.clone(),
             network_service: config.network_service.clone(),
             to_background: Box::pin(to_background.clone()),
@@ -1066,17 +1075,39 @@ async fn run_background<TPlat: PlatformRef>(
                     .runtimes
                     .retain(|_, runtime| runtime.strong_count() > 0);
 
+                // Subscribers only know about the blocks that have been reported to them, and
+                // they unpin the pruned blocks they are told about. A block that has been pruned
+                // before being reported must therefore not be forwarded.
+                let reported_pruned_blocks = pruned_blocks
+                    .iter()
+                    .filter(|b| b.reported)
+                    .map(|b| b.user_data.hash)
+                    .collect::<Vec<_>>();
+
                 let all_blocks_notif = Notification::Finalized {
                     best_block_hash_if_changed,
                     hash: finalized_block.hash,
-                    pruned_blocks: pruned_blocks.iter().map(|(_, b, _)| b.hash).collect(),
+                    pruned_blocks: reported_pruned_blocks.clone(),
                 };
 
                 let mut to_remove = Vec::new();
                 for (subscription_id, (sender, finalized_pinned_remaining)) in
                     all_blocks_subscriptions.iter_mut()
                 {
-                    let count_limit = pruned_blocks.len() + 1;
+                    // Mark the finalized and pruned blocks as finalized or non-canonical, and
+                    // count them. Only the blocks the subscriber still has pinned count towards
+                    // its limit: a block unpinned before being finalized or pruned has already
+                    // been released and must not be charged.
+                    let mut count_limit = 0;
+                    for block in
+                        iter::once(&finalized_block.hash).chain(reported_pruned_blocks.iter())
+                    {
+                        if let Some(pin) = pinned_blocks.get_mut(&(*subscription_id, *block)) {
+                            debug_assert!(pin.block_ignores_limit);
+                            pin.block_ignores_limit = false;
+                            count_limit += 1;
+                        }
+                    }
 
                     if *finalized_pinned_remaining < count_limit {
                         to_remove.push(*subscription_id);
@@ -1089,16 +1120,6 @@ async fn run_background<TPlat: PlatformRef>(
                     }
 
                     *finalized_pinned_remaining -= count_limit;
-
-                    // Mark the finalized and pruned blocks as finalized or non-canonical.
-                    for block in iter::once(&finalized_block.hash)
-                        .chain(pruned_blocks.iter().map(|(_, b, _)| &b.hash))
-                    {
-                        if let Some(pin) = pinned_blocks.get_mut(&(*subscription_id, *block)) {
-                            debug_assert!(pin.block_ignores_limit);
-                            pin.block_ignores_limit = false;
-                        }
-                    }
                 }
                 for to_remove in to_remove {
                     all_blocks_subscriptions.remove(&to_remove);
@@ -1770,6 +1791,7 @@ async fn run_background<TPlat: PlatformRef>(
                         &background.log_target,
                         "foreground-compile-and-pin-runtime-cache-hit"
                     );
+                    background.metrics.runtime_cache_hits.inc();
                     existing_runtime
                 } else {
                     // No identical runtime was found. Try compiling the new runtime.
@@ -1789,6 +1811,9 @@ async fn run_background<TPlat: PlatformRef>(
                         ?compilation_duration,
                         compilation_success = runtime.is_ok()
                     );
+                    background
+                        .metrics
+                        .observe_runtime_compilation(compilation_duration, runtime.is_ok());
                     let runtime = Arc::new(Runtime {
                         heap_pages: storage_heap_pages,
                         runtime_code: storage_code,
@@ -2134,7 +2159,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     .ban_and_disconnect(
                                         storage_request_sender,
                                         network_service::BanSeverity::Low,
-                                        "storage-proof-request-failed",
+                                        network_service::BanReason::StorageRequestFailed,
                                     )
                                     .await;
                                 handle_storage_on_demand_progress(
@@ -2188,7 +2213,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     .ban_and_disconnect(
                                         storage_request_sender,
                                         network_service::BanSeverity::Low,
-                                        "child-storage-proof-request-failed",
+                                        network_service::BanReason::ChildStorageRequestFailed,
                                     )
                                     .await;
                                 handle_storage_on_demand_progress(
@@ -2282,7 +2307,7 @@ async fn run_background<TPlat: PlatformRef>(
                             .ban_and_disconnect(
                                 call_proof_sender,
                                 network_service::BanSeverity::Low,
-                                "call-proof-request-failed",
+                                network_service::BanReason::CallProofRequestFailed,
                             )
                             .await;
                         (operation, None)
@@ -2370,7 +2395,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 .ban_and_disconnect(
                                     call_proof_sender,
                                     network_service::BanSeverity::High,
-                                    "invalid-call-proof",
+                                    network_service::BanReason::InvalidCallProof,
                                 )
                                 .await;
                         }
@@ -2712,6 +2737,7 @@ async fn run_background<TPlat: PlatformRef>(
                         "runtime-download-finish-compilation-cache-hit",
                         block_hashes = concerned_blocks,
                     );
+                    background.metrics.runtime_cache_hits.inc();
                     existing_runtime
                 } else {
                     let before_compilation = background.platform.now();
@@ -2731,6 +2757,9 @@ async fn run_background<TPlat: PlatformRef>(
                         compilation_success = runtime.is_ok(),
                         block_hashes = concerned_blocks,
                     );
+                    background
+                        .metrics
+                        .observe_runtime_compilation(compilation_duration, runtime.is_ok());
                     match &runtime {
                         Ok(runtime) => {
                             log!(
@@ -2862,6 +2891,9 @@ struct Background<TPlat: PlatformRef> {
 
     /// See [`Config::platform`].
     platform: TPlat,
+
+    /// See [`Config::metrics`].
+    metrics: Arc<crate::metrics::ChainMetrics>,
 
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,

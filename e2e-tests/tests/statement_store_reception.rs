@@ -73,8 +73,7 @@ async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
     ensure_js_deps_installed();
     ensure_browser_deps_installed();
 
-    // NOTE: temporarily disable tests exec within browser.
-    for (idx, host) in [Host::Node /* Host::Browser */].into_iter().enumerate() {
+    for (idx, host) in [Host::Node, Host::Browser].into_iter().enumerate() {
         // Statements *and topics* needs to be re-created for each host
         // otherwise they persist in the collators' store and get pushed to
         // the next host right away during the initial sync.

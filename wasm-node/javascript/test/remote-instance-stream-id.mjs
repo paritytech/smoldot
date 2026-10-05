@@ -34,8 +34,16 @@ const WEBSOCKET_ADDRESS = { ty: "websocket", url: "ws://127.0.0.1:1" };
 const WEBRTC_ADDRESS = {
   ty: "webrtc",
   targetPort: 1,
-  ipVersion: "4",
+  ipVersion: 4,
   targetIp: "127.0.0.1",
+  remoteTlsCertificateSha256: new Uint8Array(32),
+};
+// The domain-name form of a WebRTC address, resolved by the platform.
+const WEBRTC_DNS_ADDRESS = {
+  ty: "webrtc",
+  targetPort: 1,
+  hostname: "example.com",
+  family: undefined,
   remoteTlsCertificateSha256: new Uint8Array(32),
 };
 const PAYLOAD = [new Uint8Array([1, 2, 3])];
@@ -157,6 +165,22 @@ test("stream-send for a live substream works", async (t) => {
   // Given
   const ctx = await setup();
   await withConnection(ctx, WEBRTC_ADDRESS, [3]);
+
+  // When
+  ctx.serverPort.postMessage({ ty: "stream-send", connectionId: 1, streamId: 3, data: PAYLOAD });
+  await ctx.flush();
+
+  // Then
+  t.true(reached(ctx, "stream-send", 3));
+  ctx.close();
+});
+
+// The domain-name form of a WebRTC address is a different object shape. It must
+// survive the `MessagePort` and still be tracked as a multi-stream connection.
+test("stream-send for a live substream of a DNS WebRTC connection works", async (t) => {
+  // Given
+  const ctx = await setup();
+  await withConnection(ctx, WEBRTC_DNS_ADDRESS, [3]);
 
   // When
   ctx.serverPort.postMessage({ ty: "stream-send", connectionId: 1, streamId: 3, data: PAYLOAD });

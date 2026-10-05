@@ -17,7 +17,7 @@
 
 use super::{
     BlockNotification, ConfigSubstrateCompatibleRuntimeCodeHint, FinalizedBlockRuntime,
-    Notification, SubscribeAll, ToBackground,
+    Notification, SubscribeAll, SyncStatus, ToBackground,
 };
 use crate::{log, network_service, platform::PlatformRef, util};
 
@@ -64,8 +64,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
     runtime_code_hint: Option<ConfigSubstrateCompatibleRuntimeCodeHint>,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+    metrics: Arc<crate::metrics::ChainMetrics>,
 ) {
     let mut task = Task {
+        metrics,
         sync: Some(all::AllSync::new(all::Config {
             chain_information,
             block_number_bytes,
@@ -118,6 +120,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         .fuse(),
         mode: ModeState::Deciding,
         bootstrap_complete: false,
+        sync_status_subscribers: Vec::new(),
+        last_sent_sync_status: None,
         deciding_packets_seen: 0,
         mode_decision_deadline: future::Either::Left(Box::pin(
             platform.sleep(MODE_DECISION_TIMEOUT),
@@ -138,6 +142,18 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
         ),
         platform,
     };
+
+    // The gauges are otherwise only refreshed when the best or finalized block changes, which
+    // during a warp sync from a checkpoint can take a long time.
+    {
+        let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
+        task.metrics
+            .sync_best_block_height
+            .set(sync.best_block_number());
+        task.metrics
+            .sync_finalized_block_height
+            .set(sync.finalized_block_number());
+    }
 
     // Suppress warp completion during Deciding; lifted once the chosen mode drains.
     task.sync
@@ -275,6 +291,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 let (new_sync, error) =
                     req.build(all::ExecHint::CompileWithNonDeterministicValidation, true);
                 let elapsed = task.platform.now() - before_instant;
+                task.metrics
+                    .observe_runtime_compilation(elapsed, error.is_ok());
                 match error {
                     Ok(()) => {
                         log!(
@@ -387,6 +405,8 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 // must be cleared.
                 task.all_notifications.clear();
 
+                emit_sync_status(&mut task, SyncStatus::Ready);
+
                 if matches!(
                     task.mode,
                     ModeState::AwaitingWarp { .. } | ModeState::Deciding
@@ -438,6 +458,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             verified_hash = HashDisplay(&fragment_hash),
                             verified_height = fragment_number
                         );
+                        task.metrics.sync_warp_fragments_verified.inc();
+                        task.metrics.sync_warp_sync_height.set(fragment_number);
+
+                        emit_warp_syncing_status(&mut task, fragment_number);
                     }
                     Err(err) => {
                         log!(
@@ -472,7 +496,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                                     .ban_and_disconnect(
                                         sender_if_still_connected,
                                         network_service::BanSeverity::High,
-                                        "bad-warp-sync-fragment",
+                                        network_service::BanReason::BadWarpSyncFragment,
                                     )
                                     .await;
                             }
@@ -500,6 +524,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             hash = HashDisplay(&verified_hash),
                             is_new_best = if is_new_best { "yes" } else { "no" }
                         );
+                        task.metrics.sync_blocks_verified.inc();
 
                         if is_new_best {
                             task.network_up_to_date_best = false;
@@ -539,6 +564,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             hash = HashDisplay(&verified_hash),
                             ?error
                         );
+                        task.metrics.sync_block_verify_errors.inc();
 
                         log!(
                             &task.platform,
@@ -557,7 +583,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                                 .ban_and_disconnect(
                                     peer_id,
                                     network_service::BanSeverity::High,
-                                    "bad-block",
+                                    network_service::BanReason::BadBlock,
                                 )
                                 .await;
                         }*/
@@ -589,6 +615,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             finalized_blocks = finalized_blocks_newest_to_oldest.len(),
                             sender
                         );
+                        task.metrics.sync_finality_proofs_verified.inc();
 
                         if updates_best_block {
                             task.network_up_to_date_best = false;
@@ -657,23 +684,9 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             ?error,
                             sender,
                         );
+                        task.metrics.sync_finality_proof_verify_errors.inc();
 
-                        // Errors of type `JustificationEngineMismatch` indicate that the chain
-                        // uses a finality engine that smoldot doesn't recognize. This is a benign
-                        // error that shouldn't lead to a ban.
-                        //
-                        // Errors of type `UnknownTargetBlock` are expected during the catch-up
-                        // window that follows a warp sync: the non-finalized tree only contains
-                        // the warp-sync target block, so peers may send justifications for
-                        // higher blocks that the local node hasn't downloaded yet.
-                        // Banning these peers would slow down the catch-up.
-                        if !matches!(
-                            error,
-                            all::JustificationVerifyError::JustificationEngineMismatch |
-                            all::JustificationVerifyError::FinalityVerify(
-                                smoldot::chain::blocks_tree::FinalityVerifyError::UnknownTargetBlock { .. }
-                            )
-                        ) {
+                        if justification_error_warrants_ban(&error) {
                             log!(
                                 &task.platform,
                                 Warn,
@@ -685,7 +698,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                                 .ban_and_disconnect(
                                     sender,
                                     network_service::BanSeverity::High,
-                                    "bad-justification",
+                                    network_service::BanReason::BadJustification,
                                 )
                                 .await;
                         }
@@ -702,6 +715,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             ?error,
                             sender,
                         );
+                        task.metrics.sync_finality_proof_verify_errors.inc();
 
                         log!(
                             &task.platform,
@@ -714,7 +728,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             .ban_and_disconnect(
                                 sender,
                                 network_service::BanSeverity::High,
-                                "bad-grandpa-commit",
+                                network_service::BanReason::BadGrandpaCommit,
                             )
                             .await;
                     }
@@ -851,7 +865,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             .ban_and_disconnect(
                                 peer_id,
                                 network_service::BanSeverity::High,
-                                "bad-block-announce",
+                                network_service::BanReason::BadBlockAnnounce,
                             )
                             .await;
                     }
@@ -886,6 +900,9 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                             task.mode = ModeState::AwaitingWarp {
                                 target_finalized: finalized_block_height,
                             };
+                            task.metrics
+                                .sync_warp_sync_target_height
+                                .set(finalized_block_height);
                             // Keep the deadline armed as a warp-stall fallback.
                             task.mode_decision_deadline = future::Either::Left(Box::pin(
                                 task.platform.sleep(MODE_DECISION_TIMEOUT),
@@ -997,6 +1014,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     unreachable!()
                 };
 
+                task.metrics
+                    .sync_best_block_height
+                    .set(sync.best_block_number());
+
                 let fut = task
                     .network_service
                     .set_local_best_block(*sync.best_block_hash(), sync.best_block_number());
@@ -1013,6 +1034,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 let Some(sync) = &mut task.sync else {
                     unreachable!()
                 };
+
+                task.metrics
+                    .sync_finalized_block_height
+                    .set(sync.finalized_block_number());
 
                 let grandpa_set_id =
                     if let chain::chain_information::ChainInformationFinalityRef::Grandpa {
@@ -1118,6 +1143,17 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 let _ = send_back.send(out);
             }
 
+            WakeUpReason::ForegroundMessage(ToBackground::SubscribeSyncStatus { send_back }) => {
+                let (tx, rx) = async_channel::unbounded();
+                if let Some(status) = task.last_sent_sync_status {
+                    let _ = tx.try_send(status);
+                } else if task.bootstrap_complete {
+                    let _ = tx.try_send(SyncStatus::Ready);
+                }
+                task.sync_status_subscribers.push(tx);
+                let _ = send_back.send(rx);
+            }
+
             WakeUpReason::ForegroundMessage(ToBackground::SerializeChainInformation {
                 send_back,
             }) => {
@@ -1179,7 +1215,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         source_peer_id,
                         network_service::BanSeverity::Low,
-                        "failed-blocks-request",
+                        network_service::BanReason::BlocksRequestFailed,
                     )
                     .await;
 
@@ -1213,7 +1249,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         sync[sync.request_source_id(request_id)].0.clone(),
                         network_service::BanSeverity::Low,
-                        "failed-warp-sync-request",
+                        network_service::BanReason::WarpSyncRequestFailed,
                     )
                     .await;
 
@@ -1239,7 +1275,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         sync[sync.request_source_id(request_id)].0.clone(),
                         network_service::BanSeverity::Low,
-                        "failed-storage-request",
+                        network_service::BanReason::StorageRequestFailed,
                     )
                     .await;
 
@@ -1265,7 +1301,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                     .ban_and_disconnect(
                         sync[sync.request_source_id(request_id)].0.clone(),
                         network_service::BanSeverity::Low,
-                        "failed-call-proof-request",
+                        network_service::BanReason::CallProofRequestFailed,
                     )
                     .await;
 
@@ -1382,6 +1418,17 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                         grandpa_request.await.map(RequestOutcome::WarpSync),
                     )
                 }));
+
+                // Report the warp sync as soon as fragments are requested rather than once the
+                // first one verifies, so that peers never answering is visible as a stall.
+                // While `Deciding` the mode may still end up `AllForksOnly`; wait for the
+                // decision to avoid a spurious warp-syncing report.
+                if !matches!(task.mode, ModeState::Deciding) {
+                    let proven_finalized = warp_sync_finalized_number(
+                        task.sync.as_ref().unwrap_or_else(|| unreachable!()),
+                    );
+                    emit_warp_syncing_status(&mut task, proven_finalized);
+                }
             }
 
             WakeUpReason::StartRequest(
@@ -1614,6 +1661,9 @@ struct Task<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     platform: TPlat,
 
+    /// Metrics of the chain.
+    metrics: Arc<crate::metrics::ChainMetrics>,
+
     /// Main syncing state machine. Contains a list of peers, requests, and blocks, and manages
     /// everything about the non-finalized chain.
     ///
@@ -1630,6 +1680,12 @@ struct Task<TPlat: PlatformRef> {
     /// so a stray `WarpSyncFinished` cannot rebuild `all_forks` and `Stop` queued subscribers.
     /// Once `true`, warp may re-engage and any later completion is allowed to fire a `Stop`.
     bootstrap_complete: bool,
+
+    /// Subscribers of [`super::SyncService::subscribe_sync_status`].
+    sync_status_subscribers: Vec<async_channel::Sender<SyncStatus>>,
+
+    /// Last value sent to [`Task::sync_status_subscribers`], to avoid repeating it.
+    last_sent_sync_status: Option<SyncStatus>,
 
     /// Below-gap packets observed while [`ModeState::Deciding`]; gates AllForksOnly commit.
     deciding_packets_seen: usize,
@@ -1802,6 +1858,26 @@ fn warp_sync_can_proceed(
     }
 }
 
+/// Returns `true` if a justification verification error means the sender misbehaved.
+///
+/// [`chain::blocks_tree::FinalityVerifyError::UnknownTargetBlock`] and
+/// [`chain::blocks_tree::FinalityVerifyError::TooFarAhead`] only mean that the justification
+/// can't be verified *yet*: the local node is lagging behind, typically right after a warp sync
+/// when the non-finalized tree only contains the warp sync target, and catches up on its own.
+/// `AllForksSync` treats the same errors as "pending" for GrandPa commits.
+/// [`all::JustificationVerifyError::JustificationEngineMismatch`] says nothing about the sender
+/// either. Banning for any of these would drop honest peers and slow the catch-up down.
+fn justification_error_warrants_ban(error: &all::JustificationVerifyError) -> bool {
+    !matches!(
+        error,
+        all::JustificationVerifyError::JustificationEngineMismatch
+            | all::JustificationVerifyError::FinalityVerify(
+                chain::blocks_tree::FinalityVerifyError::UnknownTargetBlock { .. }
+                    | chain::blocks_tree::FinalityVerifyError::TooFarAhead { .. }
+            )
+    )
+}
+
 /// Responds to every queued `SubscribeAll` request. Each response allocates a fresh
 /// notification channel and pushes its sender into `task.all_notifications`.
 fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
@@ -1847,10 +1923,70 @@ fn commit_all_forks_only<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
 
     drain_pending_subscriptions(task);
     task.bootstrap_complete = true;
+    emit_sync_status(task, SyncStatus::Ready);
     task.sync
         .as_mut()
         .unwrap_or_else(|| unreachable!())
         .set_warp_completion_suppressed(false);
+}
+
+/// Height of the highest block proven finalized by the warp sync in progress. Falls back to the
+/// finalized block of the chain when no warp sync is in progress.
+fn warp_sync_finalized_number(
+    sync: &all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>,
+) -> u64 {
+    match sync.status() {
+        all::Status::WarpSyncFragments {
+            finalized_block_number,
+            ..
+        }
+        | all::Status::WarpSyncChainInformation {
+            finalized_block_number,
+            ..
+        } => finalized_block_number,
+        all::Status::Sync => sync.finalized_block_number(),
+    }
+}
+
+/// Emits [`SyncStatus::WarpSyncing`] with `at` as the proven-finalized height and the highest
+/// best block advertised by a peer as the target.
+fn emit_warp_syncing_status<TPlat: PlatformRef>(task: &mut Task<TPlat>, at: u64) {
+    let sync = task.sync.as_ref().unwrap_or_else(|| unreachable!());
+    let peers_best = sync
+        .sources()
+        .map(|src| sync.source_best_block(src).0)
+        .max()
+        .unwrap_or(0);
+    emit_sync_status(
+        task,
+        SyncStatus::WarpSyncing {
+            at,
+            // Peers may advertise a best block below what has already been verified.
+            target: cmp::max(peers_best, at),
+        },
+    );
+}
+
+/// Sends `status` to every subscriber of [`Task::sync_status_subscribers`], unless it is the
+/// same as the last value sent. Subscribers whose receiver is gone are removed.
+fn emit_sync_status<TPlat: PlatformRef>(task: &mut Task<TPlat>, status: SyncStatus) {
+    send_sync_status(
+        &mut task.sync_status_subscribers,
+        &mut task.last_sent_sync_status,
+        status,
+    );
+}
+
+fn send_sync_status(
+    subscribers: &mut Vec<async_channel::Sender<SyncStatus>>,
+    last_sent: &mut Option<SyncStatus>,
+    status: SyncStatus,
+) {
+    if *last_sent == Some(status) {
+        return;
+    }
+    *last_sent = Some(status);
+    subscribers.retain(|sender| sender.try_send(status).is_ok());
 }
 
 #[cfg(test)]
@@ -2044,5 +2180,101 @@ mod tests {
             neighbor_packet_outcome(&ModeState::Deciding, &sync, MODE_DECISION_MIN_PACKETS - 1,),
             NeighborPacketOutcome::CommitAllForksOnly,
         );
+    }
+
+    #[test]
+    fn send_sync_status_delivers_to_all_open_subscribers() {
+        let mut subscribers = Vec::new();
+        let mut receivers = Vec::new();
+        for _ in 0..3 {
+            let (tx, rx) = async_channel::unbounded();
+            subscribers.push(tx);
+            receivers.push(rx);
+        }
+        let mut last_sent = None;
+        let status = SyncStatus::WarpSyncing { at: 7, target: 42 };
+
+        send_sync_status(&mut subscribers, &mut last_sent, status);
+
+        assert_eq!(subscribers.len(), 3);
+        assert_eq!(last_sent, Some(status));
+        for rx in receivers {
+            assert_eq!(rx.try_recv(), Ok(status));
+        }
+    }
+
+    #[test]
+    fn send_sync_status_drops_closed_subscribers() {
+        let (tx_open, rx_open) = async_channel::unbounded();
+        let (tx_closed, rx_closed) = async_channel::unbounded::<SyncStatus>();
+        drop(rx_closed);
+        let mut subscribers = vec![tx_open, tx_closed];
+        let mut last_sent = None;
+
+        send_sync_status(&mut subscribers, &mut last_sent, SyncStatus::Ready);
+
+        assert_eq!(subscribers.len(), 1);
+        assert_eq!(rx_open.try_recv(), Ok(SyncStatus::Ready));
+    }
+
+    #[test]
+    fn send_sync_status_skips_consecutive_duplicates() {
+        let (tx, rx) = async_channel::unbounded();
+        let mut subscribers = vec![tx];
+        let mut last_sent = None;
+        let a = SyncStatus::WarpSyncing { at: 1, target: 9 };
+        let b = SyncStatus::WarpSyncing { at: 2, target: 9 };
+
+        send_sync_status(&mut subscribers, &mut last_sent, a);
+        send_sync_status(&mut subscribers, &mut last_sent, a);
+        send_sync_status(&mut subscribers, &mut last_sent, b);
+        send_sync_status(&mut subscribers, &mut last_sent, SyncStatus::Ready);
+        send_sync_status(&mut subscribers, &mut last_sent, SyncStatus::Ready);
+
+        assert_eq!(rx.try_recv(), Ok(a));
+        assert_eq!(rx.try_recv(), Ok(b));
+        assert_eq!(rx.try_recv(), Ok(SyncStatus::Ready));
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// Errors caused by the local node lagging behind, or by an unknown finality engine, must not
+    /// lead to a ban.
+    #[test]
+    fn catch_up_justification_errors_do_not_ban() {
+        assert!(!justification_error_warrants_ban(
+            &all::JustificationVerifyError::JustificationEngineMismatch
+        ));
+        assert!(!justification_error_warrants_ban(
+            &all::JustificationVerifyError::FinalityVerify(
+                chain::blocks_tree::FinalityVerifyError::UnknownTargetBlock {
+                    block_number: 2545,
+                    block_hash: [1; 32],
+                }
+            )
+        ));
+        assert!(!justification_error_warrants_ban(
+            &all::JustificationVerifyError::FinalityVerify(
+                chain::blocks_tree::FinalityVerifyError::TooFarAhead {
+                    justification_block_number: 2545,
+                    justification_block_hash: [1; 32],
+                    block_to_finalize_number: 2520,
+                }
+            )
+        ));
+    }
+
+    /// An invalid justification is the sender's fault and leads to a ban.
+    #[test]
+    fn invalid_justification_errors_ban() {
+        assert!(justification_error_warrants_ban(
+            &all::JustificationVerifyError::VerificationFailed(
+                smoldot::finality::verify::JustificationVerifyError::BadSignature
+            )
+        ));
+        assert!(justification_error_warrants_ban(
+            &all::JustificationVerifyError::FinalityVerify(
+                chain::blocks_tree::FinalityVerifyError::EqualFinalizedHeightButInequalHash
+            )
+        ));
     }
 }

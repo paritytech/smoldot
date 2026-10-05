@@ -89,6 +89,7 @@ use core::{
     time::Duration,
 };
 use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
+use strum::VariantArray as _;
 
 pub use crate::libp2p::{
     collection::{
@@ -280,6 +281,10 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
     /// Peers known to support a chain's Kademlia protocol, as determined by Identify responses.
     /// Used by [`ChainNetwork::kademlia_capable_peers`].
     kademlia_capable_peers: BTreeSet<(usize, PeerIndex)>,
+
+    /// Peers known to support a chain's statement/2 protocol, as determined by Identify
+    /// responses. Used by [`ChainNetwork::statement_capable_peers`].
+    statement_capable_peers: BTreeSet<(usize, PeerIndex)>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -374,15 +379,15 @@ enum NotificationsProtocol {
     },
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, strum::VariantArray)]
 enum SubstreamDirection {
     In,
     Out,
 }
 
 impl SubstreamDirection {
-    const MIN: Self = SubstreamDirection::In;
-    const MAX: Self = SubstreamDirection::Out;
+    const MIN: Self = Self::VARIANTS[0];
+    const MAX: Self = Self::VARIANTS[Self::VARIANTS.len() - 1];
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -405,7 +410,7 @@ impl NotificationsSubstreamState {
 }
 
 /// Lifecycle state of the Bitswap substream.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, strum::VariantArray)]
 enum BitswapSubstreamState {
     /// Used for outbound substreams that were requested, but not yet confirmed by the remote.
     Pending,
@@ -414,8 +419,8 @@ enum BitswapSubstreamState {
 }
 
 impl BitswapSubstreamState {
-    const MIN: Self = BitswapSubstreamState::Pending;
-    const MAX: Self = BitswapSubstreamState::Open;
+    const MIN: Self = Self::VARIANTS[0];
+    const MAX: Self = Self::VARIANTS[Self::VARIANTS.len() - 1];
 }
 
 impl<TChain, TConn, TNow> ChainNetwork<TChain, TConn, TNow>
@@ -490,6 +495,7 @@ where
                 Default::default(),
             ),
             kademlia_capable_peers: BTreeSet::new(),
+            statement_capable_peers: BTreeSet::new(),
             chains: slab::Slab::with_capacity(config.chains_capacity),
             chains_by_protocol_info: hashbrown::HashMap::with_capacity_and_hasher(
                 config.chains_capacity,
@@ -594,21 +600,13 @@ where
         let desired = self
             .gossip_desired_peers_by_chain
             .range(
-                (
-                    chain_id.0,
-                    GossipKind::ConsensusTransactions,
-                    PeerIndex(usize::MIN),
-                )
-                    ..=(
-                        chain_id.0,
-                        GossipKind::ConsensusTransactions,
-                        PeerIndex(usize::MAX),
-                    ),
+                (chain_id.0, GossipKind::MIN, PeerIndex(usize::MIN))
+                    ..=(chain_id.0, GossipKind::MAX, PeerIndex(usize::MAX)),
             )
-            .map(|(_, _, peer_index)| *peer_index)
+            .map(|(_, kind, peer_index)| (*kind, *peer_index))
             .collect::<Vec<_>>();
-        for desired in desired {
-            self.gossip_remove_desired_inner(chain_id, desired, GossipKind::ConsensusTransactions);
+        for (kind, desired) in desired {
+            self.gossip_remove_desired_inner(chain_id, desired, kind);
         }
 
         // Close any notifications substream of the chain.
@@ -733,6 +731,8 @@ where
         }
 
         self.kademlia_capable_peers
+            .retain(|(c, _)| *c != chain_id.0);
+        self.statement_capable_peers
             .retain(|(c, _)| *c != chain_id.0);
 
         // Actually remove the chain. This will panic if the `ChainId` is invalid.
@@ -925,7 +925,10 @@ where
 
         if self
             .gossip_desired_peers
-            .range((peer_index, kind, usize::MIN)..=(peer_index, kind, usize::MAX))
+            .range(
+                (peer_index, GossipKind::MIN, usize::MIN)
+                    ..=(peer_index, GossipKind::MAX, usize::MAX),
+            )
             .next()
             .is_none()
         {
@@ -977,19 +980,17 @@ where
             return;
         };
 
-        let chains = {
-            // TODO: this works only because there's only one GossipKind
-            let mut chains_and_after =
-                self.gossip_desired_peers
-                    .split_off(&(peer_index, kind, usize::MIN));
-            let mut chains_after =
-                chains_and_after.split_off(&(PeerIndex(peer_index.0 + 1), kind, usize::MIN));
-            self.gossip_desired_peers.append(&mut chains_after);
-            chains_and_after
-        };
+        let chains = self
+            .gossip_desired_peers
+            .range((peer_index, kind, usize::MIN)..=(peer_index, kind, usize::MAX))
+            .map(|(_, _, chain_index)| *chain_index)
+            .collect::<Vec<_>>();
 
-        for (_removed_peer_index, _, chain_index) in chains {
-            debug_assert_eq!(_removed_peer_index, peer_index);
+        for chain_index in chains {
+            let _was_in = self
+                .gossip_desired_peers
+                .remove(&(peer_index, kind, chain_index));
+            debug_assert!(_was_in);
             let _was_in =
                 self.gossip_desired_peers_by_chain
                     .remove(&(chain_index, kind, peer_index));
@@ -1001,7 +1002,18 @@ where
             ));
         }
 
-        self.unconnected_desired.remove(&peer_index);
+        if self
+            .gossip_desired_peers
+            .range(
+                (peer_index, GossipKind::MIN, usize::MIN)
+                    ..=(peer_index, GossipKind::MAX, usize::MAX),
+            )
+            .next()
+            .is_none()
+        {
+            self.unconnected_desired.remove(&peer_index);
+        }
+
         self.try_clean_up_peer(peer_index);
     }
 
@@ -1436,16 +1448,8 @@ where
                             if self
                                 .gossip_desired_peers
                                 .range(
-                                    (
-                                        expected_peer_index,
-                                        GossipKind::ConsensusTransactions,
-                                        usize::MIN,
-                                    )
-                                        ..=(
-                                            expected_peer_index,
-                                            GossipKind::ConsensusTransactions,
-                                            usize::MAX,
-                                        ),
+                                    (expected_peer_index, GossipKind::MIN, usize::MIN)
+                                        ..=(expected_peer_index, GossipKind::MAX, usize::MAX),
                                 )
                                 .next()
                                 .is_some()
@@ -1475,17 +1479,9 @@ where
 
                     // Insert the new connection in `self.connected_unopened_gossip_desired`
                     // if relevant.
-                    for (_, _, chain_id) in self.gossip_desired_peers.range(
-                        (
-                            actual_peer_index,
-                            GossipKind::ConsensusTransactions,
-                            usize::MIN,
-                        )
-                            ..=(
-                                actual_peer_index,
-                                GossipKind::ConsensusTransactions,
-                                usize::MAX,
-                            ),
+                    for (_, kind, chain_id) in self.gossip_desired_peers.range(
+                        (actual_peer_index, GossipKind::MIN, usize::MIN)
+                            ..=(actual_peer_index, GossipKind::MAX, usize::MAX),
                     ) {
                         if self
                             .notification_substreams_by_peer_id
@@ -1515,7 +1511,7 @@ where
                             self.connected_unopened_gossip_desired.insert((
                                 actual_peer_index,
                                 ChainId(*chain_id),
-                                GossipKind::ConsensusTransactions,
+                                *kind,
                             ));
                         }
                     }
@@ -1561,6 +1557,7 @@ where
                     // Auto-fire an outbound Identify request the first time we see this peer.
                     // The response will populate `kademlia_capable_peers`, which discovery
                     // logic uses to find Kademlia targets independently of gossip state.
+                    // It also populates `statement_capable_peers`.
                     //
                     // Identify expects a length-prefixed empty body (see inbound handler
                     // around line 2037, which checks `request_payload.is_empty()`). Passing
@@ -1619,8 +1616,8 @@ where
                     if self
                         .gossip_desired_peers
                         .range(
-                            (peer_index, GossipKind::ConsensusTransactions, usize::MIN)
-                                ..=(peer_index, GossipKind::ConsensusTransactions, usize::MAX),
+                            (peer_index, GossipKind::MIN, usize::MIN)
+                                ..=(peer_index, GossipKind::MAX, usize::MAX),
                         )
                         .count()
                         != 0
@@ -1647,14 +1644,14 @@ where
                                 state.established && !state.shutting_down
                             })
                         {
-                            for (_, _, chain_index) in self.gossip_desired_peers.range(
-                                (peer_index, GossipKind::ConsensusTransactions, usize::MIN)
-                                    ..=(peer_index, GossipKind::ConsensusTransactions, usize::MAX),
+                            for (_, kind, chain_index) in self.gossip_desired_peers.range(
+                                (peer_index, GossipKind::MIN, usize::MIN)
+                                    ..=(peer_index, GossipKind::MAX, usize::MAX),
                             ) {
                                 self.connected_unopened_gossip_desired.remove(&(
                                     peer_index,
                                     ChainId(*chain_index),
-                                    GossipKind::ConsensusTransactions,
+                                    *kind,
                                 ));
                             }
                         }
@@ -1866,6 +1863,8 @@ where
                             // a chain when its self-advertised protocols list contains that
                             // chain's Kad protocol name. The response is consumed internally
                             // (no `Event::RequestResult` is emitted for Identify).
+                            // `statement_capable_peers` is populated the same way from the
+                            // statement/2 protocol name, for chains that use statements.
                             if let Ok(payload) = response {
                                 if let Ok(decoded) = codec::decode_identify_response(&payload) {
                                     let advertised: Vec<&str> = decoded.protocols.collect();
@@ -1879,6 +1878,20 @@ where
                                         if advertised.iter().any(|p| *p == kad_name_string) {
                                             self.kademlia_capable_peers
                                                 .insert((chain_index, peer_index));
+                                        }
+
+                                        if chain.enable_statement_protocol {
+                                            let statement_name = codec::encode_protocol_name_string(
+                                                codec::ProtocolName::Statement {
+                                                    genesis_hash: chain.genesis_hash,
+                                                    fork_id: chain.fork_id.as_deref(),
+                                                    version: codec::StatementProtocolVersion::V2,
+                                                },
+                                            );
+                                            if advertised.iter().any(|p| *p == statement_name) {
+                                                self.statement_capable_peers
+                                                    .insert((chain_index, peer_index));
+                                            }
                                         }
                                     }
                                 }
@@ -2278,7 +2291,7 @@ where
                                         .connections_by_peer_id
                                         .range(
                                             (peer_index, ConnectionId::MIN)
-                                                ..=(peer_index, ConnectionId::MIN),
+                                                ..=(peer_index, ConnectionId::MAX),
                                         )
                                         .any(|(_, c)| {
                                             let state = self.inner.connection_state(*c);
@@ -4174,6 +4187,24 @@ where
             .map(|(_, peer_index)| &self.peers[peer_index.0])
     }
 
+    /// Returns the list of peers known to support the statement/2 protocol of the given chain,
+    /// as determined by their Identify protocol response.
+    ///
+    /// Always empty if [`ChainConfig::enable_statement_protocol`] is `false` for this chain.
+    /// The same limits as [`ChainNetwork::kademlia_capable_peers`] apply: Identify is sent at
+    /// most once per peer, so peers that connected before the chain was added are missing.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn statement_capable_peers(&self, chain_id: ChainId) -> impl Iterator<Item = &PeerId> {
+        assert!(self.chains.contains(chain_id.0));
+        self.statement_capable_peers
+            .range((chain_id.0, PeerIndex(usize::MIN))..=(chain_id.0, PeerIndex(usize::MAX)))
+            .map(|(_, peer_index)| &self.peers[peer_index.0])
+    }
+
     /// Returns the list of all peers for a [`Event::GossipConnected`] event of the given kind has
     /// been emitted.
     /// It is possible to send gossip notifications to these peers.
@@ -4509,6 +4540,14 @@ where
             },
             NotificationsProtocol::Grandpa {
                 chain_index: chain_id.0,
+            },
+            NotificationsProtocol::Statement {
+                chain_index: chain_id.0,
+                version: codec::StatementProtocolVersion::V1,
+            },
+            NotificationsProtocol::Statement {
+                chain_index: chain_id.0,
+                version: codec::StatementProtocolVersion::V2,
             },
         ] {
             for (substream_id, direction, state) in self
@@ -5315,8 +5354,8 @@ where
         if self
             .gossip_desired_peers
             .range(
-                (peer_index, GossipKind::ConsensusTransactions, usize::MIN)
-                    ..=(peer_index, GossipKind::ConsensusTransactions, usize::MAX),
+                (peer_index, GossipKind::MIN, usize::MIN)
+                    ..=(peer_index, GossipKind::MAX, usize::MAX),
             )
             .next()
             .is_some()
@@ -5332,6 +5371,8 @@ where
         // otherwise a future peer reusing this `PeerIndex` would inherit stale Kad capability.
         self.identify_requested_peers.remove(&peer_index);
         self.kademlia_capable_peers
+            .retain(|(_, p)| *p != peer_index);
+        self.statement_capable_peers
             .retain(|(_, p)| *p != peer_index);
 
         let peer_id = self.peers.remove(peer_index.0);
@@ -5426,9 +5467,14 @@ impl<TChain, TConn, TNow> ops::IndexMut<ConnectionId> for ChainNetwork<TChain, T
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, strum::VariantArray)]
 pub enum GossipKind {
     ConsensusTransactions,
+}
+
+impl GossipKind {
+    const MIN: Self = Self::VARIANTS[0];
+    const MAX: Self = Self::VARIANTS[Self::VARIANTS.len() - 1];
 }
 
 /// Error returned by [`ChainNetwork::add_chain`].

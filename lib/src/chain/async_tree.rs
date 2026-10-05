@@ -946,17 +946,25 @@ where
                         continue;
                     }
 
-                    // `Some` whenever the async operation finished, regardless of whether the
-                    // block was reported. Consumers rely on this to know that the operation's
-                    // outcome was already acted upon (e.g. the relay block was already unpinned);
-                    // returning `None` for a finished-but-unreported block leads to that outcome
-                    // being applied twice.
-                    let async_op = match pruned.user_data.async_op {
-                        AsyncOpState::Finished { user_data, .. } => Some(user_data),
-                        _ => None,
+                    // `async_op_user_data` is `Some` whenever the async operation finished,
+                    // regardless of whether the block was reported. Consumers rely on this to
+                    // know that the operation's outcome was already acted upon (e.g. the relay
+                    // block was already unpinned). `reported` tells whether the block was ever
+                    // part of the output, which is a stricter condition.
+                    let (async_op_user_data, reported) = match pruned.user_data.async_op {
+                        AsyncOpState::Finished {
+                            user_data,
+                            reported,
+                        } => (Some(user_data), reported),
+                        _ => (None, false),
                     };
 
-                    pruned_blocks.push((pruned.index, pruned.user_data.user_data, async_op));
+                    pruned_blocks.push(PrunedBlock {
+                        index: pruned.index,
+                        user_data: pruned.user_data.user_data,
+                        async_op_user_data,
+                        reported,
+                    });
                 }
 
                 // Try to advance the output best block to the `Finished` block with the highest
@@ -1200,14 +1208,7 @@ pub enum OutputUpdate<TBl, TAsync> {
 
         /// Blocks that were a descendant of the former finalized block but not of the new
         /// finalized block. These blocks are no longer part of the data structure.
-        ///
-        /// If the `Option<TAsync>` is `Some`, then that block's asynchronous operation had
-        /// finished. Otherwise it hadn't.
-        ///
-        /// Note that this is `Some` even for a block that finished its operation but was never
-        /// reported in an [`OutputUpdate`], which differs from
-        /// [`InputIterItem::async_op_user_data`] (`Some` only once reported).
-        pruned_blocks: Vec<(NodeIndex, TBl, Option<TAsync>)>,
+        pruned_blocks: Vec<PrunedBlock<TBl, TAsync>>,
     },
 
     /// A new block has been added to the list of output unfinalized blocks.
@@ -1219,6 +1220,27 @@ pub enum OutputUpdate<TBl, TAsync> {
         /// output finalized block.
         best_block_index: Option<NodeIndex>,
     },
+}
+
+/// See [`OutputUpdate::Finalized::pruned_blocks`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrunedBlock<TBl, TAsync> {
+    /// Index the node had within the data structure before being pruned.
+    pub index: NodeIndex,
+
+    /// User data associated to this block.
+    pub user_data: TBl,
+
+    /// `Some` if the asynchronous operation of this block had finished, whether or not the
+    /// block was ever reported in an [`OutputUpdate::Block`]. This differs from
+    /// [`InputIterItem::async_op_user_data`], which is `Some` only once reported.
+    pub async_op_user_data: Option<TAsync>,
+
+    /// `true` if this block was reported in an [`OutputUpdate::Block`] before being pruned, in
+    /// other words if it was part of the output.
+    ///
+    /// Always `false` when [`PrunedBlock::async_op_user_data`] is `None`.
+    pub reported: bool,
 }
 
 /// See [`OutputUpdate`].
@@ -1341,11 +1363,79 @@ mod tests {
             other => panic!("expected finalization of relay-B, got {other:?}"),
         };
 
-        // A's finished op must come back as `Some`, so it isn't acted on twice.
+        // A's finished op must come back as `Some`, so it isn't acted on twice, while
+        // `reported` must be `false` since A never made it to the output.
         let a_entry = pruned_blocks
             .iter()
-            .find(|(idx, _, _)| *idx == block_a)
+            .find(|b| b.index == block_a)
             .expect("relay-A must appear in pruned_blocks");
-        assert_eq!(a_entry.2, Some("parahead-A"));
+        assert_eq!(a_entry.async_op_user_data, Some("parahead-A"));
+        assert!(!a_entry.reported);
+    }
+
+    // Regression test for Sentry DOTLI-BM (panic at runtime_service.rs:493). The runtime service
+    // forwards pruned blocks to its subscribers, who unpin them later. It must therefore be
+    // able to tell which pruned blocks were actually reported to them.
+    #[test]
+    fn pruned_blocks_report_whether_they_were_output() {
+        let now = Duration::new(0, 0);
+
+        let mut tree = AsyncTree::<Duration, &'static str, &'static str>::new(Config {
+            finalized_async_user_data: "runtime-genesis",
+            retry_after_failed: Duration::from_secs(5),
+            blocks_capacity: 4,
+        });
+
+        // Block B (best chain): same op as its parent (the finalized block), reported.
+        let block_b = tree.input_insert_block("B", None, true, true);
+        match tree.try_advance_output() {
+            Some(OutputUpdate::Block(b)) => assert_eq!(b.index, block_b),
+            other => panic!("expected B to be reported, got {other:?}"),
+        }
+
+        // Block C (fork): same op as its parent, reported.
+        let block_c = tree.input_insert_block("C", None, true, false);
+        match tree.try_advance_output() {
+            Some(OutputUpdate::Block(b)) => assert_eq!(b.index, block_c),
+            other => panic!("expected C to be reported, got {other:?}"),
+        }
+
+        // Block D (fork): same op as its parent, finished but not yet reported.
+        let block_d = tree.input_insert_block("D", None, true, false);
+
+        // Block E (fork): needs its own op, which never finishes.
+        let block_e = tree.input_insert_block("E", None, false, false);
+        match tree.next_necessary_async_op(&now) {
+            NextNecessaryAsyncOp::Ready(p) => assert_eq!(p.block_index, block_e),
+            NextNecessaryAsyncOp::NotReady { .. } => unreachable!(),
+        }
+
+        // Finalize B before D is reported.
+        tree.input_finalize(block_b);
+        let pruned_blocks = match tree.try_advance_output() {
+            Some(OutputUpdate::Finalized { pruned_blocks, .. }) => pruned_blocks,
+            other => panic!("expected finalization of B, got {other:?}"),
+        };
+
+        let find = |idx| {
+            pruned_blocks
+                .iter()
+                .find(|b| b.index == idx)
+                .expect("block must appear in pruned_blocks")
+        };
+
+        let c = find(block_c);
+        assert_eq!(c.async_op_user_data, Some("runtime-genesis"));
+        assert!(c.reported);
+
+        let d = find(block_d);
+        assert_eq!(d.async_op_user_data, Some("runtime-genesis"));
+        assert!(!d.reported);
+
+        let e = find(block_e);
+        assert_eq!(e.async_op_user_data, None);
+        assert!(!e.reported);
+
+        assert_eq!(pruned_blocks.len(), 3);
     }
 }

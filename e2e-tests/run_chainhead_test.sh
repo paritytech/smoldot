@@ -13,6 +13,12 @@
 #   with para:  paseo-ah, paseo-ah-next, polkadot-ah, kusama-ah, westend-ah
 #
 # Set WITH_RUNTIME=true to subscribe with runtime (default false).
+#
+# Opt-in metrics: set SMOLDOT_METRICS_OUT=<file.json> to poll
+# `sudo_unstable_metrics` every 5s (SMOLDOT_METRICS_INTERVAL_MS) during the
+# run, write the time series there, and render a sibling .html report with
+# graphs (heights, peers, request rates/durations, connection churn).
+# Example: SMOLDOT_METRICS_OUT=_logs/metrics.json ./run_chainhead_test.sh paseo
 
 set -euo pipefail
 
@@ -42,21 +48,21 @@ case "${network}" in
     relay_spec="${SPECS_DIR}/paseo.json"
     para_spec="${SPECS_DIR}/paseo_asset_hub_next.json"
     relay_rpc="https://paseo-rpc.n.dwellir.com"
-    para_rpc="" # TODO
+    para_rpc="https://paseo-asset-hub-next-rpc.polkadot.io"
     ;;
   polkadot)
     relay_spec="${SPECS_DIR}/polkadot.json"
-    relay_rpc=""  # TODO: set Polkadot relay RPC URL
+    relay_rpc="https://polkadot-rpc.n.dwellir.com"
     ;;
   polkadot-ah)
     relay_spec="${SPECS_DIR}/polkadot.json"
     para_spec="${SPECS_DIR}/polkadot_asset_hub.json"
-    relay_rpc=""  # TODO: set Polkadot relay RPC URL
-    para_rpc=""  # TODO: set Polkadot Asset Hub RPC URL
+    relay_rpc="https://polkadot-rpc.n.dwellir.com"
+    para_rpc="https://asset-hub-polkadot-rpc.n.dwellir.com"
     ;;
   kusama)
     relay_spec="${SPECS_DIR}/ksmcc3.json"
-    relay_rpc=""  # TODO: set Kusama relay RPC URL
+    relay_rpc="https://kusama-rpc.n.dwellir.com"
     ;;
   kusama-ah)
     relay_spec="${SPECS_DIR}/ksmcc3.json"
@@ -66,13 +72,13 @@ case "${network}" in
     ;;
   westend)
     relay_spec="${SPECS_DIR}/westend2.json"
-    relay_rpc=""  # TODO: set Westend relay RPC URL
+    relay_rpc="https://westend-rpc.n.dwellir.com"
     ;;
   westend-ah)
     relay_spec="${SPECS_DIR}/westend2.json"
     para_spec="${SPECS_DIR}/westend2_asset_hub.json"
-    relay_rpc=""  # TODO: set Westend relay RPC URL
-    para_rpc=""  # TODO: set Westend Asset Hub RPC URL
+    relay_rpc="https://westend-rpc.n.dwellir.com"
+    para_rpc="https://asset-hub-westend-rpc.n.dwellir.com"
     ;;
   *)
     echo "Unknown network: ${network}" >&2
@@ -179,7 +185,8 @@ if [[ ! -d "${SCRIPT_DIR}/node_modules" ]]; then
 fi
 
 cd "${SCRIPT_DIR}"
-exec env \
+test_rc=0
+env \
   WITH_RUNTIME="${WITH_RUNTIME:-false}" \
   RELAY_CHAIN_SPEC="${RELAY_CHAIN_SPEC}" \
   PARA_CHAIN_SPEC="${PARA_CHAIN_SPEC}" \
@@ -195,5 +202,13 @@ exec env \
   PER_SUB_TIMEOUT_MS="${PER_SUB_TIMEOUT_MS:-600000}" \
   OVERALL_TIMEOUT_MS="${OVERALL_TIMEOUT_MS:-900000}" \
   SMOLDOT_LOG_LEVEL="${SMOLDOT_LOG_LEVEL:-2}" \
+  SMOLDOT_METRICS_OUT="${SMOLDOT_METRICS_OUT:-}" \
+  SMOLDOT_METRICS_INTERVAL_MS="${SMOLDOT_METRICS_INTERVAL_MS:-5000}" \
   TEST_NAME=chainhead_v1_follow \
-  node hosts/node/run.js
+  node hosts/node/run.js || test_rc=$?
+
+if [[ -n "${SMOLDOT_METRICS_OUT:-}" && -f "${SMOLDOT_METRICS_OUT}" ]]; then
+  node render_metrics_html.mjs "${SMOLDOT_METRICS_OUT}" || true
+fi
+
+exit "${test_rc}"

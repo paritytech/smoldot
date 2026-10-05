@@ -430,13 +430,13 @@ pub fn parse_and_dedup(
         });
     }
 
-    let mut seen_strings: hashbrown::HashSet<String> =
-        hashbrown::HashSet::with_capacity(cids.len());
+    let mut seen_strings: hashbrown::HashSet<String, fnv::FnvBuildHasher> =
+        hashbrown::HashSet::with_capacity_and_hasher(cids.len(), Default::default());
     // Dedup by 32-byte content digest, matching the literal spec wording (and the polkadot-sdk
     // reference impl). Two cosmetically different CID strings that decode to the same digest
     // collide here, regardless of multicodec or multihash type.
-    let mut seen_digests: hashbrown::HashSet<[u8; 32]> =
-        hashbrown::HashSet::with_capacity(cids.len());
+    let mut seen_digests: hashbrown::HashSet<[u8; 32], fnv::FnvBuildHasher> =
+        hashbrown::HashSet::with_capacity_and_hasher(cids.len(), Default::default());
     let mut out = Vec::with_capacity(cids.len());
 
     for cid_str in cids {

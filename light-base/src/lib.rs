@@ -99,11 +99,13 @@ use smoldot::{
 mod bitswap_service;
 mod database;
 mod json_rpc_service;
+mod metrics;
 mod runtime_service;
 mod sync_service;
 mod transactions_service;
 mod util;
 
+pub mod lifecycle_service;
 pub mod network_service;
 pub mod platform;
 
@@ -291,6 +293,9 @@ struct ChainServices<TPlat: platform::PlatformRef> {
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
     bitswap_service: Arc<bitswap_service::BitswapService>,
+    chain_metrics: Arc<metrics::ChainMetrics>,
+    network_metrics: Arc<metrics::NetworkMetrics>,
+    lifecycle_service: Arc<lifecycle_service::LifecycleService>,
 }
 
 impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
@@ -301,6 +306,9 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
             runtime_service: self.runtime_service.clone(),
             transactions_service: self.transactions_service.clone(),
             bitswap_service: self.bitswap_service.clone(),
+            chain_metrics: self.chain_metrics.clone(),
+            network_metrics: self.network_metrics.clone(),
+            lifecycle_service: self.lifecycle_service.clone(),
         }
     }
 }
@@ -933,6 +941,9 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 transactions_service: services.transactions_service.clone(),
                 runtime_service: services.runtime_service.clone(),
                 bitswap_service: services.bitswap_service.clone(),
+                chain_metrics: services.chain_metrics.clone(),
+                network_metrics: services.network_metrics.clone(),
+                lifecycle_service: services.lifecycle_service.clone(),
                 chain_name: chain_spec.name().to_owned(),
                 chain_ty: chain_spec.chain_type().to_owned(),
                 chain_is_live: chain_spec.has_live_network(),
@@ -1062,6 +1073,21 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
         json_rpc_sender.queue_rpc_request(json_rpc_request)
     }
+
+    /// Subscribes to the lifecycle state of the given chain: bootstrap phase, peer presence and
+    /// stall verdict. The first item is the current state, then one item per change. See
+    /// [`lifecycle_service::LifecycleState`].
+    ///
+    /// The schema is unstable.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    pub fn lifecycle_state(&self, chain_id: ChainId) -> lifecycle_service::Subscription {
+        let key = &self.public_api_chains.get(chain_id.0).unwrap().key;
+        let running = self.chains_by_key.as_ref().unwrap().get(key).unwrap();
+        running.services.lifecycle_service.subscribe()
+    }
 }
 
 impl<TPlat: platform::PlatformRef, TChain> ops::Index<ChainId> for Client<TPlat, TChain> {
@@ -1131,6 +1157,8 @@ fn start_services<TPlat: platform::PlatformRef>(
     network_identify_agent_version: String,
     enable_statement_protocol: bool,
 ) -> ChainServices<TPlat> {
+    let chain_metrics = Arc::new(metrics::ChainMetrics::default());
+
     let network_service = network_service.get_or_insert_with(|| {
         network_service::NetworkService::new(network_service::Config {
             platform: platform.clone(),
@@ -1140,6 +1168,8 @@ fn start_services<TPlat: platform::PlatformRef>(
             chains_capacity: 1,
         })
     });
+
+    let network_metrics = network_service.metrics();
 
     let network_service_chain = network_service.add_chain(network_service::ConfigChain {
         log_name: log_name.clone(),
@@ -1174,6 +1204,7 @@ fn start_services<TPlat: platform::PlatformRef>(
         fork_id,
         block_number_bytes,
         enable_statement_protocol,
+        metrics: chain_metrics.clone(),
     });
 
     let (sync_service, runtime_service) = match config {
@@ -1190,6 +1221,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                 platform: platform.clone(),
                 log_name: log_name.clone(),
                 block_number_bytes,
+                metrics: chain_metrics.clone(),
                 network_service: network_service_chain.clone(),
                 chain_type: sync_service::ConfigChainType::Parachain(
                     sync_service::ConfigParachain {
@@ -1207,6 +1239,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                 runtime_service::Config {
                     log_name: log_name.clone(),
                     platform: platform.clone(),
+                    metrics: chain_metrics.clone(),
                     sync_service: sync_service.clone(),
                     network_service: network_service_chain.clone(),
                     genesis_block_scale_encoded_header,
@@ -1225,6 +1258,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                 log_name: log_name.clone(),
                 block_number_bytes,
                 platform: platform.clone(),
+                metrics: chain_metrics.clone(),
                 network_service: network_service_chain.clone(),
                 chain_type: sync_service::ConfigChainType::SubstrateCompatible(
                     sync_service::ConfigSubstrateCompatible {
@@ -1246,6 +1280,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                 runtime_service::Config {
                     log_name: log_name.clone(),
                     platform: platform.clone(),
+                    metrics: chain_metrics.clone(),
                     sync_service: sync_service.clone(),
                     network_service: network_service_chain.clone(),
                     genesis_block_scale_encoded_header,
@@ -1264,6 +1299,7 @@ fn start_services<TPlat: platform::PlatformRef>(
         transactions_service::Config {
             log_name: log_name.clone(),
             platform: platform.clone(),
+            metrics: chain_metrics.clone(),
             sync_service: sync_service.clone(),
             runtime_service: runtime_service.clone(),
             network_service: network_service_chain.clone(),
@@ -1283,11 +1319,19 @@ fn start_services<TPlat: platform::PlatformRef>(
         },
     ));
 
+    // The lifecycle service holds a small state describing what the chain is doing, for the
+    // benefit of embedders.
+    let lifecycle_service =
+        lifecycle_service::start(platform, &sync_service, &network_service_chain);
+
     ChainServices {
         network_service: network_service_chain,
         runtime_service,
         sync_service,
         transactions_service,
         bitswap_service,
+        chain_metrics,
+        network_metrics,
+        lifecycle_service,
     }
 }

@@ -71,6 +71,25 @@ export default async function statementStoreReception(ctx) {
   }
   report("statement_subscribeStatement accepted", true, `subId=${subId}`);
 
+  // The first notification must be the empty initial batch, the only one with `remaining`.
+  const initialBatch = await rpc.readJsonRpcUntil(
+    para,
+    (msg) => {
+      if (msg.method !== "statement_statement") return undefined;
+      if (msg.params?.subscription !== subId) return undefined;
+      return msg.params.result;
+    },
+    Date.now() + 20_000,
+  );
+  const initialOk =
+    initialBatch?.event === "newStatements" &&
+    Array.isArray(initialBatch.data?.statements) &&
+    initialBatch.data.statements.length === 0 &&
+    initialBatch.data.remaining === 0;
+  const initialDetail = JSON.stringify(initialBatch);
+  report("initial batch: empty newStatements with remaining 0", initialOk, initialDetail);
+  if (!initialOk) throw new Error(`unexpected initial batch: ${initialDetail}`);
+
   // Block until Rust signals that smoldot is peered with both collators at
   // the statement-store level. The listen window below only makes sense
   // after that point: both peers push stmt_A during their initial sync.
@@ -119,12 +138,22 @@ export default async function statementStoreReception(ctx) {
     `other first=${firstOtherMs}ms count=${countOther}`;
   report("reception: stmt_A received exactly once, stmt_B never, no stray statements", ok, detail);
 
-  // Unsubscribe as a best-effort cleanup. Terminating the client implicitly
-  // removes the subscription; the test doesn't fail on this RPC round-trip
-  // since pending notifications may delay the response past our budget.
-  try {
-    rpc.sendRpc(para, "statement_unsubscribeStatement", [subId]);
-  } catch (_) {}
+  // `true` for an active subscription, `false` for one already gone or never issued.
+  const unsubscribe = (id) => rpc.sendRpcAndWait(para, "statement_unsubscribeStatement", [id]);
+  const unsubAnswers = [
+    await unsubscribe(subId),
+    await unsubscribe(subId),
+    await unsubscribe("never-issued"),
+  ];
+  const unsubOk =
+    unsubAnswers[0] === true && unsubAnswers[1] === false && unsubAnswers[2] === false;
+  const unsubDetail = `answers=${JSON.stringify(unsubAnswers)} expected=[true,false,false]`;
+  report(
+    "statement_unsubscribeStatement: true for the active subscription, false once gone or unknown",
+    unsubOk,
+    unsubDetail,
+  );
 
   if (!ok) throw new Error(`reception assertion failed: ${detail}`);
+  if (!unsubOk) throw new Error(`unsubscribe assertion failed: ${unsubDetail}`);
 }

@@ -35,41 +35,41 @@ use zombienet_sdk::{Arg, LocalFileSystem, Network, NetworkConfig, NetworkConfigB
 pub const PARA_ID: u32 = 1004;
 pub const PARA_CHAIN: &str = "people-westend-local";
 
-/// UDP port for `name`'s WebRTC listener. `validator-{i}` gets `33000 + i`
-/// (any index below ELASTIC_VALIDATOR_COUNT), the fixed names live above that range.
-fn webrtc_udp_port(name: &str) -> u16 {
-    let mut base_port = 33000;
-    if let Some(i) = name
-        .strip_prefix("validator-")
-        .and_then(|s| s.parse::<u16>().ok())
-    {
-        if u32::from(i) >= ELASTIC_VALIDATOR_COUNT {
-            unreachable!("validator name: {name}, not associated to any udp port")
+/// Ports already handed out by this process
+static WEBRTC_PORTS_TAKEN: std::sync::Mutex<std::collections::BTreeSet<u16>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Asks the kernel for a free UDP port.
+fn free_loopback_udp_port() -> u16 {
+    loop {
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|s| s.local_addr())
+            .expect("bind an ephemeral loopback UDP port")
+            .port();
+        if WEBRTC_PORTS_TAKEN.lock().unwrap().insert(port) {
+            return port;
         }
-        return base_port + i;
-    }
-    base_port += ELASTIC_VALIDATOR_COUNT as u16;
-    match name {
-        "alice" => base_port,
-        "bob" => base_port + 1,
-        // Bulletin network collators (src/harness.rs).
-        "collator-1" => base_port + 2,
-        "collator-2" => base_port + 3,
-        _ => unreachable!("name: {name}, not associated to any udp port"),
     }
 }
 
-/// Looks up the fixed WebRTC UDP port assigned to `name` and returns the CLI
-/// args that make a substrate node listen for WebRTC on it.
-pub fn listener_args(name: &str) -> Vec<Arg> {
-    let udp_port = webrtc_udp_port(name);
+/// CLI args that make a node listen for WebRTC on a free UDP port.
+///
+/// An explicit `webrtc-direct` listen address is honored regardless of role or flag.
+///
+/// The port itself comes from the kernel's ephemeral range, the same
+/// trick zombienet uses for its TCP ports, so concurrent runs on one machine don't
+/// collide the way a hardcoded base would.
+///
+/// Call once per node. Another process may grab the port between the probe releasing
+/// it and the node binding it; the node then fails to bind and the harness stops with
+/// `missing loopback TCP or WebRTC listen address`.
+pub fn webrtc_args() -> Vec<Arg> {
+    let port = free_loopback_udp_port();
+    // The `=` form is deliberate: zombienet's port-rewrite scan only matches
+    // `Arg::Option` pairs, so the pair form would steal the node's TCP slot.
     vec![
-        ("--listen-addr", "/ip4/0.0.0.0/tcp/0/ws").into(),
-        "--experimental-webrtc".into(),
-        (
-            "--listen-addr",
-            format!("/ip4/127.0.0.1/udp/{udp_port}/webrtc-direct").as_str(),
-        )
+        format!("--listen-addr=/ip4/127.0.0.1/udp/{port}/webrtc-direct")
+            .as_str()
             .into(),
     ]
 }
@@ -265,10 +265,11 @@ fn build_network_config(
             }
             // Per-node DB, element i onto validator-i; empty on Fresh.
             // validator-0 outside the fold sets the typestate.
+            // The WebRTC listener is per node: one UDP port each.
             .with_validator(|n| {
                 n.with_name("validator-0")
                     .bootnode(true)
-                    .with_args(listener_args("validator-0"))
+                    .with_args(webrtc_args())
                     .with_optional_db_snapshot(relay_dbs.first().cloned())
             });
             (1..ELASTIC_VALIDATOR_COUNT).fold(r, |acc, i| {
@@ -276,7 +277,7 @@ fn build_network_config(
                 acc.with_validator(|n| {
                     n.with_name(&format!("validator-{i}"))
                         .bootnode(true)
-                        .with_args(listener_args(&format!("validator-{i}")))
+                        .with_args(webrtc_args())
                         .with_optional_db_snapshot(db)
                 })
             })
@@ -296,18 +297,21 @@ fn build_network_config(
                 None => p,
                 Some(path) => p.with_chain_spec_path(path),
             };
+            // Node-level `with_args` replaces the parachain `default_args`, so the two
+            // default flags are repeated alongside each collator's own WebRTC port.
+            let collator_args = || {
+                [
+                    vec!["--force-authoring".into(), "--authoring=slot-based".into()],
+                    webrtc_args(),
+                ]
+                .concat()
+            };
             p.with_collator(|n| {
-                // Node-level `with_args` replaces the parachain `default_args`,
-                // so the two default flags must be repeated here.
-                let mut args = vec!["--force-authoring".into(), "--authoring=slot-based".into()];
-                args.extend(listener_args("alice"));
-                n.with_name("alice").bootnode(true).with_args(args)
+                n.with_name("alice")
+                    .bootnode(true)
+                    .with_args(collator_args())
             })
-            .with_collator(|n| {
-                let mut args = vec!["--force-authoring".into(), "--authoring=slot-based".into()];
-                args.extend(listener_args("bob"));
-                n.with_name("bob").bootnode(true).with_args(args)
-            })
+            .with_collator(|n| n.with_name("bob").bootnode(true).with_args(collator_args()))
         })
         .with_global_settings(|g| {
             g.with_base_dir(base_dir_str).with_spawn_concurrency(1) // https://github.com/paritytech/smoldot/pull/3249#issuecomment-4438807458
@@ -432,44 +436,70 @@ pub async fn prepare_runtime_spec(
     Ok(out)
 }
 
+/// Drops every `/p2p/<peer_id>` component past the first.
+///
+/// The litep2p backend already appends the local peer id to each listen address,
+/// and `system_localListenAddresses` appends another one unconditionally, so the
+/// RPC hands back `…/p2p/<id>/p2p/<id>`. smoldot's bootnode parser pops exactly
+/// one trailing `/p2p/` and rejects whatever is left over.
+fn normalize_p2p_suffix(addr: &str) -> String {
+    match addr.match_indices("/p2p/").nth(1) {
+        Some((idx, _)) => addr[..idx].to_string(),
+        None => addr.to_string(),
+    }
+}
+
 /// For each named node, returns its dialable multiaddrs to seed `bootNodes`.
+///
+/// Nodes listen on wildcard addresses, which litep2p expands into one advertised
+/// multiaddr per interface. Only the loopback ones are kept: the light clients run
+/// in the same network namespace, and the container/LAN addresses would just cost
+/// smoldot dial timeouts.
 async fn collect_bootnode_multiaddrs(
     network: &Network<LocalFileSystem>,
     names: &[&str],
 ) -> Result<Vec<String>, anyhow::Error> {
     let mut out: Vec<String> = Vec::new();
     for name in names {
-        let node = network.get_node(*name)?;
-        let rpc = node.rpc().await?;
-        let mut listen_addrs: Vec<String> = rpc
-            .request::<Vec<String>>("system_localListenAddresses", RpcParams::new())
-            .await
-            .map_err(|e| anyhow!("{name}: system_localListenAddresses failed: {e}"))?
-            .into_iter()
-            // Keep only loopback addresses.
+        let mut listen_addrs: Vec<String> = rpc_listen_addresses(network, name)
+            .await?
+            .iter()
             .filter(|addr| addr.contains("/ip4/127.0.0.1/"))
+            .map(|addr| normalize_p2p_suffix(addr))
             .collect();
-        // Sanitize multiaddrs: system_localListenAddresses currently appends an
-        // extra /p2p/<peer_id> even when one is already present.
-        for addr in listen_addrs.iter_mut() {
-            if addr.matches("/p2p/").count() == 2 {
-                if let Some(idx) = addr.rfind("/p2p/") {
-                    addr.truncate(idx);
-                }
-            }
-        }
+        // `system_localListenAddresses` is backed by a HashSet, so its order
+        // varies between calls; sort to keep the generated specs reproducible.
+        listen_addrs.sort();
+        listen_addrs.dedup();
 
         let has_tcp = listen_addrs.iter().any(|a| a.contains("/tcp/"));
-        let has_webrtc = listen_addrs.iter().any(|a| a.contains("/webrtc"));
+        // The certhash matters: smoldot rejects a `/webrtc-direct` multiaddr that
+        // lacks one, and an unparsable bootnode is dropped with a warning rather
+        // than an error — the browser host would then hang instead of failing.
+        let has_webrtc = listen_addrs
+            .iter()
+            .any(|a| a.contains("/webrtc-direct/") && a.contains("/certhash/"));
         if !has_tcp || !has_webrtc {
             return Err(anyhow!(
-                "{name}: missing TCP or WebRTC listen address (got {listen_addrs:?})"
+                "{name}: missing loopback TCP or WebRTC listen address (got {listen_addrs:?})"
             ));
         }
 
         out.extend(listen_addrs);
     }
     Ok(out)
+}
+
+/// Reads a node's advertised listen addresses over JSON-RPC.
+async fn rpc_listen_addresses(
+    network: &Network<LocalFileSystem>,
+    name: &str,
+) -> Result<Vec<String>, anyhow::Error> {
+    let node = network.get_node(name)?;
+    let rpc = node.rpc().await?;
+    rpc.request::<Vec<String>>("system_localListenAddresses", RpcParams::new())
+        .await
+        .map_err(|e| anyhow!("{name}: system_localListenAddresses failed: {e}"))
 }
 
 fn write_spec_with_bootnodes(
@@ -570,6 +600,46 @@ pub async fn run_chainhead_v1_follow(
     with_runtime: bool,
     follow: FollowChain,
 ) -> Result<(), anyhow::Error> {
+    run_chainhead_v1_follow_with_env(live, cfg, with_runtime, follow, &[]).await
+}
+
+/// Number of `finalized` events the early-unpin test waits for. The runtime
+/// service allows 32 pinned finalized or pruned blocks per subscription, and
+/// the leak cost one slot per finalized event, so the subscription used to be
+/// stopped at the 32nd event.
+const UNPIN_EARLY_MIN_FINALIZED_EVENTS: u32 = 40;
+
+/// Follows the relay chain with runtime and unpins every block as soon as it
+/// is announced. Fails if the subscription is stopped before
+/// [`UNPIN_EARLY_MIN_FINALIZED_EVENTS`] `finalized` events arrive.
+pub async fn run_chainhead_v1_unpin_early(
+    live: &LiveNetwork,
+    cfg: &Scenario,
+) -> Result<(), anyhow::Error> {
+    let min_finalized = UNPIN_EARLY_MIN_FINALIZED_EVENTS.to_string();
+    run_chainhead_v1_follow_with_env(
+        live,
+        cfg,
+        true,
+        FollowChain::Relay,
+        &[
+            ("UNPIN_EARLY", "true"),
+            ("TEST_RESUBSCRIBE", "false"),
+            ("MIN_FINALIZED_EVENTS", min_finalized.as_str()),
+            ("PER_SUB_TIMEOUT_MS", "540000"),
+            ("OVERALL_TIMEOUT_MS", "600000"),
+        ],
+    )
+    .await
+}
+
+async fn run_chainhead_v1_follow_with_env(
+    live: &LiveNetwork,
+    cfg: &Scenario,
+    with_runtime: bool,
+    follow: FollowChain,
+    extra_env: &[(&str, &str)],
+) -> Result<(), anyhow::Error> {
     let relay_spec_str = live.relay_spec.to_str().expect("UTF-8 path");
     let para_spec_str = live.para_spec.to_str().expect("UTF-8 path");
 
@@ -589,8 +659,7 @@ pub async fn run_chainhead_v1_follow(
         FollowChain::Para => "para",
     };
 
-    // NOTE: temporarily disable tests exec within browser.
-    for host in [crate::Host::Node /* crate::Host::Browser */] {
+    for host in [crate::Host::Node, crate::Host::Browser] {
         // Re-sample the live heights per host: the network keeps advancing
         // while the previous host runs, and the validator compares smoldot's
         // initial finalized against these values for the lag-regression check.
@@ -622,6 +691,7 @@ pub async fn run_chainhead_v1_follow(
             env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
             env_vars.push(("SMOLDOT_DB_PARA", para_db.as_str()));
         }
+        env_vars.extend_from_slice(extra_env);
 
         log::info!(
             "running chainHead_v1_follow on {host:?} host (follow={followed}, with_runtime={with_runtime}, relay best/finalized=#{relay_best}/#{relay_finalized}, para best/finalized=#{para_best}/#{para_finalized})"
@@ -630,6 +700,51 @@ pub async fn run_chainhead_v1_follow(
             .await
             .map_err(|e| anyhow!("chainhead_v1_follow failed on {host:?} host: {e}"))?;
     }
+    Ok(())
+}
+
+/// Runs the shared `lifecycle` body against a live network on the Node host.
+/// The relay chain is expected to warp sync (and therefore to report `syncing`
+/// progress) if the network's finalized tip is more than
+/// [`WARP_SYNC_MINIMUM_GAP`] blocks ahead of smoldot's starting point.
+pub async fn run_lifecycle(live: &LiveNetwork, cfg: &Scenario) -> Result<(), anyhow::Error> {
+    let relay_spec_str = live.relay_spec.to_str().expect("UTF-8 path");
+    let para_spec_str = live.para_spec.to_str().expect("UTF-8 path");
+
+    let smoldot_db_paths = cfg.smoldot_db().map(|db| {
+        (
+            db.relay_db_json.to_str().expect("UTF-8 path").to_owned(),
+            db.para_db_json.to_str().expect("UTF-8 path").to_owned(),
+        )
+    });
+
+    let expect_warp_sync = match cfg.snapshot() {
+        None => false,
+        Some(snapshot) => {
+            let start = match cfg.smoldot_db() {
+                Some(db) => parse_finalized_height_from_db(&db.relay_db_json)?,
+                None => parse_finalized_height_from_spec(&snapshot.smoldot_relay_spec)?,
+            };
+            live.expected_initial_finalized > start
+        }
+    };
+    let expect_warp_sync_str = if expect_warp_sync { "true" } else { "false" };
+
+    let mut env_vars: Vec<(&str, &str)> = vec![
+        ("RELAY_CHAIN_SPEC", relay_spec_str),
+        ("PARA_CHAIN_SPEC", para_spec_str),
+        ("EXPECT_WARP_SYNC", expect_warp_sync_str),
+    ];
+    if let Some((relay_db, para_db)) = smoldot_db_paths.as_ref() {
+        env_vars.push(("SMOLDOT_DB_RELAY", relay_db.as_str()));
+        env_vars.push(("SMOLDOT_DB_PARA", para_db.as_str()));
+    }
+
+    log::info!("running lifecycle test on Node host (expect_warp_sync={expect_warp_sync})");
+    crate::ensure_js_deps_installed();
+    crate::run_shared_test(crate::Host::Node, "lifecycle", &env_vars)
+        .await
+        .map_err(|e| anyhow!("lifecycle failed on Node host: {e}"))?;
     Ok(())
 }
 
