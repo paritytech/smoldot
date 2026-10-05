@@ -15,9 +15,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use smoldot::libp2p::multiaddr::{Multiaddr, Protocol};
+use smoldot::libp2p::{
+    multiaddr::{Multiaddr, Protocol},
+    multihash::Multihash,
+};
 
-use super::{Address, ConnectionType, MultiStreamAddress};
+use super::{Address, ConnectionType, DnsFamily, MultiStreamAddress};
 use core::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     str,
@@ -118,41 +121,48 @@ pub fn multiaddr_to_address(
             Protocol::Udp(port),
             Some(Protocol::WebRtcDirect),
             Some(Protocol::Certhash(multihash)),
-        ) => {
-            if multihash.hash_algorithm_code() != 0x12 {
-                return Err(Error::NonSha256Certhash);
-            }
-            let Ok(remote_certificate_sha256) = <&[u8; 32]>::try_from(multihash.data_ref()) else {
-                return Err(Error::InvalidMultihashLength);
-            };
-            AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtc {
-                ip: IpAddr::V4(Ipv4Addr::from(ip)),
-                port,
-                remote_certificate_sha256,
-            })
-        }
+        ) => AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtc {
+            ip: IpAddr::V4(Ipv4Addr::from(ip)),
+            port,
+            remote_certificate_sha256: certhash_sha256(&multihash)?,
+        }),
 
         (
             Protocol::Ip6(ip),
             Protocol::Udp(port),
             Some(Protocol::WebRtcDirect),
             Some(Protocol::Certhash(multihash)),
-        ) => {
-            if multihash.hash_algorithm_code() != 0x12 {
-                return Err(Error::NonSha256Certhash);
-            }
-            let Ok(remote_certificate_sha256) = <&[u8; 32]>::try_from(multihash.data_ref()) else {
-                return Err(Error::InvalidMultihashLength);
-            };
-            AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtc {
-                ip: IpAddr::V6(Ipv6Addr::from(ip)),
-                port,
-                remote_certificate_sha256,
-            })
-        }
-
+        ) => AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtc {
+            ip: IpAddr::V6(Ipv6Addr::from(ip)),
+            port,
+            remote_certificate_sha256: certhash_sha256(&multihash)?,
+        }),
+        (
+            dns @ (Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr)),
+            Protocol::Udp(port),
+            Some(Protocol::WebRtcDirect),
+            Some(Protocol::Certhash(multihash)),
+        ) => AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtcDns {
+            hostname: str::from_utf8(addr.into_bytes()).map_err(Error::NonUtf8DomainName)?,
+            family: match dns {
+                Protocol::Dns(_) => DnsFamily::Any,
+                Protocol::Dns4(_) => DnsFamily::Ipv4,
+                Protocol::Dns6(_) => DnsFamily::Ipv6,
+                _ => unreachable!(),
+            },
+            port,
+            remote_certificate_sha256: certhash_sha256(&multihash)?,
+        }),
         _ => return Err(Error::UnknownCombination),
     })
+}
+
+/// Extracts the SHA-256 hash out of the multihash of a `/certhash` component.
+fn certhash_sha256<'a>(multihash: &Multihash<&'a [u8]>) -> Result<&'a [u8; 32], Error> {
+    if multihash.hash_algorithm_code() != 0x12 {
+        return Err(Error::NonSha256Certhash);
+    }
+    <&[u8; 32]>::try_from(multihash.data_ref()).map_err(|_| Error::InvalidMultihashLength)
 }
 
 #[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
@@ -175,4 +185,129 @@ pub enum Error {
 
     /// Multiaddr contains a multihash whose length doesn't match its hash algorithm.
     InvalidMultihashLength,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AddressOrMultiStreamAddress, Error, multiaddr_to_address};
+    use crate::platform::{ConnectionType, DnsFamily, MultiStreamAddress};
+    use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use smoldot::libp2p::multiaddr::Multiaddr;
+
+    /// SHA-256 certhash of a real `webrtc-direct` bootnode.
+    const CERTHASH: &str = "uEiBsqkcr8pOaNjl6px_v1nBatWMfXB9C_sU8fDat3mZWfQ";
+
+    fn multistream(multiaddr: &Multiaddr) -> MultiStreamAddress<'_> {
+        match multiaddr_to_address(multiaddr).unwrap() {
+            AddressOrMultiStreamAddress::MultiStreamAddress(addr) => addr,
+            AddressOrMultiStreamAddress::Address(addr) => {
+                panic!("expected a multistream address, got {addr:?}")
+            }
+        }
+    }
+
+    fn cert_of(addr: &MultiStreamAddress) -> [u8; 32] {
+        match addr {
+            MultiStreamAddress::WebRtc {
+                remote_certificate_sha256,
+                ..
+            }
+            | MultiStreamAddress::WebRtcDns {
+                remote_certificate_sha256,
+                ..
+            } => **remote_certificate_sha256,
+        }
+    }
+
+    #[test]
+    fn webrtc_with_ip_address() {
+        let ip4: Multiaddr = format!("/ip4/1.2.3.4/udp/30333/webrtc-direct/certhash/{CERTHASH}")
+            .parse()
+            .unwrap();
+        let parsed = multistream(&ip4);
+        assert!(matches!(
+            parsed,
+            MultiStreamAddress::WebRtc { ip: IpAddr::V4(ip), port: 30333, .. }
+                if ip == Ipv4Addr::new(1, 2, 3, 4)
+        ));
+        assert_eq!(ConnectionType::from(&parsed), ConnectionType::WebRtcIpv4);
+
+        let ip6: Multiaddr = format!("/ip6/::1/udp/30333/webrtc-direct/certhash/{CERTHASH}")
+            .parse()
+            .unwrap();
+        let parsed = multistream(&ip6);
+        assert!(matches!(
+            parsed,
+            MultiStreamAddress::WebRtc { ip: IpAddr::V6(ip), port: 30333, .. }
+                if ip == Ipv6Addr::LOCALHOST
+        ));
+        assert_eq!(ConnectionType::from(&parsed), ConnectionType::WebRtcIpv6);
+    }
+
+    #[test]
+    fn webrtc_with_domain_name() {
+        let ip4: Multiaddr = format!("/ip4/1.2.3.4/udp/30333/webrtc-direct/certhash/{CERTHASH}")
+            .parse()
+            .unwrap();
+        let expected_cert = cert_of(&multistream(&ip4));
+
+        for (protocol, family) in [
+            ("dns", DnsFamily::Any),
+            ("dns4", DnsFamily::Ipv4),
+            ("dns6", DnsFamily::Ipv6),
+        ] {
+            let multiaddr: Multiaddr =
+                format!("/{protocol}/example.com/udp/30333/webrtc-direct/certhash/{CERTHASH}")
+                    .parse()
+                    .unwrap();
+            let parsed = multistream(&multiaddr);
+            assert_eq!(
+                parsed,
+                MultiStreamAddress::WebRtcDns {
+                    hostname: "example.com",
+                    family,
+                    port: 30333,
+                    remote_certificate_sha256: &expected_cert,
+                },
+                "{protocol}"
+            );
+            assert_eq!(ConnectionType::from(&parsed), ConnectionType::WebRtcDns);
+        }
+    }
+
+    #[test]
+    fn webrtc_rejected_combinations() {
+        // `dnsaddr` is never dialed directly.
+        let multiaddr: Multiaddr =
+            format!("/dnsaddr/example.com/udp/1/webrtc-direct/certhash/{CERTHASH}")
+                .parse()
+                .unwrap();
+        assert!(matches!(
+            multiaddr_to_address(&multiaddr),
+            Err(Error::UnknownCombination)
+        ));
+
+        // A certhash is mandatory.
+        let multiaddr: Multiaddr = "/dns/example.com/udp/1/webrtc-direct".parse().unwrap();
+        assert!(matches!(
+            multiaddr_to_address(&multiaddr),
+            Err(Error::UnknownCombination)
+        ));
+
+        // SHA-1 multihash (code 0x11, 20 zero bytes), base64url without padding.
+        let sha1_certhash = format!("u{}{}", "ERQ", "A".repeat(27));
+        for host in ["dns/example.com", "ip4/1.2.3.4"] {
+            let multiaddr: Multiaddr =
+                format!("/{host}/udp/1/webrtc-direct/certhash/{sha1_certhash}")
+                    .parse()
+                    .unwrap();
+            assert!(
+                matches!(
+                    multiaddr_to_address(&multiaddr),
+                    Err(Error::NonSha256Certhash)
+                ),
+                "{host}"
+            );
+        }
+    }
 }

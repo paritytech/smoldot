@@ -112,7 +112,12 @@ export async function createBrowserHost() {
         },
       });
       await page.route("**/*", async (route) => {
-        const { pathname } = new URL(route.request().url());
+        const url = new URL(route.request().url());
+        // Only the page itself and the smoldot files are served from disk. Anything the page
+        // fetches elsewhere goes to the real network, like the DNS-over-HTTPS lookups smoldot
+        // makes for `/dns/…/webrtc-direct` addresses.
+        if (url.origin !== "http://localhost") return route.continue();
+        const { pathname } = url;
         if (pathname === "/") return route.fulfill({ contentType: "text/html", body: PAGE_HTML });
         if (!pathname.startsWith("/smoldot/")) return route.fulfill({ status: 404, body: "" });
         const file = path.resolve(smoldotDir, pathname.slice("/smoldot/".length));

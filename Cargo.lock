@@ -2729,6 +2729,7 @@ dependencies = [
  "slab",
  "smallvec",
  "soketto",
+ "strum",
  "tempfile",
  "twox-hash",
  "wasmi",
