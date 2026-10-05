@@ -187,6 +187,8 @@ unsafe extern "C" {
     /// - One `type` byte (see below).
     /// - Two big-endian bytes representing the port (either TCP or UDP depending on the `type`)
     ///   to connect to.
+    /// - (type `18` only) One byte indicating the address family that the domain name must
+    ///   resolve to: `0` for either IPv4 or IPv6, `4` for IPv4 only, `6` for IPv6 only.
     /// - (optional) The 32 bytes SHA-256 hash of the certificate of the remote.
     /// - An UTF-8-encoded IP address or domain name. Use the `addr_len` parameter to determine
     ///   its length. When using an IPv4, it is encoded as `a.b.c.d`. When using an IPv6, it is
@@ -203,6 +205,9 @@ unsafe extern "C" {
     /// - `14`: WebSocket secure connection, with a port and a domaine name.
     /// - `16`: WebRTC connection, with a port, an IPv4 address, and a remote certificate hash.
     /// - `17`: WebRTC connection, with a port, an IPv6 address, and a remote certificate hash.
+    /// - `18`: WebRTC connection, with a port, a domain name, and a remote certificate hash.
+    ///   WebRTC requires a literal IP address, and the host is responsible for resolving the
+    ///   domain name itself.
     ///
     /// > **Note**: While these numbers seem arbitrary, they actually loosely follow a certain
     /// >           scheme. The lowest 2 bits indicate the type of IP address, while the highest
