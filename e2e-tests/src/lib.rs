@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 pub mod bulletin;
 pub mod harness;
+pub mod jam;
 pub mod network;
 pub mod snapshot;
 pub mod statement;
@@ -97,6 +98,29 @@ impl SyncFile {
         writeln!(f, "{message}")?;
         Ok(())
     }
+
+    /// The other direction: waits until the body has sent `label` with
+    /// `ctx.sendSync(label)` (browser host only), which appends `js:<label>`
+    /// to the same file. Used where Rust must inject a fault at a point only
+    /// the body can observe, such as "the client is at the tip".
+    pub async fn wait_for_js(
+        &self,
+        label: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), anyhow::Error> {
+        let expected = format!("js:{label}");
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let contents = std::fs::read_to_string(self.file.path()).unwrap_or_default();
+            if contents.lines().any(|line| line.trim() == expected) {
+                return Ok(());
+            }
+            if std::time::Instant::now() > deadline {
+                anyhow::bail!("the body did not send \"{label}\" within {timeout:?}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
 }
 
 /// Resolves the base directory tests share with zombienet.
@@ -121,8 +145,19 @@ fn project_root() -> PathBuf {
 }
 
 /// Ensures the smoldot JS bundle is built, to make cargo test self-sufficient.
+///
+/// `SKIP_SMOLDOT_BUILD=1` uses the bundle already in `wasm-node/javascript/dist`
+/// (as `SKIP_BUILD` does for `run_chainhead_test.sh`), for hosts where
+/// `npm run build` cannot run or when iterating on a test body.
 pub fn ensure_smoldot_built() {
     let js_dir = project_root().join("wasm-node/javascript");
+    if std::env::var_os("SKIP_SMOLDOT_BUILD").is_some() {
+        assert!(
+            js_dir.join("dist/mjs/index-browser.js").is_file(),
+            "SKIP_SMOLDOT_BUILD is set but wasm-node/javascript/dist is not built"
+        );
+        return;
+    }
     if !js_dir.join("node_modules").exists() {
         let status = std::process::Command::new("npm")
             .arg("ci")
@@ -165,6 +200,11 @@ pub fn ensure_js_deps_installed() {
 /// Chromium is downloaded.
 pub fn ensure_browser_deps_installed() {
     ensure_deps_installed();
+    // `CHROMIUM_PATH` names an installed Chrome (`hosts/browser/run.js` launches
+    // it), for hosts where Playwright's own download does not run, such as NixOS.
+    if std::env::var_os("CHROMIUM_PATH").is_some() {
+        return;
+    }
     // `playwright install chromium` is idempotent and a no-op if the browser
     // is already cached locally.
     let status = std::process::Command::new("npx")

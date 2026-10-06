@@ -1,51 +1,25 @@
 # JAM GRANDPA finality
 
-`npm run test:jam:finality` runs a fresh six-validator PolkaJam GRANDPA network,
-verifies three authority sets through the browser's real smoldot bundle, checks
-that pinned headers survive tree pruning, and reconnects node0 while finality
-advances. It writes `capture.json` (headers, raw framed CE130 exchanges, follow
-events and client logs) to its printed runtime directory and tears down all nodes.
-
-Build the browser bundle first, then run from `wasm-node/javascript`:
+The live GRANDPA acceptance is the `jam_finality` scenario in `e2e-tests`
+(`e2e-tests/docs/jam-scenarios.md`): a fresh six-validator PolkaJam GRANDPA
+network on zombienet, the browser's real smoldot bundle verifying three
+authority sets, a pinned header surviving tree pruning, and jam0 stopped and
+started again while finality advances.
 
 ```sh
-node prepare.mjs --debug
-npm run buildModules
-POLKAJAM_BIN_DIR=/path/to/pinned/binaries npm run test:jam:finality
+cargo test --manifest-path e2e-tests/Cargo.toml --test jam_finality -- --nocapture
 ```
 
-`POLKAJAM_BIN_DIR` is optional: without it `polkajam` is taken from `PATH`.
-It is the only required executable and must be built beforehand; nothing is
-built during a run. A missing executable stops startup. Build instructions for
-PolkaJam `3ccb03b7dc5ca54b16de81db7fdf7076de083ad0` are in
-[README.md](README.md). Every node reads [dev-chain-spec.json](dev-chain-spec.json),
-with validator ports fixed at 40000–40005. Stop other test/demo networks first.
-`CHROMIUM_PATH` optionally selects a system Chrome executable.
-`JAM_RPC_PORT` (24800) and `JAM_RUNTIME_DIR` override the independent defaults.
 To regenerate the committed fixture from a successful run, set
-`JAM_FINALITY_FIXTURE` to its output path. The exporter keeps the original header
-and CE130 payload bytes, checks frame lengths, hashes and captured ancestry, and
-retains proofs whose targets the browser finalized. It requires at least twenty
-proofs across three authority sets. Raw exchanges remain in `capture.json`.
+`JAM_FINALITY_FIXTURE` to its output path; the raw capture (headers, CE 130
+exchanges, follow events, client logs) goes next to it as
+`<path>.capture.json`. The exporter keeps the original header and CE 130 payload
+bytes, checks frame lengths, hashes and captured ancestry, and retains proofs
+whose targets the browser finalized. It requires at least twenty proofs across
+three authority sets.
 
-C2's `npm run test:jam` retains its Dummy-mode default and no-finality assertions.
-The manual demo's harness explicitly selects GRANDPA.
-
-Both finality modes launch six validators and one ordinary RPC node directly,
-using the same checked-in genesis. From `wasm-node/javascript`:
-
-```sh
-polkajam --config-path "$NODE/conf" --chain test/jam/dev-chain-spec.json run \
-  --data-path "$NODE/data" --finality-mode grandpa --dev-validator 0
-# Repeat with validator indices 1 through 5 and separate NODE directories.
-polkajam --config-path "$RPC_NODE/conf" --chain test/jam/dev-chain-spec.json run \
-  --data-path "$RPC_NODE/data" --finality-mode grandpa \
-  --mode=ordinary --rpc-port 24800
-```
-
-Use `POLKAVM_BACKEND=interpreter` with the existing header-only dev binaries.
-The runner does not build or modify PolkaJam. Restarts preserve GRANDPA mode and
-node0's database. The C3 harness owns the separate manual-demo server.
+The `jam_follow` scenario (the browser gate) keeps Dummy mode and its
+no-finality assertions. The manual demo's networks run GRANDPA.
 
 ## Trusted checkpoints
 

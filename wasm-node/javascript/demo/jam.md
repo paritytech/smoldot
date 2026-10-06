@@ -1,50 +1,60 @@
 # JAM light client — local demo and manual QA walkthrough
 
-One command starts a local PolkaJam dev network, serves this page with the
-embedded smoldot browser build against it, and gives you a live view plus
-buttons to break and restore the network:
+The demo is a PolkaJam network that zombienet starts and a small harness that
+serves this page, with the embedded smoldot browser build, against it. The
+harness starts no network itself. There are two ways to get one, each in two
+terminals, from the smoldot root:
 
 ```sh
-cd wasm-node/javascript
-npm run demo:jam
+# Route 1: zombie-cli and the checked-in TOML.
+# terminal 1
+ZOMBIE_CLI=<zombienet-sdk>/target/release/zombie-cli \
+POLKAJAM_BIN_DIR=<polkajam>/target/release just zombie-jam
+# terminal 2, once terminal 1 prints "network is up"
+just demo-jam-attach
 ```
 
-To rebuild smoldot's WASM and JavaScript before launching, use
-`npm run demo:jam:rebuild` instead. `demo:jam` uses the existing build.
+```sh
+# Route 2: the DEV_MODE of the e2e-tests JAM scenarios (zombienet-sdk).
+# terminal 1
+POLKAJAM_BIN_DIR=<polkajam>/target/release just demo-jam-dev
+# terminal 2: the command terminal 1 prints, for example
+just demo-jam-attach '/tmp/zombienet-<pid>/jam_spec.json' <rpc port>
+```
 
-It prints one URL. Open it, press **Start**, and watch a JAM chain arrive in the
-browser. Ctrl-C stops the network and the server. No second terminal, no pasted
-shell heredoc, no hand-edited spec.
+The harness prints one URL. Open it, press **Start**, and watch a JAM chain
+arrive in the browser. Ctrl-C in terminal 2 stops only the server; Ctrl-C in
+terminal 1 stops the network.
 
 **Trusted starting point; verified live finality.** The spec supplies a trusted
 anchor header and its post-state. `initialized` describes that anchor; later
 `finalized` events follow verified GRANDPA proofs and ordered authority
-transitions. The demo starts every PolkaJam node in GRANDPA mode and follows
-with `[false]` (`withRuntime: false`), without runtime execution. Finalization
-prunes old ancestors and discarded forks. If proofs cannot be obtained, the
-client keeps its last verified head and eventually reaches its resource bound.
-C2's `npm run test:jam` continues to use Dummy mode; `npm run test:jam:finality`
-runs the dedicated GRANDPA acceptance and proof capture.
+transitions. Both routes start every PolkaJam node in GRANDPA mode, and the page
+follows with `[false]` (`withRuntime: false`), without runtime execution.
+Finalization prunes old ancestors and discarded forks. If proofs cannot be
+obtained, the client keeps its last verified head and eventually reaches its
+resource bound. The automated scenarios live in `e2e-tests` (see
+`e2e-tests/docs/jam-scenarios.md`): `jam_follow` runs Dummy finality,
+`jam_finality` the GRANDPA acceptance and proof capture.
 
 ## Prerequisites
 
-- **A browser bundle.** `npm run demo:jam` checks for
-  `dist/mjs/index-browser.js` and refuses to start without it. To build and
-  launch, use `npm run demo:jam:rebuild`: it rebuilds the WASM in debug mode,
-  clears `dist`, compiles the JavaScript, and starts the demo only if the build
-  succeeds. Building requires JavaScript dependencies (`npm ci`) and a Rust
-  toolchain with the `wasm32v1-none` or `wasm32-unknown-unknown` target. For a
-  min-size release bundle, use `npm run build` followed by `npm run demo:jam`.
-  After editing Rust or JavaScript, stop the demo, run `npm run demo:jam:rebuild`,
-  and reload the page.
-- **The `polkajam` executable, already built.** The spec is pinned to
-  `3ccb03b7dc5ca54b16de81db7fdf7076de083ad0`. The harness looks in
-  `POLKAJAM_BIN_DIR` if set, otherwise on `PATH`, and stops if it is missing.
+- **A browser bundle.** `npm run demo:jam` (what `just demo-jam-attach` runs)
+  checks for `dist/mjs/index-browser.js` and refuses to start without it.
+  `npm run demo:jam:rebuild` rebuilds the WASM in debug mode, clears `dist`,
+  compiles the JavaScript, and starts the harness only if the build succeeds
+  (set `JAM_SPEC_PATH` and `JAM_RPC_PORT` for it as `demo-jam-attach` does).
+  Building requires JavaScript dependencies (`npm ci`) and a Rust toolchain
+  with the `wasm32v1-none` or `wasm32-unknown-unknown` target. For a min-size
+  release bundle, use `npm run build`. After editing Rust or JavaScript, stop
+  the harness, rebuild, and reload the page.
+- **The `polkajam` executable, already built**, from the PolkaJam branch
+  `skunert/polkajam-light-client` at `3ccb03b7dc5ca54b16de81db7fdf7076de083ad0`.
+  Both routes take it from `POLKAJAM_BIN_DIR` if set, otherwise from `PATH`.
   A `polkajam` older than this pin signs GRANDPA votes without the posterior
   state root: the client logs `jam-finality-rejected` and `jam-warp-rejected`
   with `Decode(LengthLimit)`, reconnects, and never shows `jam-warp-applied` or
-  a finalized update. Select the pinned build with `POLKAJAM_BIN_DIR`; the
-  harness never clones or builds binaries. Build once in a PolkaJam checkout:
+  a finalized update. Build once in the PolkaJam checkout:
 
   ```sh
   SKIP_PVM_BUILDS=1 CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTC_BOOTSTRAP=1 \
@@ -54,26 +64,35 @@ runs the dedicated GRANDPA acceptance and proof capture.
 
   `SKIP_PVM_BUILDS=1` stops PolkaJam's build script from building the guest
   blob, so stable Rust 1.93.0 suffices; on a Nix host add `NIX_ENFORCE_PURITY=0`.
-  The [test README](../test/jam/README.md) explains the flags.
-
-  Then put `polkajam` on `PATH`, or run
-  `POLKAJAM_BIN_DIR=/path/to/polkajam/target/release npm run demo:jam`.
-  Nodes always load [the checked-in spec](../test/jam/dev-chain-spec.json),
-  so its genesis does not depend on how the installed binary built its service
-  blobs. [Spec provenance and regeneration](../test/jam/CHAIN_SPEC.md) are
-  recorded beside it.
+- **zombienet-sdk** from its branch `skunert/polkajam-light-client`: route 1
+  needs its `zombie-cli` (`cargo build --release -p zombie-cli`, then
+  `ZOMBIE_CLI`, else `zombie-cli` from `PATH`); route 2 builds `e2e-tests`,
+  which takes the SDK from that checkout by path. Only that branch writes each
+  validator's P-256 id into the genesis `C(8)` and every validator into the
+  spec's `bootnodes` as `<ed25519>+<p256>@127.0.0.1:<port>`, and only that
+  PolkaJam parses the combined form.
 - Node 22 or newer. The demo adds no npm dependency.
 
-Optional environment knobs, the same names C2's `npm run test:jam` uses:
-`JAM_RPC_PORT` (19800), `JAM_RUNTIME_DIR` (a fresh temporary directory), plus
-`JAM_HTTP_PORT` (8080) for this page. Validator UDP ports are fixed by the spec
-at 40000–40005. Stop other JAM test/demo networks first; occupied ports fail
-startup. RPC and HTTP ports can change without changing genesis.
+`just zombie-jam` runs `zombie-cli spawn --provider native --dir /tmp/jam-zombie
+--node-verifier none test/jam/zombienet/tiny-grandpa.toml`: six GRANDPA
+validators `jam0`..`jam5` on ports zombienet picks, and the ordinary node
+`jam-or` with RPC on 19800. `just demo-jam-dev` runs
+`DEV_MODE=1 cargo test --manifest-path e2e-tests/Cargo.toml --test jam_demo`,
+which spawns the same topology through zombienet-sdk on free ports and prints
+the harness command with its spec path and RPC port; `just demo-jam-dev
+jam_follow` gives the Dummy network of the browser gate instead. Either way the
+validator ports live in the generated spec, so nothing in this repository fixes
+them.
+
+`just demo-jam-attach` takes the spec path and the RPC port as arguments,
+defaulting to `JAM_SPEC_PATH` and `JAM_RPC_PORT`, then to
+`/tmp/jam-zombie/jam_spec.json` and 19800, which are route 1's. `JAM_HTTP_PORT`
+(8080) moves this page.
 
 ## Browsers
 
 - **Chrome / Chromium** — verified for this walkthrough. WebTransport with
-  `serverCertificateHashes` reaches `127.0.0.1:40000` with no command-line flags
+  `serverCertificateHashes` reaches the loopback validators with no command-line flags
   when the page is served from `127.0.0.1`, as the harness does.
 - **Firefox** — verified by earlier rounds against the C1 page; see the note at
   the end of this file and `notes/C3-M11c-manual_demo.md` in the planning
@@ -89,18 +108,17 @@ a secure context, which is exactly what WebTransport needs.
 | Path | What it is |
 |---|---|
 | `/demo/jam.html` | this page |
-| `/jam-demo/spec.json` | the checked-in genesis with the combined browser bootnode added, re-read from disk on every request |
-| `/jam-demo/spec-wrong-authorities.json` | the same spec with a corrupted genesis authority set (step 10) |
-| `/jam-demo/control` | `POST {"action": "status" \| "dev-bootnode" \| "kill-node0" \| "start-node0" \| "restart-node0"}`; the page also posts `{"action": "peers", ...}` with its client's connected peers, which `status` returns as `browserPeers` and summarizes in `peersLine` |
+| `/jam-demo/spec.json` | the attached network's spec (`JAM_SPEC_PATH`), unchanged, re-read from disk on every request |
+| `/jam-demo/spec-wrong-authorities.json` | the same spec with a corrupted genesis authority set (step 10), built from it on every request by `corruptGenesisAuthorities` in `e2e-tests/shared/jam.js`, the builder the browser gate uses |
+| `/jam-demo/control` | `POST {"action": "status" \| "kill-node0" \| "start-node0" \| "restart-node0"}`; the node actions answer `not managed by this harness in attach mode`, because the network belongs to zombienet. The page also posts `{"action": "peers", ...}` with its client's connected peers, which `status` returns as `browserPeers` and summarizes in `peersLine` |
 | everything else | files under `wasm-node/javascript/` |
 
 The server binds `127.0.0.1` only and rejects non-loopback peers and foreign
 `Host` headers. There is no authentication beyond that, so do not expose it.
 
-The bootnode address is never written into this page. It comes from
-`test/jam/network.mjs`'s `formatBootnode`, the one place in this repository that
-knows the combined Ed25519 and P-256 identity spelling, so the page and the network can
-never disagree about the identity or the port.
+The page never writes a bootnode address itself: the spec zombienet generated
+names every validator as a combined Ed25519 and P-256 bootnode, and its genesis
+`C(8)` carries the same validators.
 
 ## Reading the live view
 
@@ -158,35 +176,7 @@ exactly one down the table, each row's Parent equal to the hash of the row below
 it, the author index moving around the validator set, and an `epoch` mark on the
 row whose epoch position is 0.
 
-## With zombienet
-
-The same page can follow a network that zombienet starts, in two terminals:
-
-```sh
-# terminal 1, from the smoldot root
-ZOMBIE_CLI=<zombienet-sdk>/target/release/zombie-cli \
-POLKAJAM_BIN_DIR=<polkajam>/target/release just zombie-jam
-# terminal 2, once terminal 1 prints "network is up"
-just demo-jam-attach
-```
-
-`just zombie-jam` runs `zombie-cli spawn --provider native --dir /tmp/jam-zombie
---node-verifier none test/jam/zombienet/tiny-grandpa.toml`: six GRANDPA
-validators `jam0`..`jam5` on ports zombienet picks, and the ordinary node
-`jam-or` with RPC on 19800. Both binaries must come from the
-`skunert/polkajam-light-client` branches of zombienet-sdk and PolkaJam: only
-those write each validator's P-256 id into the genesis `C(8)` and every
-validator into the spec's `bootnodes` as `<ed25519>+<p256>@127.0.0.1:<port>`,
-and only that PolkaJam parses the combined form. Ctrl-C in terminal 1 stops the
-network.
-
-`just demo-jam-attach` starts the harness in attach mode (`JAM_SPEC_PATH`,
-default `/tmp/jam-zombie/jam_spec.json`, and `JAM_RPC_PORT`, default 19800). It
-serves that spec unchanged, runs the node oracle against that port, and starts
-no network: **Kill/Start/Restart node0** answer `not managed by this harness in
-attach mode`, the dev-bootnode checkbox is not needed (the spec names its own
-peers), `spec-wrong-authorities.json` does not exist, and Ctrl-C stops only the
-server. Open the printed URL and press **Start** as below.
+## Peers: bootnodes, genesis set, live set
 
 The client puts every source into one candidate pool: the spec's bootnodes
 first, then the genesis `C(8)` validators (a validator that is also a bootnode
@@ -194,9 +184,8 @@ is one candidate, the bootnode), replaced by the live `C(8)` after the first
 verified finality advance. All of them are liveness sources only; whatever they
 serve is verified the same way. A spec with neither a P-256 bootnode nor a
 P-256 id in its genesis `C(8)` is refused at load with an error naming both.
-To try a spec without bootnodes, strip its `bootnodes` and pass the copy:
-`just demo-jam-attach /abs/path/spec.json`. Killing a validator by PID
-(`pgrep -f /tmp/jam-zombie/jam0/cfg`) shows the client moving to the others.
+To try a spec with fewer bootnodes, edit a copy's `bootnodes` and pass it:
+`just demo-jam-attach /abs/path/spec.json <rpc port>`.
 
 ## Checklist
 
@@ -224,13 +213,13 @@ passes about every 72 seconds and you will see several in a normal session.
    the current client; run `npm run demo:jam:rebuild` and reload after source changes);
    Connection stuck at *Connecting (following, no block yet)* while the log
    repeats `jam-connect` / `jam-reconnect` (the client cannot reach the
-   bootnode); *Client vs node* drifting further behind with every poll.
+   bootnodes); *Client vs node* drifting further behind with every poll.
    Three `stop` events within 30 seconds are an error: the log names the count
    and the page stops instead of retrying indefinitely.
    *Note:* every Start warps to the peer's finalized head and syncs the suffix
    on an aged network. Ascending catch-up verifies the remaining headers, with
-   verified finality pruning the tree. See the aged-network acceptance command
-   in [the test README](../test/jam/README.md).
+   verified finality pruning the tree. The `jam_aged` scenario in `e2e-tests`
+   checks exactly that join on a restored aged network.
 
 2. **Slots advance.**
    *Do:* watch for half a minute.
@@ -262,57 +251,57 @@ passes about every 72 seconds and you will see several in a normal session.
    *Failure:* Header returns `null` or a non-hex value; the buttons stay enabled
    after Unpin; an error appears in the log panel and the session stops.
 
-5. **Kill node0: the client finds the other validators.**
-   *Do:* wait until *Connected peers* lists two connected slots — slot 0
-   `bootnode 127.0.0.1:40000` and slot 1 `genesis 127.0.0.1:4000x` (a validator
-   from the spec's genesis `C(8)`, dialed from the start) — and, ideally,
-   *Validator set (C(8))* reads `6 validator(s), 5 discovered`, which happens
-   after the first verified finality advance, usually within seconds of Start.
-   Then press **Kill node0**.
-   *See:* the network line reports `node0 NOT running` and one fewer node
-   process. Within a few seconds the slot that held node0 reconnects to another
-   validator, and *Connected peers* shows two non-bootnode entries (`discovered`
-   once the set has been read, `genesis` before), neither on port 40000; the
-   network line ends with the harness's own `browser peers: …` line. Blocks keep
-   arriving, *Client vs node* stays in step, and verified `finalized` events
-   continue. The browser console shows connection failures to `127.0.0.1:40000`;
-   that is the client honestly failing to reach a dead peer before moving on.
-   Nothing about trust changed: every header, finality proof and state proof a
-   discovered validator serves is verified exactly as node0's were. The client
-   found these validators in the active set `C(8)`: first in the spec's genesis
-   state, then in the finalized state, read with a verified proof; each record
+5. **Kill jam0: the client finds the other validators.**
+   *Do:* wait until *Connected peers* lists two connected slots and note the
+   address of one of them, `127.0.0.1:<port>`; jam0's port is in its line
+   `For WebTransport, use …@…:<port>` in `<base dir>/jam0/jam0.log` (route 1:
+   `/tmp/jam-zombie`). *Validator set (C(8))* reads `6 validator(s), …` after
+   the first verified finality advance, usually within seconds of Start. Stop
+   jam0 the way PolkaJam expects, with Ctrl-C's signal:
+   `pkill -INT -f '<base dir>/jam0/cfg'`. The harness buttons answer an error
+   by design.
+   *See:* within a few seconds the slot that held jam0 reconnects to another
+   validator, and *Connected peers* shows two entries, neither on jam0's port;
+   the network line ends with the harness's own `browser peers: …` line.
+   Blocks keep arriving, *Client vs node* stays in step, and verified
+   `finalized` events continue. The browser console shows connection failures
+   to jam0's address; that is the client honestly failing to reach a dead peer
+   before moving on. Nothing about trust changed: every header, finality proof
+   and state proof another validator serves is verified exactly as jam0's were.
+   The client found these validators in the active set `C(8)`: first in the
+   spec, then in the finalized state, read with a verified proof; each record
    carries the validator's address and its P-256 WebTransport identity.
-   *Failure:* *Blocks since Start* freezing for more than about ten seconds after
-   the kill although the validator set had been read; the same address in both
-   slots; *Connected peers* claiming a connection the log never showed.
-   *Note:* killing node0 *before* the first finality advance no longer freezes
-   the client: the genesis `C(8)` validators are candidates from the start. A
-   client freezes only with a spec that names no peer besides node0.
+   *Failure:* *Blocks since Start* freezing for more than about ten seconds
+   after the kill; the same address in both slots; *Connected peers* claiming a
+   connection the log never showed.
 
-6. **Start node0 again.**
-   *Do:* press **Start node0** (use **Restart node0** when node0 is still alive).
-   *See:* blocks never stopped, so there is nothing to catch up. Within one to
-   about five minutes one slot moves back to node0: *Connected peers* shows
-   `bootnode 127.0.0.1:40000 · connected` again and the log has
+6. **Start jam0 again.**
+   *Do:* start jam0 with the command zombienet spawned it with, on its own
+   directory and database: the `🚀 jam0, spawning.... with command: polkajam …`
+   line in terminal 1 (route 2 logs it at the start), run from `<base dir>/jam0`
+   with `POLKAVM_BACKEND=interpreter` in its environment.
+   *See:* blocks never stopped, so there is nothing to catch up. A slot holding
+   a `genesis` or `discovered` peer returns to a bootnode only after that
+   bootnode's backoff: a failed bootnode is retried after 30 seconds, then 60,
+   120, 240 and at most every 300 seconds, and the log has
    `jam-slot-preempted`. The client prefers bootnodes, but it does not cut a
-   working connection every few seconds to probe a dead one: a failed bootnode is
-   retried in place of a genesis or discovered peer after 30 seconds, then 60, 120, 240 and
-   at most every 300 seconds.
-   If the client did freeze (a spec naming no other peer), blocks resume within
-   roughly 10–20 seconds of the restart and **without reloading the page**, and
-   *Client vs node* closes the gap back to zero; the number of new blocks matches
-   the number of slots that passed, which **Recent blocks** shows as consecutive
-   slots across the gap. Chrome backfilled within ~15 seconds here, Firefox
-   needed closer to 30.
-   *Failure:* node0 never used again within ten minutes while it runs; or, in
-   the frozen case, nothing within a minute, or a block count far behind the
-   slot span.
+   working connection every few seconds to probe a dead one. With every
+   validator a bootnode, as zombienet writes the spec, both slots usually stay
+   on bootnodes throughout.
+   *Failure:* jam0 dying again right after its start (planning
+   `unrelated_bugs.md` PJ1, node dies on restart when a GRANDPA commit arrives
+   early); or, with a spec naming jam0 as its only peer, no block within a
+   minute of the start.
+
+   Steps 5 and 6 run unattended, with jam0 as the client's only bootnode, as
+   the `jam_discovery` scenario in `e2e-tests`; the kill and the start go
+   through zombienet-sdk's node handle there.
 
 7. **Unfollow, then Start again.**
    *Do:* press **Unfollow**, wait a few seconds, then **Stop** and **Start**.
    *See:* after Unfollow, Connection reads *Unfollowed (chain still running)* and
-   no further follow events are appended, while the network line still shows
-   node0 running. A manual Unfollow is never automatically re-followed.
+   no further follow events are appended, while the node's own best block keeps
+   moving. A manual Unfollow is never automatically re-followed.
    Start re-subscribes and blocks flow again from a fresh
    `initialized`.
    *Failure:* follow events keep arriving after Unfollow; Start does nothing, or
@@ -326,7 +315,8 @@ passes about every 72 seconds and you will see several in a normal session.
    *Failure:* the page hangs on *Stopping*, or Start stays disabled.
 
 9. **Finality view.**
-   *Do:* watch **Finality** across two epoch boundaries, then restart node0.
+   *Do:* watch **Finality** across two epoch boundaries, then stop and start
+   jam0 as in steps 5 and 6.
    *See:* the client finalized head advances, *Live finality updates* grows,
    and recent rows become *Finalized*. Epoch transitions are verified before
    later heads advance. After reconnecting, finality resumes without restarting
@@ -356,7 +346,7 @@ passes about every 72 seconds and you will see several in a normal session.
     authenticated: the real validators are unknown authorities and the
     remaining four cannot reach the five-of-six quorum. The genesis hash
     changes as a side effect, which is what a network without GRANDPA (the
-    `npm run test:jam` gate, which runs Dummy finality) detects instead, as a
+    `jam_follow` scenario, which runs Dummy finality) detects instead, as a
     `NoData` answer to the first block request for an unknown genesis.
 
     **What the client cannot detect.** A spec that differed *only* in its
@@ -373,9 +363,9 @@ passes about every 72 seconds and you will see several in a normal session.
     and U13 (chain-bound GRANDPA votes) in the planning repository's
     `followups.md`.
 
-Afterwards press Ctrl-C in the terminal. The harness stops the network and the
-server and prints either "teardown complete; no PolkaJam process left behind" or
-a list of processes that survived, which would be a bug.
+Afterwards press Ctrl-C in terminal 2: the harness stops its server and prints
+"teardown complete; attach mode, the network was not ours and keeps running".
+Ctrl-C in terminal 1 tears the network down.
 
 ## What this does not prove
 
@@ -388,9 +378,9 @@ a list of processes that survived, which would be a bug.
   refused. Two chains that share their genesis validators are
   indistinguishable to this client after a warp; see step 10's "What the client
   cannot detect".
-- **One bootnode, loopback validators.** The spec names node0 as its only
-  bootnode; the client finds the other five in the genesis `C(8)` and later in
-  the live one. On the dev network every validator
+- **Loopback validators.** The spec names every validator as a bootnode and
+  carries the same set in its genesis `C(8)`; the client replaces the latter
+  with the live set later. On the dev network every validator
   advertises `127.0.0.1`, so the browser can dial all of them; a real network
   needs validators whose advertised addresses are reachable from the browser.
   The P-256 identity's position in the metadata is PolkaJam's convention, not
@@ -402,7 +392,7 @@ a list of processes that survived, which would be a bug.
 
 ## Named elements and automation handles
 
-DOM ids: `spec-url`, `spec-file`, `dev-bootnode`, `start`, `stop`, `header`,
+DOM ids: `spec-url`, `spec-file`, `start`, `stop`, `header`,
 `unpin`, `unfollow`, `status`, `header-output`, `events`, `logs`, `kill-node0`,
 `start-node0`, `restart-node0`, `network-status`, and the live view's
 `live-connection`, `live-bootnode`, `live-peers`, `live-pool`, `live-last-event`, `live-anchor`,
@@ -426,11 +416,6 @@ with their counts, bytes and milliseconds), `discoveryError`, the latest
 `initialized` anchor's decoded slot, and each row's `finality` status.
 Rendered RPC and log content uses `textContent`, never HTML.
 
-The **Add the running demo network's node0 bootnode** checkbox is only needed
-when you point the page at a spec that carries no bootnodes of its own — a local
-file, say. It asks the harness for the address instead of hardcoding one.
-`/jam-demo/spec.json` already contains it, so leave the box unchecked.
-
 Demo-side bounds, unchanged from C1 except the last three: 100 entries per panel,
 4,096 characters per entry, one header in the header panel, at most 16 locally
 tracked pins, at most 32 pending RPC calls with 15-second timeouts, at most 256
@@ -449,20 +434,19 @@ Browser regression with controlled client/node RPC streams (no WASM or dev
 network required): `node --test test/jam/demo.mjs`. Set `CHROMIUM_PATH` to a
 system Chrome executable if Playwright's bundled browser is unavailable. This
 checks finality rendering, fork pruning, independent RPC errors, re-follow
-limits, stale replies, manual Unfollow and Stop during startup. To also run the
-live warp regression (starts and tears down its own harness, waits 80 seconds
-before Start), free the network ports first, then run:
+limits, stale replies, manual Unfollow and Stop during startup.
+
+The live page regression is the `jam_demo` scenario in `e2e-tests`: it spawns a
+GRANDPA network through zombienet-sdk, ages it past a set change, and runs
+`node test/jam/demo.mjs --live` with `JAM_SPEC_PATH` and `JAM_RPC_PORT`:
 
 ```sh
-POLKAJAM_BIN_DIR=/path/to/pinned/target/release node test/jam/demo.mjs --live
+cargo test --manifest-path e2e-tests/Cargo.toml --test jam_demo -- --nocapture
 ```
 
-The live case asserts one `stop`, a different second anchor, resumed blocks and
-finality, and no automatic re-follow after manual Unfollow.
-
-Steps 5 and 6 run unattended as `npm run test:jam:discovery`, which starts this
-harness, drives this page and reads the harness `status`; see
-[the test README](../test/jam/README.md).
+The live cases assert one `stop`, a different second anchor, resumed blocks and
+finality, no automatic re-follow after manual Unfollow, the refusal of step 10,
+and attach mode with every, one or no bootnode in the spec.
 
 ## Firefox note
 

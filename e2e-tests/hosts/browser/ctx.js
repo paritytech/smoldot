@@ -17,14 +17,22 @@
 
 // Browser host: builds the `ctx` a shared test body runs against, INSIDE the
 // page. Mirrors hosts/node/ctx.js but uses the smoldot browser build (already on
-// `window.__smoldot` via page/index.html) with `forbidTcp: true` (→ WebRTC) and
-// bridges `waitSync` back to Node through the `window.__waitSync` exposed
-// function. JSON-RPC is not host-specific — bodies import it from
-// `shared/rpc.js` and build it with `createRpc(ctx.client)`.
+// `window.__smoldot` via page/index.html) with `forbidTcp: true` (→ WebRTC, and
+// WebTransport for JAM chains) and bridges `waitSync` back to Node through the
+// `window.__waitSync` exposed function. JSON-RPC is not host-specific — bodies
+// import it from `shared/rpc.js` and build it with `createRpc(ctx.client)`.
+//
+// Browser-only extras on top of the ctx contract, used by the JAM bodies:
+// `clientLogs` (every log line of `client`, newest last, bounded), `startClient`
+// (a second client with its own `logs`, terminated by `cleanup`) and
+// `sendSync(label)` (the body → Rust direction of the SyncFile, read by
+// `SyncFile::wait_for_js`).
 //
 // Served at /browser/ctx.js and imported inside a single page.evaluate by
 // hosts/browser/run.js.
 
+const MAX_CAPTURED_LOGS = 50_000;
+const MAX_CAPTURED_MESSAGE_CHARS = 400;
 
 function report(name, passed, detail) {
   const suffix = detail ? `: ${detail}` : "";
@@ -36,23 +44,46 @@ function report(name, passed, detail) {
   }
 }
 
+// Starts a smoldot client whose log lines are printed and kept in `logs`.
+function startCapturing(options, prefix) {
+  const logs = [];
+  const client = window.__smoldot.start({
+    ...options,
+    logCallback: (level, target, message) => {
+      const labels = { 1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE" };
+      const label = labels[level] ?? `L${level}`;
+      console.log(`${prefix}[smoldot [${label}]][${target}] ${message}`);
+      logs.push({
+        t: Date.now(),
+        level,
+        target: String(target),
+        message: String(message).slice(0, MAX_CAPTURED_MESSAGE_CHARS),
+      });
+      if (logs.length > MAX_CAPTURED_LOGS) logs.splice(0, logs.length - MAX_CAPTURED_LOGS);
+    },
+  });
+  return { client, logs };
+}
+
 export async function makeBrowserCtx({ env, files }) {
   const maxLogLevel = Number.parseInt(env.SMOLDOT_LOG_LEVEL || "3", 10);
-  const client = window.__smoldot.start({
+  const main = startCapturing({
     maxLogLevel,
     forbidTcp: true,
     forbidWs: true,
     forbidWss: true,
-    logCallback: (level, target, message) => {
-      const labels = { 1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE" };
-      const label = labels[level] ?? `L${level}`;
-      console.log(`[smoldot [${label}]][${target}] ${message}`);
-    },
-  });
+  }, "");
+  const extra = [];
 
   return {
     host: "browser",
-    client,
+    client: main.client,
+    clientLogs: main.logs,
+    startClient: (options = {}, name = `client${extra.length + 2}`) => {
+      const started = startCapturing({ maxLogLevel, ...options }, `[${name}]`);
+      extra.push(started.client);
+      return started;
+    },
     env,
     files,
     report,
@@ -63,13 +94,20 @@ export async function makeBrowserCtx({ env, files }) {
       }
       return window.__waitSync(label, timeoutMs);
     },
-    cleanup: async () => {
-      await client.terminate().catch(() => {});
+    sendSync: (label) => {
+      if (typeof window.__sendSync !== "function") {
+        throw new Error("sendSync called but SYNC_PATH was not set on the Rust side");
+      }
+      return window.__sendSync(label);
     },
-    // Browsers can't write to disk; DB-dump is a Node-host-only capability.
-    //
-    // Writing to disk is only used by the generate-snapshot capability
-    // which is used to create files which later will be used by both node and browser tests.
-    dumpDb: async () => {},
+    cleanup: async () => {
+      for (const client of extra) await client.terminate().catch(() => {});
+      await main.client.terminate().catch(() => {});
+    },
+    // Browsers can't write to disk: Node writes the files for the page, into
+    // `SMOLDOT_DB_DUMP_DIR` as the Node host does; a no-op when it is unset.
+    dumpDb: async (filesObj) => {
+      if (typeof window.__dumpDb === "function") await window.__dumpDb(filesObj);
+    },
   };
 }

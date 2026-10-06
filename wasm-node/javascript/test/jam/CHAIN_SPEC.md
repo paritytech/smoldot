@@ -3,13 +3,13 @@
 `dev-chain-spec.json` was generated on 2026-09-23 from PolkaJam commit
 `1445c6cebf0557aa7f2d7ade851364f880f303c9`, built with `SKIP_PVM_BUILDS=1`
 and the flags in [README.md](README.md). The spec uses six deterministic dev
-validators at 127.0.0.1:40000–40005. RPC and HTTP ports are runtime settings
-outside the spec. Only one local test/demo network can run at a time.
+validators at 127.0.0.1:40000–40005.
 
-Every node, including a restarted node, reads this file unchanged. The browser
-copy differs only in its combined-identity bootnode; PolkaJam cannot parse that
-identity yet (upstream follow-up U1). The negative browser case additionally
-flips the last genesis-header byte. Neither step computes genesis.
+Since D19 (e2e scenarios on zombienet) no test network reads it: zombienet
+generates each network's spec with `gen-spec`, with the ports it picked, and
+the light client takes that spec unchanged. The file stays as a fixture for
+unit tests that want a real PolkaJam genesis and for the drift check below,
+which tells at a pin move whether PolkaJam's dev genesis changed.
 
 ## Drift check
 
@@ -37,12 +37,4 @@ with the normalized output written to `dev-chain-spec.json`. A successful drift
 check prints nothing and exits zero; it does at the current pin. Review any diff
 before replacing the file and updating this provenance. A binary built without
 `SKIP_PVM_BUILDS=1` embeds real guest blobs, produces a different dev genesis and
-must not be used for regeneration. It can still run the checked-in spec:
-PolkaJam decodes `genesis_header` and the state items from the file as given and
-recomputes nothing. The browser gate's genesis-agreement assertion (client and
-node report the same genesis hash) checks that after every pin move.
-
-Changing the validator ports needs a spec regenerated with the same build
-(`polkajam --chain=dev:<base port> dump-spec`); then
-replace the reviewed spec and update `BASE_PORT` in `network.mjs` together. Runtime base-port overrides are rejected. Update the provenance and
-rerun the browser and finality gates after either a pin or port change.
+must not be used for regeneration.

@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.81"
+base64 = "0.22"
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 env_logger = "0.11.2"
 hex = { version = "0.4.3", default-features = false }
@@ -15,5 +16,15 @@ serde_json = "1.0.132"
 sha2 = { version = "0.10", default-features = false }
 smoldot = { path = "../lib", default-features = false }
 tempfile = "3.8.1"
-tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "process", "time", "fs", "io-util"] }
-zombienet-sdk = "0.4.13"
+tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "process", "time", "fs", "io-util", "signal"] }
+# The JAM scenarios (`tests/jam_*.rs`) need zombienet-sdk's JAM support from the local fork
+# branch `skunert/polkajam-light-client` (P-256 identities and combined bootnodes in the generated
+# spec, JAM node kill and start, fixed JAM p2p ports). Revert to a crates.io release once those
+# changes are published.
+zombienet-sdk = { path = "/home/sebastian/work/repos/zombienet-sdk/crates/sdk" }
+
+# The fork's own `[patch.crates-io]` does not apply to this workspace, so it is repeated here:
+# zombienet's `jam-*` 0.1.29 dependencies come from the PolkaJam fork branch of the same name.
+[patch.crates-io]
+jam-std-common = { path = "/home/sebastian/work/repos/polkajam/crates/jam-std-common" }
+jam-types = { path = "/home/sebastian/work/repos/polkajam/crates/jam-types" }

@@ -1,36 +1,39 @@
-# JAM browser end-to-end test (`npm run test:jam`)
+# JAM test assets
 
-Runs the smoldot **browser** build in a real headless Chromium against a real
-local PolkaJam dev network and asserts the live-network acceptance criteria of
-the JAM light client (M11b): follow/catch-up, header authenticity, node restart
-catch-up, unfollow, and the wrong-authority-set negative path.
-
-Node has no WebTransport, so this is the only way to exercise the JAM network
-stack end to end.
-
-## Quick start
+The live JAM tests are scenarios of the `e2e-tests` crate since D19 (e2e
+scenarios on zombienet): zombienet-sdk spawns the PolkaJam network, Rust injects
+the faults through zombienet's node handles, and a JavaScript body runs the
+smoldot browser build in headless Chrome. See
+[`e2e-tests/docs/jam-scenarios.md`](../../../../e2e-tests/docs/jam-scenarios.md)
+for the five scenarios, the aged snapshot and the `DEV_MODE` route to the
+manual demo.
 
 ```sh
-cd wasm-node/javascript
-
-# The browser bundle must already be built (do not rebuild it here).
-test -f dist/mjs/index-browser.js || npm run build
-
-# Playwright's Chromium (once per machine; browsers are cached in ~/.cache/ms-playwright).
-npx playwright install chromium
-
-# Point at a directory holding the prebuilt `polkajam` executable.
-POLKAJAM_BIN_DIR=/path/to/polkajam/target/release npm run test:jam
+cargo test --manifest-path e2e-tests/Cargo.toml --test jam_follow -- --nocapture
 ```
 
-## Binaries
+What stays here:
 
-Only `polkajam` is required. It is located in `POLKAJAM_BIN_DIR` if set,
-otherwise on `PATH`. There is no third source: nothing is cloned or compiled
-during a run, and no path is inferred from another path. A missing executable
-stops the run before any node starts and points to these build instructions.
+| File | Purpose |
+|---|---|
+| `demo.mjs` | Browser regression of the manual demo page. `node --test test/jam/demo.mjs` runs the controlled-stream cases (no network); `--live` is the JavaScript step of the `jam_demo` scenario and needs `JAM_SPEC_PATH` and `JAM_RPC_PORT` of a running GRANDPA network |
+| `zombienet/tiny-grandpa.toml` | The six-validator GRANDPA network `just zombie-jam` spawns with `zombie-cli` for the manual demo (`demo/jam.md`) |
+| `dev-chain-spec.json` | A fixed tiny dev spec, kept as a fixture for the drift check in [CHAIN_SPEC.md](CHAIN_SPEC.md); no test network reads it any more |
+| `FINALITY.md` | GRANDPA finality design notes and the provenance of the committed CE 130 fixture |
 
-Build it once, from a PolkaJam checkout at the pinned commit:
+The `ava` configuration in `package.json` excludes `test/jam/**`, so
+`npm test` never starts a browser for these files.
+
+## PolkaJam binaries
+
+The scenarios and the manual demo need `polkajam` from the PolkaJam branch
+`skunert/polkajam-light-client` at `3ccb03b7dc5ca54b16de81db7fdf7076de083ad0`
+(main of 2026-09-30, `27d63b8d`, plus `gen-spec` writing each validator's P-256
+id into its metadata, the restored `SKIP_PVM_BUILDS` switch, and combined
+`<ed25519>+<p256>@ip:port` bootnodes in specs and `gen-spec`;
+`polkajam 0.1.29 / GP 0.8.0`; GRANDPA votes sign the header hash with its
+posterior state root since PR #1261). The version string does not distinguish
+it from earlier pins. Build it once in that checkout:
 
 ```sh
 SKIP_PVM_BUILDS=1 CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTC_BOOTSTRAP=1 \
@@ -40,188 +43,25 @@ SKIP_PVM_BUILDS=1 CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTC_BOOTSTRAP=1
 
 Rust 1.93.0, no nightly toolchain and no RISC-V target. With `SKIP_PVM_BUILDS=1`
 PolkaJam's `crates/node/build.rs` embeds an empty bootstrap-service guest blob
-and never builds one, at build time or at runtime, so `dump-spec` and `gen-spec`
-run from any directory and the drift check in [CHAIN_SPEC.md](CHAIN_SPEC.md)
-reproduces the checked-in spec. Line tables keep backtraces readable in an
-optimized binary. `RUSTC_BOOTSTRAP` and the crate attribute enable two library
-features that are still unstable in 1.93.0. On a Nix host add
-`NIX_ENFORCE_PURITY=0`, or the first build script fails to link.
+and never builds one, so `gen-spec` and `dump-spec` run from any directory and
+the drift check in [CHAIN_SPEC.md](CHAIN_SPEC.md) reproduces the checked-in
+spec. Line tables keep backtraces readable in an optimized binary.
+`RUSTC_BOOTSTRAP` and the crate attribute enable two library features that are
+still unstable in 1.93.0. On a Nix host add `NIX_ENFORCE_PURITY=0`, or the first
+build script fails to link.
 
-Then put `polkajam` on `PATH`, or point `POLKAJAM_BIN_DIR` at its directory.
-Every node reads [dev-chain-spec.json](dev-chain-spec.json). A run never
-constructs genesis from the executable's embedded service blobs. See
-[CHAIN_SPEC.md](CHAIN_SPEC.md) for provenance and the regeneration check.
-
-## What it does
-
-1. **Network** (`network.mjs`): directly launches six dev validators and one
-   ordinary RPC node with the checked-in spec, in Dummy finality mode. There
-   are no proxy nodes. Validator UDP ports are fixed at 40000–40005; an occupied
-   port fails startup. Only one test/demo network can run at a time.
-   JavaScript adds the deterministic combined Ed25519+P-256 node0 bootnode to
-   smoldot's copy of the spec and writes a wrong-authority-set variant
-   (`corruptGenesisAuthorities` in `network.mjs`: one byte of the first two
-   validators' Ed25519 keys is flipped in the genesis header's epoch mark and
-   in the matching records of the state items `C(4)` and `C(8)`, which also
-   changes the genesis hash). Genesis is otherwise unchanged. The node-side spec has
-   empty bootnodes because PolkaJam cannot yet parse combined identities.
-   The startup gate asserts node0's WebTransport advertisement against the
-   fixed identity and port; it never derives them from logs. RPC readiness
-   polls `parameters`/`bestBlock` until a live block exists.
-2. **Page** (`page.html`, `page.mjs`): loads `/dist/mjs/index-browser.js`, sets
-   `window.__smoldot`, and exposes an in-page driver that starts smoldot
-   clients, adds chains, follows, records events/logs with timestamps, requests
-   headers, and unfollows.
-3. **Phases** (`e2e.mjs`, Playwright):
-   - **positive**: `chainHead_v1_follow [false]` -> `initialized` whose
-     `finalizedBlockHashes[0]` is the spec genesis hash; >= 5 `newBlock` events
-     with the 5th within `5 x 6s` of the first; every `parentBlockHash` is a
-     previously reported hash or the anchor; a `bestBlockChanged` after the
-     first `newBlock`; no `finalized` event for the whole session;
-     `chainHead_v1_header` bytes hash (BLAKE2b-256, `blakejs`) to the requested
-     hash.
-   - **restart**: node0 is stopped (SIGINT, see Notes) and restarted against the
-     same config/data directory; a `newBlock` within 60 s whose
-     `parentBlockHash` was reported before the restart, followed by
-     `bestBlockChanged`. The client cannot route around the outage here: it
-     discovers other validators only after a verified finality advance, which
-     a Dummy network never produces, so the final phase also asserts that every
-     slot stayed on the bootnode and no `C(8)` read happened.
-   - **unfollow**: `chainHead_v1_unfollow` resolves and no further follow events
-     arrive for ~2 s.
-   - **negative**: a second client with the corrupted-authority-set spec gets
-     `initialized` with its own genesis hash as the anchor, is refused within
-     90 s, and never emits a `newBlock`. The refusal signature depends on the
-     network's finality mode: on this Dummy network the first CE 128 request
-     for an unknown genesis gets `NoData` and the client logs `jam-connect`
-     then `jam-reconnect`; on a GRANDPA network aged past one set change the
-     first warp fragment fails to authenticate under the altered set 0 and the
-     client logs `jam-warp-rejected`. Either signature passes.
-
-     What the check does **not** establish: a spec that differed only in its
-     genesis *hash* would be accepted after a warp. GRANDPA precommits sign
-     `(round, set_id, vote)` and nothing chain-specific, and the headers below
-     the first set change are never fetched, so a client cannot tell apart two
-     chains that share their genesis validators. Chain identity belongs in the
-     connection and in the vote payload — planning `followups.md` U7 (chain
-     identity over WebTransport) and U13 (chain-bound GRANDPA votes).
-4. **Entry point** (`run.mjs`): creates the runtime directory, wires the phases,
-   always tears the network down in a `finally`, verifies that no PolkaJam
-   process survived, writes `report.json`, prints `PASS:`/`FAIL:` per assertion
-   and exits non-zero on any failure.
-
-The page, the smoldot bundle and the driver are served from disk with
-Playwright `page.route` interception at `http://localhost/` (a secure context
-for WebTransport); no HTTP server is started.
-
-## Environment knobs
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `POLKAJAM_BIN_DIR` | search `PATH` | directory holding the `polkajam` executable |
-| `JAM_RUNTIME_DIR` | fresh `mkdtemp` under `os.tmpdir()` | where logs, specs and `report.json` are written |
-| `JAM_RPC_PORT` | `19800` | ordinary-node JSON-RPC port |
-| `CHROMIUM_PATH` | Playwright Chromium | optional system Chrome executable, e.g. on NixOS |
-
-## Pinned PolkaJam
-
-`POLKAJAM_COMMIT = 3ccb03b7dc5ca54b16de81db7fdf7076de083ad0`, the head of the PolkaJam branch
-`skunert/polkajam-light-client`: main of 2026-09-30 (`27d63b8d`) plus three
-commits, `gen-spec` writing each validator's P-256 id into its metadata, the
-restored `SKIP_PVM_BUILDS` switch, and combined `<ed25519>+<p256>@ip:port`
-bootnodes in specs and `gen-spec` (`polkajam 0.1.29 / GP 0.8.0`; GRANDPA votes
-sign the header hash with its posterior state root since PR #1261). The version
-string does not distinguish it from earlier pins, and binary provenance is not
-checked during a run. This pin's `SKIP_PVM_BUILDS=1` build reproduces the
-checked-in spec; see [CHAIN_SPEC.md](CHAIN_SPEC.md).
-
-## Teardown and evidence
-
-- Every spawned process is started with `detached: true` (its own process group)
-  and killed as a group; teardown is idempotent and runs in a `finally`, plus on
-  `SIGINT`/`SIGTERM`.
-- The per-run `net/testnet` node directory is removed.
-- Retained in the runtime directory: `report.json`, `network.log`,
-  `node0-restart.log`, `spec.json`, `spec-wrong-authorities.json`. The runtime
-  directory path is printed at the end.
-- `report.json` contains every assertion with its phase, per-phase durations,
-  the observed events and client logs (bounded), the genesis hashes, the
-  browser version and any leftover processes.
-
-## Historical timings (0.7.2 pin)
-
-Local Linux, 32 cores, prebuilt PolkaJam binaries, Playwright Chromium
-(headless, bundled with `playwright@1.63.0`):
-
-| Step | Time |
-|---|---|
-| PolkaJam cold build (32 cores, A5 flags) | 114 s (A5: 55 s with warm deps) |
-| Network startup (launcher -> WebTransport line + live RPC) | 1.7-7.3 s |
-| Positive phase (5 blocks) | 17-23 s |
-| Restart phase | 5.9 s (SIGINT path) |
-| Unfollow phase | 2.5 s |
-| Negative phase | 0.6 s |
-| **Whole run** | **34-37 s** |
-
-The negative phase is fast because the corrupted anchor exhausts the bounded
-catch-up (`gap_limit`) and the connection is dropped within ~50 ms of the first
-connect; the 90 s budget is a safety margin.
+Then put its `target/release` first on `PATH`: zombienet starts `polkajam` from
+`PATH`, and `just zombie-jam` and `just demo-jam-dev` prepend `POLKAJAM_BIN_DIR`.
 
 ## Notes
 
 - **Headless Chromium and local network access**: Chromium blocks requests from
   a page to loopback/LAN addresses unless the origin is allowed, which surfaces
-  as `net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS`. The test launches
-  Chromium with `--disable-features=LocalNetworkAccessChecks`; without it,
-  WebTransport never reaches the node (verified: the handshake reaches the node
-  and then fails only on the expected fake certificate hash).
-- **node0 restart uses SIGINT, not SIGTERM**: PolkaJam only installs a SIGINT
-  handler (`tokio::signal::ctrl_c`). With SIGTERM the node dies without
-  `node.shutdown()`, its database is not flushed, and the restarted node logs
-  `Writing genesis block` and forks from genesis instead of catching up
-  (observed: first post-restart block 53.8 s later with the genesis as parent).
-  With SIGINT the node resumes its chain (`Best final block: ...`, no genesis
-  rewrite) and catch-up completes in ~6 s. `killNode0()` sends SIGINT and falls
-  back to SIGTERM/SIGKILL if the process does not exit.
-- The `ava` configuration in `package.json` excludes `test/jam/**`, so
-  `npm test` never starts a network.
-- The test does not rebuild the browser bundle; it fails fast with instructions
-  if `dist/mjs/index-browser.js` is missing.
-## Aged-network catch-up (D14)
-
-After building the browser bundle, run `node test/jam/e2e.mjs --aged` from
-`wasm-node/javascript`. This manual runner starts GRANDPA nodes, counts actual
-ancestors until the network has at least 130 blocks, then starts a fresh browser
-client at `cpuRateLimit: 0.5`. It requires reaching the current RPC tip within
-180 seconds and records first-block latency, time to tip, imported blocks per
-second, and finality events in `aged-report.json` in its temporary runtime
-directory. Allow about fourteen minutes for network aging.
-
-Use `JAM_AGED_ATTACH_DIR=/path/to/running/runtime JAM_RPC_PORT=25800` to measure
-an existing network without restarting it. `JAM_AGED_BLOCKS` changes the minimum
-age in actual blocks; `JAM_AGED_BOUND_MS` changes the catch-up deadline.
-`CHROMIUM_PATH` selects an installed browser, including on NixOS. The short
-`npm run test:jam` CI gate remains separate from this deliberate aging wait.
-
-## Peer discovery (D3)
-
-`npm run test:jam:discovery` (`discovery.mjs`) starts the demo harness
-(`demo/jam-harness.mjs`, GRANDPA finality) and drives the demo page in
-Chromium, so it exercises the page's peer list, the harness `status` and the
-kill/start buttons exactly as walkthrough steps 5 and 6 in `demo/jam.md`
-describe. A fresh client whose only bootnode is node0 must follow the chain, see
-verified finality, read the active set `C(8)` (six validators, five discovered
-besides node0) and hold node0 plus one discovered validator. At the tip, node0 is
-killed: within 120 s the harness `status` must list two connected peers of
-source `discovered`, and three verified headers and two finalized events must
-arrive. node0 is then started again and must be connected as a bootnode within
-420 s; a failed bootnode replaces a discovered peer after 30 s, doubling per
-failure to 5 minutes. Timings and every `C(8)` refresh (bytes and milliseconds)
-go to `discovery-report.json` in the runtime directory.
-
-It needs `POLKAJAM_BIN_DIR` (or `PATH`), a built browser bundle, free ports
-8080 and 40000 to 40005, and `CHROMIUM_PATH` where Playwright's browser is not
-installed. `JAM_DISCOVERY_AGE_SECONDS` ages the network before Start, so the
-client warps first and discovers afterwards. A run on a fresh network takes
-under a minute; it is not part of the 15-minute CI job, which runs the Dummy
-gate only.
+  as `net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS`. The `e2e-tests` browser
+  host launches Chromium with `--disable-features=LocalNetworkAccessChecks`;
+  without it, WebTransport never reaches the node.
+- **Stopping a node uses SIGINT, not SIGTERM or SIGKILL**: PolkaJam only
+  installs a SIGINT handler (`tokio::signal::ctrl_c`) and flushes its database
+  in it. The scenarios stop a node through zombienet's `kill` with a grace
+  period, which sends SIGINT first; a restarted node then resumes its chain
+  instead of writing a new genesis block, and the scenarios check that.

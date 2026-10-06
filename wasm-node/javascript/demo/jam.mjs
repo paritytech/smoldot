@@ -365,7 +365,6 @@ async function start() {
     renderLive();
     const file = field('spec-file').files[0];
     const url = field('spec-url').value.trim();
-    const devBootnode = field('dev-bootnode').checked;
     try {
         let text;
         if (file) {
@@ -392,32 +391,6 @@ async function start() {
         if (current !== run) return;
         const spec = JSON.parse(text);
         if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw new Error('Expected a JSON spec object');
-        if (devBootnode) {
-            // The address is deliberately not written down here: it comes from
-            // the harness that started the network, which formats it in exactly
-            // one place (test/jam/network.mjs `formatBootnode`).
-            let status;
-            try {
-                status = await controlRequest('dev-bootnode');
-            } catch (error) {
-                // An attached harness (zombienet) manages no node0, and its
-                // spec already names its peers: carry on with the spec as is.
-                if (current !== run) return;
-                const message = String(error && (error.message || error));
-                if (!harness.status?.attach && !message.includes('attach mode')) throw error;
-                print('logs', 'Not adding a dev bootnode: ' + message);
-            }
-            if (current !== run) return;
-            if (status !== undefined) {
-                const bootnode = status?.bootnode;
-                if (typeof bootnode !== 'string' || bootnode.length === 0)
-                    throw new Error('The demo harness did not report a bootnode address');
-                if (spec.bootnodes !== undefined && !Array.isArray(spec.bootnodes)) throw new Error('bootnodes must be an array');
-                spec.bootnodes ??= [];
-                if (!spec.bootnodes.includes(bootnode)) spec.bootnodes.push(bootnode);
-                print('logs', "Added the running network's node0 bootnode: " + bootnode);
-            }
-        }
         run.bootnodes = Array.isArray(spec.bootnodes) ? spec.bootnodes.slice() : [];
         run.params = specParams(spec);
         if (!run.params) print('logs', 'Spec protocol_parameters could not be read; the slot/epoch display stays empty.');
@@ -932,7 +905,7 @@ async function poll() {
         harness.error = String(error && (error.message || error));
         field('network-status').textContent =
             'Demo harness not reachable at ' + CONTROL_URL + ' (' + harness.error +
-            '). Start it with: cd wasm-node/javascript && npm run demo:jam';
+            '). Start it with: just demo-jam-attach (see demo/jam.md)';
     }
     setNetworkButtons();
     renderLive();

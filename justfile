@@ -5,13 +5,10 @@
 default:
     @just --list
 
-# Rebuild the JS package and start the local JAM demo (needs PolkaJam binaries).
-demo-jam:
-    cd wasm-node/javascript && npm run demo:jam:rebuild
-
-# Start the local JAM demo without rebuilding the JS package.
-demo-jam-fast:
-    cd wasm-node/javascript && npm run demo:jam
+# The demo harness starts no network any more (D19, e2e scenarios on zombienet):
+# `demo-jam` and `demo-jam-fast` are the attach recipe under their old names.
+alias demo-jam := demo-jam-attach
+alias demo-jam-fast := demo-jam-attach
 
 # `zombie-jam` needs `zombie-cli` and `polkajam` from the
 # `skunert/polkajam-light-client` branches of zombienet-sdk and PolkaJam:
@@ -27,3 +24,12 @@ zombie-jam:
 # Serve the demo page for a running network (default: zombie-jam's); Ctrl-C stops only the server.
 demo-jam-attach spec=env_var_or_default("JAM_SPEC_PATH", "/tmp/jam-zombie/jam_spec.json") rpc_port=env_var_or_default("JAM_RPC_PORT", "19800"):
     cd wasm-node/javascript && JAM_SPEC_PATH="{{spec}}" JAM_RPC_PORT="{{rpc_port}}" npm run demo:jam
+
+# `demo-jam-dev` spawns the network of an `e2e-tests` JAM scenario (default
+# `jam_demo`, GRANDPA) through zombienet-sdk in DEV_MODE and prints the
+# `just demo-jam-attach` line for it. Needs `polkajam` (`POLKAJAM_BIN_DIR`,
+# prepended to PATH, else PATH).
+
+# Keep a scenario's JAM network up for the demo page (DEV_MODE); Ctrl-C stops it.
+demo-jam-dev scenario="jam_demo":
+    PATH="${POLKAJAM_BIN_DIR:+$POLKAJAM_BIN_DIR:}$PATH" ZOMBIE_PROVIDER=native DEV_MODE=1 cargo test --manifest-path e2e-tests/Cargo.toml --test {{scenario}} -- --nocapture

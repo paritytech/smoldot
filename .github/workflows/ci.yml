@@ -288,21 +288,6 @@ jobs:
         node prepare.mjs --debug
         rm -rf dist
         npm run buildModules
-    - name: Run JAM browser end-to-end test
-      working-directory: wasm-node/javascript
-      env:
-        POLKAJAM_BIN_DIR: ${{ github.workspace }}/.polkajam-src/target/release
-      run: npm run test:jam
-    - name: Upload JAM e2e evidence on failure
-      if: failure()
-      uses: actions/upload-artifact@v6
-      with:
-        name: jam-e2e-logs-${{ github.sha }}
-        path: |
-          /tmp/jam-e2e-*/**
-          .polkajam-src/*.log
-        if-no-files-found: ignore
-        retention-days: 7
 
   jam-e2e-gate:
     # Always runs so `all-ci` is not skipped on pull requests that do not touch

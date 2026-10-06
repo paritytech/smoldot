@@ -72,7 +72,13 @@ try {
   hasHostPrepare = true;
 } catch {}
 
-const browser = await chromium.launch();
+// `CHROMIUM_PATH` selects an installed Chrome where Playwright's own download
+// does not run (NixOS). Local network access checks would block the page's
+// WebTransport sessions to loopback validators (JAM scenarios).
+const browser = await chromium.launch({
+  executablePath: process.env.CHROMIUM_PATH || undefined,
+  args: ["--disable-features=LocalNetworkAccessChecks"],
+});
 const context = await browser.newContext();
 const page = await context.newPage();
 page.on("console", (m) => console.error(`[browser:${m.type()}] ${m.text()}`));
@@ -86,8 +92,31 @@ if (process.env.SYNC_PATH) {
   );
 }
 
-// Fulfill the page and its module/wasm assets from disk; nothing hits the network.
-await page.route("**/*", async (route) => {
+// The body → Rust direction (`ctx.sendSync`): `js:`-prefixed lines in the same
+// file, so they never satisfy a `waitSync` for a Rust label.
+if (process.env.SYNC_PATH) {
+  await page.exposeFunction("__sendSync", (label) =>
+    fs.appendFile(process.env.SYNC_PATH, `js:${label}\n`).then(() => true),
+  );
+}
+
+// `ctx.dumpDb` in the page: Node writes the files, as the Node host does.
+if (process.env.SMOLDOT_DB_DUMP_DIR) {
+  const dir = process.env.SMOLDOT_DB_DUMP_DIR;
+  await page.exposeFunction("__dumpDb", async (filesObj) => {
+    await fs.mkdir(dir, { recursive: true });
+    for (const [name, content] of Object.entries(filesObj)) {
+      if (name.includes("/") || name.includes("\\")) throw new Error(`dumpDb: bad name ${name}`);
+      await fs.writeFile(path.join(dir, name), content);
+    }
+    return true;
+  });
+}
+
+// Fulfill the page and its module/wasm assets from disk. Only the page's own
+// origin is intercepted: a body may still reach a node's HTTP JSON-RPC (the JAM
+// bodies read PolkaJam's, which answers CORS `*`).
+await page.route("http://localhost/**", async (route) => {
   const { pathname } = new URL(route.request().url());
   let file;
   if (pathname === "/" || pathname === "/index.html") {

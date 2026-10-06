@@ -157,6 +157,30 @@ TEST_NAME=smoke RELAY_CHAIN_SPEC=… PARA_CHAIN_SPEC=… REQUIRED_BLOCKS=5 \
 ```
 
 
+## JAM scenarios
+
+`tests/jam_*.rs` test smoldot's JAM light client against a PolkaJam network on
+zombienet-sdk's JAM support: `jam_follow` (the Dummy browser gate),
+`jam_finality`, `jam_discovery`, `jam_aged` (restored from a local snapshot
+that the `#[ignore]` `jam_generate_snapshot` produces) and `jam_demo` (the
+manual demo page's live regression). They run on the browser host only (the
+JAM transport is WebTransport) and need `polkajam` and the zombienet-sdk fork
+branch; see [`docs/jam-scenarios.md`](docs/jam-scenarios.md). `DEV_MODE=1`
+keeps a JAM network up for the manual demo (`just demo-jam-dev`).
+
+```sh
+ZOMBIE_PROVIDER=native PATH=<polkajam>/target/release:$PATH \
+  cargo test --manifest-path e2e-tests/Cargo.toml --test jam_follow -- --nocapture
+```
+
+Browser-host extras the JAM bodies use: `CHROMIUM_PATH` selects an installed
+Chrome (and skips `playwright install`), `ctx.clientLogs` holds the client's
+log lines, `ctx.startClient` starts a second client, `ctx.sendSync(label)` is
+the body → Rust direction of the `SyncFile` (`SyncFile::wait_for_js`), and
+`ctx.dumpDb` writes through Node into `SMOLDOT_DB_DUMP_DIR`.
+`SKIP_SMOLDOT_BUILD=1` reuses the built bundle.
+
+
 ## chainHead against live networks
 
 [`run_chainhead_test.sh`](run_chainhead_test.sh) drives the shared

@@ -47,7 +47,6 @@
     <input id="spec-url" type="url" value="/jam-demo/spec.json">
     <label for="spec-file">Or select a JSON spec file</label>
     <input id="spec-file" type="file" accept=".json,application/json">
-    <label><input id="dev-bootnode" type="checkbox"> Add the running demo network's node0 bootnode (asked of the local harness, never hardcoded here; local dev network only)</label>
     <p><code>withRuntime: false</code> is required and cannot be enabled here.</p>
     <div class="controls">
         <button id="start" type="button">Start</button>
@@ -123,8 +122,9 @@
     <p id="blocks-empty">No block has arrived yet.</p>
 
     <h2>Break the network</h2>
-    <p class="note">These buttons act on the local dev network started by <code>npm run demo:jam</code>,
-        through the harness's loopback control endpoint. They do nothing to the client itself.</p>
+    <p class="note">The harness attaches to a network zombienet started and manages no node, so these
+        buttons answer an error; stop and start a validator through zombienet instead (see <code>demo/jam.md</code>).
+        They never act on the client itself.</p>
     <div class="controls">
         <button id="kill-node0" type="button" disabled>Kill node0</button>
         <button id="start-node0" type="button" disabled>Start node0</button>
