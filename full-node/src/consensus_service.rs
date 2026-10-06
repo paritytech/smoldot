@@ -3359,6 +3359,7 @@ pub async fn runtime_call(
         storage_main_trie_changes: initial_storage_changes.into_main_trie_diff(),
         max_log_level: 0,
         calculate_trie_changes: true,
+        calculate_child_tries_roots_on_finish: true,
     })
     .map_err(|(err, _)| RuntimeCallError::RuntimeStartError(err))?;
 

@@ -1645,6 +1645,7 @@ fn run_single_runtime_call(
             executor::runtime_call::StorageProofSizeBehavior::proof_recording_disabled(),
         max_log_level: 0,
         calculate_trie_changes: false,
+        calculate_child_tries_roots_on_finish: false,
     })
     .map_err(|(err, _)| format!("Failed to start {function_name}: {err}"))?;
 
