@@ -142,7 +142,8 @@ handshake arrived) or disconnected. *Validator set (C(8))* says how often the
 client has read the active set and what the last read cost. Both rows mirror
 the client's own `jam-slot-assigned`, `jam-peer-connected`,
 `jam-peer-disconnected` and `jam-pool-changed` log lines; the page decides
-nothing. The harness has no view of the browser's connections, so the page
+nothing; a disconnected slot shows its `reason` (see "Client events"). The
+harness has no view of the browser's connections, so the page
 reports the list to it, and the harness prints a `browser peers:` line whenever
 it changes.
 
@@ -207,8 +208,10 @@ passes about every 72 seconds and you will see several in a normal session.
    blocks and verified `finalized` events then arrive from that anchor. The
    client and chain stay running throughout. Old unfinalized rows become
    *Superseded*, retaining the visible history without claiming finality.
-   *Warp status* retains `jam-warp-applied` or `jam-anchor-unserved` when logged;
-   the latter means the configured peers could not serve the anchor.
+   *Warp status* retains `jam-warp-applied`, the latest `jam-warp-rejected`
+   with its step and error, or `jam-anchor-unserved`; the last means the
+   configured peers could not serve the anchor. **Client events** shows each
+   step of the join (`jam-warp-request-queued` to `jam-warp-applied`).
    *Failure:* `Failed to decode chain specification` (check that the spec matches
    the current client; run `npm run demo:jam:rebuild` and reload after source changes);
    Connection stuck at *Connecting (following, no block yet)* while the log
@@ -333,8 +336,9 @@ passes about every 72 seconds and you will see several in a normal session.
     nothing: no `newBlock` ever, *Blocks since Start* stays 0, and the **Log**
     panel shows `jam-warp-rejected` with a verification error, followed by
     `jam-reconnect` lines at a growing backoff as the client keeps treating the
-    peer as faulty and retrying. *Warp status* stays empty, because no warp was
-    ever applied.
+    peer as faulty and retrying. *Warp status* shows the rejection, its step
+    (`fragments`) and error, and counts the rejections; no warp is ever
+    applied.
     *Failure:* any `newBlock`, or `jam-warp-applied` — either would mean the
     client joined a chain it cannot authenticate.
 
@@ -366,6 +370,145 @@ passes about every 72 seconds and you will see several in a normal session.
 Afterwards press Ctrl-C in terminal 2: the harness stops its server and prints
 "teardown complete; attach mode, the network was not ours and keeps running".
 Ctrl-C in terminal 1 tears the network down.
+
+## Client events
+
+The **Client events** section shows the client's own debug log as events: one
+row per event, newest first, with the time since Start, the connection slot,
+the category and the fields. A request is one row from its start to its
+outcome: it reads *pending* until the outcome line arrives, then the outcome
+and the duration. Category toggles (peers, pool, blocks, justification, state,
+warp, finality) and a text filter narrow the table; at most 1,000 events are
+kept, the oldest go first, and the line above the table counts the dropped
+ones. **Download events** saves the kept events, the spec's genesis hash
+(BLAKE2b-256 of `genesis_header`, computed in the page), the run's start time
+and the totals per category as JSON. The section keeps the last run's events
+after Stop until the next Start. The raw lines stay in **Client logs**.
+
+The events come from `light-base/src/sync_service/jam.rs`; `demo/jam-events.mjs`
+parses them, and the live rows for peers, the validator set and *Warp status*
+read the same parsed events. *Warp status* shows the latest applied join, the
+latest rejection (with its step, error and how many rejections there were since
+Start) or an unserved anchor.
+
+### Grammar
+
+```
+jam-<area>-<what>[; key=value, key=value, ...]
+```
+
+- **Area and category.** The first word after `jam-` picks the category:
+  `peer`, `slot`, `connect`, `reconnect`, `stream` are *peers*; `pool`,
+  `discovery` *pool*; `block`, `announcement`, `header` *blocks*;
+  `justification`; `state`; `warp`, `anchor` *warp*; `finality`, `finalized`
+  *finality*. Every line is logged at Debug, except `jam-anchor-unserved` at
+  Warn. The page starts the client with `maxLogLevel: 4` (Debug).
+- **Values are tokens:** decimal numbers, `0x` hashes in full, `true`/`false`,
+  `ip:port`, the driver's own kebab-case words, and error variant names such as
+  `NoData` or `Decode(LengthLimit)` (struct-variant fields are dropped, so
+  `WrongSetId { expected, received }` logs as `WrongSetId`). A value never
+  contains `, ` or `=`. Two exceptions, both handled by the parser: `message=`
+  of `jam-stream-reset` is the platform's free text and always the last field,
+  so everything after `message=` is its value; and `hash=` of
+  `jam-anchor-unserved` (Warn, left as it was) is a byte list, so a part
+  without `key=` continues the previous value. `-` means "does not apply".
+- **`slot=`** is the connection slot (0 or 1) on every line about one
+  connection, except on five older lines whose `slot=` was already a block
+  slot and stays one for their consumers: `jam-warp-join-selected`,
+  `jam-warp-applied`, `jam-finalized`, `jam-anchor-unserved` and
+  `jam-discovery-read-started`. The first three carry the connection slot as
+  `conn=`; the page shows their `slot` as `block_slot`. `jam-connect` and
+  `jam-reconnect` have no fields, because e2e bodies match them exactly; the
+  `jam-slot-assigned` before `jam-connect` and the `jam-peer-disconnected`
+  before `jam-reconnect` name the slot.
+- **`req=`** names one request for the whole client run. The start line
+  `jam-<area>-request-queued` and the outcome line `jam-<area>-request-ended`
+  share it, and so do the lines about the request in between
+  (`jam-stream-reset`, `jam-warp-rejected`, `jam-finalized`, ...).
+- **Outcome lines** carry `outcome=` and `elapsed_ms=` (since the request was
+  queued): `ok`; `failed` with the transport's `error=` (`NoData`,
+  `Transient`, `Rejected`, ...); `rejected` with the verifier's `error=`;
+  `timeout` or `cancelled` with the connection's end `reason=`. A request in
+  flight when the pool moves its slot to a bootnode gets no outcome line;
+  `jam-peer-disconnected` with `reason=preempted` ends it, and the page closes
+  the row as `cancelled`.
+- **Purposes:** blocks `warp-join-head`, `root-probe`, `repair`, `ascending`;
+  justifications `warp-join`, `finality`; state `warp-join` (the four items
+  `C4..C11` at the join head), `discovery` (`C8` at the finalized head); warp
+  `warp-join`.
+
+### Events
+
+| Event | Category | Fields | When it fires |
+|---|---|---|---|
+| `jam-pool-initial` | pool | `bootnodes`, `genesis`, `max_discovered`, `slots` | once at start: the pool's counts |
+| `jam-pool-candidate` | pool | `index`, `source`, `address`, `p256` | once per candidate at start, bootnodes first (at most 16 plus `max_validators`) |
+| `jam-pool-waiting` | pool | `slot`, `ready_in_ms` | a slot finds no candidate to dial; once per wait, `-` = until the pool changes |
+| `jam-pool-changed` | pool | `validators`, `usable`, `discovered`, `added`, `removed`, `retired`, `value_bytes`, `elapsed_ms` | a verified `C(8)` read was merged into the pool |
+| `jam-discovery-read-started` | pool | `slot` (block slot) | the `C(8)` refresh starts at the finalized head of that slot |
+| `jam-discovery-failed` | pool | `reason` | the refresh gave up: `Released`, `Unavailable`, `Cancelled`, `Provenance`, `Absent`, `Decode` |
+| `jam-slot-assigned` | peers | `slot`, `source`, `address`, `p256` | a slot took a candidate and dials it |
+| `jam-connect` | peers | none | the dial starts (right after `jam-slot-assigned`) |
+| `jam-slot-unsupported` | peers | `slot`, `address` | the platform cannot dial that address type |
+| `jam-peer-connected` | peers | `slot`, `source`, `address`, `final_slot`, `handshake_ms` | the peer's UP0 handshake arrived |
+| `jam-peer-disconnected` | peers | `slot`, `source`, `address`, `lasted_ms`, `reason` | the connection ended; `reason` below |
+| `jam-slot-preempted` | peers | `slot`, `from`, `to` | the pool moved a slot from a validator to a due bootnode |
+| `jam-reconnect` | peers | none | the slot asks the pool for its next candidate |
+| `jam-stream-reset` | peers | `slot`, `stream`, `req`, `reason`, `message` | the peer reset a stream; `stream` is `block`, `justification`, `state`, `warp` or `other` |
+| `jam-peer-protocol-error` | peers | `slot`, `error` | a JAMNP-S protocol error other than an oversized message |
+| `jam-announcement` | blocks | `slot`, `block_slot`, `final_slot` | a UP0 announcement arrived |
+| `jam-header-inserted` | blocks | `slot`, `via`, `block_slot`, `hash`, `known` | a header went into the tree (`via` `ascending`, `announcement` or `repair`; `known` if it was there already) |
+| `jam-block-request-queued` | blocks | `slot`, `req`, `purpose`, `hash`, `direction`, `max_blocks` | a CE 128 request is queued |
+| `jam-block-request-ended` | blocks | `slot`, `req`, `purpose`, `outcome`, `blocks`, `bytes`, `error`, `reason`, `elapsed_ms` | its outcome |
+| `jam-block-size-halved` | blocks | `slot`, `req`, `max_blocks`, `next_max_blocks`, `ceiling` | a response was too large; later ascending requests ask for fewer blocks |
+| `jam-justification-request-queued` | justification | `slot`, `req`, `purpose`, `target`, `target_slot`, `set_id` | a CE 130 request is queued (`set_id` for `finality` only) |
+| `jam-justification-request-ended` | justification | `slot`, `req`, `purpose`, `outcome`, `bytes`, `error`, `reason`, `elapsed_ms` | its outcome; the verdict follows as `jam-finalized`, `jam-finality-rejected` or a warp line |
+| `jam-state-request-queued` | state | `slot`, `req`, `purpose`, `block`, `trust`, `keys`, `max_size` | a CE 129 read is queued |
+| `jam-state-request-ended` | state | `slot`, `req`, `purpose`, `outcome`, `entries`, `nodes`, `bytes`, `error`, `reason`, `elapsed_ms` | its outcome; `rejected` carries the proof error |
+| `jam-state-rejected` | state | `slot`, `req`, `error` | the range proof did not verify (kept from before; the outcome line says the same) |
+| `jam-state-unavailable` | state | `slot`, `purpose` | the read itself gave up: every slot was tried (`discovery`, slot `-`) or the warp join's read failed |
+| `jam-warp-request-queued` | warp | `set_id`, `slot`, `req`, `purpose` | a CE 153 request from set `set_id` is queued |
+| `jam-warp-request-ended` | warp | `slot`, `req`, `purpose`, `outcome`, `start_set_id`, `bytes`, `fragments`, `set_id`, `chain_done`, `error`, `reason`, `elapsed_ms` | its outcome: fragments verified and the set reached, or the error |
+| `jam-warp-fragmentless` | warp | `reason`, `slot`, `req` | the first warp request answered `NoData`: nothing to warp |
+| `jam-warp-join-selected` | warp | `advertisement`, `slot` (block slot), `conn`, `hash`, `fragments`, `set_id` | the join freezes the peer's finalized head F |
+| `jam-warp-head-fetched` | warp | `slot`, `req`, `hash`, `block_slot`, `authenticated` | F's header arrived; `by-fragment` when the last fragment already finalized it, else `needs-justification` |
+| `jam-warp-justification-verified` | warp | `slot`, `req`, `hash`, `set_id` | F's justification verified |
+| `jam-warp-item-read` | warp | `slot`, `item`, `bytes` | one of the state items 4, 6, 8, 11 was read at F |
+| `jam-warp-applied` | warp | `set_id`, `slot` (block slot), `fragments`, `state_bytes`, `state_responses`, `fragment_finality`, `conn`, `hash` | the client re-anchored at F |
+| `jam-warp-rejected` | warp | `slot`, `step`, `req`, `error`, `reason` | a join step failed verification (`step` `fragments`, `head`, `justification` or `apply`; `reason` for a failed request) |
+| `jam-warp-abandoned` | warp | `slot`, `step`, `fragments`, `reason` | the connection ended during a join for another reason than a rejection |
+| `jam-anchor-unserved` | warp | `reason`, `error`, `hash`, `slot` (block slot) | Warn: every slot refused the anchor; the client stops |
+| `jam-finalized` | finality | `slot` (block slot), `set_id`, `retained`, `conn`, `req`, `hash` | a justification verified and finality advanced |
+| `jam-finality-rejected` | finality | `slot`, `req`, `target`, `set_id`, `error` | a justification did not verify |
+
+### Why a connection ended
+
+`jam-peer-disconnected` names one `reason` for every end of a connection:
+
+| `reason` | Meaning |
+|---|---|
+| `connect-timeout` | the transport did not connect within 20 s |
+| `transport` | the platform closed the connection (for example the peer died) |
+| `handshake-timeout` | no UP0 handshake within 20 s |
+| `idle` | nothing was read for 90 s |
+| `stream-open-timeout`, `stream-timeout` | a stream did not open, or outlived 20 s |
+| `block-timeout`, `justification-timeout`, `state-timeout`, `warp-timeout` | that request took more than 20 s |
+| `stream-reset` | the peer reset its UP0 stream, or the warp join's justification stream |
+| `block-failed`, `justification-failed`, `state-failed`, `warp-failed` | that request failed in a way that ends the connection |
+| `state-rejected`, `warp-rejected`, `warp-invalid`, `finality-rejected` | a response did not verify |
+| `state-unavailable`, `state-cancelled` | the warp join's state read ended without a result |
+| `root-refused`, `root-unextendable`, `anchor-unserved` | the peer does not serve our finalized root |
+| `unexpected-response`, `protocol-error`, `message-too-large`, `limit`, `request-refused`, `setup` | protocol or bound violations |
+| `insert-failed`, `tree-full` | the header tree refused a header or is full |
+| `warp-revision` | another slot applied a warp join; every connection restarts on the new anchor |
+| `stopped` | the chain stopped |
+| `preempted` | the pool moved the slot to a due bootnode |
+
+On the tiny network (six validators, 6-second slots) a client at the tip logs
+one announcement and one inserted header per block per slot, plus one
+justification request, its outcome and `jam-finalized` per finality advance:
+measured over five minutes on 2026-10-06, 73 `jam-*` lines (8.8 kB) a minute,
+of 140 client lines (25 kB) a minute at Debug in all.
 
 ## What this does not prove
 
@@ -402,16 +545,21 @@ DOM ids: `spec-url`, `spec-file`, `start`, `stop`, `header`,
 `live-node-best`, `live-agreement`, plus the block list's `blocks-body` (its
 `<tbody>`) and `blocks-empty`. Finality fields: `finality-state`, `finality-head`,
 `finality-slot`, `finality-count`, `finality-age`, `finality-node`,
-`finality-node-gap`.
+`finality-node-gap`. Client events: `client-events-categories` with one
+checkbox `client-events-<category>` per category, `client-events-filter`,
+`client-events-download`, `client-events-summary`, `client-events-body` and
+`client-events-empty`.
 
 `window.jamDemo` exposes `.start()`, `.stop()`, `.header()`, `.unfollow()`,
-`.network('kill-node0' | 'start-node0' | 'restart-node0')`, `.snapshot()` (a
+`.network('kill-node0' | 'start-node0' | 'restart-node0')`,
+`.clientEvents()` (what **Download events** saves), `.downloadEvents()`, `.snapshot()` (a
 bounded copy of the session state) and `.live()` (the live view's values,
 including the decoded header, the tracked leaves, the block rows behind
 **Recent blocks**, and the harness status).
 The live snapshot also includes `finalized` (hash, source and optional slot),
-`finalityCount`, `lastFinalityAt`, `refollows`, `warpStatus`, `peers` (per
-slot: source, address, state, since), `refreshes` (the last 32 `C(8)` merges
+`finalityCount`, `lastFinalityAt`, `refollows`, `warpStatus` and `warp` (the
+event behind it: name, slot, step, error, rejections), `peers` (per
+slot: source, address, state, since, the disconnect reason), `refreshes` (the last 32 `C(8)` merges
 with their counts, bytes and milliseconds), `discoveryError`, the latest
 `initialized` anchor's decoded slot, and each row's `finality` status.
 Rendered RPC and log content uses `textContent`, never HTML.
@@ -421,20 +569,22 @@ Demo-side bounds, unchanged from C1 except the last three: 100 entries per panel
 tracked pins, at most 32 pending RPC calls with 15-second timeouts, at most 256
 tracked block hashes behind the leaf view, 20 rows in **Recent blocks**, and a
 header-fetch queue capped at those same 20 so a catch-up burst cannot build a
-backlog. These are demo bounds, **not** a measurement of the
+backlog, and 1,000 client events. These are demo bounds, **not** a measurement of the
 client's memory use.
 
 Syntax check (does not execute WASM or connect to the network):
 
 ```sh
-node --check demo/jam.mjs && node --check demo/jam-harness.mjs
+node --check demo/jam.mjs && node --check demo/jam-events.mjs && node --check demo/jam-harness.mjs
 ```
 
 Browser regression with controlled client/node RPC streams (no WASM or dev
 network required): `node --test test/jam/demo.mjs`. Set `CHROMIUM_PATH` to a
 system Chrome executable if Playwright's bundled browser is unavailable. This
 checks finality rendering, fork pruning, independent RPC errors, re-follow
-limits, stale replies, manual Unfollow and Stop during startup.
+limits, stale replies, manual Unfollow and Stop during startup, and the client
+events: every event of the table above parses, free text with commas, request
+pairing, the 1,000-event cap, the filters, the section and its download.
 
 The live page regression is the `jam_demo` scenario in `e2e-tests`: it spawns a
 GRANDPA network through zombienet-sdk, ages it past a set change, and runs
@@ -445,8 +595,9 @@ cargo test --manifest-path e2e-tests/Cargo.toml --test jam_demo -- --nocapture
 ```
 
 The live cases assert one `stop`, a different second anchor, resumed blocks and
-finality, no automatic re-follow after manual Unfollow, the refusal of step 10,
-and attach mode with every, one or no bootnode in the spec.
+finality, no automatic re-follow after manual Unfollow, that every `jam-*` line
+parses and every category shows events, the refusal of step 10 in *Warp
+status*, and attach mode with every, one or no bootnode in the spec.
 
 ## Firefox note
 

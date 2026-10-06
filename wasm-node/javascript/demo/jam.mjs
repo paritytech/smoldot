@@ -1,6 +1,8 @@
 // Smoldot
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
+import { BLOCK_SLOT_EVENTS, CATEGORIES, blake2b256Hex, createEventStore } from './jam-events.mjs';
+
 const field = id => document.getElementById(id);
 const MAX_PINS = 16;
 const MAX_PENDING = 32;
@@ -15,8 +17,12 @@ const POLL_MS = 2000;
 const MAX_PEER_SLOTS = 2;
 /** How many `C(8)` refreshes the page remembers, newest last. */
 const MAX_REFRESHES = 32;
+/** How many client events the Client events section keeps; the oldest go first. */
+const MAX_CLIENT_EVENTS = 1000;
 const entries = { events: [], logs: [] };
 let current;
+/** The run whose client events are shown and downloadable; kept after Stop. */
+let eventsRun;
 let stopping = false;
 
 function print(panel, text) {
@@ -352,9 +358,12 @@ async function start() {
         blockCount: 0, blocks: new Map(), bootnodes: [], startedAt: Date.now(),
         rows: [], headerQueue: [], finalityCount: 0,
         generation: 0, refollows: 0, followStops: [], activeBlocks: new Set(),
-        peers: [], refreshes: [],
+        peers: [], refreshes: [], clientEvents: createEventStore({ max: MAX_CLIENT_EVENTS }),
+        logLines: 0, logBytes: 0,
     };
     current = run;
+    eventsRun = run;
+    renderClientEvents();
     for (const panel of ['events', 'logs']) {
         entries[panel].length = 0;
         field(panel).textContent = '';
@@ -392,6 +401,11 @@ async function start() {
         const spec = JSON.parse(text);
         if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw new Error('Expected a JSON spec object');
         run.bootnodes = Array.isArray(spec.bootnodes) ? spec.bootnodes.slice() : [];
+        try {
+            run.genesisHash = blake2b256Hex(hexToBytes(String(spec.genesis_header ?? '')));
+        } catch {
+            run.genesisHash = undefined;
+        }
         run.params = specParams(spec);
         if (!run.params) print('logs', 'Spec protocol_parameters could not be read; the slot/epoch display stays empty.');
         renderLive();
@@ -402,12 +416,11 @@ async function start() {
             cpuRateLimit: 0.5,
             logCallback: (_level, target, message) => {
                 if (current !== run) return;
+                // Every client line, JAM or not, for the log volume.
+                run.logLines += 1;
+                run.logBytes += String(target).length + String(message).length;
                 print('logs', '[' + target + '] ' + message);
-                if (/jam-warp-applied|jam-anchor-unserved/.test(message)) {
-                    run.warpStatus = message;
-                    renderLive();
-                }
-                peerLog(run, String(message));
+                clientLog(run, String(target), String(message));
             },
         });
         run.chain = await run.client.addChain({ chainSpec: JSON.stringify(spec) });
@@ -435,57 +448,78 @@ async function unfollow() {
 }
 
 // --------------------------------------------------------------------------
-// Connected peers and the discovered validator set.
-//
-// The client logs every slot assignment, UP0 handshake and disconnect with the
-// peer's source (`bootnode` from the spec's bootnodes, `genesis` from the
-// spec's genesis C(8), `discovered` from a verified C(8) read), and every merge
-// of a C(8) read. This panel only mirrors
-// those lines; nothing here decides whom the client dials or trusts.
+// Client events: every `jam-*` debug line of the client's JAM driver, parsed
+// by `jam-events.mjs` (grammar in demo/jam.md, "Client events"). The live rows
+// for peers, the validator set and the warp status below read the same parsed
+// events; nothing here decides whom the client dials or trusts.
 // --------------------------------------------------------------------------
 
-const PEER_LOG = /^(jam-slot-assigned|jam-peer-connected|jam-peer-disconnected|jam-pool-changed|jam-discovery-failed)(?:; (.*))?$/;
+const PEER_EVENTS = new Set(['jam-slot-assigned', 'jam-peer-connected', 'jam-peer-disconnected',
+    'jam-pool-changed', 'jam-discovery-failed']);
+/** The lines that set *Warp status*: an applied join, a rejected one, or an unserved anchor. */
+const WARP_STATUS_EVENTS = new Set(['jam-warp-applied', 'jam-warp-rejected', 'jam-anchor-unserved']);
 
-/** `k=v, k=v` as the smoldot log formatter writes fields. */
-function logFields(text) {
-    const fields = {};
-    for (const part of text.split(', ')) {
-        const at = part.indexOf('=');
-        if (at > 0) fields[part.slice(0, at)] = part.slice(at + 1);
-    }
-    return fields;
+function clientLog(run, target, message) {
+    const event = run.clientEvents.add(target, message, Date.now());
+    if (!event) return;
+    if (PEER_EVENTS.has(event.name)) peerEvent(run, event);
+    if (WARP_STATUS_EVENTS.has(event.name)) warpEvent(run, event, message);
+    scheduleEventsRender();
 }
 
-function peerLog(run, message) {
-    const match = PEER_LOG.exec(message);
-    if (!match) return;
-    const [, kind, rest] = match;
-    const fields = logFields(rest ?? '');
-    if (kind === 'jam-pool-changed') {
+/**
+ * Connected peers and the discovered validator set. The client logs every
+ * slot assignment, UP0 handshake and disconnect with the peer's source
+ * (`bootnode` from the spec's bootnodes, `genesis` from the spec's genesis
+ * C(8), `discovered` from a verified C(8) read), and every merge of a C(8)
+ * read; this mirrors those events.
+ */
+function peerEvent(run, event) {
+    const { name, fields } = event;
+    if (name === 'jam-pool-changed') {
         const number = key => Number.isFinite(Number(fields[key])) ? Number(fields[key]) : undefined;
         run.refreshes.push({
-            at: Date.now(), validators: number('validators'), usable: number('usable'),
+            at: event.at, validators: number('validators'), usable: number('usable'),
             discovered: number('discovered'), added: number('added'), removed: number('removed'),
             retired: number('retired'), valueBytes: number('value_bytes'), elapsedMs: number('elapsed_ms'),
         });
         if (run.refreshes.length > MAX_REFRESHES) run.refreshes.shift();
         run.discoveryError = undefined;
-    } else if (kind === 'jam-discovery-failed') {
+    } else if (name === 'jam-discovery-failed') {
         run.discoveryError = fields.reason ?? 'unknown';
     } else {
-        const slot = Number(fields.slot);
-        if (!Number.isInteger(slot) || slot < 0 || slot >= MAX_PEER_SLOTS) return;
-        if (kind === 'jam-peer-disconnected') {
-            if (run.peers[slot]) Object.assign(run.peers[slot], { state: 'disconnected', since: Date.now() });
+        const slot = event.slot;
+        if (slot === null || slot >= MAX_PEER_SLOTS) return;
+        if (name === 'jam-peer-disconnected') {
+            if (run.peers[slot]) Object.assign(run.peers[slot], { state: 'disconnected', since: event.at, reason: fields.reason });
         } else {
             run.peers[slot] = {
                 slot, source: fields.source, address: fields.address,
-                state: kind === 'jam-peer-connected' ? 'connected' : 'dialing', since: Date.now(),
+                state: name === 'jam-peer-connected' ? 'connected' : 'dialing', since: event.at,
             };
         }
     }
     void reportPeers(run);
     renderLive();
+}
+
+/** *Warp status*: the latest applied join, rejection or unserved anchor, and how many rejections. */
+function warpEvent(run, event, message) {
+    if (event.name === 'jam-warp-rejected') run.warpRejections = (run.warpRejections ?? 0) + 1;
+    run.warpStatus = message;
+    run.warp = {
+        event: event.name, at: event.at, slot: event.slot, req: event.req,
+        step: event.fields.step, error: event.fields.error ?? event.fields.reason,
+        rejections: run.warpRejections ?? 0,
+    };
+    renderLive();
+}
+
+function warpStatusText(run) {
+    if (!run?.warp) return undefined;
+    if (run.warp.event !== 'jam-warp-rejected') return run.warpStatus;
+    return 'rejected at step ' + (run.warp.step ?? '–') + ' on slot ' + (run.warp.slot ?? '–') + ': ' +
+        (run.warp.error ?? '–') + ' · ' + run.warp.rejections + ' rejection(s) since Start · ' + run.warpStatus;
 }
 
 function peerList(run) {
@@ -526,7 +560,8 @@ function renderPeers(run) {
     ensurePeerRows();
     const peers = peerList(run);
     setText('live-peers', !run ? undefined : peers.length === 0 ? 'none yet' : peers.map(peer =>
-        'slot ' + peer.slot + ': ' + peer.source + ' ' + peer.address + ' · ' + peer.state + ' ' +
+        'slot ' + peer.slot + ': ' + peer.source + ' ' + peer.address + ' · ' + peer.state +
+        (peer.state === 'disconnected' && peer.reason ? ' (' + peer.reason + ')' : '') + ' ' +
         Math.round((Date.now() - peer.since) / 1000) + 's').join(' | '));
     const last = run?.refreshes.at(-1);
     setText('live-pool', !run ? undefined : last
@@ -698,7 +733,7 @@ function renderLive() {
         setHash('live-reanchor', anchors.at(-1), '· count ' + run.refollows + ' · slot ' +
             (run.initialized.slot ?? '–') + (run.initialized.error ? ' · header not readable' : ''));
     } else setText('live-reanchor', run?.refollows ? run.refollows + ' · waiting for initialized' : '0');
-    setText('live-warp-status', run?.warpStatus);
+    setText('live-warp-status', warpStatusText(run));
     setText('live-count', run ? String(run.blockCount) : '0');
     setHash('live-block', run?.latest);
     setHash('live-parent', run && run.latest ? run.blocks.get(run.latest) ?? undefined : undefined);
@@ -818,6 +853,152 @@ function renderBlocks(run) {
     }
     body.textContent = '';
     body.append(table);
+}
+
+// --------------------------------------------------------------------------
+// Client events section: newest first, one row per request from start to
+// outcome, category toggles and a text filter, at most MAX_CLIENT_EVENTS
+// events, and a JSON download. It keeps the last run's events after Stop.
+// --------------------------------------------------------------------------
+
+/** Category toggles and the text filter. */
+const eventFilter = { categories: new Set(CATEGORIES), text: '' };
+let eventsRenderTimer;
+const HASH = /^0x[0-9a-f]{64}$/;
+
+/** Coalesces bursts: a catch-up can log dozens of lines in a second. */
+function scheduleEventsRender() {
+    if (eventsRenderTimer !== undefined) return;
+    eventsRenderTimer = setTimeout(() => {
+        eventsRenderTimer = undefined;
+        renderClientEvents();
+    }, 250);
+}
+
+/** The fields worth showing in the Details column, `slot` as a block slot where it is one. */
+function detailEntries(name, fields, skip) {
+    const blockSlot = BLOCK_SLOT_EVENTS.has(name);
+    return Object.entries(fields)
+        .filter(([key]) => !skip.includes(key) && key !== 'req' && (blockSlot ? key !== 'conn' : key !== 'slot'))
+        .map(([key, value]) => [blockSlot && key === 'slot' ? 'block_slot' : key, value]);
+}
+
+function appendFields(td, entries) {
+    for (const [key, value] of entries) {
+        td.append(document.createTextNode(' ' + key + ' '));
+        if (HASH.test(value)) {
+            const code = document.createElement('code');
+            code.textContent = abbreviate(value);
+            code.title = value + ' (click to copy)';
+            code.tabIndex = 0;
+            code.style.cursor = 'copy';
+            code.onclick = () => { void navigator.clipboard?.writeText(value).catch(() => {}); };
+            td.append(code);
+        } else {
+            const strong = document.createElement('strong');
+            strong.textContent = value;
+            td.append(strong);
+        }
+    }
+}
+
+function renderClientEvents() {
+    const run = eventsRun;
+    const store = run?.clientEvents;
+    const rows = store ? store.view(eventFilter) : [];
+    setText('client-events-summary', !store ? 'No client started yet.' :
+        store.rows.length + ' event(s) kept of at most ' + store.max + ' · ' + store.dropped + ' dropped · ' +
+        store.pending() + ' request(s) pending · ' + store.total + ' since Start' +
+        (store.unparsed ? ' · ' + store.unparsed + ' jam- line(s) not parsed' : '') +
+        (rows.length !== store.rows.length ? ' · ' + rows.length + ' shown' : ''));
+    field('client-events-download').disabled = !store;
+    field('client-events-empty').hidden = rows.length > 0;
+    const body = field('client-events-body');
+    const table = document.createDocumentFragment();
+    for (const entry of rows) {
+        const row = document.createElement('tr');
+        row.dataset.category = entry.category;
+        if (entry.request) row.dataset.request = entry.request.pending ? 'pending' : entry.request.outcome ?? 'ended';
+        cell(row, '+' + ((entry.at - run.startedAt) / 1000).toFixed(1) + ' s');
+        cell(row, entry.slot === null ? '–' : String(entry.slot));
+        cell(row, entry.category);
+        cell(row, entry.request ? entry.name.replace(/-queued$/, '') : entry.name, { mono: true });
+        const td = cell(row, entry.req === null ? '' : '#' + entry.req);
+        td.className = 'details';
+        if (entry.request) {
+            appendFields(td, detailEntries(entry.name, entry.fields, []));
+            const outcome = document.createElement('span');
+            const request = entry.request;
+            if (request.pending) {
+                outcome.className = 'pending';
+                outcome.textContent = ' → pending ' + ((Date.now() - entry.at) / 1000).toFixed(1) + ' s';
+                td.append(outcome);
+            } else {
+                outcome.className = 'outcome';
+                outcome.textContent = ' → ' + (request.outcome ?? 'ended') +
+                    (request.elapsedMs === null ? '' : ' in ' + request.elapsedMs + ' ms');
+                td.append(outcome);
+                if (request.end) appendFields(td, detailEntries(request.endName, request.end, ['purpose', 'outcome', 'elapsed_ms']));
+            }
+        } else {
+            appendFields(td, detailEntries(entry.name, entry.fields, []));
+        }
+        table.append(row);
+    }
+    body.textContent = '';
+    body.append(table);
+}
+
+/** The retained events, the spec's genesis hash and the run's start, as a JSON file. */
+function eventsDocument() {
+    const run = eventsRun;
+    if (!run) return undefined;
+    return {
+        format: 'smoldot-jam-client-events/1',
+        genesisHash: run.genesisHash ?? null,
+        startedAt: new Date(run.startedAt).toISOString(),
+        savedAt: new Date().toISOString(),
+        /** Every client log line since Start, JAM or not: count and characters of target plus message. */
+        clientLog: { lines: run.logLines, bytes: run.logBytes },
+        ...run.clientEvents.snapshot(),
+    };
+}
+
+function downloadEvents() {
+    const document_ = eventsDocument();
+    if (!document_) return undefined;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(document_, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'jam-client-events-' + document_.startedAt.replace(/[:.]/g, '-') + '.json';
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    return document_;
+}
+
+function setupClientEvents() {
+    const toggles = field('client-events-categories');
+    for (const category of CATEGORIES) {
+        const label = document.createElement('label');
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.id = 'client-events-' + category;
+        box.checked = true;
+        box.onchange = () => {
+            if (box.checked) eventFilter.categories.add(category); else eventFilter.categories.delete(category);
+            renderClientEvents();
+        };
+        label.append(box, document.createTextNode(' ' + category));
+        toggles.append(label);
+    }
+    field('client-events-filter').oninput = event => {
+        eventFilter.text = event.target.value;
+        renderClientEvents();
+    };
+    field('client-events-download').onclick = () => { downloadEvents(); };
+    renderClientEvents();
 }
 
 // --------------------------------------------------------------------------
@@ -953,12 +1134,18 @@ for (const action of ['kill-node0', 'start-node0', 'restart-node0'])
 
 setInterval(() => { void poll(); }, POLL_MS);
 setInterval(renderLive, 1000);
+// Pending requests show their running time.
+setInterval(() => { if (eventsRun?.clientEvents.pending()) scheduleEventsRender(); }, 1000);
+setupClientEvents();
 void poll();
 renderLive();
 
 window.jamDemo = {
     start, stop, header, unfollow,
     network: networkAction,
+    /** The Client events section's data: what the download would save. */
+    clientEvents: eventsDocument,
+    downloadEvents,
     snapshot: () => ({
         running: !!current,
         subscription: current?.subscription,
@@ -975,6 +1162,7 @@ window.jamDemo = {
         initialized: current?.initialized,
         refollows: current?.refollows ?? 0,
         warpStatus: current?.warpStatus,
+        warp: current?.warp ? { ...current.warp } : undefined,
         peers: peerList(current),
         refreshes: (current?.refreshes ?? []).map(entry => ({ ...entry })),
         discoveryError: current?.discoveryError,

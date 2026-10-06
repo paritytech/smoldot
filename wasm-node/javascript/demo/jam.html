@@ -35,6 +35,12 @@
         .blocks th, .blocks td { text-align: left; padding: var(--small); border-bottom: var(--border); white-space: nowrap; }
         .blocks th { position: sticky; top: 0; background: Canvas; }
         .blocks tr:last-child td { border-bottom: none; }
+        .blocks td.details { white-space: normal; overflow-wrap: anywhere; }
+        .blocks tr[data-request="pending"] .pending { font-style: italic; }
+        .blocks tr[data-request="failed"] .outcome, .blocks tr[data-request="rejected"] .outcome,
+        .blocks tr[data-request="timeout"] .outcome, .blocks tr[data-request="cancelled"] .outcome { font-weight: bold; }
+        .categories { display: flex; flex-wrap: wrap; gap: var(--space); margin-block: var(--small); }
+        .categories label { display: inline; margin: 0; }
     </style>
 </head>
 <body>
@@ -120,6 +126,30 @@
         </table>
     </div>
     <p id="blocks-empty">No block has arrived yet.</p>
+
+    <h2>Client events</h2>
+    <p class="note">The client's own debug events, parsed from its <code>jam-*</code> log lines (the
+        grammar and every event are in <code>demo/jam.md</code>, &ldquo;Client events&rdquo;): which peers
+        the pool holds and which a slot dials, why a connection ended, every block, justification, state
+        and warp request from start to outcome, and the steps of the warp join. Newest first; a request is
+        one row that turns from <em>pending</em> into its outcome. Slot is the connection slot. At most
+        1,000 events are kept; the oldest go first. Click a hash to copy it in full. These rows only
+        mirror the log; the raw lines stay in <strong>Client logs</strong> below.</p>
+    <div class="categories" id="client-events-categories" role="group" aria-label="Event categories"></div>
+    <div class="controls">
+        <input id="client-events-filter" type="search" placeholder="Filter: text in event name or fields" aria-label="Filter client events">
+        <button id="client-events-download" type="button" disabled>Download events</button>
+    </div>
+    <p id="client-events-summary" role="status">No client started yet.</p>
+    <div class="blocks">
+        <table>
+            <thead>
+                <tr><th>Time</th><th>Slot</th><th>Category</th><th>Event</th><th>Details</th></tr>
+            </thead>
+            <tbody id="client-events-body"></tbody>
+        </table>
+    </div>
+    <p id="client-events-empty">No client event yet.</p>
 
     <h2>Break the network</h2>
     <p class="note">The harness attaches to a network zombienet started and manages no node, so these

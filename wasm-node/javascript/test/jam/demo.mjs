@@ -18,6 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { corruptGenesisAuthorities } from '../../../../e2e-tests/shared/jam.js';
+import { BLOCK_SLOT_EVENTS, CATEGORIES, blake2b256Hex as pageBlake2b256Hex, createEventStore, parseJamLog } from '../../demo/jam-events.mjs';
 
 const live = process.argv.includes('--live');
 const LIVE_SPEC_PATH = process.env.JAM_SPEC_PATH;
@@ -91,6 +92,8 @@ function fixtureStart(options) {
 }
 
 const hash = byte => '0x' + byte.repeat(32);
+/** The fixture spec's genesis header: the page only hashes it for the events download. */
+const FIXTURE_GENESIS_HEADER = '0x' + '5a'.repeat(140);
 
 async function setupFixture(page) {
     const params = Buffer.alloc(122);
@@ -106,10 +109,10 @@ async function setupFixture(page) {
         if (pathname === '/jam-demo/control')
             return route.fulfill({ json: { ok: true, status } });
         if (pathname === '/jam-demo/spec.json')
-            return route.fulfill({ json: { protocol_parameters: params.toString('hex') } });
+            return route.fulfill({ json: { protocol_parameters: params.toString('hex'), genesis_header: FIXTURE_GENESIS_HEADER } });
         if (pathname === '/dist/mjs/index-browser.js')
             return route.fulfill({ contentType: 'text/javascript', body: 'export const start = ' + fixtureStart.toString() });
-        if (['/demo/jam.html', '/demo/jam.mjs'].includes(pathname))
+        if (['/demo/jam.html', '/demo/jam.mjs', '/demo/jam-events.mjs'].includes(pathname))
             return route.fulfill({ path: new URL('../..' + pathname, import.meta.url).pathname });
         return route.fulfill({ status: 404 });
     });
@@ -221,9 +224,12 @@ test('re-follow resets subscription state, ignores late replies and bounds repea
         assert.equal((await page.evaluate(() => window.jamDemo.live())).blockCount, 3);
         assert.ok(!(await page.locator('#logs').innerText()).includes('Error:'));
         assert.equal(await page.evaluate(() => window.fixture.terminated), false);
-        for (const message of ['jam-warp-applied set_id=1', 'jam-anchor-unserved']) {
+        for (const message of [
+            'jam-warp-applied; set_id=1, slot=42, fragments=1, state_bytes=9, state_responses=1, fragment_finality=true, conn=0, hash=' + hash('33'),
+            'jam-anchor-unserved; reason=NoData, error=anchor [1, 2] at slot 42 is unserved, hash=[1, 2], slot=42',
+        ]) {
             await page.evaluate(message => window.fixture.log(message), message);
-            assert.equal(await page.locator('#live-warp-status').innerText(), message);
+            await page.waitForFunction(message => document.getElementById('live-warp-status').textContent === message, message);
         }
         await emit({ event: 'stop' });
         await page.waitForFunction(() => window.jamDemo.snapshot().subscription === 'fixture-3');
@@ -282,6 +288,210 @@ test('manual Unfollow and Stop during startup or re-follow cannot restart follow
     } finally { await browser.close(); }
 });
 
+// --------------------------------------------------------------------------
+// Client events (D20, debug events on the demo page): the parser against the
+// docs table and the driver's source, free text, request pairing, the cap and
+// the filters in Node; then the page's section, live rows and download.
+// --------------------------------------------------------------------------
+
+/** The rows of demo/jam.md's "Client events" table: name, category, field keys. */
+async function documentedEvents() {
+    const docs = await fs.readFile(new URL('../../demo/jam.md', import.meta.url), 'utf8');
+    const table = docs.slice(docs.indexOf('### Events'), docs.indexOf('### Why a connection ended'));
+    return [...table.matchAll(/^\| `(jam-[a-z0-9-]+)` \| (\w+) \| (.*?) \| .* \|$/gm)].map(match => ({
+        name: match[1], category: match[2], fields: [...match[3].matchAll(/`([a-z_0-9]+)`/g)].map(field => field[1]),
+    }));
+}
+
+/** A line with every documented field, free text where the grammar allows it. */
+function synthesize({ name, fields }) {
+    const value = key => key === 'message' ? 'jamnp-stream-reset:6 the peer said, no=data, twice'
+        : ['hash', 'target', 'block'].includes(key) ? hash('ab')
+            : ['slot', 'conn'].includes(key) ? '1' : key === 'req' ? '42' : 'v-' + key;
+    return fields.length === 0 ? name : name + '; ' + fields.map(key => key + '=' + value(key)).join(', ');
+}
+
+test('client events: every documented event parses, and the docs list exactly what the driver logs', async () => {
+    const documented = await documentedEvents();
+    assert.ok(documented.length >= 39, `${documented.length} documented events`);
+    for (const row of documented) {
+        assert.ok(CATEGORIES.includes(row.category), row.name);
+        const line = synthesize(row);
+        const event = parseJamLog('jam-dev-0', line, 7);
+        assert.ok(event, line);
+        assert.equal(event.name, row.name);
+        assert.equal(event.category, row.category, row.name);
+        assert.deepEqual(Object.keys(event.fields), row.fields, row.name);
+        const connection = BLOCK_SLOT_EVENTS.has(row.name) ? 'conn' : 'slot';
+        assert.equal(event.slot, row.fields.includes(connection) ? 1 : null, row.name);
+        assert.equal(event.req, row.fields.includes('req') ? 42 : null, row.name);
+        if (row.fields.includes('message')) assert.equal(event.rest, 'jamnp-stream-reset:6 the peer said, no=data, twice');
+    }
+    // Every `"jam-..."` literal of the driver is an event name; all are documented.
+    const rust = await fs.readFile(new URL('../../../../light-base/src/sync_service/jam.rs', import.meta.url), 'utf8');
+    const logged = [...new Set([...rust.matchAll(/"(jam-[a-z0-9-]+)"/g)].map(match => match[1]))].sort();
+    assert.deepEqual(logged, documented.map(row => row.name).sort());
+});
+
+test('client events: free text, byte lists, non-events, request pairing, the cap and filters', () => {
+    const reset = parseJamLog('t', 'jam-stream-reset; slot=0, stream=state, req=4, reason=NoData, message=jamnp-stream-reset:6 a, b=c, d', 1);
+    assert.equal(reset.fields.reason, 'NoData');
+    assert.equal(reset.fields.message, 'jamnp-stream-reset:6 a, b=c, d');
+    assert.equal(reset.fields.b, undefined);
+    const unserved = parseJamLog('t', 'jam-anchor-unserved; reason=NoData, error=anchor [1, 2] at slot 9 is unserved, hash=[1, 2, 3], slot=9', 1);
+    assert.deepEqual(unserved.fields, { reason: 'NoData', error: 'anchor [1, 2] at slot 9 is unserved', hash: '[1, 2, 3]', slot: '9' });
+    assert.equal(unserved.slot, null, 'a block slot is not a connection slot');
+    assert.equal(parseJamLog('t', 'jam-connect', 1).slot, null);
+    for (const line of ['sync-service: something', 'jam-', 'jam-unknownarea-x', 'jam-peer-connected; no fields here', 'jam-peer connected']) {
+        assert.equal(parseJamLog('t', line, 1), null, line);
+    }
+
+    const store = createEventStore({ max: 5 });
+    store.add('t', 'jam-block-request-queued; slot=0, req=1, purpose=ascending, hash=' + hash('aa') + ', direction=ascending, max_blocks=4', 100);
+    store.add('t', 'jam-state-request-queued; slot=1, req=2, purpose=discovery, block=' + hash('bb') + ', trust=authenticated, keys=C8, max_size=800000', 110);
+    store.add('t', 'jam-justification-request-queued; slot=1, req=3, purpose=finality, target=' + hash('cc') + ', target_slot=-, set_id=2', 120);
+    assert.equal(store.rows.length, 3);
+    assert.equal(store.pending(), 3);
+    store.add('t', 'jam-block-request-ended; slot=0, req=1, purpose=ascending, outcome=ok, blocks=4, bytes=900, elapsed_ms=35', 135);
+    assert.equal(store.rows.length, 3, 'an outcome updates its request row in place');
+    assert.deepEqual({ ...store.rows[0].request, end: undefined }, {
+        pending: false, purpose: 'ascending', endName: 'jam-block-request-ended', endAt: 135, outcome: 'ok', elapsedMs: 35, end: undefined,
+        endLine: 'jam-block-request-ended; slot=0, req=1, purpose=ascending, outcome=ok, blocks=4, bytes=900, elapsed_ms=35',
+    });
+    assert.ok(store.rows[0].line.startsWith('jam-block-request-queued; slot=0, req=1'));
+    // A request cut short by preemption has no outcome line; the disconnect closes it.
+    store.add('t', 'jam-peer-disconnected; slot=1, source=genesis, address=127.0.0.1:1, lasted_ms=5000, reason=preempted', 400);
+    assert.equal(store.pending(), 0);
+    assert.equal(store.rows[1].request.outcome, 'cancelled');
+    assert.equal(store.rows[1].request.end.reason, 'preempted');
+    // An outcome whose start was never seen is kept as its own row.
+    store.add('t', 'jam-warp-request-ended; slot=0, req=77, purpose=warp-join, outcome=failed, error=NoData, elapsed_ms=3', 410);
+    assert.equal(store.rows.at(-1).request.outcome, 'failed');
+    // The cap drops the oldest rows and counts them; totals cover everything.
+    for (let index = 0; index < 4; index += 1) store.add('t', 'jam-announcement; slot=0, block_slot=' + index + ', final_slot=0', 500 + index);
+    assert.equal(store.rows.length, 5);
+    assert.equal(store.dropped, 4);
+    assert.equal(store.total, 10, 'outcome lines count, though they update rows in place');
+    assert.equal(store.byCategory.blocks, 6);
+    assert.equal(store.byName['jam-announcement'], 4);
+    // The block request row was dropped with its pairing: a late outcome stands alone.
+    store.add('t', 'jam-block-request-ended; slot=0, req=1, purpose=ascending, outcome=ok, blocks=1, bytes=9, elapsed_ms=1', 600);
+    assert.equal(store.rows.at(-1).request.endName, 'jam-block-request-ended');
+    store.add('t', 'jam-nonsense here', 601);
+    assert.equal(store.unparsed, 1);
+    assert.deepEqual(store.unparsedSamples, ['jam-nonsense here']);
+    // Filters: categories and text, newest first.
+    assert.deepEqual(store.view({ categories: new Set(['warp']) }), [], 'the warp row was the oldest and is gone');
+    assert.deepEqual(store.view({ categories: new Set(['blocks']) }).map(row => row.name),
+        ['jam-block-request-ended', ...Array(4).fill('jam-announcement')]);
+    assert.deepEqual(store.view({ text: 'BLOCK_SLOT=3' }).map(row => row.fields.block_slot), ['3']);
+    assert.equal(store.view({ categories: new Set(CATEGORIES), text: '' })[0].at, 600);
+    const snapshot = store.snapshot();
+    assert.equal(JSON.parse(JSON.stringify(snapshot)).events.length, 5);
+
+    for (const length of [0, 1, 127, 128, 129, 300, 1000]) {
+        const bytes = Uint8Array.from({ length }, (_, index) => (index * 31 + 7) & 255);
+        assert.equal(pageBlake2b256Hex(bytes), '0x' + blake.blake2bHex(bytes, undefined, 32), `${length} bytes`);
+    }
+});
+
+test('client events section: request rows, filters, peers and warp status from events, cap, download', async () => {
+    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH });
+    try {
+        const context = await browser.newContext({ acceptDownloads: true });
+        const page = await context.newPage();
+        const errors = [];
+        page.on('pageerror', error => errors.push(error.message));
+        await setupFixture(page);
+        await page.evaluate(() => window.jamDemo.start());
+        const log = lines => page.evaluate(lines => { for (const line of lines) window.fixture.log(line); }, lines);
+        const summary = () => page.locator('#client-events-summary').innerText();
+        await log([
+            'jam-pool-initial; bootnodes=1, genesis=5, max_discovered=12, slots=2',
+            'jam-pool-candidate; index=0, source=bootnode, address=127.0.0.1:40000, p256=fixture',
+            'jam-slot-assigned; slot=0, source=bootnode, address=127.0.0.1:40000, p256=fixture',
+            'jam-connect',
+            'jam-peer-connected; slot=0, source=bootnode, address=127.0.0.1:40000, final_slot=40, handshake_ms=12',
+            'jam-block-request-queued; slot=0, req=1, purpose=ascending, hash=' + hash('aa') + ', direction=ascending, max_blocks=4',
+            'jam-justification-request-queued; slot=0, req=2, purpose=finality, target=' + hash('bb') + ', target_slot=41, set_id=1',
+        ]);
+        await page.waitForFunction(() => document.querySelectorAll('#client-events-body tr').length === 7);
+        assert.match(await summary(), /^7 event\(s\) kept of at most 1000 · 0 dropped · 2 request\(s\) pending · 7 since Start$/);
+        assert.equal(await page.locator('#client-events-body tr[data-request="pending"]').count(), 2);
+        assert.match(await page.locator('#client-events-body tr').first().innerText(), /jam-justification-request.*#2.*pending/s);
+        const hashCode = page.locator('#client-events-body code[title^="' + hash('aa') + '"]');
+        assert.equal(await hashCode.count(), 1, 'hashes are shortened and copy on click');
+        assert.equal(await hashCode.innerText(), hash('aa').slice(0, 10) + '…' + hash('aa').slice(-8));
+        let live = await page.evaluate(() => window.jamDemo.live());
+        assert.deepEqual(live.peers.map(({ slot, source, state }) => ({ slot, source, state })), [{ slot: 0, source: 'bootnode', state: 'connected' }]);
+
+        await log([
+            'jam-block-request-ended; slot=0, req=1, purpose=ascending, outcome=ok, blocks=4, bytes=2000, elapsed_ms=35',
+            'jam-stream-reset; slot=0, stream=justification, req=2, reason=Rejected, message=jamnp-stream-reset:1 closed, code=1',
+            'jam-justification-request-ended; slot=0, req=2, purpose=finality, outcome=failed, error=Rejected, elapsed_ms=50',
+            'jam-warp-rejected; slot=0, step=fragments, req=3, error=Decode(LengthLimit)',
+            'jam-peer-disconnected; slot=0, source=bootnode, address=127.0.0.1:40000, lasted_ms=900, reason=warp-rejected',
+        ]);
+        await page.waitForFunction(() => document.querySelectorAll('#client-events-body tr').length === 10);
+        assert.equal(await page.locator('#client-events-body tr[data-request="pending"]').count(), 0);
+        assert.match(await page.locator('#client-events-body tr[data-request="ok"]').innerText(), /ok in 35 ms blocks 4 bytes 2000/);
+        assert.match(await page.locator('#client-events-body tr[data-request="failed"]').innerText(), /failed in 50 ms error Rejected/);
+        assert.match(await page.locator('#client-events-body tr', { hasText: 'jam-stream-reset' }).innerText(),
+            /message jamnp-stream-reset:1 closed, code=1/);
+        live = await page.evaluate(() => window.jamDemo.live());
+        assert.equal(live.peers[0].state, 'disconnected');
+        assert.equal(live.peers[0].reason, 'warp-rejected');
+        assert.match(await page.locator('#live-peers').innerText(), /disconnected \(warp-rejected\)/);
+        assert.equal(live.warp.event, 'jam-warp-rejected');
+        assert.match(await page.locator('#live-warp-status').innerText(),
+            /^rejected at step fragments on slot 0: Decode\(LengthLimit\) · 1 rejection\(s\) since Start · jam-warp-rejected; /);
+
+        // Category toggles and the text filter.
+        await page.locator('#client-events-peers').uncheck();
+        await page.waitForFunction(() => !document.querySelector('#client-events-body tr[data-category="peers"]'));
+        assert.equal(await page.locator('#client-events-body tr').count(), 5);
+        assert.match(await summary(), /· 5 shown$/);
+        await page.locator('#client-events-peers').check();
+        await page.locator('#client-events-filter').fill('finality');
+        await page.waitForFunction(() => document.querySelectorAll('#client-events-body tr').length === 1);
+        assert.match(await page.locator('#client-events-body tr').innerText(), /jam-justification-request/);
+        await page.locator('#client-events-filter').fill('');
+        await page.waitForFunction(() => document.querySelectorAll('#client-events-body tr').length === 10);
+
+        // The cap: 1,000 events, the oldest dropped and counted.
+        await page.evaluate(() => {
+            for (let index = 0; index < 1005; index += 1)
+                window.fixture.log('jam-announcement; slot=1, block_slot=' + index + ', final_slot=0');
+        });
+        await page.waitForFunction(() => document.getElementById('client-events-summary').textContent.includes('15 dropped'));
+        assert.equal(await page.locator('#client-events-body tr').count(), 1000);
+        const kept = await page.evaluate(() => window.jamDemo.clientEvents());
+        assert.equal(kept.retained, 1000);
+        assert.equal(kept.total, 1017);
+        assert.equal(kept.byCategory.blocks, 1007);
+        assert.equal(kept.unparsed, 0);
+
+        // The download: the kept events, the genesis hash and the start time.
+        await page.evaluate(() => window.jamDemo.stop());
+        assert.ok(await page.locator('#client-events-download').isEnabled(), 'the last run stays downloadable after Stop');
+        const [download] = await Promise.all([page.waitForEvent('download'), page.locator('#client-events-download').click()]);
+        assert.match(download.suggestedFilename(), /^jam-client-events-\d{4}-\d\d-\d\dT[\d-]+Z\.json$/);
+        const saved = JSON.parse(await fs.readFile(await download.path(), 'utf8'));
+        assert.equal(saved.format, 'smoldot-jam-client-events/1');
+        assert.equal(saved.genesisHash, '0x' + blake.blake2bHex(Buffer.from(FIXTURE_GENESIS_HEADER.slice(2), 'hex'), undefined, 32));
+        assert.ok(!Number.isNaN(Date.parse(saved.startedAt)));
+        assert.equal(saved.events.length, 1000);
+        assert.equal(saved.dropped, 15);
+        assert.equal(saved.events.at(-1).fields.block_slot, '1004');
+        await page.evaluate(() => window.jamDemo.start());
+        await page.waitForFunction(() => document.getElementById('client-events-summary').textContent.startsWith('0 event(s) kept'));
+        await page.evaluate(() => window.jamDemo.stop());
+        assert.deepEqual(errors, []);
+    } finally {
+        await browser.close();
+    }
+});
+
 if (live) test('aged network: warp re-follow, blocks, finality, manual Unfollow and the wrong authority set', { timeout: 420000 }, async () => {
     // The network is already aged past a set change by `jam_demo`.
     const run = await startHarness({ JAM_SPEC_PATH: LIVE_SPEC_PATH, JAM_RPC_PORT: LIVE_RPC_PORT });
@@ -320,6 +530,28 @@ if (live) test('aged network: warp re-follow, blocks, finality, manual Unfollow 
             assert.ok((await page.locator('#events').innerText()).includes('"event":"finalized"'));
             console.log(JSON.stringify({ anchors: anchors.map(event => event.finalizedBlockHashes.at(-1)),
                 slot: live.initialized.slot, blocks: live.blockCount, finality: live.finalityCount, refollows: live.refollows }));
+
+            // Client events: every `jam-*` line of the run parsed, and every
+            // category has events. `state` comes from the warp join's reads and
+            // the C(8) refresh after the first finality advance; `warp` from
+            // the aged network. Only the pool's wait line may never fire.
+            await page.waitForFunction(() => (window.jamDemo.clientEvents()?.byName['jam-pool-changed'] ?? 0) > 0,
+                null, { timeout: 60000 });
+            const clientEvents = await page.evaluate(() => window.jamDemo.clientEvents());
+            assert.equal(clientEvents.unparsed, 0, JSON.stringify(clientEvents.unparsedSamples));
+            for (const category of CATEGORIES) assert.ok(clientEvents.byCategory[category] > 0, `no ${category} event`);
+            for (const name of ['jam-pool-initial', 'jam-pool-candidate', 'jam-slot-assigned', 'jam-peer-connected',
+                'jam-warp-request-ended', 'jam-warp-join-selected', 'jam-warp-head-fetched', 'jam-warp-item-read',
+                'jam-warp-applied', 'jam-block-request-ended', 'jam-justification-request-ended',
+                'jam-state-request-ended', 'jam-finalized', 'jam-pool-changed'])
+                assert.ok(clientEvents.byName[name] > 0, `no ${name}`);
+            assert.equal(clientEvents.genesisHash, genesis);
+            const requestRows = clientEvents.events.filter(event => event.request);
+            assert.ok(requestRows.some(event => !event.request.pending && event.request.outcome === 'ok'
+                && Number.isInteger(event.request.elapsedMs)), 'a request row from start to outcome');
+            assert.match(await page.locator('#client-events-summary').innerText(), /event\(s\) kept of at most 1000/);
+            console.log(JSON.stringify({ clientEvents: { total: clientEvents.total, retained: clientEvents.retained,
+                pending: clientEvents.pending, byCategory: clientEvents.byCategory, byName: clientEvents.byName } }));
             for (const id of ['header', 'unpin', 'unfollow']) assert.ok(await page.locator('#' + id).isEnabled());
             await page.locator('#unfollow').click();
             await page.waitForFunction(() => window.jamDemo.live().connection.startsWith('Unfollowed'));
@@ -331,6 +563,7 @@ if (live) test('aged network: warp re-follow, blocks, finality, manual Unfollow 
             assert.equal((await page.evaluate(() => window.jamDemo.snapshot())).subscription, undefined);
             await page.locator('#stop').click();
             await page.waitForFunction(() => document.getElementById('status').textContent === 'Stopped');
+            await reportClientEvents(page, 'aged network');
 
             // Walkthrough step 10 on the live GRANDPA network, aged past a set
             // change by everything above: a spec whose genesis authority set
@@ -354,15 +587,21 @@ if (live) test('aged network: warp re-follow, blocks, finality, manual Unfollow 
             const refused = await page.evaluate(() => window.jamDemo.live());
             assert.equal(refused.initialized?.anchors.at(-1), wrongGenesis);
             assert.equal(refused.blockCount, 0);
-            assert.equal(refused.warpStatus, undefined);
+            // O20 (demo Warp status should show a rejected warp): the status
+            // names the rejection instead of staying empty.
+            assert.equal(refused.warp?.event, 'jam-warp-rejected');
+            assert.match(await page.locator('#live-warp-status').innerText(), /^rejected at step \S+ on slot \d: \S+ · \d+ rejection/);
             await delay(30000); // Five dev slots: a client that joined would have blocks.
             const settled = await page.evaluate(() => window.jamDemo.live());
             assert.equal(settled.blockCount, 0);
             assert.equal(settled.refollows, 0);
+            assert.ok(!(await page.evaluate(() => window.jamDemo.live().warpStatus)).startsWith('jam-warp-applied'));
             console.log(JSON.stringify({ wrongGenesis, blocks: settled.blockCount,
-                rejections: rejections.length, firstRejection: rejections[0] }));
+                rejections: rejections.length, firstRejection: rejections[0],
+                warpStatus: await page.locator('#live-warp-status').innerText() }));
             await page.locator('#stop').click();
             await page.waitForFunction(() => document.getElementById('status').textContent === 'Stopped');
+            await reportClientEvents(page, 'wrong authority set');
         } catch (error) {
             console.error(JSON.stringify(await page.evaluate(() => window.jamDemo.snapshot()), null, 2));
             throw error;
@@ -376,6 +615,27 @@ if (live) test('aged network: warp re-follow, blocks, finality, manual Unfollow 
         assert.match(run.output, /the network was not ours and keeps running/);
     }
 });
+
+/** One page run's client events for the record: totals, volume and one raw line per event. */
+async function reportClientEvents(page, label) {
+    const saved = await page.evaluate(() => window.jamDemo.clientEvents());
+    const examples = {};
+    for (const event of saved.events) {
+        examples[event.name] ??= event.line;
+        if (event.request?.endName) examples[event.request.endName] ??= event.request.endLine;
+    }
+    const count = (map, key) => { map[key] = (map[key] ?? 0) + 1; };
+    const reasons = {};
+    const outcomes = {};
+    for (const event of saved.events) {
+        if (event.name === 'jam-peer-disconnected') count(reasons, event.fields.reason);
+        if (event.request) count(outcomes, event.name.replace(/-request-(queued|ended)$/, '') + ' ' +
+            (event.request.purpose ?? '-') + ' ' + (event.request.pending ? 'pending' : event.request.outcome));
+    }
+    console.log(JSON.stringify({ clientEventsReport: label, seconds: (Date.now() - Date.parse(saved.startedAt)) / 1000,
+        total: saved.total, bytes: saved.bytes, dropped: saved.dropped, clientLog: saved.clientLog,
+        byName: saved.byName, reasons, outcomes, examples }));
+}
 
 /** Starts `demo/jam-harness.mjs` with `env` and resolves once its banner is out. */
 async function startHarness(env) {
@@ -455,6 +715,8 @@ if (live) test('attach mode: spec from JAM_SPEC_PATH with all, one or no bootnod
                 console.log(JSON.stringify({ variant, timings, sources: [...sources], warp: state.warpStatus,
                     blocks: state.blockCount, finality: state.finalityCount }));
                 assert.ok(state.blockCount > 0 && state.finalityCount > 0, `${variant}: no block or no finality`);
+                const clientEvents = await page.evaluate(() => window.jamDemo.clientEvents());
+                assert.equal(clientEvents.unparsed, 0, `${variant}: ${JSON.stringify(clientEvents.unparsedSamples)}`);
                 assert.deepEqual([...sources.keys()].filter(source => source !== 'discovered').sort(), [...expected].sort(),
                     `${variant}: peer sources ${JSON.stringify([...sources])}`);
                 // The RPC oracle works without a managed network.
@@ -472,6 +734,7 @@ if (live) test('attach mode: spec from JAM_SPEC_PATH with all, one or no bootnod
                 assert.ok((await nodeRpc('bestBlock')).slot > 0, 'the network is untouched');
                 await page.locator('#stop').click();
                 await page.waitForFunction(() => document.getElementById('status').textContent === 'Stopped');
+                await reportClientEvents(page, 'attach, ' + variant);
                 assert.deepEqual(errors, []);
             } finally {
                 await page.close();

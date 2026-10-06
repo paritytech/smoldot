@@ -60,7 +60,13 @@ use crate::{
     platform::{MultiStreamAddress, PlatformRef, SubstreamDirection},
 };
 use alloc::{borrow::Cow, boxed::Box, collections::VecDeque, string::String, sync::Arc, vec::Vec};
-use core::{num::NonZeroUsize, pin::Pin, time::Duration};
+use core::{
+    fmt,
+    num::NonZeroUsize,
+    pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 use discovery::{Acquire, Peer, Pool, Release, Source};
 use futures_lite::{StreamExt as _, future};
 use smoldot::jam::{
@@ -90,6 +96,301 @@ const ACTIVE_SET_READ_BYTES: u32 = 800_000;
 const POOL_POLL: Duration = Duration::from_millis(500);
 /// A slot on a discovered peer checks this often whether a bootnode is due.
 const PREEMPT_POLL: Duration = Duration::from_secs(1);
+
+// Debug events.
+//
+// Every log line of this driver is one event in one grammar, so a page or a
+// test can parse it without knowing the code:
+//
+//     jam-<area>-<what>[; key=value, key=value, ...]
+//
+// The areas are `pool`, `peer` (with the older `slot`, `connect`,
+// `reconnect` and `stream`), `block` (with `announcement` and `header`),
+// `justification`, `state`, `warp` (with `anchor`), `finality` (with
+// `finalized`) and `discovery`. Events are logged at Debug, except
+// `jam-anchor-unserved` at Warn.
+//
+// Values are tokens: decimal numbers, `0x` hashes in full, `true`/`false`,
+// addresses `ip:port`, this driver's own kebab-case words (`purpose`,
+// `outcome`, `reason`), and error variant names (`NoData`,
+// `Decode(LengthLimit)`; see [`Token`]). A value never contains `, ` or `=`,
+// with two exceptions: `message=` of `jam-stream-reset` is the platform's
+// free text and always the last field, so a parser takes the rest of the line
+// after it verbatim; and `hash=` of `jam-anchor-unserved` (Warn) is a byte
+// list, so a part without `key=` continues the previous value. `-` means that
+// the field does not apply.
+//
+// Common fields:
+//
+// - `slot=` is the connection slot (0 or 1) on every line about one
+//   connection, except five older lines whose `slot=` was already a block
+//   slot and stays one for their consumers: `jam-warp-join-selected`,
+//   `jam-warp-applied`, `jam-finalized`, `jam-anchor-unserved` and
+//   `jam-discovery-read-started`. The first three carry the connection slot
+//   as `conn=`. `jam-connect` and `jam-reconnect` carry no field at all,
+//   because their consumers match them exactly; the `jam-slot-assigned` before
+//   and the `jam-peer-disconnected` before them name the slot.
+// - `req=` names one request for the whole client run: the start line
+//   (`jam-<area>-request-queued`) and the outcome line
+//   (`jam-<area>-request-ended`) share it, and so do the lines about that
+//   request in between (`jam-stream-reset`, `jam-warp-rejected`,
+//   `jam-finalized`, ...).
+// - An outcome line carries `outcome=` (`ok`, `failed`, `rejected`,
+//   `timeout`, `cancelled`) and `elapsed_ms=` since the request was queued.
+//   `failed` adds the transport's `error=`, `rejected` the verifier's
+//   `error=`, `timeout` and `cancelled` the connection's end `reason=`.
+//   A request in flight when the pool moves its slot to a bootnode
+//   (`jam-slot-preempted`) gets no outcome line; `jam-peer-disconnected` with
+//   `reason=preempted` ends it.
+// - `jam-peer-disconnected` carries `reason=`, one [`End`] per way a
+//   connection ends.
+//
+// The table of every event is in `wasm-node/javascript/demo/jam.md`, section
+// "Client events"; `demo/jam-events.mjs` is the page's parser.
+
+/// The counter behind `req=`: unique within the process, hence within one
+/// client run (each browser client is its own WASM instance).
+static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+fn next_request() -> u64 {
+    NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A request's log identity: its `req=` and what it is for.
+#[derive(Clone, Copy)]
+struct Tag {
+    req: u64,
+    purpose: &'static str,
+}
+
+impl Tag {
+    fn new(purpose: &'static str) -> Self {
+        Self {
+            req: next_request(),
+            purpose,
+        }
+    }
+}
+
+/// `0x` and the bytes in lowercase hex.
+struct Hex<'a>(&'a [u8]);
+
+impl fmt::Display for Hex<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("0x")?;
+        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+    }
+}
+
+/// The value, or `-` when the field does not apply.
+struct Opt<T>(Option<T>);
+
+impl<T: fmt::Display> fmt::Display for Opt<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(value) => value.fmt(f),
+            None => f.write_str("-"),
+        }
+    }
+}
+
+/// An error's variant path as one token: its `Debug` output without
+/// whitespace and without the fields of struct variants, for example
+/// `Decode(LengthLimit)` or `WrongSetId`.
+struct Token<'a>(&'a dyn fmt::Debug);
+
+impl fmt::Display for Token<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct Filter<'a, 'b> {
+            out: &'a mut fmt::Formatter<'b>,
+            depth: usize,
+        }
+        impl fmt::Write for Filter<'_, '_> {
+            fn write_str(&mut self, text: &str) -> fmt::Result {
+                for c in text.chars() {
+                    match c {
+                        '{' => self.depth += 1,
+                        '}' => self.depth = self.depth.saturating_sub(1),
+                        _ if self.depth > 0 || c.is_whitespace() => {}
+                        '=' => self.out.write_char(':')?,
+                        c => self.out.write_char(c)?,
+                    }
+                }
+                Ok(())
+            }
+        }
+        fmt::write(
+            &mut Filter { out: f, depth: 0 },
+            format_args!("{:?}", self.0),
+        )
+    }
+}
+
+/// [`Token`] of a warp error, unwrapped like its `Display`.
+fn warp_token(error: &WarpError) -> Token<'_> {
+    match error {
+        WarpError::Finality(error) => Token(error),
+        WarpError::State(error) => Token(error),
+        WarpError::Tree(error) => Token(error),
+        other => Token(other),
+    }
+}
+
+/// `C<n>` for the state key of item `n`, else the key in hex.
+struct Key<'a>(&'a trie::StateKey);
+
+impl fmt::Display for Key<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if *self.0 == trie::state_key(self.0[0]) {
+            write!(f, "C{}", self.0[0])
+        } else {
+            Hex(self.0).fmt(f)
+        }
+    }
+}
+
+/// A state request's key range: `C8`, or `C4..C11`.
+struct Keys<'a>(&'a StateRequest);
+
+impl fmt::Display for Keys<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.start == self.0.end {
+            Key(&self.0.start).fmt(f)
+        } else {
+            write!(f, "{}..{}", Key(&self.0.start), Key(&self.0.end))
+        }
+    }
+}
+
+fn direction_str(direction: &Direction) -> &'static str {
+    match direction {
+        Direction::AscendingExclusive => "ascending",
+        Direction::DescendingInclusive => "descending",
+    }
+}
+
+fn trust_str(trust: Trust) -> &'static str {
+    match trust {
+        Trust::Finalized => "finalized",
+        Trust::Authenticated => "authenticated",
+    }
+}
+
+/// What a state read is for: the warp join reads against a finalized root,
+/// the `C(8)` refresh against an authenticated child's prior root.
+fn read_purpose(trust: Trust) -> &'static str {
+    match trust {
+        Trust::Finalized => "warp-join",
+        Trust::Authenticated => "discovery",
+    }
+}
+
+/// Wire size of a CE 129 response: proof nodes, keys and values.
+fn state_response_bytes(response: &StateResponse) -> usize {
+    response.nodes.len() * 64
+        + response
+            .entries
+            .iter()
+            .map(|(_, value)| 31 + value.len())
+            .sum::<usize>()
+}
+
+/// Why a connection ended: the `reason=` of `jam-peer-disconnected`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum End {
+    /// The transport did not connect within [`TIMEOUT`].
+    ConnectTimeout,
+    /// The JAMNP-S state machine refused its limits.
+    Setup,
+    /// The chain stopped (tree full or anchor unserved).
+    Stopped,
+    /// Another slot applied a warp join; every connection restarts on it.
+    WarpRevision,
+    HandshakeTimeout,
+    /// Nothing was read for [`IDLE_TIMEOUT`].
+    Idle,
+    StreamOpenTimeout,
+    StateTimeout,
+    BlockTimeout,
+    JustificationTimeout,
+    WarpTimeout,
+    /// A request or peer stream outlived [`TIMEOUT`].
+    StreamTimeout,
+    /// The peer reset a stream that carries no request (UP0), or the
+    /// justification stream of a warp join.
+    StreamReset,
+    /// The platform closed the connection.
+    Transport,
+    /// A frame, buffer, header or counter bound.
+    Limit,
+    UnexpectedResponse,
+    StateRejected,
+    StateFailed,
+    StateUnavailable,
+    StateCancelled,
+    BlockFailed,
+    JustificationFailed,
+    WarpFailed,
+    WarpRejected,
+    /// The warp join's own consistency checks failed.
+    WarpInvalid,
+    FinalityRejected,
+    /// The peer answered `NoData` for our finalized root.
+    RootRefused,
+    /// The peer cannot extend our finalized root.
+    RootUnextendable,
+    AnchorUnserved,
+    MessageTooLarge,
+    ProtocolError,
+    /// The connection refused to queue a request.
+    RequestRefused,
+    InsertFailed,
+    TreeFull,
+    /// The pool moved the slot to a bootnode whose retry was due.
+    Preempted,
+}
+
+impl End {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ConnectTimeout => "connect-timeout",
+            Self::Setup => "setup",
+            Self::Stopped => "stopped",
+            Self::WarpRevision => "warp-revision",
+            Self::HandshakeTimeout => "handshake-timeout",
+            Self::Idle => "idle",
+            Self::StreamOpenTimeout => "stream-open-timeout",
+            Self::StateTimeout => "state-timeout",
+            Self::BlockTimeout => "block-timeout",
+            Self::JustificationTimeout => "justification-timeout",
+            Self::WarpTimeout => "warp-timeout",
+            Self::StreamTimeout => "stream-timeout",
+            Self::StreamReset => "stream-reset",
+            Self::Transport => "transport",
+            Self::Limit => "limit",
+            Self::UnexpectedResponse => "unexpected-response",
+            Self::StateRejected => "state-rejected",
+            Self::StateFailed => "state-failed",
+            Self::StateUnavailable => "state-unavailable",
+            Self::StateCancelled => "state-cancelled",
+            Self::BlockFailed => "block-failed",
+            Self::JustificationFailed => "justification-failed",
+            Self::WarpFailed => "warp-failed",
+            Self::WarpRejected => "warp-rejected",
+            Self::WarpInvalid => "warp-invalid",
+            Self::FinalityRejected => "finality-rejected",
+            Self::RootRefused => "root-refused",
+            Self::RootUnextendable => "root-unextendable",
+            Self::AnchorUnserved => "anchor-unserved",
+            Self::MessageTooLarge => "message-too-large",
+            Self::ProtocolError => "protocol-error",
+            Self::RequestRefused => "request-refused",
+            Self::InsertFailed => "insert-failed",
+            Self::TreeFull => "tree-full",
+            Self::Preempted => "preempted",
+        }
+    }
+}
 
 pub(crate) struct Config {
     params: Params,
@@ -1114,6 +1415,30 @@ pub(super) async fn run<P: PlatformRef>(
         config.genesis,
         usize::from(config.params.max_validators),
     );
+    // Bounded by 16 bootnodes plus `max_validators`, once per start.
+    let count = |source| pool.candidates().filter(|p| p.source == source).count();
+    log!(
+        &platform,
+        Debug,
+        &log_name,
+        "jam-pool-initial",
+        bootnodes = count(Source::Bootnode),
+        genesis = count(Source::Genesis),
+        max_discovered = config.params.max_validators,
+        slots = slots
+    );
+    for (index, peer) in pool.candidates().enumerate() {
+        log!(
+            &platform,
+            Debug,
+            &log_name,
+            "jam-pool-candidate",
+            index = index,
+            source = peer.source.as_str(),
+            address = peer.address(),
+            p256 = peer.identity.to_text()
+        );
+    }
     let state = Arc::new(async_lock::Mutex::new(State {
         reads: StateReads::new(slots),
         #[cfg(test)]
@@ -1227,6 +1552,8 @@ async fn slot_loop<P: PlatformRef>(
     let mut fetch_size = FetchSize::default();
     let mut root_probe = None;
     let mut previous: Option<smoldot::jam::types::Ed25519Public> = None;
+    // Log a wait once when it starts, not once per poll.
+    let mut waiting = false;
     loop {
         if state.lock().await.stopped {
             future::pending::<()>().await;
@@ -1240,6 +1567,17 @@ async fn slot_loop<P: PlatformRef>(
                 match acquired {
                     Ok(peer) => peer,
                     Err(wait) => {
+                        if !waiting {
+                            waiting = true;
+                            log!(
+                                platform,
+                                Debug,
+                                log_name,
+                                "jam-pool-waiting",
+                                slot = slot,
+                                ready_in_ms = Opt(wait.map(|wait| wait.as_millis()))
+                            );
+                        }
                         let wait = wait.map_or(POOL_POLL, |wait| wait.min(POOL_POLL));
                         platform.sleep(wait.max(Duration::from_millis(1))).await;
                         continue;
@@ -1247,6 +1585,7 @@ async fn slot_loop<P: PlatformRef>(
                 }
             }
         };
+        waiting = false;
         log!(
             platform,
             Debug,
@@ -1376,11 +1715,22 @@ async fn connect_once<P: PlatformRef>(
         preempted: None,
     };
     let Some(connected) = connected else {
+        log!(
+            platform,
+            Debug,
+            log_name,
+            "jam-peer-disconnected",
+            slot = peer_index,
+            source = peer.source.as_str(),
+            address = peer.address(),
+            lasted_ms = 0,
+            reason = End::ConnectTimeout.as_str()
+        );
         return Some(outcome);
     };
     let started = platform.now();
     let driving = async {
-        drive(
+        Err(drive_connection(
             platform,
             log_name,
             params,
@@ -1389,17 +1739,16 @@ async fn connect_once<P: PlatformRef>(
             connected.connection,
             (fetch_size, root_probe),
         )
-        .await;
-        None
+        .await)
     };
-    outcome.preempted = match preempt {
+    let ended: Result<Peer, End> = match preempt {
         Some(origin) if peer.source != Source::Bootnode => {
             future::or(driving, async {
                 loop {
                     platform.sleep(PREEMPT_POLL).await;
                     let now = platform.now() - origin.clone();
                     if let Some(next) = state.lock().await.preempt_candidate(peer_index, now) {
-                        return Some(next);
+                        return Ok(next);
                     }
                 }
             })
@@ -1407,6 +1756,11 @@ async fn connect_once<P: PlatformRef>(
         }
         _ => driving.await,
     };
+    let reason = match &ended {
+        Ok(_) => End::Preempted,
+        Err(end) => *end,
+    };
+    outcome.preempted = ended.ok();
     outcome.lasted = platform.now() - started;
     let mut s = state.lock().await;
     s.reads.release(peer_index, false);
@@ -1426,7 +1780,8 @@ async fn connect_once<P: PlatformRef>(
         slot = peer_index,
         source = peer.source.as_str(),
         address = peer.address(),
-        lasted_ms = outcome.lasted.as_millis()
+        lasted_ms = outcome.lasted.as_millis(),
+        reason = reason.as_str()
     );
     Some(outcome)
 }
@@ -1523,7 +1878,44 @@ fn classify_reset(message: &str) -> net::RequestError {
     }
 }
 
+/// [`drive_connection`] for tests, which drive one connection without its end reason.
+#[cfg(test)]
 async fn drive<P: PlatformRef>(
+    platform: &P,
+    log_name: &str,
+    params: &Params,
+    peer_index: usize,
+    state: &Arc<async_lock::Mutex<State>>,
+    transport: P::MultiStream,
+    (fetch_size, root_probe): (&mut FetchSize, &mut Option<Hash>),
+) {
+    drive_connection(
+        platform,
+        log_name,
+        params,
+        peer_index,
+        state,
+        transport,
+        (fetch_size, root_probe),
+    )
+    .await;
+}
+
+/// Where a warp join stands, for `jam-warp-abandoned`.
+fn warp_step(warp: &Warp) -> &'static str {
+    if !warp.chain_done {
+        "fragments"
+    } else if warp.head.is_none() {
+        "head"
+    } else if warp.finalized.is_none() {
+        "justification"
+    } else {
+        "state"
+    }
+}
+
+/// Drives one connection until it ends and says why.
+async fn drive_connection<P: PlatformRef>(
     platform: &P,
     log_name: &str,
     params: &Params,
@@ -1531,7 +1923,7 @@ async fn drive<P: PlatformRef>(
     state: &Arc<async_lock::Mutex<State>>,
     mut transport: P::MultiStream,
     (fetch_size, root_probe): (&mut FetchSize, &mut Option<Hash>),
-) {
+) -> End {
     let handshake = {
         let s = state.lock().await;
         Handshake {
@@ -1557,7 +1949,7 @@ async fn drive<P: PlatformRef>(
             max_streams: 4,
         },
     ) else {
-        return;
+        return End::Setup;
     };
     let mut streams: Vec<Stream<P>> = Vec::new();
     let mut opening: Option<(net::SubstreamKind, P::Instant)> = None;
@@ -1576,71 +1968,76 @@ async fn drive<P: PlatformRef>(
     let mut imports = VecDeque::new();
     let mut repair_ready = false;
     let mut announcements = VecDeque::new();
-    let mut requested: Option<(net::RequestId, BlockRequest, P::Instant)> = None;
-    let mut proof_requested: Option<(net::RequestId, Hash, P::Instant)> = None;
-    let mut state_requested: Option<(net::RequestId, P::Instant)> = None;
+    let mut requested: Option<(net::RequestId, BlockRequest, P::Instant, Tag)> = None;
+    let mut proof_requested: Option<(net::RequestId, Hash, P::Instant, Tag)> = None;
+    let mut state_requested: Option<(net::RequestId, P::Instant, Tag)> = None;
     let mut advertised: Option<Final> = None;
     let mut advertisement_revision = 0u64;
     let mut warped = false;
     let mut warp: Option<Warp> = None;
-    let mut warp_requested: Option<(net::RequestId, u32, P::Instant)> = None;
+    let mut warp_requested: Option<(net::RequestId, u32, P::Instant, Tag)> = None;
     let mut warp_revision = state.lock().await.warp_revision;
-    loop {
+    let elapsed_ms = |when: &P::Instant| (platform.now() - when.clone()).as_millis();
+    let end = 'conn: loop {
         // A turn performs bounded protocol work and at most one ancestry insertion.
         // In particular, never retain the shared tree lock across this yield: RPC
         // consumers and the other peer must be able to run between notifications.
         future::yield_now().await;
         {
             let s = state.lock().await;
-            if s.stopped || s.warp_revision != warp_revision {
-                return;
+            if s.stopped {
+                break 'conn End::Stopped;
+            }
+            if s.warp_revision != warp_revision {
+                break 'conn End::WarpRevision;
             }
         }
         let mut local_progress = false;
         let now = platform.now();
-        if (!handshaken && now.clone() - started.clone() >= TIMEOUT)
-            || now.clone() - last_activity.clone() >= IDLE_TIMEOUT
-        {
-            return;
+        if !handshaken && now.clone() - started.clone() >= TIMEOUT {
+            break 'conn End::HandshakeTimeout;
+        }
+        if now.clone() - last_activity.clone() >= IDLE_TIMEOUT {
+            break 'conn End::Idle;
         }
         if let Some((kind, when)) = &opening
             && now.clone() - when.clone() >= TIMEOUT
         {
             let _ = connection.outgoing_open_failed(*kind);
-            return;
+            break 'conn End::StreamOpenTimeout;
         }
         // This deadline starts while the request is still queued, before a stream
         // reservation exists. Peer-created streams cannot starve it indefinitely.
-        if let Some((id, when)) = &state_requested
+        if let Some((id, when, _)) = &state_requested
             && now.clone() - when.clone() >= TIMEOUT
         {
             let _ = connection.cancel_request(*id, net::RequestError::Timeout);
             state.lock().await.reads.release(peer_index, false);
-            return;
+            break 'conn End::StateTimeout;
         }
-        if let Some((id, _, when)) = &requested
+        if let Some((id, _, when, _)) = &requested
             && now.clone() - when.clone() >= TIMEOUT
         {
             let _ = connection.cancel_request(*id, net::RequestError::Timeout);
-            return;
+            break 'conn End::BlockTimeout;
         }
-        if let Some((id, _, when)) = &proof_requested
+        if let Some((id, _, when, _)) = &proof_requested
             && now.clone() - when.clone() >= TIMEOUT
         {
             let _ = connection.cancel_request(*id, net::RequestError::Timeout);
-            return;
+            break 'conn End::JustificationTimeout;
         }
-        if let Some((id, _, when)) = &warp_requested
+        if let Some((id, _, when, _)) = &warp_requested
             && now.clone() - when.clone() >= TIMEOUT
         {
             let _ = connection.cancel_request(*id, net::RequestError::Timeout);
-            return;
+            break 'conn End::WarpTimeout;
         }
         if streams
             .iter()
             .any(|s| s.limited_lifetime && now.clone() - s.opened.clone() >= TIMEOUT)
         {
-            return;
+            break 'conn End::StreamTimeout;
         }
         if opening.is_none()
             && let Some(kind) = connection.desired_outgoing_substreams()
@@ -1660,18 +2057,46 @@ async fn drive<P: PlatformRef>(
             };
             if let Some(message) = error {
                 let reason = classify_reset(&message);
+                // Which of this connection's requests the stream carried.
+                let owner = request.and_then(|id| {
+                    state_requested
+                        .as_ref()
+                        .filter(|(r, ..)| *r == id)
+                        .map(|(.., tag)| ("state", tag.req))
+                        .or_else(|| {
+                            requested
+                                .as_ref()
+                                .filter(|(r, ..)| *r == id)
+                                .map(|(.., tag)| ("block", tag.req))
+                        })
+                        .or_else(|| {
+                            proof_requested
+                                .as_ref()
+                                .filter(|(r, ..)| *r == id)
+                                .map(|(.., tag)| ("justification", tag.req))
+                        })
+                        .or_else(|| {
+                            warp_requested
+                                .as_ref()
+                                .filter(|(r, ..)| *r == id)
+                                .map(|(.., tag)| ("warp", tag.req))
+                        })
+                });
                 log!(
                     platform,
                     Debug,
                     log_name,
                     "jam-stream-reset",
+                    slot = peer_index,
+                    stream = owner.map_or("other", |(kind, _)| kind),
+                    req = Opt(owner.map(|(_, req)| req)),
                     reason = alloc::format!("{reason:?}"),
                     message = message
                 );
                 drop(access);
                 if state_requested
                     .as_ref()
-                    .is_some_and(|(id, _)| request == Some(*id))
+                    .is_some_and(|(id, ..)| request == Some(*id))
                 {
                     if let Some(event) = connection.substream_reset(stream.id, reason) {
                         events.push(event);
@@ -1680,13 +2105,25 @@ async fn drive<P: PlatformRef>(
                     local_progress = true;
                     continue;
                 }
-                if let Some((id, _, _)) = &proof_requested
+                if let Some((id, _, when, tag)) = &proof_requested
                     && request == Some(*id)
                 {
                     if warp.is_some() {
-                        return;
+                        break 'conn End::StreamReset;
                     }
                     let _ = connection.cancel_request(*id, reason);
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-justification-request-ended",
+                        slot = peer_index,
+                        req = tag.req,
+                        purpose = tag.purpose,
+                        outcome = "failed",
+                        error = alloc::format!("{reason:?}"),
+                        elapsed_ms = elapsed_ms(when)
+                    );
                     proof_requested = None;
                     proof_unavailable = true;
                     streams.remove(index);
@@ -1695,10 +2132,10 @@ async fn drive<P: PlatformRef>(
                 }
                 if requested
                     .as_ref()
-                    .is_some_and(|(id, _, _)| request == Some(*id))
+                    .is_some_and(|(id, ..)| request == Some(*id))
                     || warp_requested
                         .as_ref()
-                        .is_some_and(|(id, _, _)| request == Some(*id))
+                        .is_some_and(|(id, ..)| request == Some(*id))
                 {
                     if let Some(event) = connection.substream_reset(stream.id, reason) {
                         events.push(event);
@@ -1707,28 +2144,28 @@ async fn drive<P: PlatformRef>(
                     local_progress = true;
                     continue;
                 }
-                return;
+                break 'conn End::StreamReset;
             }
             let mut rw = match access.take() {
                 Some(rw) => rw,
-                None => return,
+                None => break 'conn End::Transport,
             };
             drop(access);
             let incoming_limit = if state_requested
                 .as_ref()
-                .is_some_and(|(id, _)| request == Some(*id))
+                .is_some_and(|(id, ..)| request == Some(*id))
             {
                 FRAME_BYTES + 496 * 64 + 8
             } else if warp_requested
                 .as_ref()
-                .is_some_and(|(id, _, _)| request == Some(*id))
+                .is_some_and(|(id, ..)| request == Some(*id))
             {
                 WARP_BYTES + 4
             } else {
                 FRAME_BYTES + 4
             };
             if rw.incoming_buffer.len() > incoming_limit || rw.write_bytes_queued > 65536 {
-                return;
+                break 'conn End::Limit;
             }
             let mut output = [0; 4096];
             let queueable = rw
@@ -1791,36 +2228,83 @@ async fn drive<P: PlatformRef>(
                     request_id,
                     response,
                 } => {
-                    if !state_requested
-                        .take()
-                        .is_some_and(|(id, _)| id == request_id)
-                    {
-                        return;
+                    let Some((id, when, tag)) = state_requested.take() else {
+                        break 'conn End::UnexpectedResponse;
+                    };
+                    if id != request_id {
+                        break 'conn End::UnexpectedResponse;
                     }
+                    let entries = response.entries.len();
+                    let nodes = response.nodes.len();
+                    let bytes = state_response_bytes(&response);
                     if let Err(error) = state.lock().await.reads.received(peer_index, &response) {
                         log!(
                             platform,
                             Debug,
                             log_name,
+                            "jam-state-request-ended",
+                            slot = peer_index,
+                            req = tag.req,
+                            purpose = tag.purpose,
+                            outcome = "rejected",
+                            entries = entries,
+                            nodes = nodes,
+                            bytes = bytes,
+                            error = Token(&error),
+                            elapsed_ms = elapsed_ms(&when)
+                        );
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
                             "jam-state-rejected",
+                            slot = peer_index,
+                            req = tag.req,
                             error = alloc::format!("{error:?}")
                         );
-                        return;
+                        break 'conn End::StateRejected;
                     }
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-state-request-ended",
+                        slot = peer_index,
+                        req = tag.req,
+                        purpose = tag.purpose,
+                        outcome = "ok",
+                        entries = entries,
+                        nodes = nodes,
+                        bytes = bytes,
+                        elapsed_ms = elapsed_ms(&when)
+                    );
                 }
                 net::Event::RequestFailed { request_id, reason }
                     if state_requested
                         .as_ref()
-                        .is_some_and(|(id, _)| *id == request_id) =>
+                        .is_some_and(|(id, ..)| *id == request_id) =>
                 {
-                    state_requested = None;
+                    if let Some((_, when, tag)) = state_requested.take() {
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-state-request-ended",
+                            slot = peer_index,
+                            req = tag.req,
+                            purpose = tag.purpose,
+                            outcome = "failed",
+                            error = alloc::format!("{reason:?}"),
+                            elapsed_ms = elapsed_ms(&when)
+                        );
+                    }
                     state
                         .lock()
                         .await
                         .reads
                         .release(peer_index, reason == net::RequestError::Transient);
                     if warp.is_some() || reason != net::RequestError::NoData {
-                        return;
+                        break 'conn End::StateFailed;
                     }
                 }
                 net::Event::HandshakeReceived(h) => {
@@ -1832,7 +2316,9 @@ async fn drive<P: PlatformRef>(
                             "jam-peer-connected",
                             slot = peer_index,
                             source = peer.source.as_str(),
-                            address = peer.address()
+                            address = peer.address(),
+                            final_slot = h.final_.slot,
+                            handshake_ms = elapsed_ms(&started)
                         );
                     }
                     advertisement_revision = 1;
@@ -1848,10 +2334,18 @@ async fn drive<P: PlatformRef>(
                 }
                 net::Event::Announcement(a) => {
                     let Some(revision) = advertisement_revision.checked_add(1) else {
-                        return;
+                        break 'conn End::Limit;
                     };
                     advertisement_revision = revision;
-                    log!(platform, Debug, log_name, "jam-announcement");
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-announcement",
+                        slot = peer_index,
+                        block_slot = a.header.slot,
+                        final_slot = a.final_.slot
+                    );
                     peer_slot = peer_slot.max(a.header.slot).max(a.final_.slot);
                     if waiting_for_finality.is_some_and(|slot| a.final_.slot > slot) {
                         cursor = Some(state.lock().await.tree.finalized().hash);
@@ -1869,12 +2363,28 @@ async fn drive<P: PlatformRef>(
                     }
                 }
                 net::Event::BlockResponse { request_id, blocks } => {
-                    let Some((id, request, _)) = requested.take() else {
-                        return;
+                    let Some((id, request, when, tag)) = requested.take() else {
+                        break 'conn End::UnexpectedResponse;
                     };
                     if id != request_id {
-                        return;
+                        break 'conn End::UnexpectedResponse;
                     }
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-block-request-ended",
+                        slot = peer_index,
+                        req = tag.req,
+                        purpose = tag.purpose,
+                        outcome = "ok",
+                        blocks = blocks.len(),
+                        bytes = blocks
+                            .iter()
+                            .map(|block| block.header.encode(params).len() + block.body.len())
+                            .sum::<usize>(),
+                        elapsed_ms = elapsed_ms(&when)
+                    );
                     if *root_probe == Some(request.hash)
                         && request.direction == Direction::DescendingInclusive
                     {
@@ -1887,7 +2397,7 @@ async fn drive<P: PlatformRef>(
                         if request.direction != Direction::DescendingInclusive
                             || request.max_blocks != 1
                         {
-                            return;
+                            break 'conn End::UnexpectedResponse;
                         }
                         if let Err(error) =
                             warp.receive_headers(params, blocks, state.lock().await.header_bytes)
@@ -1897,17 +2407,35 @@ async fn drive<P: PlatformRef>(
                                 Debug,
                                 log_name,
                                 "jam-warp-rejected",
-                                error = alloc::format!("{error}")
+                                slot = peer_index,
+                                step = "head",
+                                req = tag.req,
+                                error = warp_token(&error)
                             );
-                            return;
+                            break 'conn End::WarpRejected;
                         }
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-warp-head-fetched",
+                            slot = peer_index,
+                            req = tag.req,
+                            hash = Hex(&request.hash),
+                            block_slot = Opt(warp.head.as_ref().map(|head| head.slot)),
+                            authenticated = if warp.finalized.is_some() {
+                                "by-fragment"
+                            } else {
+                                "needs-justification"
+                            }
+                        );
                         continue;
                     }
                     let mut bytes = 0;
                     for block in blocks {
                         let header_len = block.header.encode(params).len();
                         if header_len > state.lock().await.header_bytes {
-                            return;
+                            break 'conn End::Limit;
                         }
                         bytes += header_len + block.body.len();
                         drop(block.body);
@@ -1931,17 +2459,17 @@ async fn drive<P: PlatformRef>(
                     start_set_id,
                     fragments,
                 } => {
-                    let Some((id, expected, _)) = warp_requested.take() else {
-                        return;
+                    let Some((id, expected, when, tag)) = warp_requested.take() else {
+                        break 'conn End::UnexpectedResponse;
                     };
                     let Some(warp) = &mut warp else {
-                        return;
+                        break 'conn End::UnexpectedResponse;
                     };
                     if id != request_id
                         || start_set_id != expected
                         || expected != warp.authorities.set_id()
                     {
-                        return;
+                        break 'conn End::UnexpectedResponse;
                     }
                     let limits = {
                         let s = state.lock().await;
@@ -1951,28 +2479,74 @@ async fn drive<P: PlatformRef>(
                             proof: s.proof_limits(),
                         }
                     };
+                    let before = warp.fragments;
                     if let Err(error) = warp.advance(params, &fragments, &limits) {
                         log!(
                             platform,
                             Debug,
                             log_name,
-                            "jam-warp-rejected",
-                            error = alloc::format!("{error}")
+                            "jam-warp-request-ended",
+                            slot = peer_index,
+                            req = tag.req,
+                            purpose = tag.purpose,
+                            outcome = "rejected",
+                            start_set_id = start_set_id,
+                            bytes = fragments.len(),
+                            error = warp_token(&error),
+                            elapsed_ms = elapsed_ms(&when)
                         );
-                        return;
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-warp-rejected",
+                            slot = peer_index,
+                            step = "fragments",
+                            req = tag.req,
+                            error = warp_token(&error)
+                        );
+                        break 'conn End::WarpRejected;
                     }
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-warp-request-ended",
+                        slot = peer_index,
+                        req = tag.req,
+                        purpose = tag.purpose,
+                        outcome = "ok",
+                        start_set_id = start_set_id,
+                        bytes = fragments.len(),
+                        fragments = warp.fragments.saturating_sub(before),
+                        set_id = warp.authorities.set_id(),
+                        chain_done = warp.chain_done,
+                        elapsed_ms = elapsed_ms(&when)
+                    );
                 }
                 net::Event::JustificationResponse {
                     request_id,
                     target,
                     justification,
                 } => {
-                    let Some((id, expected, _)) = proof_requested.take() else {
-                        return;
+                    let Some((id, expected, when, tag)) = proof_requested.take() else {
+                        break 'conn End::UnexpectedResponse;
                     };
                     if id != request_id || target != expected {
-                        return;
+                        break 'conn End::UnexpectedResponse;
                     }
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-justification-request-ended",
+                        slot = peer_index,
+                        req = tag.req,
+                        purpose = tag.purpose,
+                        outcome = "ok",
+                        bytes = justification.len(),
+                        elapsed_ms = elapsed_ms(&when)
+                    );
                     let mut s = state.lock().await;
                     if let Some(warp) = &mut warp {
                         if let Err(error) =
@@ -1983,10 +2557,23 @@ async fn drive<P: PlatformRef>(
                                 Debug,
                                 log_name,
                                 "jam-warp-rejected",
-                                error = alloc::format!("{error}")
+                                slot = peer_index,
+                                step = "justification",
+                                req = tag.req,
+                                error = warp_token(&error)
                             );
-                            return;
+                            break 'conn End::WarpRejected;
                         }
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-warp-justification-verified",
+                            slot = peer_index,
+                            req = tag.req,
+                            hash = Hex(&target),
+                            set_id = warp.authorities.set_id()
+                        );
                         continue;
                     }
                     s.proof_owner = None;
@@ -1996,9 +2583,13 @@ async fn drive<P: PlatformRef>(
                             Debug,
                             log_name,
                             "jam-finality-rejected",
-                            error = alloc::format!("{error:?}")
+                            slot = peer_index,
+                            req = tag.req,
+                            target = Hex(&target),
+                            set_id = s.authorities.set_id(),
+                            error = Token(&error)
                         );
-                        return;
+                        break 'conn End::FinalityRejected;
                     }
                     log!(
                         platform,
@@ -2007,38 +2598,71 @@ async fn drive<P: PlatformRef>(
                         "jam-finalized",
                         slot = s.tree.finalized().slot,
                         set_id = s.authorities.set_id(),
-                        retained = s.tree.len()
+                        retained = s.tree.len(),
+                        conn = peer_index,
+                        req = tag.req,
+                        hash = Hex(&s.tree.finalized().hash)
                     );
                 }
-                net::Event::RequestFailed { request_id, .. }
+                net::Event::RequestFailed { request_id, reason }
                     if proof_requested
                         .as_ref()
-                        .is_some_and(|(id, _, _)| *id == request_id) =>
+                        .is_some_and(|(id, ..)| *id == request_id) =>
                 {
-                    if warp.is_some() {
-                        return;
+                    if let Some((_, _, when, tag)) = proof_requested.take() {
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-justification-request-ended",
+                            slot = peer_index,
+                            req = tag.req,
+                            purpose = tag.purpose,
+                            outcome = "failed",
+                            error = alloc::format!("{reason:?}"),
+                            elapsed_ms = elapsed_ms(&when)
+                        );
                     }
-                    proof_requested = None;
+                    if warp.is_some() {
+                        break 'conn End::JustificationFailed;
+                    }
                     state.lock().await.proof_owner = None;
                 }
                 net::Event::RequestFailed { request_id, reason }
                     if warp_requested
                         .as_ref()
-                        .is_some_and(|(id, _, _)| *id == request_id) =>
+                        .is_some_and(|(id, ..)| *id == request_id) =>
                 {
+                    let req = warp_requested.take().map(|(_, _, when, tag)| {
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-warp-request-ended",
+                            slot = peer_index,
+                            req = tag.req,
+                            purpose = tag.purpose,
+                            outcome = "failed",
+                            error = alloc::format!("{reason:?}"),
+                            elapsed_ms = elapsed_ms(&when)
+                        );
+                        tag.req
+                    });
                     if reason != net::RequestError::NoData {
                         log!(
                             platform,
                             Debug,
                             log_name,
                             "jam-warp-rejected",
-                            reason = alloc::format!("{reason:?}")
+                            reason = alloc::format!("{reason:?}"),
+                            slot = peer_index,
+                            step = "fragments",
+                            req = Opt(req)
                         );
-                        return;
+                        break 'conn End::WarpFailed;
                     }
-                    warp_requested = None;
                     let Some(warp) = &mut warp else {
-                        return;
+                        break 'conn End::UnexpectedResponse;
                     };
                     warp.chain_done = true;
                     if warp.fragments == 0 {
@@ -2047,19 +2671,33 @@ async fn drive<P: PlatformRef>(
                             Debug,
                             log_name,
                             "jam-warp-fragmentless",
-                            reason = "NoData"
+                            reason = "NoData",
+                            slot = peer_index,
+                            req = Opt(req)
                         );
                     }
                 }
                 net::Event::RequestFailed { request_id, reason } => {
-                    let Some((id, request, _)) = requested.take() else {
-                        return;
+                    let Some((id, request, when, tag)) = requested.take() else {
+                        break 'conn End::UnexpectedResponse;
                     };
                     if id != request_id {
-                        return;
+                        break 'conn End::UnexpectedResponse;
                     }
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-block-request-ended",
+                        slot = peer_index,
+                        req = tag.req,
+                        purpose = tag.purpose,
+                        outcome = "failed",
+                        error = alloc::format!("{reason:?}"),
+                        elapsed_ms = elapsed_ms(&when)
+                    );
                     if warp.is_some() || reason != net::RequestError::NoData {
-                        return;
+                        break 'conn End::BlockFailed;
                     }
                     if *root_probe == Some(request.hash)
                         && request.direction == Direction::DescendingInclusive
@@ -2076,8 +2714,9 @@ async fn drive<P: PlatformRef>(
                                 hash = alloc::format!("{:?}", request.hash),
                                 slot = s.tree.finalized().slot
                             );
+                            break 'conn End::AnchorUnserved;
                         }
-                        return;
+                        break 'conn End::RootRefused;
                     }
                     if request.direction == Direction::AscendingExclusive {
                         let s = state.lock().await;
@@ -2095,7 +2734,7 @@ async fn drive<P: PlatformRef>(
                         fallback = true;
                     } else if request.hash == state.lock().await.tree.finalized().hash {
                         // This peer cannot extend our authenticated root.
-                        return;
+                        break 'conn End::RootUnextendable;
                     } else {
                         // First-child selection can repeat a dead branch. Wait for
                         // an announcement repair or for the server to prune it.
@@ -2103,14 +2742,36 @@ async fn drive<P: PlatformRef>(
                     }
                 }
                 net::Event::ProtocolError(net::ProtocolError::MessageTooLarge) => {
-                    if requested.as_ref().is_some_and(|(_, request, _)| {
-                        request.direction == Direction::AscendingExclusive || warp.is_some()
-                    }) {
+                    if let Some((_, request, _, tag)) = &requested
+                        && (request.direction == Direction::AscendingExclusive || warp.is_some())
+                    {
+                        let before = fetch_size.count;
                         fetch_size.oversized();
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-block-size-halved",
+                            slot = peer_index,
+                            req = tag.req,
+                            max_blocks = before,
+                            next_max_blocks = fetch_size.count,
+                            ceiling = fetch_size.ceiling
+                        );
                     }
-                    return;
+                    break 'conn End::MessageTooLarge;
                 }
-                net::Event::ProtocolError(_) => return,
+                net::Event::ProtocolError(error) => {
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-peer-protocol-error",
+                        slot = peer_index,
+                        error = Token(&error)
+                    );
+                    break 'conn End::ProtocolError;
+                }
             }
         }
         if handshaken && !warped {
@@ -2121,15 +2782,19 @@ async fn drive<P: PlatformRef>(
                 if !w.chain_done && warp_requested.is_none() {
                     let start = w.authorities.set_id();
                     let Ok(id) = connection.request_warp(start) else {
-                        return;
+                        break 'conn End::RequestRefused;
                     };
-                    warp_requested = Some((id, start, now.clone()));
+                    let tag = Tag::new("warp-join");
+                    warp_requested = Some((id, start, now.clone(), tag));
                     log!(
                         platform,
                         Debug,
                         log_name,
                         "jam-warp-request-queued",
-                        set_id = start
+                        set_id = start,
+                        slot = peer_index,
+                        req = tag.req,
+                        purpose = tag.purpose
                     );
                     local_progress = true;
                 } else if w.chain_done {
@@ -2146,7 +2811,7 @@ async fn drive<P: PlatformRef>(
                                 error = alloc::format!("{error}"),
                                 slot = s.tree.finalized().slot
                             );
-                            return;
+                            break 'conn End::AnchorUnserved;
                         }
                         warp = None;
                         warped = true;
@@ -2163,13 +2828,17 @@ async fn drive<P: PlatformRef>(
                                     log_name,
                                     "jam-warp-join-selected",
                                     advertisement = advertisement_revision,
-                                    slot = f.slot
+                                    slot = f.slot,
+                                    conn = peer_index,
+                                    hash = Hex(&f.hash),
+                                    fragments = w.fragments,
+                                    set_id = w.authorities.set_id()
                                 );
                             }
                         }
                         if w.head.is_none() && requested.is_none() {
                             let Some(f) = &w.final_head else {
-                                return;
+                                break 'conn End::WarpInvalid;
                             };
                             // F alone: the read is at F against its signed root.
                             let request = BlockRequest {
@@ -2178,35 +2847,60 @@ async fn drive<P: PlatformRef>(
                                 max_blocks: 1,
                             };
                             let Ok(id) = connection.request_blocks(request.clone()) else {
-                                return;
+                                break 'conn End::RequestRefused;
                             };
-                            requested = Some((id, request, now.clone()));
+                            let tag = Tag::new("warp-join-head");
+                            log!(
+                                platform,
+                                Debug,
+                                log_name,
+                                "jam-block-request-queued",
+                                slot = peer_index,
+                                req = tag.req,
+                                purpose = tag.purpose,
+                                hash = Hex(&request.hash),
+                                direction = direction_str(&request.direction),
+                                max_blocks = request.max_blocks
+                            );
+                            requested = Some((id, request, now.clone(), tag));
                             local_progress = true;
                         } else if w.head.is_some()
                             && w.finalized.is_none()
                             && proof_requested.is_none()
                         {
                             let Some(f) = &w.final_head else {
-                                return;
+                                break 'conn End::WarpInvalid;
                             };
                             let Ok(id) = connection.request_justification(f.hash) else {
-                                return;
+                                break 'conn End::RequestRefused;
                             };
-                            proof_requested = Some((id, f.hash, now.clone()));
+                            let tag = Tag::new("warp-join");
+                            log!(
+                                platform,
+                                Debug,
+                                log_name,
+                                "jam-justification-request-queued",
+                                slot = peer_index,
+                                req = tag.req,
+                                purpose = tag.purpose,
+                                target = Hex(&f.hash),
+                                target_slot = f.slot
+                            );
+                            proof_requested = Some((id, f.hash, now.clone(), tag));
                             local_progress = true;
                         } else if w.finalized.is_some() {
                             if let Some(rx) = &mut w.read {
                                 match rx.try_recv() {
                                     Ok(Some(Ok(result))) => {
                                         let Ok(expected) = w.next_read() else {
-                                            return;
+                                            break 'conn End::WarpInvalid;
                                         };
                                         if result.at != expected.at
                                             || result.root != expected.root
                                             || result.trust != Trust::Finalized
                                             || result.root_header != expected.root_header
                                         {
-                                            return;
+                                            break 'conn End::WarpInvalid;
                                         }
                                         let before = w.items.len();
                                         for index in [4, 6, 8, 11].into_iter().skip(before) {
@@ -2220,24 +2914,44 @@ async fn drive<P: PlatformRef>(
                                                 .iter()
                                                 .find(|(k, _)| *k == key)
                                             else {
-                                                return;
+                                                break 'conn End::WarpInvalid;
                                             };
                                             w.items.push((key, value.clone()));
+                                            log!(
+                                                platform,
+                                                Debug,
+                                                log_name,
+                                                "jam-warp-item-read",
+                                                slot = peer_index,
+                                                item = index,
+                                                bytes = value.len()
+                                            );
                                         }
                                         if w.items.len() == before {
-                                            return;
+                                            break 'conn End::WarpInvalid;
                                         }
                                         w.state_responses += 1;
                                         w.read = None;
                                         local_progress = true;
                                     }
                                     Ok(None) => {}
-                                    _ => return,
+                                    Ok(Some(Err(StateReadError::Unavailable))) => {
+                                        log!(
+                                            platform,
+                                            Debug,
+                                            log_name,
+                                            "jam-state-unavailable",
+                                            slot = peer_index,
+                                            purpose = "warp-join"
+                                        );
+                                        break 'conn End::StateUnavailable;
+                                    }
+                                    Err(_) => break 'conn End::StateCancelled,
                                 }
                             }
                             if w.items.len() == 4 {
                                 let Some(w) = warp.take() else {
-                                    return;
+                                    break 'conn End::WarpInvalid;
                                 };
                                 let count = w.fragments;
                                 let fragment_finality = w.last_final.is_some_and(|last| {
@@ -2255,9 +2969,11 @@ async fn drive<P: PlatformRef>(
                                         Debug,
                                         log_name,
                                         "jam-warp-rejected",
-                                        error = alloc::format!("{error}")
+                                        slot = peer_index,
+                                        step = "apply",
+                                        error = warp_token(&error)
                                     );
-                                    return;
+                                    break 'conn End::WarpRejected;
                                 }
                                 warp_revision = s.warp_revision;
                                 fetch_size.count =
@@ -2281,11 +2997,13 @@ async fn drive<P: PlatformRef>(
                                     fragments = count,
                                     state_bytes = state_bytes,
                                     state_responses = state_responses,
-                                    fragment_finality = fragment_finality
+                                    fragment_finality = fragment_finality,
+                                    conn = peer_index,
+                                    hash = Hex(&s.tree.finalized().hash)
                                 );
                             } else if w.read.is_none() {
                                 let Ok(read) = w.next_read() else {
-                                    return;
+                                    break 'conn End::WarpInvalid;
                                 };
                                 let mut s = state.lock().await;
                                 match s.reads.start(read) {
@@ -2294,7 +3012,7 @@ async fn drive<P: PlatformRef>(
                                         local_progress = true;
                                     }
                                     Err(net::Error::Limit) => {}
-                                    Err(_) => return,
+                                    Err(_) => break 'conn End::WarpInvalid,
                                 }
                             }
                         }
@@ -2306,14 +3024,16 @@ async fn drive<P: PlatformRef>(
         let pause_imports = {
             let s = state.lock().await;
             if normal_sync && s.tree.len() >= s.max_blocks && s.proof_owner.is_none() {
-                return;
+                break 'conn End::TreeFull;
             }
             !normal_sync || (s.proof_owner.is_some() && s.tree.len() + 1 >= s.max_blocks)
         };
         if !pause_imports && !imports.is_empty() {
             if let Some(header) = imports.pop_front() {
                 let hash = header.hash(params);
+                let block_slot = header.slot;
                 let mut s = state.lock().await;
+                let known = s.tree.get(&hash).is_some();
                 // Another peer may have finalized this prefix while the batch
                 // was in flight. Its pruned ancestors need no re-import.
                 let result = if header.slot <= s.tree.finalized().slot {
@@ -2325,34 +3045,57 @@ async fn drive<P: PlatformRef>(
                     Ok(()) => {
                         cursor = fallback.then_some(hash);
                         last_activity = now.clone();
-                        log!(platform, Debug, log_name, "jam-header-inserted");
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-header-inserted",
+                            slot = peer_index,
+                            via = "ascending",
+                            block_slot = block_slot,
+                            hash = Hex(&hash),
+                            known = known || block_slot <= s.tree.finalized().slot
+                        );
                     }
                     Err(InsertFailure::Tree(tree::InsertError::Verify(_))) if !fallback => {
                         imports.clear();
                         cursor = Some(s.tree.finalized().hash);
                         fallback = true;
                     }
-                    Err(_) => return,
+                    Err(_) => break 'conn End::InsertFailed,
                 }
                 local_progress = true;
             }
         } else if !pause_imports && requested.is_none() {
-            let header = if repair_ready {
-                repair.pop()
+            let (header, via) = if repair_ready {
+                (repair.pop(), "repair")
             } else if repair.is_empty() {
-                announcements.pop_front()
+                (announcements.pop_front(), "announcement")
             } else {
-                None
+                (None, "")
             };
             if let Some(header) = header {
                 let mut s = state.lock().await;
                 if header.slot > s.tree.finalized().slot {
+                    let hash = header.hash(params);
+                    let known = s.tree.get(&hash).is_some();
                     match s.insert(header.clone(), platform.now_from_unix_epoch().as_secs()) {
                         Ok(()) => {
                             cursor = None;
                             fallback = false;
                             waiting_for_finality = None;
                             last_activity = now.clone();
+                            log!(
+                                platform,
+                                Debug,
+                                log_name,
+                                "jam-header-inserted",
+                                slot = peer_index,
+                                via = via,
+                                block_slot = header.slot,
+                                hash = Hex(&hash),
+                                known = known
+                            );
                         }
                         Err(InsertFailure::Tree(tree::InsertError::UnknownParent)) => {
                             // Finality from another peer may have pruned the
@@ -2363,7 +3106,7 @@ async fn drive<P: PlatformRef>(
                                 repair.clear();
                             }
                         }
-                        Err(_) => return,
+                        Err(_) => break 'conn End::InsertFailed,
                     }
                 }
                 repair_ready = !repair.is_empty() && repair_ready;
@@ -2407,6 +3150,17 @@ async fn drive<P: PlatformRef>(
                     );
                 }
                 Some(DiscoveryEvent::Failed { reason }) => {
+                    if reason == "Unavailable" {
+                        // Every slot was tried: the read's own outcome.
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-state-unavailable",
+                            slot = "-",
+                            purpose = "discovery"
+                        );
+                    }
                     log!(
                         platform,
                         Debug,
@@ -2427,10 +3181,23 @@ async fn drive<P: PlatformRef>(
             let mut s = state.lock().await;
             if let Some(target) = s.reserve_proof(peer_index, advertised) {
                 let Ok(id) = connection.request_justification(target) else {
-                    return;
+                    break 'conn End::RequestRefused;
                 };
-                proof_requested = Some((id, target, platform.now()));
+                let tag = Tag::new("finality");
+                proof_requested = Some((id, target, platform.now(), tag));
                 local_progress = true;
+                log!(
+                    platform,
+                    Debug,
+                    log_name,
+                    "jam-justification-request-queued",
+                    slot = peer_index,
+                    req = tag.req,
+                    purpose = tag.purpose,
+                    target = Hex(&target),
+                    target_slot = Opt(s.tree.get(&target).map(|block| block.slot)),
+                    set_id = s.authorities.set_id()
+                );
             }
         }
         // Finality and state reads arbitrate the second slot; never enqueue a
@@ -2445,14 +3212,32 @@ async fn drive<P: PlatformRef>(
                 && s.warp_owner.is_none_or(|owner| owner == peer_index)
                 && let Some(request) = s.reads.reserve(peer_index)
             {
+                let trust = s.reads.pending.as_ref().map(|(read, _)| read.trust);
+                let keys = alloc::format!("{}", Keys(&request));
+                let block = request.block;
+                let max_size = request.max_size;
                 match connection.request_state(request) {
                     Ok(id) => {
-                        state_requested = Some((id, platform.now()));
+                        let tag = Tag::new(trust.map_or("-", read_purpose));
+                        state_requested = Some((id, platform.now(), tag));
                         local_progress = true;
+                        log!(
+                            platform,
+                            Debug,
+                            log_name,
+                            "jam-state-request-queued",
+                            slot = peer_index,
+                            req = tag.req,
+                            purpose = tag.purpose,
+                            block = Hex(&block),
+                            trust = Opt(trust.map(trust_str)),
+                            keys = keys,
+                            max_size = max_size
+                        );
                     }
                     Err(_) => {
                         s.reads.release(peer_index, true);
-                        return;
+                        break 'conn End::RequestRefused;
                     }
                 }
             }
@@ -2463,39 +3248,65 @@ async fn drive<P: PlatformRef>(
                 // The proof already in flight must get a turn before more imports.
             } else if s.tree.len() >= s.max_blocks && s.proof_owner.is_none() {
                 // All proof candidates failed: don't deadlock on an unfinalizable fork.
-                return;
+                break 'conn End::TreeFull;
             } else {
                 let request = if let Some(hash) = *root_probe {
-                    Some(BlockRequest {
-                        hash,
-                        direction: Direction::DescendingInclusive,
-                        max_blocks: 1,
-                    })
+                    Some((
+                        BlockRequest {
+                            hash,
+                            direction: Direction::DescendingInclusive,
+                            max_blocks: 1,
+                        },
+                        "root-probe",
+                    ))
                 } else if let Some(header) = repair.last() {
-                    Some(BlockRequest {
-                        hash: header.parent,
-                        direction: Direction::DescendingInclusive,
-                        max_blocks: 1,
-                    })
+                    Some((
+                        BlockRequest {
+                            hash: header.parent,
+                            direction: Direction::DescendingInclusive,
+                            max_blocks: 1,
+                        },
+                        "repair",
+                    ))
                 } else if waiting_for_finality.is_none() && announcements.is_empty() {
                     let head = cursor
                         .and_then(|hash| s.tree.get(&hash))
                         .unwrap_or_else(|| s.tree.best());
-                    (peer_slot > head.slot).then_some(BlockRequest {
-                        hash: head.hash,
-                        direction: Direction::AscendingExclusive,
-                        max_blocks: fetch_size.count,
-                    })
+                    (peer_slot > head.slot).then_some((
+                        BlockRequest {
+                            hash: head.hash,
+                            direction: Direction::AscendingExclusive,
+                            max_blocks: fetch_size.count,
+                        },
+                        "ascending",
+                    ))
                 } else {
                     None
                 };
-                if let Some(request) = request {
+                if let Some((request, purpose)) = request {
                     let Ok(id) = connection.request_blocks(request.clone()) else {
-                        return;
+                        break 'conn End::RequestRefused;
                     };
-                    requested = Some((id, request, platform.now()));
+                    let tag = Tag::new(purpose);
+                    let (hash, direction, max_blocks) = (
+                        request.hash,
+                        direction_str(&request.direction),
+                        request.max_blocks,
+                    );
+                    requested = Some((id, request, platform.now(), tag));
                     local_progress = true;
-                    log!(platform, Debug, log_name, "jam-block-request-queued");
+                    log!(
+                        platform,
+                        Debug,
+                        log_name,
+                        "jam-block-request-queued",
+                        slot = peer_index,
+                        req = tag.req,
+                        purpose = tag.purpose,
+                        hash = Hex(&hash),
+                        direction = direction,
+                        max_blocks = max_blocks
+                    );
                 }
             }
         }
@@ -2532,14 +3343,14 @@ async fn drive<P: PlatformRef>(
         match next {
             Some(Some((stream, direction))) => {
                 let Some(id) = next_id.checked_add(1) else {
-                    return;
+                    break 'conn End::Limit;
                 };
                 next_id = id;
                 let mut request = None;
                 let limited_lifetime = match direction {
                     SubstreamDirection::Outbound => {
                         let Some((kind, _)) = opening.take() else {
-                            return;
+                            break 'conn End::ProtocolError;
                         };
                         request = match kind {
                             net::SubstreamKind::Ce128 { request_id }
@@ -2550,7 +3361,7 @@ async fn drive<P: PlatformRef>(
                         };
                         if connection.substream_opened(id, kind).is_err() {
                             let _ = connection.outgoing_open_failed(kind);
-                            return;
+                            break 'conn End::ProtocolError;
                         }
                         matches!(
                             kind,
@@ -2575,13 +3386,113 @@ async fn drive<P: PlatformRef>(
                     request,
                 });
             }
-            Some(None) => return,
+            Some(None) => break 'conn End::Transport,
             None => {}
         }
+    };
+    // Requests still in flight end with the connection: say how, once each.
+    let outcome = |timeout: End| {
+        if end == timeout {
+            "timeout"
+        } else {
+            "cancelled"
+        }
+    };
+    let pending = [
+        requested
+            .as_ref()
+            .map(|(_, _, when, tag)| ("jam-block-request-ended", when, tag, End::BlockTimeout)),
+        proof_requested.as_ref().map(|(_, _, when, tag)| {
+            (
+                "jam-justification-request-ended",
+                when,
+                tag,
+                End::JustificationTimeout,
+            )
+        }),
+        state_requested
+            .as_ref()
+            .map(|(_, when, tag)| ("jam-state-request-ended", when, tag, End::StateTimeout)),
+        warp_requested
+            .as_ref()
+            .map(|(_, _, when, tag)| ("jam-warp-request-ended", when, tag, End::WarpTimeout)),
+    ];
+    for (name, when, tag, timeout) in pending.into_iter().flatten() {
+        log!(
+            platform,
+            Debug,
+            log_name,
+            name,
+            slot = peer_index,
+            req = tag.req,
+            purpose = tag.purpose,
+            outcome = outcome(timeout),
+            reason = end.as_str(),
+            elapsed_ms = elapsed_ms(when)
+        );
     }
+    // A rejection already said where the join failed.
+    if let Some(w) = &warp
+        && !matches!(end, End::WarpRejected | End::WarpFailed)
+    {
+        log!(
+            platform,
+            Debug,
+            log_name,
+            "jam-warp-abandoned",
+            slot = peer_index,
+            step = warp_step(w),
+            fragments = w.fragments,
+            reason = end.as_str()
+        );
+    }
+    end
 }
 
 mod discovery;
 
 #[cfg(all(test, feature = "std"))]
 mod tests;
+
+#[cfg(test)]
+mod log_format_tests {
+    use super::{End, Hex, Key, Keys, Opt, Token, finality, net, trie};
+    use alloc::string::ToString as _;
+    use smoldot::jam::codec::DecodeError;
+
+    #[test]
+    fn tokens_are_variant_paths_without_separators() {
+        let wrong = finality::Error::WrongSetId {
+            expected: 1,
+            received: 2,
+        };
+        assert_eq!(Token(&wrong).to_string(), "WrongSetId");
+        let decode = finality::Error::Decode(DecodeError::LengthLimit);
+        assert_eq!(Token(&decode).to_string(), "Decode(LengthLimit)");
+        let item = net::ProtocolError::Decode(DecodeError::InvalidDiscriminant(3));
+        assert_eq!(Token(&item).to_string(), "Decode(InvalidDiscriminant(3))");
+        assert_eq!(
+            Token(&trie::ProofError::RootMismatch).to_string(),
+            "RootMismatch"
+        );
+    }
+
+    #[test]
+    fn values_are_single_tokens() {
+        assert_eq!(Hex(&[0xab, 0x01]).to_string(), "0xab01");
+        assert_eq!(Opt::<u64>(None).to_string(), "-");
+        assert_eq!(Opt(Some(7)).to_string(), "7");
+        assert_eq!(Key(&trie::state_key(8)).to_string(), "C8");
+        let mut odd = trie::state_key(8);
+        odd[30] = 1;
+        assert!(Key(&odd).to_string().starts_with("0x08"));
+        let request = trie::StateRequest {
+            block: [0; 32],
+            start: trie::state_key(4),
+            end: trie::state_key(11),
+            max_size: 1,
+        };
+        assert_eq!(Keys(&request).to_string(), "C4..C11");
+        assert_eq!(End::JustificationTimeout.as_str(), "justification-timeout");
+    }
+}

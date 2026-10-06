@@ -236,6 +236,11 @@ impl Pool {
         }
     }
 
+    /// Every candidate, bootnodes first, for the driver's log.
+    pub(super) fn candidates(&self) -> impl Iterator<Item = &Peer> {
+        self.entries.iter().map(|e| &e.peer)
+    }
+
     pub(super) fn held(&self, slot: usize) -> Option<&Peer> {
         self.entries
             .iter()
