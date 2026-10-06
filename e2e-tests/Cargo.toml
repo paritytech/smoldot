@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.81"
+base64 = "0.22"
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 env_logger = "0.11.2"
 hex = { version = "0.4.3", default-features = false }
@@ -15,5 +16,33 @@ serde_json = "1.0.132"
 sha2 = { version = "0.10", default-features = false }
 smoldot = { path = "../lib", default-features = false }
 tempfile = "3.8.1"
-tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "process", "time", "fs", "io-util"] }
-zombienet-sdk = "0.4.13"
+tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "process", "time", "fs", "io-util", "signal"] }
+zombienet-sdk = "0.5.2"
+
+[features]
+# The JAM scenarios: `src/jam.rs` and `tests/jam_*.rs`. They need zombienet-sdk's JAM support
+# (P-256 identities and both bootnode lists in the generated spec, JAM node kill and start, fixed
+# JAM p2p ports), which no zombienet-sdk release has yet. Until one does, this feature does not
+# build against crates.io; raise the `zombienet-sdk` version above to that release and make the
+# scenarios unconditional.
+jam = []
+
+[[test]]
+name = "jam_aged"
+required-features = ["jam"]
+
+[[test]]
+name = "jam_discovery"
+required-features = ["jam"]
+
+[[test]]
+name = "jam_finality"
+required-features = ["jam"]
+
+[[test]]
+name = "jam_follow"
+required-features = ["jam"]
+
+[[test]]
+name = "jam_generate_snapshot"
+required-features = ["jam"]

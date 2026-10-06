@@ -134,7 +134,7 @@ fn ensure_bundle_extracted() -> Result<PathBuf, anyhow::Error> {
         return Ok(p);
     }
 
-    let cache = cache_dir()?;
+    let cache = cache_dir(ARTIFACTS_VERSION)?;
     let marker = cache.join(".extracted-sha");
     let extracted_ok = std::fs::read_to_string(&marker)
         .map(|s| s.trim() == BUNDLE_SHA256)
@@ -167,12 +167,13 @@ fn ensure_bundle_extracted() -> Result<PathBuf, anyhow::Error> {
     Ok(cache)
 }
 
-fn cache_dir() -> Result<PathBuf, anyhow::Error> {
+/// `smoldot-e2e/<name>` in the user's cache directory, created if missing.
+pub(crate) fn cache_dir(name: &str) -> Result<PathBuf, anyhow::Error> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .ok_or_else(|| anyhow!("neither XDG_CACHE_HOME nor HOME is set"))?;
-    let dir = base.join("smoldot-e2e").join(ARTIFACTS_VERSION);
+    let dir = base.join("smoldot-e2e").join(name);
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -195,7 +196,10 @@ pub(crate) fn download(url: &str, dst: &std::path::Path) -> Result<(), anyhow::E
     Ok(())
 }
 
-fn extract_tarball(tarball: &std::path::Path, dst: &std::path::Path) -> Result<(), anyhow::Error> {
+pub(crate) fn extract_tarball(
+    tarball: &std::path::Path,
+    dst: &std::path::Path,
+) -> Result<(), anyhow::Error> {
     let status = std::process::Command::new("tar")
         .arg("-xzf")
         .arg(tarball)
