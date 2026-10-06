@@ -19,6 +19,7 @@
 
 import { Client, ClientOptionsWithBytecode } from './public-types.js'
 import { start as innerStart, Connection, ConnectionConfig } from './internals/client.js'
+import { resolveDnsOverHttps } from './internals/dns-over-https.js'
 
 export {
     AddChainError,
@@ -218,8 +219,7 @@ function connect(config: ConnectionConfig): Connection {
             };
         }
 
-        const { targetPort, ipVersion, targetIp, remoteTlsCertificateSha256 } =
-            config.address;
+        const { targetPort, remoteTlsCertificateSha256 } = config.address;
 
         const state: {
             // Note that `pc` can be the connection, but also null or undefined.
@@ -235,17 +235,52 @@ function connect(config: ConnectionConfig): Connection {
             // Set to `true` before any outbound substream is open. Used to detect when the first
             // substream is opened.
             isFirstOutSubstream: boolean,
+            // Aborts the DNS resolution of the target, if one is in progress.
+            dnsAbort: AbortController | null,
         } = {
             pc: undefined,
             dataChannels: new Map(),
             nextStreamId: 0,
             isFirstOutSubstream: true,
+            dnsAbort: null,
         };
+
+        // The SDP answer needs the literal IP address of the remote.
+        // Browsers expose no DNS API, so a multiaddress with a domain name is resolved over
+        // DNS-over-HTTPS. Resolution is started here and is only awaited in
+        // `onnegotiationneeded`, where the IP is actually needed.
+        let target: Promise<{ targetIp: string, ipVersion: 4 | 6 }>;
+        if ("targetIp" in config.address) {
+            target = Promise.resolve({ targetIp: config.address.targetIp, ipVersion: config.address.ipVersion });
+        } else {
+            const { hostname, family } = config.address;
+            const controller = new AbortController();
+            state.dnsAbort = controller;
+            const timeout = setTimeout(() => controller.abort(), 10000);
+            const finished = () => {
+                clearTimeout(timeout);
+                state.dnsAbort = null;
+            };
+            target = resolveDnsOverHttps(hostname, family, controller.signal).then(
+                (ip) => {
+                    finished();
+                    return { targetIp: ip, ipVersion: ip.includes(':') ? 6 : 4 };
+                },
+                (error) => {
+                    finished();
+                    throw error;
+                }
+            );
+            target.catch(() => { });
+        }
 
         // Kills all the JavaScript objects (the connection and all its substreams), ensuring that no
         // callback will be called again. Doesn't report anything to smoldot, as this should be done
         // by the caller.
         const killAllJs = () => {
+            if (state.dnsAbort)
+                state.dnsAbort.abort();
+
             // The `RTCPeerConnection` is created pretty quickly. It is however still possible for
             // smoldot to cancel the opening, in which case `pc` will still be undefined.
             if (!state.pc) {
@@ -268,6 +303,19 @@ function connect(config: ConnectionConfig): Connection {
             state.dataChannels.clear();
 
             state.pc!.close();  // Not necessarily necessary, but it doesn't hurt to do so.
+        };
+
+        // Due to <https://bugzilla.mozilla.org/show_bug.cgi?id=1659672>,
+        // connections from Firefox to a localhost WebRTC server always fail:
+        // Firefox gathers no loopback ICE candidate.
+        // 
+        // Returns `true` if the connection was refused, in which case the caller must stop.
+        const refuseIfFirefoxLoopback = (ip: string): boolean => {
+            if ((ip !== '127.0.0.1' && ip !== '::1') || navigator.userAgent.indexOf('Firefox') === -1)
+                return false;
+            killAllJs();
+            config.onConnectionReset("Firefox can't connect to a localhost WebRTC server");
+            return true;
         };
 
         // Function that configures a newly-opened channel and adds it to the map. Used for both
@@ -340,19 +388,10 @@ function connect(config: ConnectionConfig): Connection {
             if (state.pc === null)
                 return;
 
-            // Due to <https://bugzilla.mozilla.org/show_bug.cgi?id=1659672>, connections from
-            // Firefox to a localhost WebRTC server always fails. Since this bug has been opened
-            // for three years at the time of writing, it is unlikely to be fixed in the short
-            // term. In order to provider better user feedback, we straight up refuse connecting
-            // and stop the connection.
-            // Note that this is just a hint. Failing to detect this will lead to the WebRTC
-            // handshake  timing out.
-            // TODO: eventually remove this if the Firefox bug is fixed
-            if ((targetIp == 'localhost' || targetIp == '127.0.0.1' || targetIp == '::1') && navigator.userAgent.indexOf('Firefox') !== -1) {
-                killAllJs();
-                config.onConnectionReset("Firefox can't connect to a localhost WebRTC server");
+            // A literal loopback address can be refused before anything is created. A domain
+            // name is checked once resolved, in `onnegotiationneeded`.
+            if ("targetIp" in config.address && refuseIfFirefoxLoopback(config.address.targetIp))
                 return;
-            }
 
             // Create a new WebRTC connection.
             state.pc = new RTCPeerConnection({ certificates: [localCertificate] });
@@ -430,6 +469,25 @@ function connect(config: ConnectionConfig): Connection {
                 sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:' + ufragPwd);
                 sdpOffer = sdpOffer.replace(/^a=ice-pwd.*$/m, 'a=ice-pwd:' + ufragPwd);
                 await state.pc!.setLocalDescription({ type: 'offer', sdp: sdpOffer });
+
+                // The answer needs the literal IP address of the remote, resolution was already stared.
+                let targetIp: string;
+                let ipVersion: 4 | 6;
+                try {
+                    ({ targetIp, ipVersion } = await target);
+                } catch (error) {
+                    // `reset()` aborts the resolution, and a failure reported through
+                    // `onconnectionstatechange` closes the connection.
+                    if (state.pc!.signalingState === "closed")
+                        return;
+                    killAllJs();
+                    config.onConnectionReset("DNS resolution failed: " + (error instanceof Error ? error.message : String(error)));
+                    return;
+                }
+                if (state.pc!.signalingState === "closed")
+                    return;
+                if (refuseIfFirefoxLoopback(targetIp))
+                    return;
 
                 // Transform certificate hash into fingerprint (upper-hex; each byte separated by ":").
                 const fingerprint = Array.from(remoteTlsCertificateSha256).map((n) => ("0" + n.toString(16)).slice(-2).toUpperCase()).join(':');

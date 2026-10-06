@@ -3760,25 +3760,23 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             ),
                         );
                     }
-                    address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(
-                        platform::MultiStreamAddress::WebRtc {
-                            ip,
-                            port,
-                            remote_certificate_sha256,
-                        },
-                    ) => {
+                    address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(address) => {
+                        let remote_certificate_sha256 = match &address {
+                            platform::MultiStreamAddress::WebRtc {
+                                remote_certificate_sha256,
+                                ..
+                            }
+                            | platform::MultiStreamAddress::WebRtcDns {
+                                remote_certificate_sha256,
+                                ..
+                            } => *remote_certificate_sha256,
+                        };
+
                         // We need to know the local TLS certificate in order to insert the
                         // connection, and as such we need to call `connect_multistream` here.
                         // As documented in the `PlatformRef` trait, `connect_multistream` must
                         // return as soon as possible.
-                        let connection = task
-                            .platform
-                            .connect_multistream(platform::MultiStreamAddress::WebRtc {
-                                ip,
-                                port,
-                                remote_certificate_sha256,
-                            })
-                            .await;
+                        let connection = task.platform.connect_multistream(address).await;
 
                         // Convert the SHA256 hashes into multihashes.
                         let local_tls_certificate_multihash = [18u8, 32]

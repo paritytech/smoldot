@@ -92,6 +92,7 @@ use core::{
     time::Duration,
 };
 use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
+use strum::VariantArray as _;
 
 pub use crate::libp2p::{
     collection::{
@@ -283,6 +284,10 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
     /// Peers known to support a chain's Kademlia protocol, as determined by Identify responses.
     /// Used by [`ChainNetwork::kademlia_capable_peers`].
     kademlia_capable_peers: BTreeSet<(usize, PeerIndex)>,
+
+    /// Peers known to support a chain's statement/2 protocol, as determined by Identify
+    /// responses. Used by [`ChainNetwork::statement_capable_peers`].
+    statement_capable_peers: BTreeSet<(usize, PeerIndex)>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -377,15 +382,15 @@ enum NotificationsProtocol {
     },
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, strum::VariantArray)]
 enum SubstreamDirection {
     In,
     Out,
 }
 
 impl SubstreamDirection {
-    const MIN: Self = SubstreamDirection::In;
-    const MAX: Self = SubstreamDirection::Out;
+    const MIN: Self = Self::VARIANTS[0];
+    const MAX: Self = Self::VARIANTS[Self::VARIANTS.len() - 1];
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -408,7 +413,7 @@ impl NotificationsSubstreamState {
 }
 
 /// Lifecycle state of the Bitswap substream.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, strum::VariantArray)]
 enum BitswapSubstreamState {
     /// Used for outbound substreams that were requested, but not yet confirmed by the remote.
     Pending,
@@ -417,8 +422,8 @@ enum BitswapSubstreamState {
 }
 
 impl BitswapSubstreamState {
-    const MIN: Self = BitswapSubstreamState::Pending;
-    const MAX: Self = BitswapSubstreamState::Open;
+    const MIN: Self = Self::VARIANTS[0];
+    const MAX: Self = Self::VARIANTS[Self::VARIANTS.len() - 1];
 }
 
 impl<TChain, TConn, TNow> ChainNetwork<TChain, TConn, TNow>
@@ -493,6 +498,7 @@ where
                 Default::default(),
             ),
             kademlia_capable_peers: BTreeSet::new(),
+            statement_capable_peers: BTreeSet::new(),
             chains: slab::Slab::with_capacity(config.chains_capacity),
             chains_by_protocol_info: hashbrown::HashMap::with_capacity_and_hasher(
                 config.chains_capacity,
@@ -734,6 +740,8 @@ where
         }
 
         self.kademlia_capable_peers
+            .retain(|(c, _)| *c != chain_id.0);
+        self.statement_capable_peers
             .retain(|(c, _)| *c != chain_id.0);
 
         // Actually remove the chain. This will panic if the `ChainId` is invalid.
@@ -1461,6 +1469,7 @@ where
                     // Auto-fire an outbound Identify request the first time we see this peer.
                     // The response will populate `kademlia_capable_peers`, which discovery
                     // logic uses to find Kademlia targets independently of gossip state.
+                    // It also populates `statement_capable_peers`.
                     //
                     // Identify expects a length-prefixed empty body (see inbound handler
                     // around line 2037, which checks `request_payload.is_empty()`). Passing
@@ -1766,6 +1775,8 @@ where
                             // a chain when its self-advertised protocols list contains that
                             // chain's Kad protocol name. The response is consumed internally
                             // (no `Event::RequestResult` is emitted for Identify).
+                            // `statement_capable_peers` is populated the same way from the
+                            // statement/2 protocol name, for chains that use statements.
                             if let Ok(payload) = response {
                                 if let Ok(decoded) = codec::decode_identify_response(&payload) {
                                     let advertised: Vec<&str> = decoded.protocols.collect();
@@ -1779,6 +1790,20 @@ where
                                         if advertised.iter().any(|p| *p == kad_name_string) {
                                             self.kademlia_capable_peers
                                                 .insert((chain_index, peer_index));
+                                        }
+
+                                        if chain.enable_statement_protocol {
+                                            let statement_name = codec::encode_protocol_name_string(
+                                                codec::ProtocolName::Statement {
+                                                    genesis_hash: chain.genesis_hash,
+                                                    fork_id: chain.fork_id.as_deref(),
+                                                    version: codec::StatementProtocolVersion::V2,
+                                                },
+                                            );
+                                            if advertised.iter().any(|p| *p == statement_name) {
+                                                self.statement_capable_peers
+                                                    .insert((chain_index, peer_index));
+                                            }
                                         }
                                     }
                                 }
@@ -4136,6 +4161,24 @@ where
             .map(|(_, peer_index)| &self.peers[peer_index.0])
     }
 
+    /// Returns the list of peers known to support the statement/2 protocol of the given chain,
+    /// as determined by their Identify protocol response.
+    ///
+    /// Always empty if [`ChainConfig::enable_statement_protocol`] is `false` for this chain.
+    /// The same limits as [`ChainNetwork::kademlia_capable_peers`] apply: Identify is sent at
+    /// most once per peer, so peers that connected before the chain was added are missing.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn statement_capable_peers(&self, chain_id: ChainId) -> impl Iterator<Item = &PeerId> {
+        assert!(self.chains.contains(chain_id.0));
+        self.statement_capable_peers
+            .range((chain_id.0, PeerIndex(usize::MIN))..=(chain_id.0, PeerIndex(usize::MAX)))
+            .map(|(_, peer_index)| &self.peers[peer_index.0])
+    }
+
     /// Returns the list of all peers with an open gossip link of the given kind.
     /// It is possible to send gossip notifications to these peers.
     ///
@@ -4283,33 +4326,14 @@ where
             })
             .ok_or(OpenGossipError::NoConnection)?;
 
-        // Accept inbound substreams. A statement link only concerns the statement substreams.
-        let all_protocols = [
-            NotificationsProtocol::BlockAnnounces {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Transactions {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Grandpa {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Statement {
-                chain_index: chain_id.0,
-                version: codec::StatementProtocolVersion::V1,
-            },
-            NotificationsProtocol::Statement {
-                chain_index: chain_id.0,
-                version: codec::StatementProtocolVersion::V2,
-            },
-        ];
-        let protocols_to_accept: &[NotificationsProtocol] = match kind {
-            GossipKind::ConsensusTransactions => &all_protocols[..],
-            GossipKind::Statement => &all_protocols[3..],
-        };
+        // Accept inbound substreams. A statement link only concerns the statement substreams,
+        // while a consensus link also carries the statement substreams that follow it.
+        let protocols_to_accept = (kind == GossipKind::ConsensusTransactions)
+            .then(|| consensus_transactions_protocols(chain_id.0))
+            .into_iter()
+            .flatten()
+            .chain(statement_protocols(chain_id.0));
         for (protocol, in_substream_id) in protocols_to_accept
-            .iter()
-            .copied()
             .flat_map(|protocol| {
                 self.notification_substreams_by_peer_id
                     .range(
@@ -4463,36 +4487,22 @@ where
         // error at the end.
         let mut has_closed_something = false;
 
-        // Close all substreams, pending or open.
-        let all_protocols = [
-            NotificationsProtocol::BlockAnnounces {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Transactions {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Grandpa {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Statement {
-                chain_index: chain_id.0,
-                version: codec::StatementProtocolVersion::V1,
-            },
-            NotificationsProtocol::Statement {
-                chain_index: chain_id.0,
-                version: codec::StatementProtocolVersion::V2,
-            },
-        ];
-        let protocols_to_close: &[NotificationsProtocol] = match kind {
-            GossipKind::ConsensusTransactions
-                if self.statement_link_wanted(chain_id.0, peer_index) =>
-            {
-                &all_protocols[..3]
-            }
-            GossipKind::ConsensusTransactions => &all_protocols[..],
-            GossipKind::Statement => &all_protocols[3..],
-        };
-        for protocol in protocols_to_close.iter().copied() {
+        // Close all substreams, pending or open. Closing a consensus link also closes the
+        // statement substreams following it, unless a statement link is wanted with the peer.
+        let close_consensus_transactions = kind == GossipKind::ConsensusTransactions;
+        let close_statement =
+            kind == GossipKind::Statement || !self.statement_link_wanted(chain_id.0, peer_index);
+        let protocols_to_close = close_consensus_transactions
+            .then(|| consensus_transactions_protocols(chain_id.0))
+            .into_iter()
+            .flatten()
+            .chain(
+                close_statement
+                    .then(|| statement_protocols(chain_id.0))
+                    .into_iter()
+                    .flatten(),
+            );
+        for protocol in protocols_to_close {
             for (substream_id, direction, state) in self
                 .notification_substreams_by_peer_id
                 .range(
@@ -5543,6 +5553,8 @@ where
         self.identify_requested_peers.remove(&peer_index);
         self.kademlia_capable_peers
             .retain(|(_, p)| *p != peer_index);
+        self.statement_capable_peers
+            .retain(|(_, p)| *p != peer_index);
 
         let peer_id = self.peers.remove(peer_index.0);
         let _was_in = self.peers_by_peer_id.remove(&peer_id);
@@ -5639,7 +5651,7 @@ impl<TChain, TConn, TNow> ops::IndexMut<ConnectionId> for ChainNetwork<TChain, T
 /// Kind of gossip link. Each kind is anchored on one notifications protocol, either version of
 /// it for statements: the link exists as long as an outbound substream of that protocol exists,
 /// and closes with it.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, strum::VariantArray)]
 pub enum GossipKind {
     /// Anchored on the block announces substream. The transactions and Grandpa substreams
     /// follow it, and so does the statement substream unless the peer also has a
@@ -5653,8 +5665,17 @@ pub enum GossipKind {
 }
 
 impl GossipKind {
-    const MIN: Self = GossipKind::ConsensusTransactions;
-    const MAX: Self = GossipKind::Statement;
+    const MIN: Self = Self::VARIANTS[0];
+    const MAX: Self = Self::VARIANTS[Self::VARIANTS.len() - 1];
+}
+
+/// Notifications protocols of a consensus and transactions link of the given chain.
+fn consensus_transactions_protocols(chain_index: usize) -> [NotificationsProtocol; 3] {
+    [
+        NotificationsProtocol::BlockAnnounces { chain_index },
+        NotificationsProtocol::Transactions { chain_index },
+        NotificationsProtocol::Grandpa { chain_index },
+    ]
 }
 
 /// Both versions of the statement protocol of the given chain.
@@ -5767,6 +5788,7 @@ pub enum Event<TConn> {
     ///
     /// The kind is always [`GossipKind::ConsensusTransactions`]. The statement kind reports
     /// through the `StatementProtocol*` events.
+    // TODO: remove the `kind` field from all the `Gossip*` events, as it is always the same
     GossipConnected {
         /// Peer we are now connected to.
         peer_id: PeerId,
