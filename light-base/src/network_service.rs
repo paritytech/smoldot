@@ -1876,15 +1876,26 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
 
                 // A statement link survives the closing of the block announces link, so it
-                // is closed on its own.
+                // needs a close of its own.
                 task.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,
                     service::GossipKind::Statement,
                 );
-                let _ =
-                    task.network
-                        .gossip_close(chain_id, &peer_id, service::GossipKind::Statement);
+                if task
+                    .network
+                    .gossip_close(chain_id, &peer_id, service::GossipKind::Statement)
+                    .is_ok()
+                {
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "statement-protocol-closed",
+                        chain = &task.network[chain_id].log_name,
+                        peer_id,
+                    );
+                }
                 if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
                     peers.remove(&peer_id);
                 }
@@ -3330,7 +3341,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // can't happen if we are already opening an out slot, which we do
                 // immediately.
                 // TODO: add debug_assert! ^
-                // Statement links do not take an inbound block announces slot.
+
+                // Statement links also appear among the opened undesired links and must
+                // not use up the inbound block announces slots.
                 if task
                     .network
                     .opened_gossip_undesired_by_chain(chain_id)
@@ -3540,7 +3553,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 // A peer still desired under the statement kind would be opened again at
-                // once. Whether to retry it is up to the statement peers selection.
+                // once. Whoever marks a peer as desired under that kind decides whether to
+                // retry.
                 task.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,
@@ -3560,7 +3574,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                 );
 
-                // See `StatementProtocolOpenFailed`.
+                // A peer still desired under the statement kind would be opened again at
+                // once, as after an open failure.
                 task.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,
