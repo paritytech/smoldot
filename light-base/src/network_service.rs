@@ -1305,7 +1305,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             CanAssignBitswapSlot(PeerId),
             NextRecentConnectionRestore,
             CanStartConnect(PeerId),
-            CanOpenGossip(PeerId, ChainId),
+            CanOpenGossip(PeerId, ChainId, service::GossipKind),
             CanOpenBitswap(PeerId),
             MessageFromConnection {
                 connection_id: service::ConnectionId,
@@ -1368,15 +1368,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     x
                 } {
                     WakeUpReason::CanStartConnect(start_connect)
-                } else if let Some((peer_id, chain_id)) = {
+                } else if let Some((peer_id, chain_id, kind)) = {
                     let x = task
                         .network
                         .connected_unopened_gossip_desired()
                         .choose(&mut task.randomness)
-                        .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id));
+                        .map(|(peer_id, chain_id, kind)| (peer_id.clone(), chain_id, kind));
                     x
                 } {
-                    WakeUpReason::CanOpenGossip(peer_id, chain_id)
+                    WakeUpReason::CanOpenGossip(peer_id, chain_id, kind)
                 } else if let Some(peer_id) = {
                     let x = task
                         .network
@@ -1753,6 +1753,17 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     debug_assert!(_was_in.is_some());
                 }
 
+                for peer_id in task
+                    .network
+                    .gossip_connected_peers(chain_id, service::GossipKind::Statement)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
+                    task.network
+                        .gossip_close(chain_id, &peer_id, service::GossipKind::Statement)
+                        .unwrap();
+                }
+
                 let _was_in = task
                     .chains_by_next_discovery
                     .remove(&(task.network[chain_id].next_discovery_when.clone(), chain_id));
@@ -1854,14 +1865,40 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     debug_assert!(_was_in.is_some());
                     task.network[chain_id].metrics.gossip_peers_connected.dec();
 
-                    if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
-                        peers.remove(&peer_id);
-                    }
-
                     // Unlike the network-event handlers below, this message handler can run
                     // while another event is already queued, hence the push to a queue.
-                    task.events_pending_send
-                        .push_back((chain_id, Event::Disconnected { peer_id }));
+                    task.events_pending_send.push_back((
+                        chain_id,
+                        Event::Disconnected {
+                            peer_id: peer_id.clone(),
+                        },
+                    ));
+                }
+
+                // A statement link survives the closing of the block announces link, so it
+                // needs a close of its own.
+                task.network.gossip_remove_desired(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::Statement,
+                );
+                if task
+                    .network
+                    .gossip_close(chain_id, &peer_id, service::GossipKind::Statement)
+                    .is_ok()
+                {
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "statement-protocol-closed",
+                        chain = &task.network[chain_id].log_name,
+                        peer_id,
+                        reason = "user-ban",
+                    );
+                }
+                if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                    peers.remove(&peer_id);
                 }
             }
             WakeUpReason::MessageForChain(
@@ -2281,7 +2318,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             ) => {
                 let peers_to_send = task
                     .network
-                    .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
+                    .gossip_connected_peers(chain_id, service::GossipKind::Statement)
                     .cloned()
                     .collect::<Vec<_>>();
 
@@ -2560,6 +2597,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &peer_id,
                     service::GossipKind::ConsensusTransactions,
                 );
+                task.network
+                    .gossip_remove_desired_all(&peer_id, service::GossipKind::Statement);
                 for (&chain_id, what_happened) in task
                     .peering_strategy
                     .unassign_slots_and_ban(&peer_id, task.platform.now() + ban_duration)
@@ -2817,7 +2856,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     );
                 }
 
-                if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                // The statement substream closes with the block announces substream, unless
+                // the peer has a statement link of its own.
+                if !task.network.gossip_is_connected(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::Statement,
+                ) && let Some(peers) = task.v2_statement_peers.get_mut(&chain_id)
+                {
                     peers.remove(&peer_id);
                 }
 
@@ -3296,9 +3342,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // can't happen if we are already opening an out slot, which we do
                 // immediately.
                 // TODO: add debug_assert! ^
+
+                // Statement links also appear among the opened undesired links and must
+                // not use up the inbound block announces slots.
                 if task
                     .network
                     .opened_gossip_undesired_by_chain(chain_id)
+                    .filter(|(_, kind)| *kind == service::GossipKind::ConsensusTransactions)
                     .count()
                     < 4
                 {
@@ -3339,6 +3389,29 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::NetworkEvent(service::Event::GossipInDesiredCancel { .. }) => {
                 // Can't happen as we already instantaneously accept or reject gossip in requests.
+                unreachable!()
+            }
+            WakeUpReason::NetworkEvent(
+                service::Event::GossipConnected {
+                    kind: service::GossipKind::Statement,
+                    ..
+                }
+                | service::Event::GossipOpenFailed {
+                    kind: service::GossipKind::Statement,
+                    ..
+                }
+                | service::Event::GossipDisconnected {
+                    kind: service::GossipKind::Statement,
+                    ..
+                }
+                | service::Event::GossipInDesired {
+                    kind: service::GossipKind::Statement,
+                    ..
+                },
+            ) => {
+                // Can't happen as the statement kind reports through the `StatementProtocol*`
+                // events, and inbound statement substreams are accepted or refused without
+                // asking.
                 unreachable!()
             }
             WakeUpReason::NetworkEvent(service::Event::IdentifyRequestIn {
@@ -3465,6 +3538,55 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
+            WakeUpReason::NetworkEvent(service::Event::StatementProtocolOpenFailed {
+                peer_id,
+                chain_id,
+                error,
+            }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "statement-protocol-open-error",
+                    chain = &task.network[chain_id].log_name,
+                    peer_id,
+                    ?error,
+                );
+
+                // A peer still desired under the statement kind would be opened again at
+                // once. Whoever marks a peer as desired under that kind decides whether to
+                // retry.
+                task.network.gossip_remove_desired(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::Statement,
+                );
+            }
+            WakeUpReason::NetworkEvent(service::Event::StatementProtocolDisconnected {
+                peer_id,
+                chain_id,
+            }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "statement-protocol-closed",
+                    chain = &task.network[chain_id].log_name,
+                    peer_id,
+                );
+
+                // A peer still desired under the statement kind would be opened again at
+                // once, as after an open failure.
+                task.network.gossip_remove_desired(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::Statement,
+                );
+
+                if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                    peers.remove(&peer_id);
+                }
+            }
             // TODO: we don't filter outbound statements yet
             WakeUpReason::NetworkEvent(service::Event::StatementTopicAffinityReceived {
                 ..
@@ -3526,6 +3648,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     task.network.gossip_remove_desired_all(
                         &expected_peer_id,
                         service::GossipKind::ConsensusTransactions,
+                    );
+                    task.network.gossip_remove_desired_all(
+                        &expected_peer_id,
+                        service::GossipKind::Statement,
                     );
                     let ban_duration = Duration::from_secs(10);
                     for (&chain_id, what_happened) in task.peering_strategy.unassign_slots_and_ban(
@@ -3707,14 +3833,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
-            WakeUpReason::CanOpenGossip(peer_id, chain_id) => {
-                task.network
-                    .gossip_open(
-                        chain_id,
-                        &peer_id,
-                        service::GossipKind::ConsensusTransactions,
-                    )
-                    .unwrap();
+            WakeUpReason::CanOpenGossip(peer_id, chain_id, kind) => {
+                task.network.gossip_open(chain_id, &peer_id, kind).unwrap();
 
                 log!(
                     &task.platform,
@@ -3723,6 +3843,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "gossip-open-start",
                     chain = &task.network[chain_id].log_name,
                     peer_id,
+                    ?kind,
                 );
             }
             WakeUpReason::CanOpenBitswap(peer_id) => {
