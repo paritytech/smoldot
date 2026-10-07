@@ -15,7 +15,7 @@ memory of past releases.
 - Walk the user through steps 1–11 in order. Pause for explicit
   confirmation before any shared-state action (commit, push).
 - Step 1: use `git log --oneline <prev-tag>..HEAD` and
-  `git diff --stat <prev-tag>..HEAD -- lib/ light-base/ wasm-node/ full-node/`
+  `git diff --stat <prev-tag>..HEAD -- lib/ light-base/ wasm-node/`
   to detect which packages need bumping. Propose the bump levels via
   `AskUserQuestion` and wait for confirmation.
 - Step 4: regenerate all three Cargo lockfiles (root + `e2e-tests/` +

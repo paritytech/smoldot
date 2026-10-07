@@ -15,8 +15,6 @@ jobs:
     # Note: `cargo update --workspace` doesn't seem to have any effect.
     - run: cargo update
       working-directory: wasm-node/rust
-    - run: cargo update
-      working-directory: full-node
     - uses: peter-evans/create-pull-request@v8
       with:
         # We use a custom secret (rather than the default GITHUB_TOKEN) so that opening the pull

@@ -35,34 +35,6 @@ on:
 permissions: read-all
 
 jobs:
-  build-push-docker-image:
-    # Docker image publishing is not supported at the moment.
-    # Note: add build-push-docker-image back to 'all-deploy` needs list if it is re-enabled.
-    if: false
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-    - uses: docker/setup-qemu-action@v3
-    - uses: docker/setup-buildx-action@v3
-    - uses: actions/checkout@v6
-    - uses: docker/login-action@v3
-      # This `if` adds an additional safety against accidental pushes.
-      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    - uses: docker/build-push-action@v6.18.0
-      with:
-        context: .
-        file: ./full-node/Dockerfile
-        load: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        tags: ghcr.io/paritytech/full-node:main
-    - run: docker push ghcr.io/paritytech/full-node:main
-      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
   build-js-doc:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -103,7 +75,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ./repo -> target
-      - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light --package smoldot-full-node
+      - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light
         working-directory: ./repo
       - run: |
           mkdir -p ./doc
