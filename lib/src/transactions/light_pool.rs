@@ -17,10 +17,7 @@
 
 //! Transactions pool specialized for light clients usage.
 //!
-//! See [the `pool` module](../pool) documentation for details about the transactions pool.
-//!
-//! Contrary to [`super::pool::Pool`], this data structure is opinionated towards a certain light
-//! client usage. This means:
+//! This data structure is opinionated towards a certain light client usage. This means:
 //!
 //! - Block bodies are initially unknown and can be added later.
 //! - Transactions included in block bodies that weren't already in the pool aren't added, and

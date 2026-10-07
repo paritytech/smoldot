@@ -21,4 +21,3 @@
 //! persistent way.
 
 pub mod finalized_serialize;
-pub mod full_sqlite;
