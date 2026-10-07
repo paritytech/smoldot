@@ -1894,6 +1894,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         "statement-protocol-closed",
                         chain = &task.network[chain_id].log_name,
                         peer_id,
+                        reason = "user-ban",
                     );
                 }
                 if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
@@ -2317,7 +2318,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             ) => {
                 let peers_to_send = task
                     .network
-                    .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
+                    .gossip_connected_peers(chain_id, service::GossipKind::Statement)
                     .cloned()
                     .collect::<Vec<_>>();
 

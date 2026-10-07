@@ -20,8 +20,9 @@
 
 use super::{
     ChainConfig, ChainId, ChainNetwork, CloseGossipError, Config, ConnectionId, Event, GossipKind,
-    NotificationsOutErr, OpenGossipError, PeerId, RemoveChainError, SendTopicAffinityError,
-    SingleStreamConnectionTask, SingleStreamHandshakeKind, established, peer_id,
+    NotificationsOutErr, OpenGossipError, PeerId, QueueNotificationError, RemoveChainError,
+    SendTopicAffinityError, SingleStreamConnectionTask, SingleStreamHandshakeKind, established,
+    peer_id,
 };
 use crate::libp2p::{connection::noise::NoiseKey, read_write::ReadWrite};
 use crate::network::codec::{self, Role};
@@ -495,6 +496,107 @@ fn statement_link_opens_without_block_announces() {
             .gossip_open(harness.alice.chain_id, &bob, GossipKind::Statement),
         Err(OpenGossipError::AlreadyOpened)
     ));
+}
+
+/// A statement link carries statements on its own. Its peer is one to broadcast statements
+/// to, although it has no block announces link.
+#[test]
+fn statement_link_delivers_statements() {
+    let mut harness = Harness::connected(true, true);
+    let alice = harness.bob.remote.clone();
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
+
+    harness.bob.network.gossip_insert_desired(
+        harness.bob.chain_id,
+        alice.clone(),
+        GossipKind::Statement,
+    );
+    harness
+        .alice
+        .network
+        .gossip_open(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Alice, StatementProtocolConnected, 1);
+
+    let statement = codec::encode_statement(&codec::Statement {
+        proof: None,
+        decryption_key: None,
+        expiry: 1 << 32,
+        channel: None,
+        topics: Vec::new(),
+        data: Some(vec![1, 2, 3]),
+    })
+    .unwrap();
+
+    // Bob has only an inbound statement substream, so it has nobody to broadcast to.
+    assert_eq!(
+        harness
+            .bob
+            .network
+            .gossip_connected_peers(harness.bob.chain_id, GossipKind::Statement)
+            .count(),
+        0
+    );
+    assert!(matches!(
+        harness
+            .bob
+            .network
+            .gossip_send_statement(&alice, harness.bob.chain_id, statement.clone()),
+        Err(QueueNotificationError::NoConnection)
+    ));
+
+    // Bob accepts notifications only once its own outbound statement substream is open, the
+    // way block announces work.
+    harness
+        .bob
+        .network
+        .gossip_open(harness.bob.chain_id, &alice, GossipKind::Statement)
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Bob, StatementProtocolConnected, 1);
+
+    // Alice broadcasts the way light-base does: one send per connected statement peer.
+    let peers = harness
+        .alice
+        .network
+        .gossip_connected_peers(chain_id, GossipKind::Statement)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(peers, vec![bob.clone()]);
+    assert_eq!(
+        harness
+            .alice
+            .network
+            .gossip_connected_peers(chain_id, GossipKind::ConsensusTransactions)
+            .count(),
+        0
+    );
+    for peer in &peers {
+        harness
+            .alice
+            .network
+            .gossip_send_statement(peer, chain_id, statement.clone())
+            .unwrap();
+    }
+
+    let events = harness.pump();
+    assert_count!(events, Bob, StatementsNotification, 1);
+    let (peer_id, statements) = events
+        .iter()
+        .find_map(|(side, event)| match event {
+            Event::StatementsNotification {
+                peer_id,
+                statements,
+                ..
+            } if *side == Side::Bob => Some((peer_id.clone(), statements.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(peer_id, alice);
+    assert_eq!(statements.len(), 1);
+    assert_eq!(statements[0].0, codec::statement_hash(&statement));
 }
 
 /// A peer without the statement protocol makes the link fail after the V2 to V1 fallback, and
