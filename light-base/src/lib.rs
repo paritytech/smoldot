@@ -157,13 +157,14 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// submitted while this many are held is dropped immediately, without being broadcast.
     ///
     /// Every transaction held costs memory, validations (through call proofs) and announcements
-    /// to peers. If the JSON-RPC client is entirely trusted, then a high value is reasonable.
+    /// to peers, as each one is periodically re-announced until it leaves the pool.
     ///
     /// The chain's services are shared between all the chains added with the same
     /// specification. If such a chain is already running, the value of the addition that
     /// started it applies.
     ///
-    /// A typical value is 256.
+    /// The wasm node uses 64 by default. Embedders whose JSON-RPC clients are entirely trusted
+    /// and that need to submit more transactions per finality delay can raise it.
     pub max_pending_transactions: NonZero<u32>,
 }
 

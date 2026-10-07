@@ -60,6 +60,7 @@ fn add_chain(
     statement_store_max_seen_statements: u32,
     statement_store_false_positive_rate: f64,
     statement_store_affinity_update_interval_ms: u32,
+    max_pending_transactions: u32,
 ) -> u32 {
     let mut client_lock = CLIENT.try_lock().unwrap();
 
@@ -146,8 +147,8 @@ fn add_chain(
                         smoldot_light::platform::PlatformRef::fill_random_bytes(&platform::PLATFORM_REF, &mut seed_bytes);
                         smoldot_light::StatementProtocolConfig::new(max_seen, statement_store_false_positive_rate, u128::from_le_bytes(seed_bytes), Duration::from_millis(u64::from(statement_store_affinity_update_interval_ms)))
                     }),
-                    // TODO: make configurable through `AddChainOptions`
-                    max_pending_transactions: NonZero::<u32>::new(256).unwrap(),
+                    max_pending_transactions: NonZero::<u32>::new(max_pending_transactions)
+                        .unwrap_or_else(|| panic!("max_pending_transactions must not be 0")),
                 }) {
                 Ok(c) => c,
                 Err(error) => {

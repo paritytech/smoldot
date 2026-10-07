@@ -509,6 +509,16 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 jsonRpcMaxSubscriptions = 0xffffffff
             }
 
+            // Sanitize `maxPendingTransactions`.
+            let maxPendingTransactions = options.maxPendingTransactions === undefined ? 64 : options.maxPendingTransactions;
+            maxPendingTransactions = Math.floor(maxPendingTransactions);
+            if (maxPendingTransactions <= 0 || isNaN(maxPendingTransactions)) {
+                throw new AddChainError("Invalid value for `maxPendingTransactions`");
+            }
+            if (maxPendingTransactions > 0xffffffff) {
+                maxPendingTransactions = 0xffffffff
+            }
+
             // Sanitize `statementStore`.
             let statementStoreMaxSeenStatements = 0;
             let statementStoreFalsePositiveRate = 0.0;
@@ -551,7 +561,8 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 jsonRpcMaxSubscriptions,
                 statementStoreMaxSeenStatements,
                 statementStoreFalsePositiveRate,
-                statementStoreAffinityUpdateIntervalMs
+                statementStoreAffinityUpdateIntervalMs,
+                maxPendingTransactions
             );
 
             const outcome = await promise;
