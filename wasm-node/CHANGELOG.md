@@ -2,11 +2,25 @@
 
 ## Unreleased
 
+## 3.7.0 - 2026-10-07
+
+### Added
+
+- WebRTC multiaddresses whose host is a domain name (`/dns/<host>/udp/<port>/webrtc-direct/certhash/<hash>`, and likewise `/dns4/` and `/dns6/`) are now dialed in browsers instead of being silently dropped. A browser cannot put a domain name in a WebRTC session description, so smoldot resolves the name itself over DNS-over-HTTPS, in the standard RFC 8484 wire format, and then connects to the resolved address. ([#3385](https://github.com/paritytech/smoldot/pull/3385))
+
+### Changed
+
+- The statement substream can now be opened, kept open and closed on its own, without the block announces substream, so the light client can keep a statement link with a peer that is not one of its block sync peers. A refused or closed statement link removes the peer from the set of wanted statement peers instead of being retried in a loop. Statement links do not count against the limit of inbound block announces links. ([#3382](https://github.com/paritytech/smoldot/pull/3382), [#3383](https://github.com/paritytech/smoldot/pull/3383), [#3384](https://github.com/paritytech/smoldot/pull/3384); fixes [#3378](https://github.com/paritytech/smoldot/issues/3378); related to [paritytech/polkadot-sdk#11288](https://github.com/paritytech/polkadot-sdk/issues/11288))
+
+### Fixed
+
+- Closing a gossip link with a peer now also closes the statement substreams with that peer. Before, the peer kept sending statements over a link that smoldot had already closed. ([#3387](https://github.com/paritytech/smoldot/pull/3387))
+- `trie_root_calculator` no longer reports the same removed trie node twice when a node is replaced by its only remaining child, and now reports the removed root node when a change empties a trie whose root is a branch node without a value, for example when a child trie is deleted. The calculated root hash was already correct. ([#3373](https://github.com/paritytech/smoldot/pull/3373))
+
 ## 3.6.0 - 2026-09-16
 
 ### Added
 
-- WebRTC multiaddresses whose host is a domain name (`/dns/<host>/udp/<port>/webrtc-direct/certhash/<hash>`, and likewise `/dns4/` and `/dns6/`) are now dialed in browsers instead of being silently dropped. A browser cannot put a domain name in a WebRTC session description, so smoldot resolves the name itself over DNS-over-HTTPS, in the standard RFC 8484 wire format, and then connects to the resolved address. ([#3385](https://github.com/paritytech/smoldot/issues/3385))
 - Add the `sudo_unstable_metrics` JSON-RPC function, returning a snapshot of internal counters and gauges (network connections, per-protocol request outcomes and durations, peer bans, connected gossip peers, verified blocks and finality proofs, best/finalized block height, warp-sync progress and target height, runtime compilations, dropped transactions). The list of metrics and their labels is unstable and may change between versions. ([#3285](https://github.com/paritytech/smoldot/issues/3285))
 - Add the `lifecycle_unstable_follow` and `lifecycle_unstable_unfollow` JSON-RPC functions. The subscription reports the lifecycle state of the chain: whether it is still connecting, warp syncing (with the current and target block heights), or ready, how many peers are connected, and whether the built-in watchdog considers it stalled (no peers, or no warp sync progress). The first notification is the current state, reported as syncing as soon as warp sync fragments are requested, and every later notification carries the whole new state, so an embedder can show what the light client is doing without parsing log output. The schema is unstable. ([#3353](https://github.com/paritytech/smoldot/pull/3353); fixes [#3301](https://github.com/paritytech/smoldot/issues/3301))
 
