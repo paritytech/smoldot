@@ -18,11 +18,9 @@
 // Legacy runtime calls at new blocks must not download a runtime the client
 // already holds. Once both chains are synced, sends `state_call` and
 // `state_getRuntimeVersion` at ROUNDS successive best blocks of each chain and
-// checks that `runtimeCacheHitsTotal` and `runtimeCompilationsTotal` from
-// `sudo_unstable_metrics` do not move. One of the two goes up after every
-// `:code` download: a cache hit when the runtime is already in memory, a
-// compilation otherwise. With an unchanged runtime, any increment is a
-// redundant download.
+// checks with `sudo_unstable_metrics` that `runtimeCodeDownloadsTotal` does
+// not move, and that `runtimeCacheHitsTotal` goes up by at least one per
+// block, meaning the runtime already in memory was reused.
 //
 // See <https://github.com/paritytech/smoldot/issues/3396>.
 
@@ -34,15 +32,17 @@ export const envInputs = ["ROUNDS"];
 
 const NEW_BLOCK_TIMEOUT_MS = 120_000;
 
-const RUNTIME_METRICS = ["runtimeCacheHitsTotal", "runtimeCompilationsTotal"];
-
 async function runtimeMetrics(sendRpcAndWait, chain) {
   const { metrics } = await sendRpcAndWait(chain, "sudo_unstable_metrics", [], 30_000);
-  return RUNTIME_METRICS.map((name) => {
+  const value = (name) => {
     const metric = metrics.find((m) => m.name === name);
     if (!metric) throw new Error(`${name} missing from sudo_unstable_metrics`);
     return metric.entries[0].value;
-  });
+  };
+  return {
+    downloads: value("runtimeCodeDownloadsTotal"),
+    cacheHits: value("runtimeCacheHitsTotal"),
+  };
 }
 
 async function waitForNewBestBlock(sendRpcAndWait, chain, previous) {
@@ -74,11 +74,15 @@ async function checkChain(ctx, rpc, label, chain, rounds) {
   report(`${label}: runtime unchanged during the test`, specVersions.size === 1, [...specVersions].join(","));
 
   const after = await runtimeMetrics(sendRpcAndWait, chain);
-  const detail = RUNTIME_METRICS.map((name, i) => `${name} ${before[i]} -> ${after[i]}`);
   report(
-    `${label}: no redundant runtime download`,
-    after.every((value, i) => value === before[i]),
-    `${detail.join(", ")} over ${rounds} blocks`,
+    `${label}: no runtime download`,
+    after.downloads === before.downloads,
+    `runtimeCodeDownloadsTotal ${before.downloads} -> ${after.downloads} over ${rounds} blocks`,
+  );
+  report(
+    `${label}: runtime reused from memory`,
+    after.cacheHits - before.cacheHits >= rounds,
+    `runtimeCacheHitsTotal ${before.cacheHits} -> ${after.cacheHits} over ${rounds} blocks`,
   );
 }
 

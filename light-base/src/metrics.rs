@@ -227,10 +227,17 @@ pub struct ChainMetrics {
     pub sync_warp_sync_height: Gauge,
     pub sync_warp_sync_target_height: Gauge,
 
+    /// Runtime compilations, successful or not, including the one done by warp sync.
     pub runtime_compilations: Counter,
+    /// Subset of [`ChainMetrics::runtime_compilations`] that failed.
     pub runtime_compilation_errors: Counter,
+    /// Total time spent in [`ChainMetrics::runtime_compilations`], in milliseconds.
     pub runtime_compilation_time_ms: Counter,
+    /// Runtimes taken from the ones already in memory instead of being compiled, found either
+    /// by `:code` Merkle value (no download) or by comparing a downloaded `:code`.
     pub runtime_cache_hits: Counter,
+    /// Full downloads of the `:code` storage value, outside of warp sync.
+    pub runtime_code_downloads: Counter,
 
     pub transactions_dropped: LabeledCounter<DropReasonKind>,
     pub json_rpc_requests: Counter,
@@ -422,6 +429,10 @@ pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::Metr
             }],
         },
         counter("runtimeCacheHitsTotal", chain.runtime_cache_hits.get()),
+        counter(
+            "runtimeCodeDownloadsTotal",
+            chain.runtime_code_downloads.get()
+        ),
         labeled_counter(
             "transactionsDroppedTotal",
             "reason",

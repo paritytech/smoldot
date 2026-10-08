@@ -1480,6 +1480,7 @@ async fn attempt_bootstrap_with_peer<TPlat: PlatformRef>(
         )
         .await
         .map_err(|e| format!("Storage proof request failed: {e}"))?;
+    metrics.runtime_code_downloads.inc();
 
     let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
         proof: proof.decode().to_vec(),

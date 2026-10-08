@@ -3743,12 +3743,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         me.background_tasks.push(Box::pin({
                             let sync_service = me.sync_service.clone();
                             let runtime_service = me.runtime_service.clone();
+                            let chain_metrics = me.chain_metrics.clone();
                             async move {
                                 Event::RuntimeDownloaded {
                                     block_hash,
                                     result: download_block_runtime(
                                         sync_service,
                                         runtime_service,
+                                        chain_metrics,
                                         block_number,
                                         block_hash,
                                         block_state_trie_root_hash,
@@ -6410,6 +6412,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 async fn download_block_runtime<TPlat: PlatformRef>(
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+    chain_metrics: Arc<crate::metrics::ChainMetrics>,
     block_number: u64,
     block_hash: [u8; 32],
     block_state_trie_root_hash: [u8; 32],
@@ -6480,6 +6483,7 @@ async fn download_block_runtime<TPlat: PlatformRef>(
             _ => unreachable!(),
         }
     }
+    chain_metrics.runtime_code_downloads.inc();
 
     runtime_service
         .compile_and_pin_runtime(
