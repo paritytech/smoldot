@@ -63,6 +63,7 @@ use alloc::{
     format,
     string::{String, ToString as _},
     sync::{Arc, Weak},
+    vec,
     vec::Vec,
 };
 use async_lock::Mutex;
@@ -340,16 +341,111 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         }
     }
 
+    /// Returns the runtime of the given block, downloading it from the network if necessary.
+    ///
+    /// The `:code` Merkle value of the block is fetched first. If a runtime with the same Merkle
+    /// value is already known, it is returned and `:code` isn't downloaded.
+    pub async fn download_and_pin_runtime(
+        &self,
+        block_hash: [u8; 32],
+        block_number: u64,
+        block_state_trie_root_hash: [u8; 32],
+    ) -> Result<PinnedRuntime, DownloadAndPinRuntimeError> {
+        let sync_service = &self.background_task_config.sync_service;
+
+        let mut code_merkle_value = None;
+        let mut code_closest_ancestor_excluding = None;
+        let mut storage_heap_pages = None;
+        for (request_index, item) in block_storage_query(
+            sync_service,
+            block_number,
+            block_hash,
+            block_state_trie_root_hash,
+            vec![
+                sync_service::StorageRequestItem {
+                    key: b":code".to_vec(),
+                    ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
+                },
+                sync_service::StorageRequestItem {
+                    key: b":heappages".to_vec(),
+                    ty: sync_service::StorageRequestItemTy::Value,
+                },
+            ],
+        )
+        .await?
+        {
+            match (request_index, item) {
+                (
+                    0,
+                    sync_service::StorageResultItem::ClosestDescendantMerkleValue {
+                        closest_descendant_merkle_value,
+                        found_closest_ancestor_excluding,
+                        ..
+                    },
+                ) => {
+                    code_merkle_value = closest_descendant_merkle_value;
+                    code_closest_ancestor_excluding = found_closest_ancestor_excluding;
+                }
+                (1, sync_service::StorageResultItem::Value { value, .. }) => {
+                    storage_heap_pages = value;
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        if let Some(code_merkle_value) = &code_merkle_value
+            && let Some(runtime) = self
+                .pin_runtime_by_code_merkle_value(
+                    code_merkle_value.clone(),
+                    storage_heap_pages.clone(),
+                )
+                .await
+        {
+            return Ok(runtime);
+        }
+
+        let mut storage_code = None;
+        for (_, item) in block_storage_query(
+            sync_service,
+            block_number,
+            block_hash,
+            block_state_trie_root_hash,
+            vec![sync_service::StorageRequestItem {
+                key: b":code".to_vec(),
+                ty: sync_service::StorageRequestItemTy::Value,
+            }],
+        )
+        .await?
+        {
+            match item {
+                sync_service::StorageResultItem::Value { value, .. } => storage_code = value,
+                _ => unreachable!(),
+            }
+        }
+        self.background_task_config
+            .metrics
+            .runtime_code_downloads
+            .inc();
+
+        self.compile_and_pin_runtime(
+            storage_code,
+            storage_heap_pages,
+            code_merkle_value,
+            code_closest_ancestor_excluding,
+        )
+        .await
+    }
+
     /// Tries to find a runtime within the [`RuntimeService`] that has the given storage code and
     /// heap pages. If none is found, compiles the runtime and stores it within the
     /// [`RuntimeService`].
-    pub async fn compile_and_pin_runtime(
+    async fn compile_and_pin_runtime(
         &self,
         storage_code: Option<Vec<u8>>,
         storage_heap_pages: Option<Vec<u8>>,
         code_merkle_value: Option<Vec<u8>>,
         closest_ancestor_excluding: Option<Vec<Nibble>>,
-    ) -> Result<PinnedRuntime, CompileAndPinRuntimeError> {
+    ) -> Result<PinnedRuntime, DownloadAndPinRuntimeError> {
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
@@ -365,16 +461,15 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         Ok(PinnedRuntime(
             result_rx
                 .await
-                .map_err(|_| CompileAndPinRuntimeError::Crash)?,
+                .map_err(|_| DownloadAndPinRuntimeError::Crash)?,
         ))
     }
 
     /// Returns an already-known runtime whose `:code` trie node has the given Merkle value and
     /// whose `:heappages` storage value is the given one, without any network request.
     ///
-    /// Returns `None` if no such runtime is known, in which case the caller is expected to
-    /// download `:code` and call [`RuntimeService::compile_and_pin_runtime`].
-    pub async fn pin_runtime_by_code_merkle_value(
+    /// Returns `None` if no such runtime is known.
+    async fn pin_runtime_by_code_merkle_value(
         &self,
         code_merkle_value: Vec<u8>,
         storage_heap_pages: Option<Vec<u8>>,
@@ -709,9 +804,12 @@ pub enum RuntimeError {
     Build(executor::host::NewErr),
 }
 
-/// Error potentially returned by [`RuntimeService::compile_and_pin_runtime`].
+/// Error potentially returned by [`RuntimeService::download_and_pin_runtime`].
 #[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
-pub enum CompileAndPinRuntimeError {
+pub enum DownloadAndPinRuntimeError {
+    /// Failed to download the storage items of the runtime.
+    #[display("{_0}")]
+    StorageQuery(sync_service::StorageQueryError),
     /// Background service has crashed while compiling this runtime. The crash might however not
     /// necessarily be caused by the runtime compilation.
     Crash,
@@ -4081,5 +4179,45 @@ async fn start_storage_request<TPlat: PlatformRef>(
                 state,
             }
         }));
+    }
+}
+
+async fn block_storage_query<TPlat: PlatformRef>(
+    sync_service: &Arc<sync_service::SyncService<TPlat>>,
+    block_number: u64,
+    block_hash: [u8; 32],
+    block_state_trie_root_hash: [u8; 32],
+    requests: Vec<sync_service::StorageRequestItem>,
+) -> Result<Vec<(usize, sync_service::StorageResultItem)>, DownloadAndPinRuntimeError> {
+    let mut results = Vec::with_capacity(requests.len());
+    let mut query = sync_service
+        .clone()
+        .storage_query(
+            block_number,
+            block_hash,
+            block_state_trie_root_hash,
+            requests.into_iter(),
+            3,
+            Duration::from_secs(20),
+            NonZero::<u32>::new(1).unwrap(),
+        )
+        .advance()
+        .await;
+
+    loop {
+        match query {
+            sync_service::StorageQueryProgress::Finished => return Ok(results),
+            sync_service::StorageQueryProgress::Progress {
+                request_index,
+                item,
+                query: next,
+            } => {
+                results.push((request_index, item));
+                query = next.advance().await;
+            }
+            sync_service::StorageQueryProgress::Error(error) => {
+                return Err(DownloadAndPinRuntimeError::StorageQuery(error));
+            }
+        }
     }
 }
