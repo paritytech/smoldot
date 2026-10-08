@@ -49,6 +49,10 @@ required-features = ["jam"]
 name = "jam_generate_snapshot"
 required-features = ["jam"]
 
+[[test]]
+name = "jam_demo"
+required-features = ["jam"]
+
 # Local only, never upstream: zombienet-sdk's JAM support from the fork branch
 # `skunert/polkajam-light-client`, and the PolkaJam `jam-*` crates that branch takes from the
 # PolkaJam branch of the same name (its own `[patch.crates-io]` does not apply here).

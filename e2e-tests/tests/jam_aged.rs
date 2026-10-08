@@ -100,7 +100,7 @@ async fn jam_aged() -> Result<()> {
     let mut env = live.body_env(None)?;
     let bound = std::env::var("JAM_AGED_BOUND_MS").unwrap_or_else(|_| "180000".into());
     env.push(("JAM_AGED_BOUND_MS".into(), bound));
-    if dev_mode_keep_alive(("jam_aged", &env_refs(&env))).await? {
+    if dev_mode_keep_alive(&live, Some(("jam_aged", &env_refs(&env)))).await? {
         return live.teardown().await;
     }
     run_jam_body("jam_aged", &env_refs(&env)).await?;

@@ -161,12 +161,13 @@ TEST_NAME=smoke RELAY_CHAIN_SPEC=… PARA_CHAIN_SPEC=… REQUIRED_BLOCKS=5 \
 
 `tests/jam_*.rs` test smoldot's JAM light client against a PolkaJam network on
 zombienet-sdk's JAM support: `jam_follow` (the Dummy browser gate),
-`jam_finality`, `jam_discovery` and `jam_aged` (restored from a local snapshot
-that the `#[ignore]` `jam_generate_snapshot` produces). They run on the browser host only (the
+`jam_finality`, `jam_discovery`, `jam_aged` (restored from a local snapshot
+that the `#[ignore]` `jam_generate_snapshot` produces) and `jam_demo` (the
+manual demo page's live regression). They run on the browser host only (the
 JAM transport is WebTransport), need `polkajam` and a zombienet-sdk with JAM
 support, and build with the `jam` feature; see
 [`docs/jam-scenarios.md`](docs/jam-scenarios.md). `DEV_MODE=1` keeps a JAM
-network up and prints how to run the body by hand.
+network up for the manual demo (`just demo-jam-dev`).
 
 ```sh
 ZOMBIE_PROVIDER=native PATH=<polkajam>/target/release:$PATH \

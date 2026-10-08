@@ -42,7 +42,7 @@ use smoldot_e2e_tests::{
 ///    no live `C(8)` read, and no finalized event.
 ///
 /// `DEV_MODE=1` skips the body, keeps the network up and prints how to run the
-/// body.
+/// body and how to attach the manual demo page to it.
 #[tokio::test(flavor = "multi_thread")]
 async fn jam_follow() -> Result<()> {
     init_logging();
@@ -50,7 +50,7 @@ async fn jam_follow() -> Result<()> {
     let live = spawn_jam(Finality::Dummy, None, None).await?;
     let sync = SyncFile::new()?;
     let env = live.body_env(Some(&sync))?;
-    if dev_mode_keep_alive(("jam_follow", &env_refs(&env))).await? {
+    if dev_mode_keep_alive(&live, Some(("jam_follow", &env_refs(&env)))).await? {
         return live.teardown().await;
     }
 

@@ -3,7 +3,7 @@
 The JAM light client (`lib/src/jam/`, `light-base/src/sync_service/jam*`) is
 tested end to end against a PolkaJam network that zombienet-sdk spawns: six
 validators `jam0`..`jam5` and the ordinary node `jam-or`, the only one serving
-JSON-RPC. Each scenario is one `tests/jam_<name>.rs` plus
+JSON-RPC. Each scenario is one `tests/jam_<name>.rs` plus, except `jam_demo`,
 one body `shared/jam_<name>.js`; helpers are in `src/jam.rs` and
 `shared/jam.js`.
 
@@ -20,6 +20,7 @@ scenario in full.
 | `jam_finality` | GRANDPA | three authority sets verified, a pinned header survives pruning, finality continues across a jam0 restart; regenerates the committed finality fixture |
 | `jam_discovery` | GRANDPA | with jam0 as its only `bootnodes_p256` entry, the client reads the validator set, holds two other validators while jam0 is down, and returns to jam0 |
 | `jam_aged` | GRANDPA | a fresh client warps onto a restored aged chain, reads state at the join head, and reaches the tip within two minutes |
+| `jam_demo` | GRANDPA | C3 (manual demo), D18 (zombienet demo): `node wasm-node/javascript/test/jam/demo.mjs --live` with the harness attached, after the network passed a set change |
 
 ```sh
 cargo test --manifest-path e2e-tests/Cargo.toml --features jam --test jam_follow -- --nocapture
@@ -68,7 +69,7 @@ still unstable in 1.93.0. On a Nix host add `NIX_ENFORCE_PURITY=0`, or the first
 build script fails to link.
 
 Then put its `target/release` first on `PATH`: zombienet starts `polkajam` from
-`PATH`.
+`PATH`, and `just zombie-jam` and `just demo-jam-dev` prepend `POLKAJAM_BIN_DIR`.
 
 ## How faults are injected
 
@@ -127,9 +128,16 @@ head the client joins at is far from genesis with many set changes behind it.
 ## DEV_MODE
 
 `DEV_MODE=1` on any scenario spawns its network, skips the body, prints how to
-run the body by hand, and keeps the
+run the body by hand and how to attach the manual demo page, and keeps the
 network up for `KEEP_ALIVE_SECS` (default 36000) or until Ctrl-C:
 
 ```sh
 DEV_MODE=1 cargo test --manifest-path e2e-tests/Cargo.toml --features jam --test jam_follow -- --nocapture
+# prints, among others:
+just demo-jam-attach '/tmp/zombienet-<pid>/jam_spec.json' <rpc port>
 ```
+
+`just demo-jam-dev [scenario]` does the same for `jam_demo` (GRANDPA) by
+default. The other route to the manual demo, `just zombie-jam` then
+`just demo-jam-attach`, spawns the network with `zombie-cli` and the checked-in
+TOML (`wasm-node/javascript/demo/jam.md`).

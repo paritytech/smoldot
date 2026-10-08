@@ -135,6 +135,9 @@ export async function waitOrFail(ctx, what, check, timeoutMs, intervalMs = 250) 
 // ---------------------------------------------------------------------------
 // Specs
 
+/** File name the demo harness serves the negative fixture under. */
+export const WRONG_SPEC_FILENAME = "spec-wrong-authorities.json";
+
 /** One Ed25519 validator key; its size fixes every offset computed below. */
 const ED25519_KEY_BYTES = 32;
 /** Bandersnatch key in front of the Ed25519 key, in both the mark and C(4)/C(8). */

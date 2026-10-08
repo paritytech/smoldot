@@ -66,7 +66,7 @@ async fn jam_discovery() -> Result<()> {
     let sync = SyncFile::new()?;
     let mut env = live.body_env(Some(&sync))?;
     env.push(("JAM_NODE0_BOOTNODE".into(), node0_bootnode));
-    if dev_mode_keep_alive(("jam_discovery", &env_refs(&env))).await? {
+    if dev_mode_keep_alive(&live, Some(("jam_discovery", &env_refs(&env)))).await? {
         return live.teardown().await;
     }
     let age = env_or("JAM_DISCOVERY_AGE_SECONDS", 0u64);
