@@ -3741,21 +3741,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     hashbrown::hash_map::Entry::Vacant(entry) => {
                         // No network request is in progress yet. Start one.
                         me.background_tasks.push(Box::pin({
-                            let sync_service = me.sync_service.clone();
                             let runtime_service = me.runtime_service.clone();
-                            let chain_metrics = me.chain_metrics.clone();
                             async move {
                                 Event::RuntimeDownloaded {
                                     block_hash,
-                                    result: download_block_runtime(
-                                        sync_service,
-                                        runtime_service,
-                                        chain_metrics,
-                                        block_number,
-                                        block_hash,
-                                        block_state_trie_root_hash,
-                                    )
-                                    .await,
+                                    result: runtime_service
+                                        .download_and_pin_runtime(
+                                            block_hash,
+                                            block_number,
+                                            block_state_trie_root_hash,
+                                        )
+                                        .await
+                                        .map_err(|error| error.to_string()),
                                 }
                             }
                         }));
@@ -6403,133 +6400,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         .map(|(s_id, _)| s_id.clone()),
                 );
             }
-        }
-    }
-}
-
-/// Obtains the runtime of the given block. Downloads `:code` only if no runtime with the same
-/// `:code` Merkle value is already known by the runtime service.
-async fn download_block_runtime<TPlat: PlatformRef>(
-    sync_service: Arc<sync_service::SyncService<TPlat>>,
-    runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-    chain_metrics: Arc<crate::metrics::ChainMetrics>,
-    block_number: u64,
-    block_hash: [u8; 32],
-    block_state_trie_root_hash: [u8; 32],
-) -> Result<runtime_service::PinnedRuntime, String> {
-    let mut code_merkle_value = None;
-    let mut code_closest_ancestor_excluding = None;
-    let mut storage_heap_pages = None;
-    for (request_index, item) in block_storage_query(
-        &sync_service,
-        block_number,
-        block_hash,
-        block_state_trie_root_hash,
-        vec![
-            sync_service::StorageRequestItem {
-                key: b":code".to_vec(),
-                ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
-            },
-            sync_service::StorageRequestItem {
-                key: b":heappages".to_vec(),
-                ty: sync_service::StorageRequestItemTy::Value,
-            },
-        ],
-    )
-    .await?
-    {
-        match (request_index, item) {
-            (
-                0,
-                sync_service::StorageResultItem::ClosestDescendantMerkleValue {
-                    closest_descendant_merkle_value,
-                    found_closest_ancestor_excluding,
-                    ..
-                },
-            ) => {
-                code_merkle_value = closest_descendant_merkle_value;
-                code_closest_ancestor_excluding = found_closest_ancestor_excluding;
-            }
-            (1, sync_service::StorageResultItem::Value { value, .. }) => {
-                storage_heap_pages = value;
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    if let Some(code_merkle_value) = &code_merkle_value
-        && let Some(runtime) = runtime_service
-            .pin_runtime_by_code_merkle_value(code_merkle_value.clone(), storage_heap_pages.clone())
-            .await
-    {
-        return Ok(runtime);
-    }
-
-    let mut storage_code = None;
-    for (_, item) in block_storage_query(
-        &sync_service,
-        block_number,
-        block_hash,
-        block_state_trie_root_hash,
-        vec![sync_service::StorageRequestItem {
-            key: b":code".to_vec(),
-            ty: sync_service::StorageRequestItemTy::Value,
-        }],
-    )
-    .await?
-    {
-        match item {
-            sync_service::StorageResultItem::Value { value, .. } => storage_code = value,
-            _ => unreachable!(),
-        }
-    }
-    chain_metrics.runtime_code_downloads.inc();
-
-    runtime_service
-        .compile_and_pin_runtime(
-            storage_code,
-            storage_heap_pages,
-            code_merkle_value,
-            code_closest_ancestor_excluding,
-        )
-        .await
-        .map_err(|error| error.to_string())
-}
-
-async fn block_storage_query<TPlat: PlatformRef>(
-    sync_service: &Arc<sync_service::SyncService<TPlat>>,
-    block_number: u64,
-    block_hash: [u8; 32],
-    block_state_trie_root_hash: [u8; 32],
-    requests: Vec<sync_service::StorageRequestItem>,
-) -> Result<Vec<(usize, sync_service::StorageResultItem)>, String> {
-    let mut results = Vec::with_capacity(requests.len());
-    let mut query = sync_service
-        .clone()
-        .storage_query(
-            block_number,
-            block_hash,
-            block_state_trie_root_hash,
-            requests.into_iter(),
-            3,
-            Duration::from_secs(20),
-            NonZero::<u32>::new(1).unwrap(),
-        )
-        .advance()
-        .await;
-
-    loop {
-        match query {
-            sync_service::StorageQueryProgress::Finished => return Ok(results),
-            sync_service::StorageQueryProgress::Progress {
-                request_index,
-                item,
-                query: next,
-            } => {
-                results.push((request_index, item));
-                query = next.advance().await;
-            }
-            sync_service::StorageQueryProgress::Error(error) => return Err(error.to_string()),
         }
     }
 }
