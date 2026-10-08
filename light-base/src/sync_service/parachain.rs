@@ -1499,6 +1499,18 @@ async fn attempt_bootstrap_with_peer<TPlat: PlatformRef>(
 
     let storage_heap_pages = heap_pages_raw.map(|(v, _)| v.to_vec());
 
+    let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied());
+    let code_merkle_value = decoded_proof
+        .closest_descendant_merkle_value(&state_root, code_nibbles.clone())
+        .ok()
+        .flatten()
+        .map(|mv| mv.to_vec());
+    let closest_ancestor_excluding = decoded_proof
+        .closest_ancestor_in_proof(&state_root, code_nibbles)
+        .ok()
+        .flatten()
+        .map(|ancestor| ancestor.collect::<Vec<_>>());
+
     let heap_pages = executor::storage_heap_pages_to_value(storage_heap_pages.as_deref())
         .map_err(|e| format!("Invalid :heappages value: {e}"))?;
 
@@ -1619,11 +1631,8 @@ async fn attempt_bootstrap_with_peer<TPlat: PlatformRef>(
             virtual_machine: vm,
             storage_code: Some(code),
             storage_heap_pages,
-            // Only consumed by the warp-sync fast path (relay chains); the parachain
-            // sync path has no hint field and drops it. Can be extracted from
-            // `decoded_proof` via `closest_descendant_merkle_value` if ever needed.
-            code_merkle_value: None,
-            closest_ancestor_excluding: None,
+            code_merkle_value,
+            closest_ancestor_excluding,
         },
     })
 }

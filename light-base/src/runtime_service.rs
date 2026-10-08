@@ -369,6 +369,29 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         ))
     }
 
+    /// Returns an already-known runtime whose `:code` trie node has the given Merkle value and
+    /// whose `:heappages` storage value is the given one, without any network request.
+    ///
+    /// Returns `None` if no such runtime is known, in which case the caller is expected to
+    /// download `:code` and call [`RuntimeService::compile_and_pin_runtime`].
+    pub async fn pin_runtime_by_code_merkle_value(
+        &self,
+        code_merkle_value: Vec<u8>,
+        storage_heap_pages: Option<Vec<u8>>,
+    ) -> Option<PinnedRuntime> {
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let _ = self
+            .send_message_or_restart_service(ToBackground::PinRuntimeByCodeMerkleValue {
+                result_tx,
+                code_merkle_value,
+                storage_heap_pages,
+            })
+            .await;
+
+        result_rx.await.ok().flatten().map(PinnedRuntime)
+    }
+
     /// Returns the runtime specification of the given runtime.
     pub async fn pinned_runtime_specification(
         &self,
@@ -703,6 +726,11 @@ enum ToBackground<TPlat: PlatformRef> {
         storage_heap_pages: Option<Vec<u8>>,
         code_merkle_value: Option<Vec<u8>>,
         closest_ancestor_excluding: Option<Vec<Nibble>>,
+    },
+    PinRuntimeByCodeMerkleValue {
+        result_tx: oneshot::Sender<Option<Arc<Runtime>>>,
+        code_merkle_value: Vec<u8>,
+        storage_heap_pages: Option<Vec<u8>>,
     },
     FinalizedRuntimeStorageMerkleValues {
         // TODO: overcomplicated
@@ -1404,6 +1432,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 .closest_ancestor_excluding,
                             runtime: Ok(finalized_block_runtime.virtual_machine),
                         });
+                        background.runtimes.insert(Arc::downgrade(&runtime));
 
                         match &runtime.runtime {
                             Ok(runtime) => {
@@ -1826,6 +1855,31 @@ async fn run_background<TPlat: PlatformRef>(
                 };
 
                 let _ = result_tx.send(runtime);
+            }
+
+            WakeUpReason::ToBackground(ToBackground::PinRuntimeByCodeMerkleValue {
+                result_tx,
+                code_merkle_value,
+                storage_heap_pages,
+            }) => {
+                let existing_runtime = background
+                    .runtimes
+                    .iter()
+                    .filter_map(|(_, rt)| rt.upgrade())
+                    .find(|rt| {
+                        rt.code_merkle_value.as_deref() == Some(&code_merkle_value[..])
+                            && rt.heap_pages == storage_heap_pages
+                    });
+
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "foreground-pin-runtime-by-code-merkle-value",
+                    found = existing_runtime.is_some()
+                );
+
+                let _ = result_tx.send(existing_runtime);
             }
 
             WakeUpReason::ToBackground(ToBackground::FinalizedRuntimeStorageMerkleValues {
