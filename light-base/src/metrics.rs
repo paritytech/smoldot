@@ -236,7 +236,7 @@ pub struct ChainMetrics {
     /// Runtimes taken from the ones already in memory instead of being compiled, found either
     /// by `:code` Merkle value (no download) or by comparing a downloaded `:code`.
     pub runtime_cache_hits: Counter,
-    /// Full downloads of the `:code` storage value, outside of warp sync.
+    /// Full downloads of the `:code` storage value.
     pub runtime_code_downloads: Counter,
 
     pub transactions_dropped: LabeledCounter<DropReasonKind>,
