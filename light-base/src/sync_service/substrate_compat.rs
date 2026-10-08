@@ -66,8 +66,13 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     metrics: Arc<crate::metrics::ChainMetrics>,
 ) {
+    let runtime_code_hint_merkle_value = runtime_code_hint
+        .as_ref()
+        .map(|hint| hint.merkle_value.clone());
+
     let mut task = Task {
         metrics,
+        runtime_code_hint_merkle_value,
         sync: Some(all::AllSync::new(all::Config {
             chain_information,
             block_number_bytes,
@@ -387,6 +392,13 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 );
 
                 task.sync = Some(sync);
+
+                // `:code` was downloaded, unless it was taken from the hint.
+                if task.runtime_code_hint_merkle_value.is_none()
+                    || task.runtime_code_hint_merkle_value != finalized_storage_code_merkle_value
+                {
+                    task.metrics.runtime_code_downloads.inc();
+                }
 
                 task.warp_sync_taking_long_time_warning =
                     future::Either::Right(future::pending()).fuse();
@@ -1657,6 +1669,10 @@ struct PendingSubscribeAll {
 struct Task<TPlat: PlatformRef> {
     /// Log target to use for all logs that are emitted.
     log_target: String,
+
+    /// Merkle value of the `:code` hint passed to the warp sync, if any. Used to find out
+    /// whether the warp sync has downloaded `:code`.
+    runtime_code_hint_merkle_value: Option<Vec<u8>>,
 
     /// Access to the platform's capabilities.
     platform: TPlat,
