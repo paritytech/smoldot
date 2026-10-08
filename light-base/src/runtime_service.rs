@@ -1878,6 +1878,9 @@ async fn run_background<TPlat: PlatformRef>(
                     "foreground-pin-runtime-by-code-merkle-value",
                     found = existing_runtime.is_some()
                 );
+                if existing_runtime.is_some() {
+                    background.metrics.runtime_cache_hits.inc();
+                }
 
                 let _ = result_tx.send(existing_runtime);
             }
@@ -2759,6 +2762,7 @@ async fn run_background<TPlat: PlatformRef>(
                 )),
             ) => {
                 // A runtime has successfully finished downloading.
+                background.metrics.runtime_code_downloads.inc();
 
                 let concerned_blocks = match &background.tree {
                     Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
