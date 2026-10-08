@@ -5,7 +5,8 @@ spawns the PolkaJam network, Rust injects the faults through zombienet's node
 handles, and a JavaScript body runs the smoldot browser build in headless
 Chrome. See
 [`e2e-tests/docs/jam-scenarios.md`](../../../../e2e-tests/docs/jam-scenarios.md)
-for the four scenarios, the aged snapshot and `DEV_MODE`.
+for the five scenarios, the aged snapshot and the `DEV_MODE` route to the
+manual demo.
 
 ```sh
 cargo test --manifest-path e2e-tests/Cargo.toml --features jam --test jam_follow -- --nocapture
@@ -15,7 +16,12 @@ What stays here:
 
 | File | Purpose |
 |---|---|
+| `demo.mjs` | Browser regression of the manual demo page. `node --test test/jam/demo.mjs` runs the controlled-stream cases (no network); `--live` is the JavaScript step of the `jam_demo` scenario and needs `JAM_SPEC_PATH` and `JAM_RPC_PORT` of a running GRANDPA network |
+| `zombienet/tiny-grandpa.toml` | The six-validator GRANDPA network `just zombie-jam` spawns with `zombie-cli` for the manual demo (`demo/jam.md`) |
 | `FINALITY.md` | How to regenerate the committed CE 130 finality fixture |
+
+The `ava` configuration in `package.json` excludes `test/jam/**`, so
+`npm test` never starts a browser for these files.
 
 ## Notes
 

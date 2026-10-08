@@ -546,17 +546,40 @@ pub async fn run_jam_body(test_name: &str, env: &[(&str, &str)]) -> Result<()> {
         .map_err(|e| anyhow!("{test_name} failed: {e}"))
 }
 
-/// `DEV_MODE`: prints how to run the body (`(test_name, env)`, on the browser
-/// host), then keeps the network alive for `KEEP_ALIVE_SECS` (default 36000)
-/// or until Ctrl-C. Returns `false` when `DEV_MODE` is unset.
-pub async fn dev_mode_keep_alive((test_name, env): (&str, &[(&str, &str)])) -> Result<bool> {
+/// `DEV_MODE`: prints how to run the body (`Some((test_name, env))`, on the
+/// browser host; `None` prints the demo page regression instead) and how to
+/// attach the manual demo to this network, then keeps the network alive for
+/// `KEEP_ALIVE_SECS` (default 36000) or until Ctrl-C. Returns `false` when
+/// `DEV_MODE` is unset.
+pub async fn dev_mode_keep_alive(
+    live: &LiveJam,
+    body: Option<(&str, &[(&str, &str)])>,
+) -> Result<bool> {
     if std::env::var("DEV_MODE").is_err() {
         return Ok(false);
     }
-    let mut dev_env = env.to_vec();
-    dev_env.push(("TEST_NAME", test_name));
-    dev_env.push(("SMOLDOT_LOG_LEVEL", "4"));
-    crate::harness::print_dev_mode_invocation(&dev_env, "hosts/browser/run.js");
+    let spec = live.spec_path();
+    let spec = spec.to_str().ok_or_else(|| anyhow!("non-utf8 spec path"))?;
+    let port = live.rpc_port()?;
+    match body {
+        Some((test_name, env)) => {
+            let mut dev_env = env.to_vec();
+            dev_env.push(("TEST_NAME", test_name));
+            dev_env.push(("SMOLDOT_LOG_LEVEL", "4"));
+            crate::harness::print_dev_mode_invocation(&dev_env, "hosts/browser/run.js");
+        }
+        None => {
+            println!();
+            println!("=== DEV_MODE: skipping the page regression, run it manually with: ===");
+            println!();
+            println!("cd wasm-node/javascript && JAM_SPEC_PATH='{spec}' JAM_RPC_PORT={port} node test/jam/demo.mjs --live");
+            println!();
+        }
+    }
+    println!("=== DEV_MODE: the manual demo page attaches with: ===");
+    println!();
+    println!("just demo-jam-attach '{spec}' {port}");
+    println!();
     let secs = env_or("KEEP_ALIVE_SECS", 36000u64);
     eprintln!("DEV_MODE: keeping the JAM network alive for {secs}s (set KEEP_ALIVE_SECS to override; Ctrl-C stops it)...");
     tokio::select! {
@@ -800,6 +823,29 @@ impl BodyRun {
             None => bail!("the body's outcome was already taken"),
         }
     }
+}
+
+/// Runs the manual demo's live page regression (`node test/jam/demo.mjs
+/// --live` in `wasm-node/javascript`) against this network: the demo harness
+/// attaches to it through `JAM_SPEC_PATH` and `JAM_RPC_PORT`. Its output is
+/// forwarded as it arrives.
+pub async fn run_demo_regression(live: &LiveJam) -> Result<()> {
+    crate::ensure_smoldot_built();
+    let js_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or_else(|| anyhow!("no repository root"))?
+        .join("wasm-node/javascript");
+    let mut cmd = tokio::process::Command::new("node");
+    cmd.args(["test/jam/demo.mjs", "--live"])
+        .current_dir(&js_dir)
+        .env("JAM_SPEC_PATH", live.spec_path())
+        .env("JAM_RPC_PORT", live.rpc_port()?.to_string())
+        .kill_on_drop(true);
+    let status = cmd.status().await.context("running test/jam/demo.mjs")?;
+    if !status.success() {
+        bail!("test/jam/demo.mjs --live failed ({status})");
+    }
+    Ok(())
 }
 
 /// Waits until a restored network finalizes past the snapshot's best block,

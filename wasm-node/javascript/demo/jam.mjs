@@ -1,0 +1,1198 @@
+// Smoldot
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+import { BLOCK_SLOT_EVENTS, CATEGORIES, blake2b256Hex, createEventStore } from './jam-events.mjs';
+
+const field = id => document.getElementById(id);
+const MAX_PINS = 16;
+const MAX_PENDING = 32;
+const MAX_HEADER_CHARS = 2 * 1024 * 1024;
+const MAX_SPEC_BYTES = 16 * 1024 * 1024;
+const MAX_TRACKED_BLOCKS = 256;
+/** How many blocks the explorer list keeps. Older rows are dropped. */
+const MAX_BLOCK_ROWS = 20;
+const CONTROL_URL = '/jam-demo/control';
+const POLL_MS = 2000;
+/** The client's connection slots; `MAX_PEERS` in light-base's JAM driver. */
+const MAX_PEER_SLOTS = 2;
+/** How many `C(8)` refreshes the page remembers, newest last. */
+const MAX_REFRESHES = 32;
+/** How many client events the Client events section keeps; the oldest go first. */
+const MAX_CLIENT_EVENTS = 1000;
+const entries = { events: [], logs: [] };
+let current;
+/** The run whose client events are shown and downloadable; kept after Stop. */
+let eventsRun;
+let stopping = false;
+
+function print(panel, text) {
+    const lines = entries[panel];
+    const value = String(text);
+    lines.push(new Date().toISOString() + ' ' + value.slice(0, 4096) + (value.length > 4096 ? ' [truncated]' : ''));
+    if (lines.length > 100) lines.shift();
+    field(panel).textContent = lines.join('\n');
+}
+
+function controls() {
+    const following = current?.subscription !== undefined && !current?.unfollowing;
+    const pinned = following && current.pins.has(current.latest);
+    field('start').disabled = !!current || stopping;
+    field('stop').disabled = !current;
+    field('header').disabled = !pinned || current.headerBusy;
+    field('unpin').disabled = !pinned || current.headerBusy || current.unpinBusy;
+    field('unfollow').disabled = !following;
+}
+
+function rpc(run, method, params) {
+    if (current !== run) return Promise.reject(new Error('Stopped'));
+    if (run.pending.size >= MAX_PENDING) return Promise.reject(new Error('Pending RPC limit reached; stop and restart'));
+    return new Promise((resolve, reject) => {
+        const id = ++run.id;
+        const timer = setTimeout(() => {
+            run.pending.delete(id);
+            reject(new Error(method + ' timed out'));
+        }, 15000);
+        run.pending.set(id, { resolve, reject, timer });
+        try {
+            run.chain.sendJsonRpc(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+        } catch (error) {
+            clearTimeout(timer);
+            run.pending.delete(id);
+            reject(error);
+        }
+    });
+}
+
+async function stop() {
+    const run = current;
+    if (!run) return;
+    stopping = true;
+    current = undefined;
+    run.abort.abort();
+    for (const request of run.pending.values()) {
+        clearTimeout(request.timer);
+        request.reject(new Error('Stopped'));
+    }
+    run.pending.clear();
+    run.pins.clear();
+    // Keep Start disabled until this client's teardown is complete.
+    field('stop').disabled = true;
+    field('header').disabled = true;
+    field('unpin').disabled = true;
+    field('unfollow').disabled = true;
+    field('status').textContent = 'Stopping';
+    renderLive();
+    try {
+        try { run.chain?.remove(); }
+        finally { await run.client?.terminate(); }
+    } catch (error) {
+        print('logs', 'Cleanup: ' + error);
+    }
+    field('status').textContent = 'Stopped';
+    stopping = false;
+    controls();
+    renderLive();
+    void reportPeers(undefined);
+}
+
+function fail(run, error) {
+    if (current !== run) return;
+    print('logs', 'Error: ' + (error instanceof Error ? error.message : error));
+    void stop();
+}
+
+async function header(run = current) {
+    if (!run || run.headerBusy || run.unfollowing || !run.pins.has(run.latest)) return;
+    const hash = run.latest;
+    const generation = run.generation;
+    run.headerBusy = true;
+    controls();
+    try {
+        const hex = await rpc(run, 'jamHead_unstable_header', [run.subscription, hash]);
+        if (!followingGeneration(run, generation)) return;
+        if (hex !== null && (typeof hex !== 'string' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(hex)))
+            throw new Error('Header response is not hexadecimal bytes');
+        if (hex?.length > MAX_HEADER_CHARS) throw new Error('Header exceeds demo display limit');
+        field('header-output').textContent = hash + '\n' + (hex ?? 'null (header unavailable)');
+        describeHeader(run, hash, hex);
+    } catch (error) {
+        if (followingGeneration(run, generation)) fail(run, error);
+    } finally {
+        if (run.generation !== generation) return;
+        run.headerBusy = false;
+        controls();
+        // Coalesce arrivals while one header request is outstanding.
+        if (current === run && run.latest !== hash) void header(run);
+    }
+}
+
+// --------------------------------------------------------------------------
+// Explorer list: the last MAX_BLOCK_ROWS blocks, newest first.
+//
+// Every `newBlock` gets one row immediately (hash, parent, arrival time) and is
+// queued for its header, which fills in slot, epoch, author and marks. Rows
+// whose header could not be fetched say so; they are never filled with guesses.
+// This is display only, exactly like the decoder it uses: a failed row is
+// recorded in the row, not turned into a session error.
+// --------------------------------------------------------------------------
+
+function addRow(run, hash, parent) {
+    run.rows.unshift({ hash, parent, at: Date.now(), finality: 'Unfinalized' });
+    run.rows.length = Math.min(run.rows.length, MAX_BLOCK_ROWS);
+    run.headerQueue.push(hash);
+    // A catch-up burst must not build an unbounded backlog; rows that fall off
+    // the list are not worth a request any more.
+    if (run.headerQueue.length > MAX_BLOCK_ROWS) run.headerQueue.splice(0, run.headerQueue.length - MAX_BLOCK_ROWS);
+}
+
+async function pumpHeaders(run) {
+    if (run.headerPumpBusy) return;
+    run.headerPumpBusy = true;
+    const generation = run.generation;
+    try {
+        while (followingGeneration(run, generation) && run.headerQueue.length > 0) {
+            const hash = run.headerQueue.shift();
+            const row = run.rows.find(entry => entry.hash === hash);
+            if (!row || row.hex !== undefined || row.note !== undefined) continue;
+            if (!run.pins.has(hash)) {
+                row.note = 'unpinned before its header was fetched';
+                continue;
+            }
+            try {
+                const hex = await rpc(run, 'jamHead_unstable_header', [run.subscription, hash]);
+                if (!followingGeneration(run, generation)) return;
+                if (typeof hex !== 'string' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(hex)) {
+                    row.note = hex === null ? 'header unavailable' : 'header is not hexadecimal bytes';
+                } else {
+                    row.hex = hex;
+                    row.decoded = run.params ? decodeRow(hex, run.params) : { error: 'spec parameters unreadable' };
+                    // Keep the existing panel behaviour: the latest new block's
+                    // header is shown without pressing anything.
+                    if (hash === run.latest) {
+                        field('header-output').textContent = hash + '\n' + hex;
+                        describeHeader(run, hash, hex);
+                    }
+                }
+            } catch (error) {
+                if (!followingGeneration(run, generation)) return;
+                row.note = String(error && (error.message || error));
+            }
+            renderLive();
+        }
+    } finally {
+        if (run.generation !== generation) return;
+        run.headerPumpBusy = false;
+        if (current === run) renderLive();
+    }
+}
+
+function decodeRow(hex, params) {
+    try {
+        return decodeHeaderForDisplay(hexToBytes(hex), params);
+    } catch (error) {
+        return { error: String(error && (error.message || error)) };
+    }
+}
+
+async function unpin(run, hashes) {
+    // A submitted unpin makes the hash unavailable immediately, not at its reply.
+    for (const hash of hashes) run.pins.delete(hash);
+    controls();
+    const generation = run.generation;
+    try {
+        await rpc(run, 'jamHead_unstable_unpin', [run.subscription, hashes]);
+    } catch (error) {
+        if (followingGeneration(run, generation)) throw error;
+    }
+    if (current !== run) return;
+    controls();
+}
+
+// Every async subscription operation belongs to one generation. A late reply
+// from the replaced follow must neither overwrite the new view nor stop it.
+function followingGeneration(run, generation) {
+    return current === run && run.generation === generation && !run.unfollowing;
+}
+
+async function follow(run) {
+    let subscription;
+    try {
+        subscription = await rpc(run, 'jamHead_unstable_follow', []);
+    } catch (error) {
+        // A bundle built before this page does not know the method.
+        if (/"code":-32601\b/.test(String(error?.message)))
+            throw new Error('The client in dist/ is older than this page (it does not answer jamHead_unstable_follow). ' +
+                'Rebuild it (`just demo-jam-attach` does by default, or `npm run demo:jam:rebuild`) and reload.');
+        throw error;
+    }
+    if (current !== run || run.unfollowing) return;
+    run.subscription = subscription;
+    field('status').textContent = 'Following';
+    controls();
+    renderLive();
+}
+
+function refollow(run) {
+    const now = Date.now();
+    run.followStops = run.followStops.filter(at => now - at < 30000);
+    run.followStops.push(now);
+    if (run.followStops.length >= 3) {
+        fail(run, new Error('Follow stopped ' + run.followStops.length + ' times within 30 seconds; re-follow limit reached'));
+        return;
+    }
+    run.refollows += 1;
+    run.generation += 1;
+    run.pins.clear();
+    run.activeBlocks.clear();
+    run.latest = run.best = run.initialized = run.finalized = run.decoded = undefined;
+    run.subscription = undefined;
+    run.headerQueue.length = 0;
+    run.headerBusy = run.headerPumpBusy = run.unpinBusy = false;
+    // Keep the bounded history so the jump is visible, but never present old
+    // unfinalized rows as candidates for finality in the replacement follow.
+    for (const row of run.rows) {
+        if (row.finality === 'Unfinalized') row.finality = 'Superseded';
+        if (!row.hex && !row.note) row.note = 'superseded before its header was fetched';
+    }
+    field('header-output').textContent = 'Waiting for a block from the new anchor.';
+    field('status').textContent = 'Re-anchored; following again';
+    print('logs', 'Follow stopped: the client re-anchored (warp join). Following again from the new anchor.');
+    controls();
+    renderLive();
+    void follow(run).catch(error => fail(run, error));
+}
+
+async function anchorHeader(run) {
+    const generation = run.generation;
+    const initialized = run.initialized;
+    const hash = initialized.anchors.at(-1);
+    if (!hash) return;
+    try {
+        const hex = await rpc(run, 'jamHead_unstable_header', [run.subscription, hash]);
+        if (!followingGeneration(run, generation) || run.initialized !== initialized) return;
+        const decoded = run.params ? decodeRow(hex, run.params) : { error: 'spec parameters unreadable' };
+        initialized.slot = decoded.slot;
+        initialized.error = decoded.error;
+        if (run.finalized?.hash === hash) run.finalized.slot = decoded.slot;
+    } catch (error) {
+        if (!followingGeneration(run, generation)) return;
+        initialized.error = String(error);
+    }
+    renderLive();
+}
+
+function event(run, value) {
+    if (value.event === 'stop') {
+        if (!run.unfollowing) refollow(run);
+        return;
+    }
+    run.lastEventAt = Date.now();
+    const hashes = value.event === 'initialized' ? value.finalizedBlockHashes :
+        value.event === 'newBlock' ? [value.blockHash] : [];
+    for (const hash of hashes ?? []) run.pins.add(hash);
+    if (value.event === 'initialized') {
+        for (const hash of value.finalizedBlockHashes ?? []) trackBlock(run, hash, null);
+        // The events panel keeps only the last 100 entries, and a catch-up
+        // burst can push `initialized` out of it within a second; record it.
+        run.initialized = { anchors: [...(value.finalizedBlockHashes ?? [])], at: Date.now() };
+        run.finalized = { hash: run.initialized.anchors.at(-1), source: 'anchor' };
+        void anchorHeader(run);
+    }
+    if (value.event === 'finalized') {
+        // Only the client's follow stream can advance this view. Node RPC
+        // reports and slot comparisons must never change client finality.
+        const finalized = new Set(value.finalizedBlockHashes ?? []);
+        const pruned = new Set(value.prunedBlockHashes ?? []);
+        for (const row of run.rows) {
+            if (row.finality === 'Superseded') continue;
+            if (finalized.has(row.hash)) row.finality = 'Finalized';
+            else if (pruned.has(row.hash)) row.finality = 'Pruned';
+        }
+        for (const hash of pruned) {
+            run.blocks.delete(hash);
+            run.activeBlocks.delete(hash);
+        }
+        const hash = value.finalizedBlockHashes?.at(-1);
+        if (hash) {
+            const decoded = run.rows.find(row => row.hash === hash)?.decoded;
+            run.finalized = { hash, source: 'follow', slot: decoded?.slot };
+            run.finalityCount += 1;
+            run.lastFinalityAt = Date.now();
+        }
+    }
+    if (value.event === 'newBlock') {
+        run.latest = value.blockHash;
+        run.blockCount += 1;
+        trackBlock(run, value.blockHash, value.parentBlockHash ?? null);
+        addRow(run, value.blockHash, value.parentBlockHash ?? null);
+        // The explorer list fetches this block's header; when it is still the
+        // latest on arrival it also refreshes the header panel, so each block
+        // still costs exactly one `jamHead_unstable_header` call.
+        void pumpHeaders(run);
+    }
+    if (value.event === 'bestBlockChanged') run.best = value.bestBlockHash;
+    if (run.pins.size > MAX_PINS) {
+        const old = [...run.pins].slice(0, run.pins.size - MAX_PINS);
+        void unpin(run, old).catch(error => fail(run, error));
+    }
+    controls();
+    renderLive();
+}
+
+async function responses(run) {
+    try {
+        for await (const text of run.chain.jsonRpcResponses) {
+            if (current !== run) return;
+            print('events', text);
+            const message = JSON.parse(text);
+            const request = run.pending.get(message.id);
+            if (request) {
+                clearTimeout(request.timer);
+                run.pending.delete(message.id);
+                if (message.error) request.reject(new Error(JSON.stringify(message.error)));
+                else request.resolve(message.result);
+            } else if (message.method === 'jamHead_unstable_followEvent' &&
+                message.params?.subscription === run.subscription && !run.unfollowing) {
+                event(run, message.params.result);
+            }
+        }
+        if (current === run) throw new Error('JSON-RPC response stream ended');
+    } catch (error) { fail(run, error); }
+}
+
+async function start() {
+    if (current || field('start').disabled) return;
+    const run = {
+        abort: new AbortController(), pending: new Map(), pins: new Set(), id: 0,
+        blockCount: 0, blocks: new Map(), bootnodes: [], startedAt: Date.now(),
+        rows: [], headerQueue: [], finalityCount: 0,
+        generation: 0, refollows: 0, followStops: [], activeBlocks: new Set(),
+        peers: [], refreshes: [], clientEvents: createEventStore({ max: MAX_CLIENT_EVENTS }),
+        logLines: 0, logBytes: 0,
+    };
+    current = run;
+    eventsRun = run;
+    renderClientEvents();
+    for (const panel of ['events', 'logs']) {
+        entries[panel].length = 0;
+        field(panel).textContent = '';
+    }
+    field('header-output').textContent = 'No header requested.';
+    field('status').textContent = 'Loading spec and WASM';
+    controls();
+    renderLive();
+    const file = field('spec-file').files[0];
+    const url = field('spec-url').value.trim();
+    try {
+        let text;
+        if (file) {
+            if (file.size > MAX_SPEC_BYTES) throw new Error('Spec exceeds 16 MiB');
+            text = await file.text();
+        } else {
+            const response = await fetch(url, { signal: run.abort.signal });
+            if (!response.ok) throw new Error('Spec HTTP ' + response.status);
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let size = 0;
+            text = '';
+            try {
+                while (true) {
+                    const chunk = await reader.read();
+                    if (chunk.done) break;
+                    size += chunk.value.length;
+                    if (size > MAX_SPEC_BYTES) throw new Error('Spec exceeds 16 MiB');
+                    text += decoder.decode(chunk.value, { stream: true });
+                }
+                text += decoder.decode();
+            } finally { await reader.cancel(); }
+        }
+        if (current !== run) return;
+        const spec = JSON.parse(text);
+        if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw new Error('Expected a JSON spec object');
+        const bootnodes = spec['bootnodes_p256'];
+        run.bootnodes = Array.isArray(bootnodes) ? bootnodes.slice() : [];
+        try {
+            run.genesisHash = blake2b256Hex(hexToBytes(String(spec.genesis_header ?? '')));
+        } catch {
+            run.genesisHash = undefined;
+        }
+        run.params = specParams(spec);
+        if (!run.params) print('logs', 'Spec protocol_parameters could not be read; the slot/epoch display stays empty.');
+        renderLive();
+        const smoldot = await import('../dist/mjs/index-browser.js');
+        if (current !== run) return;
+        run.client = smoldot.start({
+            maxLogLevel: 4,
+            cpuRateLimit: 0.5,
+            logCallback: (_level, target, message) => {
+                if (current !== run) return;
+                // Every client line, JAM or not, for the log volume.
+                run.logLines += 1;
+                run.logBytes += String(target).length + String(message).length;
+                print('logs', '[' + target + '] ' + message);
+                clientLog(run, String(target), String(message));
+            },
+        });
+        run.chain = await run.client.addChain({ chainSpec: JSON.stringify(spec) });
+        if (current !== run) return;
+        void responses(run);
+        await follow(run);
+    } catch (error) { fail(run, error); }
+}
+
+async function unfollow() {
+    const run = current;
+    if (run?.subscription === undefined || run.unfollowing) return;
+    run.unfollowing = true;
+    controls();
+    try {
+        await rpc(run, 'jamHead_unstable_unfollow', [run.subscription]);
+        if (current !== run) return;
+        run.subscription = undefined;
+        run.pins.clear();
+        run.latest = undefined;
+        field('status').textContent = 'Unfollowed. Stop removes the chain and terminates WASM; Start can then follow again.';
+        controls();
+        renderLive();
+    } catch (error) { fail(run, error); }
+}
+
+// --------------------------------------------------------------------------
+// Client events: every `jam-*` debug line of the client's JAM driver, parsed
+// by `jam-events.mjs` (grammar in demo/jam.md, "Client events"). The live rows
+// for peers, the validator set and the warp status below read the same parsed
+// events; nothing here decides whom the client dials or trusts.
+// --------------------------------------------------------------------------
+
+const PEER_EVENTS = new Set(['jam-slot-assigned', 'jam-peer-connected', 'jam-peer-disconnected',
+    'jam-pool-changed', 'jam-discovery-failed']);
+/** The lines that set *Warp status*: an applied join, a rejected one, or an unserved anchor. */
+const WARP_STATUS_EVENTS = new Set(['jam-warp-applied', 'jam-warp-rejected', 'jam-anchor-unserved']);
+
+function clientLog(run, target, message) {
+    const event = run.clientEvents.add(target, message, Date.now());
+    if (!event) return;
+    if (PEER_EVENTS.has(event.name)) peerEvent(run, event);
+    if (WARP_STATUS_EVENTS.has(event.name)) warpEvent(run, event, message);
+    scheduleEventsRender();
+}
+
+/**
+ * Connected peers and the discovered validator set. The client logs every
+ * slot assignment, UP0 handshake and disconnect with the peer's source
+ * (`bootnode` from the spec's `bootnodes_p256`, `genesis` from the spec's genesis
+ * C(8), `discovered` from a verified C(8) read), and every merge of a C(8)
+ * read; this mirrors those events.
+ */
+function peerEvent(run, event) {
+    const { name, fields } = event;
+    if (name === 'jam-pool-changed') {
+        const number = key => Number.isFinite(Number(fields[key])) ? Number(fields[key]) : undefined;
+        run.refreshes.push({
+            at: event.at, validators: number('validators'), usable: number('usable'),
+            discovered: number('discovered'), added: number('added'), removed: number('removed'),
+            retired: number('retired'), valueBytes: number('value_bytes'), elapsedMs: number('elapsed_ms'),
+        });
+        if (run.refreshes.length > MAX_REFRESHES) run.refreshes.shift();
+        run.discoveryError = undefined;
+    } else if (name === 'jam-discovery-failed') {
+        run.discoveryError = fields.reason ?? 'unknown';
+    } else {
+        const slot = event.slot;
+        if (slot === null || slot >= MAX_PEER_SLOTS) return;
+        if (name === 'jam-peer-disconnected') {
+            if (run.peers[slot]) Object.assign(run.peers[slot], { state: 'disconnected', since: event.at, reason: fields.reason });
+        } else {
+            run.peers[slot] = {
+                slot, source: fields.source, address: fields.address,
+                state: name === 'jam-peer-connected' ? 'connected' : 'dialing', since: event.at,
+            };
+        }
+    }
+    void reportPeers(run);
+    renderLive();
+}
+
+/** *Warp status*: the latest applied join, rejection or unserved anchor, and how many rejections. */
+function warpEvent(run, event, message) {
+    if (event.name === 'jam-warp-rejected') run.warpRejections = (run.warpRejections ?? 0) + 1;
+    run.warpStatus = message;
+    run.warp = {
+        event: event.name, at: event.at, slot: event.slot, req: event.req,
+        step: event.fields.step, error: event.fields.error ?? event.fields.reason,
+        rejections: run.warpRejections ?? 0,
+    };
+    renderLive();
+}
+
+function warpStatusText(run) {
+    if (!run?.warp) return undefined;
+    if (run.warp.event !== 'jam-warp-rejected') return run.warpStatus;
+    return 'rejected at step ' + (run.warp.step ?? '–') + ' on slot ' + (run.warp.slot ?? '–') + ': ' +
+        (run.warp.error ?? '–') + ' · ' + run.warp.rejections + ' rejection(s) since Start · ' + run.warpStatus;
+}
+
+function peerList(run) {
+    return (run?.peers ?? []).filter(Boolean).map(peer => ({ ...peer }));
+}
+
+/** Tells the harness what the client is connected to, for its `status`. */
+async function reportPeers(run) {
+    if (run !== undefined && current !== run) return;
+    const last = run?.refreshes.at(-1);
+    try {
+        await controlRequest('peers', {
+            peers: peerList(run).map(({ slot, source, address, state }) => ({ slot, source, address, state })),
+            pool: last ? { validators: last.validators, discovered: last.discovered, refreshes: run.refreshes.length } : null,
+        });
+    } catch {
+        // The harness is optional; the page shows the list either way.
+    }
+}
+
+/** The two rows this panel adds to the live view, after the spec bootnodes row. */
+function ensurePeerRows() {
+    if (field('live-peers')) return;
+    const anchor = field('live-bootnode');
+    let after = anchor;
+    for (const [id, label] of [['live-peers', 'Connected peers'], ['live-pool', 'Validator set (C(8))']]) {
+        const dt = document.createElement('dt');
+        dt.textContent = label;
+        const dd = document.createElement('dd');
+        dd.id = id;
+        dd.textContent = '–';
+        after.after(dt, dd);
+        after = dd;
+    }
+}
+
+function renderPeers(run) {
+    ensurePeerRows();
+    const peers = peerList(run);
+    setText('live-peers', !run ? undefined : peers.length === 0 ? 'none yet' : peers.map(peer =>
+        'slot ' + peer.slot + ': ' + peer.source + ' ' + peer.address + ' · ' + peer.state +
+        (peer.state === 'disconnected' && peer.reason ? ' (' + peer.reason + ')' : '') + ' ' +
+        Math.round((Date.now() - peer.since) / 1000) + 's').join(' | '));
+    const last = run?.refreshes.at(-1);
+    setText('live-pool', !run ? undefined : last
+        ? last.validators + ' validator(s), ' + last.discovered + ' discovered besides the bootnodes · read ' +
+          run.refreshes.length + ' time(s), last ' + (last.valueBytes ?? '–') + ' bytes in ' + (last.elapsedMs ?? '–') + ' ms' +
+          (run.discoveryError ? ' · last refresh failed: ' + run.discoveryError : '')
+        : (run.discoveryError ? 'read failed: ' + run.discoveryError + '; retried at the next finality advance'
+            : 'not read yet: the genesis C(8) seeds the pool until the first verified finality advance'));
+}
+
+// --------------------------------------------------------------------------
+// Display-only header decoding.
+//
+// The offsets mirror `lib/src/jam/codec.rs::read_header` (Gray Paper 0.8.0):
+// parent (32) | prior state root (32) | extrinsic hash (32) | slot (u32 LE) |
+// epoch-mark option | tickets-mark option | author index (u16 LE) | ...
+// Option payload sizes come from the spec's own parameters: an epoch mark is
+// 64 + natural(count) + count * 64 bytes, a tickets mark epoch_len * 33 bytes.
+//
+// NOTHING here gates a control, decides correctness, or constitutes
+// verification; that all happens in Rust inside the client. Anything that does
+// not decode is displayed as unreadable rather than guessed.
+// --------------------------------------------------------------------------
+
+function hexToBytes(hex) {
+    const text = hex.startsWith('0x') ? hex.slice(2) : hex;
+    if (text.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(text)) throw new Error('not hexadecimal');
+    const bytes = new Uint8Array(text.length / 2);
+    for (let index = 0; index < bytes.length; index += 1)
+        bytes[index] = parseInt(text.slice(index * 2, index * 2 + 2), 16);
+    return bytes;
+}
+
+/** `epoch_len`, `slot_seconds` and `max_validators` from the encoded PolkaJam `ProtocolParameters`. */
+function specParams(spec) {
+    try {
+        const bytes = hexToBytes(String(spec.protocol_parameters ?? ''));
+        if (bytes.length !== 122) return undefined;
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const params = {
+            epochLen: view.getUint32(30, true),
+            slotSeconds: view.getUint16(80, true),
+            maxValidators: 3 * view.getUint16(24, true),
+        };
+        return params.epochLen > 0 ? params : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function decodeHeaderForDisplay(bytes, params) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const need = (offset, length) => {
+        if (offset + length > bytes.length) throw new Error('header bytes end early');
+    };
+    need(0, 100);
+    const slot = view.getUint32(96, true);
+    let offset = 100;
+    need(offset, 1);
+    const epochTag = bytes[offset];
+    offset += 1;
+    if (epochTag > 1) throw new Error('epoch-mark option tag is ' + epochTag);
+    if (epochTag === 1) {
+        offset += 64;
+        need(offset, 1);
+        const first = bytes[offset++];
+        let count = first;
+        if (first >= 128) {
+            // The maximum set has 1023 keys, so only one- or two-byte naturals fit.
+            if (first >= 192) throw new Error('validator count exceeds supported bound');
+            need(offset, 1);
+            count = (first & 63) * 256 + bytes[offset++];
+            if (count < 128) throw new Error('noncanonical validator count');
+        }
+        if (count > params.maxValidators) throw new Error('validator count exceeds chain bound');
+        offset += count * 64;
+    }
+    need(offset, 1);
+    const ticketsTag = bytes[offset];
+    offset += 1;
+    if (ticketsTag > 1) throw new Error('tickets-mark option tag is ' + ticketsTag);
+    if (ticketsTag === 1) offset += params.epochLen * 33;
+    need(offset, 2);
+    return {
+        slot,
+        epochMark: epochTag === 1,
+        ticketsMark: ticketsTag === 1,
+        authorIndex: view.getUint16(offset, true),
+    };
+}
+
+function describeHeader(run, hash, hex) {
+    if (typeof hex !== 'string' || !run.params) return;
+    try {
+        run.decoded = Object.assign({ hash }, decodeHeaderForDisplay(hexToBytes(hex), run.params));
+        // An epoch boundary lasts one block; remember it so the operator can
+        // see that one went past without staring at the page for 72 seconds.
+        if (run.decoded.epochMark) run.lastEpochMark = run.decoded.slot;
+        if (run.decoded.ticketsMark) run.lastTicketsMark = run.decoded.slot;
+    } catch (error) {
+        run.decoded = { hash, error: String(error && (error.message || error)) };
+    }
+    renderLive();
+}
+
+// --------------------------------------------------------------------------
+// Live view
+// --------------------------------------------------------------------------
+
+function trackBlock(run, hash, parent) {
+    run.blocks.set(hash, parent);
+    run.activeBlocks.add(hash);
+    while (run.blocks.size > MAX_TRACKED_BLOCKS) {
+        const oldest = run.blocks.keys().next().value;
+        run.blocks.delete(oldest);
+        run.activeBlocks.delete(oldest);
+    }
+}
+
+/** Tracked hashes that no tracked block claims as its parent. */
+function leaves(run) {
+    const parents = new Set([...run.activeBlocks].map(hash => run.blocks.get(hash)));
+    return [...run.blocks.keys()].filter(hash => run.activeBlocks.has(hash) && !parents.has(hash));
+}
+
+const abbreviate = hash => typeof hash === 'string' && hash.length > 18
+    ? hash.slice(0, 10) + '…' + hash.slice(-8) : String(hash ?? '');
+
+function setText(id, text) {
+    field(id).textContent = text === undefined || text === null || text === '' ? '–' : String(text);
+}
+
+function setHash(id, hash, suffix) {
+    const cell = field(id);
+    cell.textContent = '';
+    if (typeof hash !== 'string' || hash.length === 0) {
+        cell.textContent = '–';
+        return;
+    }
+    const code = document.createElement('code');
+    code.textContent = abbreviate(hash);
+    code.title = hash + ' (click to copy)';
+    code.tabIndex = 0;
+    code.style.cursor = 'copy';
+    code.onclick = () => { void navigator.clipboard?.writeText(hash).catch(() => {}); };
+    cell.append(code);
+    if (suffix) cell.append(document.createTextNode(' ' + suffix));
+}
+
+function connectionState(run) {
+    if (stopping) return 'Stopping';
+    if (!run) return 'Stopped';
+    if (run.subscription === undefined) return run.unfollowing ? 'Unfollowed (chain still running)' : 'Starting';
+    if (run.blockCount === 0) return 'Connecting (following, no block yet)';
+    return 'Following';
+}
+
+function renderLive() {
+    const run = current;
+    setText('live-connection', connectionState(run));
+    setText('live-bootnode', run?.bootnodes?.length ? run.bootnodes.join(', ') : undefined);
+    renderPeers(run);
+    if (!run || run.lastEventAt === undefined) setText('live-last-event', undefined);
+    else setText('live-last-event', Math.round((Date.now() - run.lastEventAt) / 1000) + 's ago');
+    const anchors = run?.initialized?.anchors ?? [];
+    setHash('live-anchor', anchors[0], anchors.length > 1 ? '(+' + (anchors.length - 1) + ' more)' :
+        (run?.initialized ? 'at ' + new Date(run.initialized.at).toLocaleTimeString() : undefined));
+    if (run?.refollows && run.initialized) {
+        setHash('live-reanchor', anchors.at(-1), '· count ' + run.refollows + ' · slot ' +
+            (run.initialized.slot ?? '–') + (run.initialized.error ? ' · header not readable' : ''));
+    } else setText('live-reanchor', run?.refollows ? run.refollows + ' · waiting for initialized' : '0');
+    setText('live-warp-status', warpStatusText(run));
+    setText('live-count', run ? String(run.blockCount) : '0');
+    setHash('live-block', run?.latest);
+    setHash('live-parent', run && run.latest ? run.blocks.get(run.latest) ?? undefined : undefined);
+    const decoded = run?.decoded && run.decoded.hash === run.latest ? run.decoded : undefined;
+    if (decoded && !decoded.error) {
+        const epochLen = run.params.epochLen;
+        setText('live-slot', decoded.slot + ' (' + run.params.slotSeconds + 's per slot)');
+        setText('live-epoch', 'epoch ' + Math.floor(decoded.slot / epochLen) +
+            ', position ' + (decoded.slot % epochLen) + ' of ' + epochLen);
+        const marks = [decoded.epochMark ? 'epoch mark' : null, decoded.ticketsMark ? 'tickets mark' : null].filter(Boolean);
+        setText('live-marks', marks.length ? marks.join(' + ') : 'none');
+        setText('live-author', decoded.authorIndex);
+    } else {
+        setText('live-slot', decoded?.error ? 'header bytes not readable: ' + decoded.error : undefined);
+        setText('live-epoch', undefined);
+        setText('live-marks', undefined);
+        setText('live-author', undefined);
+    }
+    const seen = [
+        run?.lastEpochMark !== undefined ? 'last epoch mark at slot ' + run.lastEpochMark : null,
+        run?.lastTicketsMark !== undefined ? 'last tickets mark at slot ' + run.lastTicketsMark : null,
+    ].filter(Boolean);
+    setText('live-marks-seen', !run ? undefined : (seen.length ? seen.join(' · ') : 'none yet'));
+    setHash('live-best', run?.best, run?.best && run.best === run?.latest ? '(= latest new block)' : undefined);
+    const known = run ? leaves(run) : [];
+    if (known.length === 0) setText('live-leaves', undefined);
+    else field('live-leaves').textContent = known.length + (known.length === 1 ? ' leaf: ' : ' leaves: ') +
+        known.slice(0, 6).map(abbreviate).join(', ') + (known.length > 6 ? ', …' : '');
+    renderNodeView(decoded && !decoded.error ? decoded : undefined);
+    renderFinality(run);
+    renderBlocks(run);
+}
+
+function renderFinality(run) {
+    setText('finality-state', !run ? connectionState(run) : run.unfollowing ? 'Unfollowed (last observation)' :
+        !run.finalized?.hash ? 'Waiting for initialized' : run.finalized.source === 'anchor'
+            ? 'Trusted anchor; awaiting verified finality' : 'Finality reported by the client follow stream');
+    setHash('finality-head', run?.finalized?.hash);
+    // Preserve the slot when a finalized row ages out of the bounded table.
+    const decoded = run?.rows.find(row => row.hash === run.finalized?.hash)?.decoded;
+    if (decoded && !decoded.error) run.finalized.slot = decoded.slot;
+    setText('finality-slot', run?.finalized?.slot);
+    setText('finality-count', run?.finalityCount ?? 0);
+    setText('finality-age', run?.lastFinalityAt === undefined ? undefined :
+        Math.round((Date.now() - run.lastFinalityAt) / 1000) + 's ago');
+    const finalized = harness.available ? harness.status?.nodeFinalizedBlock : undefined;
+    if (!harness.available) {
+        setText('finality-node', harness.error ? 'harness unavailable' : undefined);
+    } else if (!finalized?.hash) {
+        setText('finality-node', harness.status?.nodeFinalizedBlockError
+            ? 'node RPC error: ' + harness.status.nodeFinalizedBlockError : 'unavailable');
+    } else {
+        setHash('finality-node', finalized.hash, '· slot ' + (finalized.slot ?? '–') + ' · node report only');
+    }
+    const best = harness.available ? nodeBest() : undefined;
+    setText('finality-node-gap', Number.isSafeInteger(best?.slot) && Number.isSafeInteger(finalized?.slot)
+        ? (best.slot >= finalized.slot ? (best.slot - finalized.slot) + ' slot(s)' : 'heads sampled across an update; waiting for next poll')
+        : undefined);
+}
+
+function cell(row, text, { mono = false } = {}) {
+    const td = document.createElement('td');
+    if (mono) {
+        const code = document.createElement('code');
+        code.textContent = text;
+        td.append(code);
+    } else {
+        td.textContent = text;
+    }
+    row.append(td);
+    return td;
+}
+
+function hashCell(row, hash) {
+    const td = cell(row, abbreviate(hash), { mono: true });
+    const code = td.firstChild;
+    code.title = hash + ' (click to copy)';
+    code.tabIndex = 0;
+    code.style.cursor = 'copy';
+    code.onclick = () => { void navigator.clipboard?.writeText(hash).catch(() => {}); };
+    return td;
+}
+
+function renderBlocks(run) {
+    const body = field('blocks-body');
+    const empty = field('blocks-empty');
+    const rows = run?.rows ?? [];
+    empty.hidden = rows.length > 0;
+    if (rows.length === 0) {
+        body.textContent = '';
+        return;
+    }
+    const table = document.createDocumentFragment();
+    for (const entry of rows) {
+        const row = document.createElement('tr');
+        const decoded = entry.decoded && !entry.decoded.error ? entry.decoded : undefined;
+        if (decoded) {
+            const epochLen = run.params.epochLen;
+            cell(row, String(decoded.slot));
+            cell(row, Math.floor(decoded.slot / epochLen) + ' + ' + (decoded.slot % epochLen));
+            cell(row, String(decoded.authorIndex));
+            const marks = [decoded.epochMark ? 'epoch' : null, decoded.ticketsMark ? 'tickets' : null].filter(Boolean);
+            cell(row, marks.length ? marks.join(' + ') : '–');
+        } else {
+            // No header yet, or one that did not decode. Say which; guess nothing.
+            const reason = entry.note ?? (entry.decoded?.error ? 'header not readable' : 'header pending');
+            cell(row, '–');
+            cell(row, '–');
+            cell(row, '–');
+            cell(row, reason);
+        }
+        cell(row, entry.finality);
+        hashCell(row, entry.hash);
+        if (entry.parent) hashCell(row, entry.parent); else cell(row, '–');
+        cell(row, Math.round((Date.now() - entry.at) / 1000) + 's');
+        table.append(row);
+    }
+    body.textContent = '';
+    body.append(table);
+}
+
+// --------------------------------------------------------------------------
+// Client events section: newest first, one row per request from start to
+// outcome, category toggles and a text filter, at most MAX_CLIENT_EVENTS
+// events, and a JSON download. It keeps the last run's events after Stop.
+// --------------------------------------------------------------------------
+
+/** Category toggles and the text filter. */
+const eventFilter = { categories: new Set(CATEGORIES), text: '' };
+let eventsRenderTimer;
+const HASH = /^0x[0-9a-f]{64}$/;
+
+/** Coalesces bursts: a catch-up can log dozens of lines in a second. */
+function scheduleEventsRender() {
+    if (eventsRenderTimer !== undefined) return;
+    eventsRenderTimer = setTimeout(() => {
+        eventsRenderTimer = undefined;
+        renderClientEvents();
+    }, 250);
+}
+
+/** The fields worth showing in the Details column, `slot` as a block slot where it is one. */
+function detailEntries(name, fields, skip) {
+    const blockSlot = BLOCK_SLOT_EVENTS.has(name);
+    return Object.entries(fields)
+        .filter(([key]) => !skip.includes(key) && key !== 'req' && (blockSlot ? key !== 'conn' : key !== 'slot'))
+        .map(([key, value]) => [blockSlot && key === 'slot' ? 'block_slot' : key, value]);
+}
+
+function appendFields(td, entries) {
+    for (const [key, value] of entries) {
+        td.append(document.createTextNode(' ' + key + ' '));
+        if (HASH.test(value)) {
+            const code = document.createElement('code');
+            code.textContent = abbreviate(value);
+            code.title = value + ' (click to copy)';
+            code.tabIndex = 0;
+            code.style.cursor = 'copy';
+            code.onclick = () => { void navigator.clipboard?.writeText(value).catch(() => {}); };
+            td.append(code);
+        } else {
+            const strong = document.createElement('strong');
+            strong.textContent = value;
+            td.append(strong);
+        }
+    }
+}
+
+function renderClientEvents() {
+    const run = eventsRun;
+    const store = run?.clientEvents;
+    const rows = store ? store.view(eventFilter) : [];
+    setText('client-events-summary', !store ? 'No client started yet.' :
+        store.rows.length + ' event(s) kept of at most ' + store.max + ' · ' + store.dropped + ' dropped · ' +
+        store.pending() + ' request(s) pending · ' + store.total + ' since Start' +
+        (store.unparsed ? ' · ' + store.unparsed + ' jam- line(s) not parsed' : '') +
+        (rows.length !== store.rows.length ? ' · ' + rows.length + ' shown' : ''));
+    field('client-events-download').disabled = !store;
+    field('client-events-empty').hidden = rows.length > 0;
+    const body = field('client-events-body');
+    const table = document.createDocumentFragment();
+    for (const entry of rows) {
+        const row = document.createElement('tr');
+        row.dataset.category = entry.category;
+        if (entry.request) row.dataset.request = entry.request.pending ? 'pending' : entry.request.outcome ?? 'ended';
+        cell(row, '+' + ((entry.at - run.startedAt) / 1000).toFixed(1) + ' s');
+        cell(row, entry.slot === null ? '–' : String(entry.slot));
+        cell(row, entry.category);
+        cell(row, entry.request ? entry.name.replace(/-queued$/, '') : entry.name, { mono: true });
+        const td = cell(row, entry.req === null ? '' : '#' + entry.req);
+        td.className = 'details';
+        if (entry.request) {
+            appendFields(td, detailEntries(entry.name, entry.fields, []));
+            const outcome = document.createElement('span');
+            const request = entry.request;
+            if (request.pending) {
+                outcome.className = 'pending';
+                outcome.textContent = ' → pending ' + ((Date.now() - entry.at) / 1000).toFixed(1) + ' s';
+                td.append(outcome);
+            } else {
+                outcome.className = 'outcome';
+                outcome.textContent = ' → ' + (request.outcome ?? 'ended') +
+                    (request.elapsedMs === null ? '' : ' in ' + request.elapsedMs + ' ms');
+                td.append(outcome);
+                if (request.end) appendFields(td, detailEntries(request.endName, request.end, ['purpose', 'outcome', 'elapsed_ms']));
+            }
+        } else {
+            appendFields(td, detailEntries(entry.name, entry.fields, []));
+        }
+        table.append(row);
+    }
+    body.textContent = '';
+    body.append(table);
+}
+
+/** The retained events, the spec's genesis hash and the run's start, as a JSON file. */
+function eventsDocument() {
+    const run = eventsRun;
+    if (!run) return undefined;
+    return {
+        format: 'smoldot-jam-client-events/1',
+        genesisHash: run.genesisHash ?? null,
+        startedAt: new Date(run.startedAt).toISOString(),
+        savedAt: new Date().toISOString(),
+        /** Every client log line since Start, JAM or not: count and characters of target plus message. */
+        clientLog: { lines: run.logLines, bytes: run.logBytes },
+        ...run.clientEvents.snapshot(),
+    };
+}
+
+function downloadEvents() {
+    const document_ = eventsDocument();
+    if (!document_) return undefined;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(document_, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'jam-client-events-' + document_.startedAt.replace(/[:.]/g, '-') + '.json';
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    return document_;
+}
+
+function setupClientEvents() {
+    const toggles = field('client-events-categories');
+    for (const category of CATEGORIES) {
+        const label = document.createElement('label');
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.id = 'client-events-' + category;
+        box.checked = true;
+        box.onchange = () => {
+            if (box.checked) eventFilter.categories.add(category); else eventFilter.categories.delete(category);
+            renderClientEvents();
+        };
+        label.append(box, document.createTextNode(' ' + category));
+        toggles.append(label);
+    }
+    field('client-events-filter').oninput = event => {
+        eventFilter.text = event.target.value;
+        renderClientEvents();
+    };
+    field('client-events-download').onclick = () => { downloadEvents(); };
+    renderClientEvents();
+}
+
+// --------------------------------------------------------------------------
+// Harness control endpoint: the independent oracle, and the fault buttons.
+// --------------------------------------------------------------------------
+
+/** `actionNote`: the last network action's outcome, kept next to the buttons until the next one. */
+const harness = { status: undefined, available: false, busy: false, error: undefined, actionNote: undefined };
+
+async function controlRequest(action, extra = {}) {
+    const response = await fetch(CONTROL_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...extra, action }),
+    });
+    let body;
+    try { body = await response.json(); } catch { body = undefined; }
+    if (!response.ok || !body?.ok) throw new Error(body?.error ?? ('control endpoint HTTP ' + response.status));
+    return body.status;
+}
+
+function nodeBest() {
+    const best = harness.status?.nodeBestBlock;
+    if (!best || typeof best !== 'object') return undefined;
+    const slot = Number(best.slot);
+    return { slot: Number.isFinite(slot) ? slot : undefined, hash: typeof best.hash === 'string' ? best.hash : undefined };
+}
+
+function renderNodeView(decoded) {
+    if (!harness.available) {
+        setText('live-node-best', harness.error ? 'harness unavailable' : undefined);
+        setText('live-agreement', undefined);
+        return;
+    }
+    const alive = harness.status?.attach ? 'external network (attach mode)'
+        : harness.status?.node0Alive ? 'node0 running' : 'node0 NOT running';
+    const best = nodeBest();
+    if (!best) {
+        setText('live-node-best', harness.status?.nodeBestBlockError
+            ? 'node RPC error: ' + harness.status.nodeBestBlockError + ' · ' + alive
+            : alive);
+        setText('live-agreement', undefined);
+        return;
+    }
+    setHash('live-node-best', best.hash, '· slot ' + best.slot + ' · ' + alive);
+    if (!decoded || best.slot === undefined) {
+        setText('live-agreement', undefined);
+        return;
+    }
+    const delta = best.slot - decoded.slot;
+    setText('live-agreement', delta === 0
+        ? (best.hash === decoded.hash ? 'in step: same slot and same block' : 'same slot, different block hash')
+        : (delta > 0 ? 'client is ' + delta + ' slot(s) behind the node' : 'client is ' + (-delta) + ' slot(s) ahead of the node'));
+}
+
+function setNetworkButtons() {
+    for (const id of ['kill-node0', 'start-node0', 'restart-node0'])
+        field(id).disabled = !harness.available || harness.busy;
+}
+
+function describeHarness(status) {
+    const note = harness.actionNote ? ' · last action: ' + harness.actionNote : '';
+    if (status?.attach)
+        return 'Attach mode: spec ' + status.specPath + ' · RPC port ' + status.rpcPort +
+            ' · no network managed by this harness' +
+            (typeof status.peersLine === 'string' ? ' · ' + status.peersLine : '') + note;
+    const all = status?.processes ?? [];
+    const node0 = all.find(entry => entry.node0);
+    return 'PolkaJam ' + String(status?.pinnedCommit ?? '').slice(0, 8) +
+        ' · base port ' + status?.basePort + ' · RPC port ' + status?.rpcPort +
+        ' · ' + all.length + ' node process(es) alive · ' +
+        (node0 ? 'node0 pid ' + node0.pid : 'node0 NOT running') +
+        (typeof status?.peersLine === 'string' ? ' · ' + status.peersLine : '') + note;
+}
+
+async function poll() {
+    if (harness.busy) return;
+    try {
+        harness.status = await controlRequest('status');
+        harness.available = true;
+        harness.error = undefined;
+        field('network-status').textContent = describeHarness(harness.status);
+    } catch (error) {
+        harness.available = false;
+        harness.error = String(error && (error.message || error));
+        field('network-status').textContent =
+            'Demo harness not reachable at ' + CONTROL_URL + ' (' + harness.error +
+            '). Start it with: just demo-jam-attach (see demo/jam.md)';
+    }
+    setNetworkButtons();
+    renderLive();
+}
+
+async function networkAction(action) {
+    if (harness.busy || !harness.available) return;
+    harness.busy = true;
+    setNetworkButtons();
+    field('network-status').textContent = action + ': running…';
+    try {
+        harness.status = await controlRequest(action);
+        harness.actionNote = undefined;
+        field('network-status').textContent = action + ': done · ' + describeHarness(harness.status);
+    } catch (error) {
+        // In attach mode every node action fails by design; the reason stays
+        // next to the buttons through the next status polls.
+        harness.actionNote = action + ' FAILED: ' + String(error && (error.message || error));
+        field('network-status').textContent = harness.actionNote;
+    } finally {
+        harness.busy = false;
+        setNetworkButtons();
+        renderLive();
+    }
+}
+
+field('start').onclick = start;
+field('stop').onclick = stop;
+field('header').onclick = () => { void header(); };
+field('unpin').onclick = () => {
+    const run = current;
+    if (!run?.pins.has(run.latest) || run.unpinBusy) return;
+    const generation = run.generation;
+    run.unpinBusy = true;
+    controls();
+    void unpin(run, [run.latest]).catch(error => fail(run, error)).finally(() => {
+        if (run.generation !== generation) return;
+        run.unpinBusy = false;
+        controls();
+    });
+};
+field('unfollow').onclick = unfollow;
+for (const action of ['kill-node0', 'start-node0', 'restart-node0'])
+    field(action).onclick = () => { void networkAction(action); };
+
+setInterval(() => { void poll(); }, POLL_MS);
+setInterval(renderLive, 1000);
+// Pending requests show their running time.
+setInterval(() => { if (eventsRun?.clientEvents.pending()) scheduleEventsRender(); }, 1000);
+setupClientEvents();
+void poll();
+renderLive();
+
+window.jamDemo = {
+    start, stop, header, unfollow,
+    network: networkAction,
+    /** The Client events section's data: what the download would save. */
+    clientEvents: eventsDocument,
+    downloadEvents,
+    snapshot: () => ({
+        running: !!current,
+        subscription: current?.subscription,
+        latestNewBlock: current?.latest,
+        pins: [...(current?.pins ?? [])],
+        pending: current?.pending.size ?? 0,
+        events: [...entries.events],
+        logs: [...entries.logs],
+    }),
+    live: () => ({
+        connection: connectionState(current),
+        bootnodes: [...(current?.bootnodes ?? [])],
+        blockCount: current?.blockCount ?? 0,
+        initialized: current?.initialized,
+        refollows: current?.refollows ?? 0,
+        warpStatus: current?.warpStatus,
+        warp: current?.warp ? { ...current.warp } : undefined,
+        peers: peerList(current),
+        refreshes: (current?.refreshes ?? []).map(entry => ({ ...entry })),
+        discoveryError: current?.discoveryError,
+        latestNewBlock: current?.latest,
+        parent: current?.latest ? current.blocks.get(current.latest) ?? null : undefined,
+        best: current?.best,
+        finalized: current?.finalized ? { ...current.finalized } : undefined,
+        finalityCount: current?.finalityCount ?? 0,
+        lastFinalityAt: current?.lastFinalityAt,
+        decoded: current?.decoded,
+        lastEpochMark: current?.lastEpochMark,
+        lastTicketsMark: current?.lastTicketsMark,
+        params: current?.params,
+        leaves: current ? leaves(current) : [],
+        rows: (current?.rows ?? []).map(entry => ({
+            hash: entry.hash, parent: entry.parent, at: entry.at, finality: entry.finality,
+            decoded: entry.decoded, note: entry.note, headerChars: entry.hex?.length,
+        })),
+        maxBlockRows: MAX_BLOCK_ROWS,
+        lastEventAt: current?.lastEventAt,
+        harness: { available: harness.available, busy: harness.busy, error: harness.error, status: harness.status },
+    }),
+};

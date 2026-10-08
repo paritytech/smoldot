@@ -53,7 +53,7 @@ async fn jam_finality() -> Result<()> {
             dump_dir.to_string_lossy().into_owned(),
         ));
     }
-    if dev_mode_keep_alive(("jam_finality", &env_refs(&env))).await? {
+    if dev_mode_keep_alive(&live, Some(("jam_finality", &env_refs(&env)))).await? {
         return live.teardown().await;
     }
 
