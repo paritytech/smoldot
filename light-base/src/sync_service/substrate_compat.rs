@@ -296,16 +296,26 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
                 let (new_sync, error) =
                     req.build(all::ExecHint::CompileWithNonDeterministicValidation, true);
                 let elapsed = task.platform.now() - before_instant;
-                task.metrics
-                    .observe_runtime_compilation(elapsed, error.is_ok());
+                // `elapsed` also includes the verification of the storage proof. Measuring the
+                // compilation alone would require more changes to the warp sync API, which isn't
+                // worth it for a few milliseconds.
+                match &error {
+                    Ok(all::WarpSyncBuildRuntimeOutcome::Compiled) => {
+                        task.metrics.observe_runtime_compilation(elapsed, true)
+                    }
+                    Err(all::WarpSyncBuildRuntimeError::RuntimeBuild(_)) => {
+                        task.metrics.observe_runtime_compilation(elapsed, false)
+                    }
+                    Ok(all::WarpSyncBuildRuntimeOutcome::CodeHintMismatch) | Err(_) => {}
+                }
                 match error {
-                    Ok(()) => {
+                    Ok(outcome) => {
                         log!(
                             &task.platform,
                             Debug,
                             &task.log_target,
                             "warp-sync-runtime-build-success",
-                            success = ?true,
+                            ?outcome,
                             duration = ?elapsed
                         );
                     }
