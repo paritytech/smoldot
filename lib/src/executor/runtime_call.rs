@@ -832,13 +832,13 @@ impl NextKey {
             }
 
             (host::HostVm::ExternalStorageClearPrefix(req), None) => {
-                // TODO: there's some trickiness regarding the behavior w.r.t keys only in the overlay; figure out
-
+                // The keys under the prefix that are in the pending changes have already been
+                // removed before the first `NextKey`. Only the keys of the storage are visited
+                // here, and they're counted even if they were already removed in the pending
+                // changes, like in Substrate.
                 if let Some(key) = key {
                     let key = trie::nibbles_to_bytes_suffix_extend(key).collect::<Vec<_>>();
                     assert!(key.starts_with(req.prefix().as_ref()));
-
-                    // TODO: /!\ must clear keys from overlay as well
 
                     if req
                         .max_keys_to_remove()
@@ -1719,6 +1719,30 @@ impl Inner {
                         .insert(req.child_trie().map(|ct| ct.as_ref().to_owned()));
 
                     let prefix = req.prefix().as_ref().to_owned();
+
+                    // As in Substrate, the keys under the prefix that are in the pending changes
+                    // are all removed first. They aren't counted in the number of keys removed
+                    // and don't count towards the limit. Only the keys of the storage, which are
+                    // removed afterwards, are counted.
+                    if let Some(trie) = self
+                        .pending_storage_changes
+                        .trie_diffs
+                        .get_mut(&req.child_trie().map(|ct| ct.as_ref().to_vec()))
+                    {
+                        let keys_to_erase = trie
+                            .diff_range_ordered::<[u8]>((
+                                ops::Bound::Included(&prefix[..]),
+                                ops::Bound::Unbounded,
+                            ))
+                            .take_while(|(key, _)| key.starts_with(&prefix))
+                            .filter(|(_, inserts)| *inserts)
+                            .map(|(key, _)| key.to_vec())
+                            .collect::<Vec<_>>();
+                        for key in keys_to_erase {
+                            trie.diff_insert_erase(key, ());
+                        }
+                    }
+
                     self.vm = req.into();
                     return RuntimeCall::NextKey(NextKey {
                         inner: self,

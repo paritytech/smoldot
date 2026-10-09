@@ -6,6 +6,10 @@
 
 - Add `AddChainOptions.maxPendingTransactions`: the maximum number of transactions submitted through the JSON-RPC API that a chain holds at the same time, from their submission until they are finalized or dropped. It defaults to 64, so the behaviour is unchanged unless it is set. Rust users of `smoldot-light` set the same limit through `AddChainConfig::max_pending_transactions`. ([#3394](https://github.com/paritytech/smoldot/pull/3394); fixes [#3393](https://github.com/paritytech/smoldot/issues/3393))
 
+### Fixed
+
+- `ext_storage_clear_prefix`, `ext_default_child_storage_clear_prefix` and `ext_default_child_storage_storage_kill` now also remove the keys that were written earlier in the same runtime call, or by a previous call whose changes are passed in. Before, only keys of the stored state were removed, so a later read in the same call still returned them, and the storage changes of the call were wrong. As in Substrate, these keys are not counted in the returned number of removed keys and do not count towards the limit. This affects runtime calls executed locally, such as `chainHead_v1_call` and transaction validation. ([#XXXX](https://github.com/paritytech/smoldot/pull/XXXX); fixes [#3374](https://github.com/paritytech/smoldot/issues/3374))
+
 ## 3.7.0 - 2026-10-07
 
 ### Added
