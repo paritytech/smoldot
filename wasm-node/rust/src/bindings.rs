@@ -383,6 +383,9 @@ pub extern "C" fn advance_execution() {
 /// If `json_rpc_max_pending_requests` is 0, then the value of `json_rpc_max_subscriptions` is
 /// ignored.
 ///
+/// `max_pending_transactions` indicates the maximum number of transactions submitted through the
+/// JSON-RPC API that are held at the same time. It must not be 0.
+///
 /// Calling this function allocates a chain id and starts the chain initialization in the
 /// background. Once the initialization is complete, the [`chain_initialized`] function will be
 /// called by smoldot.
@@ -398,6 +401,7 @@ pub extern "C" fn add_chain(
     statement_store_max_seen_statements: u32,
     statement_store_false_positive_rate: f64,
     statement_store_affinity_update_interval_ms: u32,
+    max_pending_transactions: u32,
 ) -> u32 {
     super::add_chain(
         get_buffer(chain_spec_buffer_index),
@@ -408,6 +412,7 @@ pub extern "C" fn add_chain(
         statement_store_max_seen_statements,
         statement_store_false_positive_rate,
         statement_store_affinity_update_interval_ms,
+        max_pending_transactions,
     )
 }
 
