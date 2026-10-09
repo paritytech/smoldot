@@ -21,12 +21,13 @@
 //! Every peer is mapped into the 32-byte topic key space by the blake2b-256 hash of its
 //! [`PeerId`], and the distance to a topic is the XOR of the two keys. The full nodes keep a
 //! topic on the `replication_factor` peers closest to it, so a light client that connects to
-//! one of the closest known peers for a topic reaches a holder of that topic.
+//! one of the closest known peers for a topic is likely to reach a holder of that topic.
 //!
-//! The topology is built from peers learned through discovery and Identify, and remembers them
-//! after they disconnect, so that a peer close to a topic can be connected again later. It
-//! computes XOR distances locally over that learned peer set and never issues a topic-specific
-//! lookup, so that nobody learns which topics the local node subscribes to.
+//! The topology is built from peers learned through discovery, Identify and statement
+//! substreams, and remembers them after they disconnect, so that a peer close to a topic can be
+//! connected again later. It computes XOR distances locally over that learned peer set and
+//! never issues a topic-specific lookup, so that nobody learns which topics the local node
+//! subscribes to.
 //!
 //! A light client is never a replica of a topic, so the affinity oracle and the routing of
 //! statements between replicas of the full node have no counterpart here.
@@ -42,12 +43,12 @@ use rand_chacha::{
 pub use crate::libp2p::PeerId;
 
 /// A point in the 32-byte key space shared by topics and hashed peer ids.
-type Key = [u8; 32];
+pub type Key = [u8; 32];
 
-/// Evict a peer unseen by any event for this long.
+/// Evict a disconnected peer unseen by any event for this long.
 const PEER_STALENESS_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 
-/// Hard cap on the known peers; bounds memory when discovery outruns staleness eviction.
+/// Hard cap on the known peers. Bounds memory when discovery outruns staleness eviction.
 const MAX_KNOWN_PEERS: usize = 8192;
 
 /// Configuration passed to [`PeersTopology::new`].
@@ -60,15 +61,23 @@ pub struct Config {
     pub replication_factor: NonZeroUsize,
 }
 
+#[derive(Debug)]
 struct PeerInfo<TNow> {
     supports_protocol: bool,
-    /// Cached `peer_key`; the peer id never changes and hashing is costly.
+    /// The statement substream to the peer is open.
+    connected: bool,
+    /// Cached `peer_key`. The peer id never changes and hashing is costly.
     key: Key,
-    /// Time of the most recent event observing this peer; the eviction key for both staleness
+    /// Time of the most recent event observing this peer, the eviction key for both staleness
     /// and the capacity backstop.
     last_seen: TNow,
 }
 
+/// Local view of the statement peers of a chain. See the [module documentation](self).
+///
+/// Events only add peers. The caller runs [`PeersTopology::evict`] periodically to drop stale
+/// peers and to hold the cap on the known peers.
+#[derive(Debug)]
 pub struct PeersTopology<TNow> {
     replication_factor: NonZeroUsize,
     /// Known remote peers, evicted by [`PeersTopology::evict`] once stale or over
@@ -80,6 +89,7 @@ impl<TNow> PeersTopology<TNow>
 where
     TNow: Clone + Ord + Add<Duration, Output = TNow>,
 {
+    /// Builds a new topology that knows no peer.
     pub fn new(config: Config) -> Self {
         let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
 
@@ -113,6 +123,23 @@ where
         self.get_or_insert_peer(peer, now).supports_protocol = supports_statement_protocol;
     }
 
+    /// Record that the statement substream to `peer` opened.
+    ///
+    /// An open substream implies statement protocol support.
+    pub fn on_substream_opened(&mut self, peer: PeerId, now: &TNow) {
+        let info = self.get_or_insert_peer(peer, now);
+        info.supports_protocol = true;
+        info.connected = true;
+    }
+
+    /// Record that the statement substream to `peer` closed.
+    pub fn on_substream_closed(&mut self, peer: PeerId, now: &TNow) {
+        if let Some(info) = self.discovered.get_mut(&peer) {
+            info.connected = false;
+            info.last_seen = now.clone().max(info.last_seen.clone());
+        }
+    }
+
     /// Number of known remote peers, including peers without confirmed statement protocol
     /// support.
     pub fn known_peers_count(&self) -> usize {
@@ -123,44 +150,41 @@ where
     ///
     /// "Closest" is computed over the locally learned statement peers, not by querying the
     /// network for the true global closest peers.
-    pub fn closest_known(&self, topic: &Key, limit: usize) -> Vec<PeerId> {
+    #[cfg(test)]
+    fn closest_known(&self, topic: &Key, limit: usize) -> Vec<PeerId> {
         self.closest_known_keyed(topic, limit)
             .into_iter()
             .map(|(peer, _)| peer)
             .collect()
     }
 
-    /// Local-only connection candidates for `topics`: a minimal set of peers covering every
-    /// topic, each topic being covered by any of its `replication_factor` closest known peers.
+    /// Local-only connection candidates for `topics`: a small set of peers, chosen greedily,
+    /// covering every topic, each topic being covered by any of its `replication_factor`
+    /// closest known peers.
     ///
     /// Only the locally learned topology is used, avoiding network lookups that would reveal
     /// the topics. The result does not depend on which peers are connected.
     pub fn peers_for_topics(&self, topics: &[Key]) -> Vec<PeerId> {
-        let pool_size = self.replication_factor.get();
-
-        let closest_pools = topics
+        let mut uncovered = topics
             .iter()
-            .map(|topic| self.closest_known_keyed(topic, pool_size))
+            .map(|topic| {
+                let pool = self.closest_known_keyed(topic, self.replication_factor.get());
+                (topic, pool)
+            })
             .collect::<Vec<_>>();
 
-        let mut uncovered = (0..topics.len()).collect::<Vec<_>>();
+        // A selected peer covers every topic whose pool holds it, so it never comes up again and
+        // each round covers at least one more topic.
         let mut selected = Vec::new();
-
-        while !uncovered.is_empty() && selected.len() < topics.len() {
-            let Some(best_peer) = best_candidate(topics, &closest_pools, &uncovered, &selected)
-            else {
-                break;
-            };
-
-            uncovered.retain(|topic_idx| !pool_contains(&closest_pools[*topic_idx], &best_peer));
+        while let Some(best_peer) = best_candidate(&uncovered) {
+            uncovered.retain(|(_, pool)| !pool_contains(pool, &best_peer));
             selected.push(best_peer);
         }
-
         selected
     }
 
-    /// Evict peers unseen for `PEER_STALENESS_TTL` as of `now`, plus any excess over
-    /// `MAX_KNOWN_PEERS`, least recently seen first.
+    /// Evict disconnected peers unseen for `PEER_STALENESS_TTL` as of `now`, plus any excess
+    /// over `MAX_KNOWN_PEERS`, least recently seen first.
     /// Returns whether the candidates for a topic changed.
     pub fn evict(&mut self, now: &TNow) -> bool {
         let mut changed = false;
@@ -169,6 +193,7 @@ where
             let Some((victim, last_seen)) = self
                 .discovered
                 .iter()
+                .filter(|(_, info)| !info.connected)
                 .min_by_key(|(_, info)| &info.last_seen)
                 .map(|(peer, info)| (peer.clone(), info.last_seen.clone()))
             else {
@@ -184,19 +209,19 @@ where
     }
 
     /// Insert `peer` if absent, refresh its `last_seen`, and return its record.
+    ///
+    /// An event delivered late, with a `now` older than the last one, leaves `last_seen` alone.
     fn get_or_insert_peer(&mut self, peer: PeerId, now: &TNow) -> &mut PeerInfo<TNow> {
-        let info = match self.discovered.entry(peer) {
-            hashbrown::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            hashbrown::hash_map::Entry::Vacant(entry) => {
-                let key = peer_key(entry.key());
-                entry.insert(PeerInfo {
-                    supports_protocol: false,
-                    key,
-                    last_seen: now.clone(),
-                })
-            }
-        };
-        info.last_seen = now.clone();
+        let info = self
+            .discovered
+            .entry(peer)
+            .or_insert_with_key(|peer| PeerInfo {
+                supports_protocol: false,
+                connected: false,
+                key: peer_key(peer),
+                last_seen: now.clone(),
+            });
+        info.last_seen = now.clone().max(info.last_seen.clone());
         info
     }
 
@@ -218,23 +243,17 @@ where
     }
 }
 
-/// The peer covering the most uncovered topics, breaking ties by the smallest distance to a
-/// covered topic, then by the smallest peer id.
-fn best_candidate(
-    topics: &[Key],
-    pools: &[Vec<(PeerId, Key)>],
-    uncovered: &[usize],
-    selected: &[PeerId],
-) -> Option<PeerId> {
+/// The peer covering the most uncovered topics, breaking ties by the smallest distance to any
+/// topic it covers, then by the smallest peer id.
+fn best_candidate(uncovered: &[(&Key, Vec<(PeerId, Key)>)]) -> Option<PeerId> {
     uncovered
         .iter()
-        .flat_map(|topic_idx| pools[*topic_idx].iter())
-        .filter(|(peer, _)| !selected.contains(peer))
+        .flat_map(|(_, pool)| pool)
         .map(|(peer, key)| {
             let (covered_count, best_distance) = uncovered
                 .iter()
-                .filter(|topic_idx| pool_contains(&pools[**topic_idx], peer))
-                .map(|topic_idx| xor_distance(&topics[*topic_idx], key))
+                .filter(|(_, pool)| pool_contains(pool, peer))
+                .map(|(topic, _)| xor_distance(topic, key))
                 .fold((0usize, [u8::MAX; 32]), |(count, best), distance| {
                     (count + 1, best.min(distance))
                 });
@@ -258,11 +277,7 @@ fn peer_key(peer: &PeerId) -> Key {
 }
 
 fn xor_distance(a: &Key, b: &Key) -> Key {
-    let mut distance = [0; 32];
-    for ((distance, a), b) in distance.iter_mut().zip(a).zip(b) {
-        *distance = a ^ b;
-    }
-    distance
+    core::array::from_fn(|i| a[i] ^ b[i])
 }
 
 #[cfg(test)]
@@ -312,6 +327,13 @@ mod tests {
         assert!(topology.closest_known(&topic(9), 10).is_empty());
         assert!(topology.peers_for_topics(&[topic(9)]).is_empty());
         assert_eq!(topology.known_peers_count(), 2);
+
+        // An open substream implies support, and closing it keeps the peer known.
+        topology.on_substream_opened(peer(3), &now);
+        assert_eq!(topology.closest_known(&topic(9), 10), vec![peer(3)]);
+        topology.on_substream_closed(peer(3), &now);
+        assert_eq!(topology.closest_known(&topic(9), 10), vec![peer(3)]);
+        assert_eq!(topology.known_peers_count(), 2);
     }
 
     #[test]
@@ -332,17 +354,42 @@ mod tests {
         assert!(topology.evict(&(start + PEER_STALENESS_TTL + Duration::from_secs(1))));
         assert_eq!(topology.known_peers_count(), 0);
 
-        for n in 0..(MAX_KNOWN_PEERS + 50) as u32 {
+        // A connected peer outlives the TTL, and an event with an older `now` leaves
+        // `last_seen` in place.
+        topology.on_substream_opened(peer(2), &start);
+        dht_peer(&mut topology, peer(3), start);
+        topology.on_peers_discovered([peer(3)], &Duration::ZERO);
+        assert!(topology.evict(&(start + PEER_STALENESS_TTL)));
+        assert_eq!(topology.closest_known(&topic(9), 10), vec![peer(2)]);
+        topology.on_substream_closed(peer(2), &(start + PEER_STALENESS_TTL));
+        assert!(topology.evict(&(start + 2 * PEER_STALENESS_TTL)));
+        assert_eq!(topology.known_peers_count(), 0);
+
+        // Over the cap, the least recently seen peers go first.
+        let numbered = |n: u32| {
             let mut key = [0; 32];
             key[..4].copy_from_slice(&n.to_be_bytes());
+            PeerId::from_public_key(&PublicKey::Ed25519(key))
+        };
+        for n in 0..(MAX_KNOWN_PEERS + 50) as u32 {
             dht_peer(
                 &mut topology,
-                PeerId::from_public_key(&PublicKey::Ed25519(key)),
-                start,
+                numbered(n),
+                start + Duration::from_secs(n.into()),
             );
         }
+        dht_peer(
+            &mut topology,
+            numbered(0),
+            start + Duration::from_secs(1 << 20),
+        );
         assert!(topology.evict(&start));
         assert_eq!(topology.known_peers_count(), MAX_KNOWN_PEERS);
+        let known = topology.closest_known(&topic(9), MAX_KNOWN_PEERS);
+        assert!(known.contains(&numbered(0)));
+        assert!(!known.contains(&numbered(1)));
+        assert!(!known.contains(&numbered(50)));
+        assert!(known.contains(&numbered(51)));
     }
 
     #[test]
@@ -355,6 +402,8 @@ mod tests {
 
         // Answers of the peers topology of a full node fed with the same peers: the seeds of
         // the seven closest peers to each topic, then the seeds of the cover of all the topics.
+        // The tests of the full node use other peer bytes, a raw identity multihash of 32 bytes
+        // of `seed`, so their expected values differ from these.
         type Vector = (
             core::ops::RangeInclusive<u8>,
             usize,
