@@ -148,6 +148,24 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
 
     /// If `Some`, enables the statement store networking protocol.
     pub statement_protocol_config: Option<StatementProtocolConfig>,
+
+    /// Maximum number of transactions that the client holds at the same time for this chain.
+    ///
+    /// A transaction submitted through the JSON-RPC API (`transactionWatch_v1_submitAndWatch`,
+    /// `transaction_v1_broadcast`, `author_submitExtrinsic`, `author_submitAndWatchExtrinsic`) is
+    /// held from its submission until it is finalized, found invalid, or dropped. A transaction
+    /// submitted while this many are held is dropped immediately, without being broadcast.
+    ///
+    /// Every transaction held costs memory, validations (through call proofs) and announcements
+    /// to peers, as each one is periodically re-announced until it leaves the pool.
+    ///
+    /// The chain's services are shared between all the chains added with the same
+    /// specification. If such a chain is already running, the value of the addition that
+    /// started it applies.
+    ///
+    /// The wasm node uses 64 by default. Embedders whose JSON-RPC clients are entirely trusted
+    /// and that need to submit more transactions per finality delay can raise it.
+    pub max_pending_transactions: NonZero<u32>,
 }
 
 /// See [`AddChainConfig::json_rpc`].
@@ -684,6 +702,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         let statement_protocol_config = config.statement_protocol_config;
+        let max_pending_transactions = config.max_pending_transactions;
 
         // Start the services of the chain to add, or grab the services if they already exist.
         let (services, log_name) = match chains_by_key.entry(new_chain_key.clone()) {
@@ -734,6 +753,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         config,
                         network_identify_agent_version,
                         statement_protocol_config.is_some(),
+                        max_pending_transactions,
                     )
                 };
 
@@ -1156,6 +1176,7 @@ fn start_services<TPlat: platform::PlatformRef>(
     config: StartServicesChainTy<'_, TPlat>,
     network_identify_agent_version: String,
     enable_statement_protocol: bool,
+    max_pending_transactions: NonZero<u32>,
 ) -> ChainServices<TPlat> {
     let chain_metrics = Arc::new(metrics::ChainMetrics::default());
 
@@ -1303,7 +1324,7 @@ fn start_services<TPlat: platform::PlatformRef>(
             sync_service: sync_service.clone(),
             runtime_service: runtime_service.clone(),
             network_service: network_service_chain.clone(),
-            max_pending_transactions: NonZero::<u32>::new(64).unwrap(),
+            max_pending_transactions,
             max_concurrent_downloads: NonZero::<u32>::new(3).unwrap(),
             max_concurrent_validations: NonZero::<u32>::new(2).unwrap(),
         },

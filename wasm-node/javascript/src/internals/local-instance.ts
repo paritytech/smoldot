@@ -93,7 +93,7 @@ export interface Instance {
      * indicate whether the initialization was actually successful. If `success` is `false`, then
      * the `chainId` becomes unallocated.
      */
-    addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number, statementStoreMaxSeenStatements: number, statementStoreFalsePositiveRate: number, statementStoreAffinityUpdateIntervalMs: number) => void,
+    addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number, statementStoreMaxSeenStatements: number, statementStoreFalsePositiveRate: number, statementStoreAffinityUpdateIntervalMs: number, maxPendingTransactions: number) => void,
     removeChain: (chainId: number) => void,
     /**
      * Notifies the background executor that it should stop. Once it has effectively stopped,
@@ -567,7 +567,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             }
         },
 
-        addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number, statementStoreMaxSeenStatements: number, statementStoreFalsePositiveRate: number, statementStoreAffinityUpdateIntervalMs: number) => {
+        addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number, statementStoreMaxSeenStatements: number, statementStoreFalsePositiveRate: number, statementStoreAffinityUpdateIntervalMs: number, maxPendingTransactions: number) => {
             if (!state.instance) {
                 eventCallback({ ty: "add-chain-id-allocated", chainId: 0 });
                 eventCallback({ ty: "add-chain-result", chainId: 0, success: false, error: "Smoldot has crashed" });
@@ -592,7 +592,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             state.bufferIndices[2] = potentialRelayChainsEncoded
             let chainId;
             try {
-                chainId = state.instance.exports.add_chain(0, 1, disableJsonRpc ? 0 : jsonRpcMaxPendingRequests, jsonRpcMaxSubscriptions, 2, statementStoreMaxSeenStatements, statementStoreFalsePositiveRate, statementStoreAffinityUpdateIntervalMs);
+                chainId = state.instance.exports.add_chain(0, 1, disableJsonRpc ? 0 : jsonRpcMaxPendingRequests, jsonRpcMaxSubscriptions, 2, statementStoreMaxSeenStatements, statementStoreFalsePositiveRate, statementStoreAffinityUpdateIntervalMs, maxPendingTransactions);
             } catch (_error) {
                 eventCallback({ ty: "add-chain-id-allocated", chainId: 0 });
                 eventCallback({ ty: "add-chain-result", chainId: 0, success: false, error: "Smoldot has crashed" });
@@ -692,7 +692,7 @@ interface SmoldotWasmExports extends WebAssembly.Exports {
     memory: WebAssembly.Memory,
     init: (maxLogLevel: number) => void,
     advance_execution: () => void,
-    add_chain: (chainSpecBufferIndex: number, databaseContentBufferIndex: number, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number, potentialRelayChainsBufferIndex: number, statementStoreMaxSeenStatements: number, statementStoreFalsePositiveRate: number, statementStoreAffinityUpdateIntervalMs: number) => number;
+    add_chain: (chainSpecBufferIndex: number, databaseContentBufferIndex: number, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number, potentialRelayChainsBufferIndex: number, statementStoreMaxSeenStatements: number, statementStoreFalsePositiveRate: number, statementStoreAffinityUpdateIntervalMs: number, maxPendingTransactions: number) => number;
     remove_chain: (chainId: number) => void,
     chain_is_ok: (chainId: number) => number,
     chain_error_len: (chainId: number) => number,
