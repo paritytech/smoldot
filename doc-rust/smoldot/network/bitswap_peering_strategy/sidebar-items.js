@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AssignSlotError","AssignablePeer","DecreasePeerConnectionsError","UnassignSlotAndBan"],"struct":["BitswapPeeringStrategy","Config"]};

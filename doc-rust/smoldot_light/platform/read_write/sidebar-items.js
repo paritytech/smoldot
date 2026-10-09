@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["IncomingBytesTakeError","IncomingBytesTakeLeb128Error"],"struct":["ReadWrite"]};
