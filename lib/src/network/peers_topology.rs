@@ -359,9 +359,12 @@ mod tests {
         topology.on_substream_opened(peer(2), &start);
         dht_peer(&mut topology, peer(3), start);
         topology.on_peers_discovered([peer(3)], &Duration::ZERO);
+        assert!(!topology.evict(&(Duration::ZERO + PEER_STALENESS_TTL)));
         assert!(topology.evict(&(start + PEER_STALENESS_TTL)));
         assert_eq!(topology.closest_known(&topic(9), 10), vec![peer(2)]);
         topology.on_substream_closed(peer(2), &(start + PEER_STALENESS_TTL));
+        topology.on_substream_closed(peer(2), &start);
+        assert!(!topology.evict(&(start + 2 * PEER_STALENESS_TTL - Duration::from_secs(1))));
         assert!(topology.evict(&(start + 2 * PEER_STALENESS_TTL)));
         assert_eq!(topology.known_peers_count(), 0);
 
