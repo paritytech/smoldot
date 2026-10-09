@@ -26,13 +26,10 @@
 //! outcomes. It would be unwise to display keys and ask users to input keys as, for example,
 //! hexadecimal, because it is easy to make a copying mistake.
 //!
-//! For this reason, Substrate-defines two human-readable formats:
+//! For this reason, Substrate defines a human-readable format for public keys, named SS58.
 //!
-//! - A human-readable format for public keys, named SS58.
-//! - A human-readable format for private keys.
-//!
-//! These formats do not mention which asymmetric cryptographic algorithm (e.g. ed25519 or sr25519)
-//! is used for the public and private keys. This must be deduced from the context.
+//! This format does not mention which asymmetric cryptographic algorithm (e.g. ed25519 or sr25519)
+//! is used for the public key. This must be deduced from the context.
 //!
 //! ## Public keys (SS58)
 //!
@@ -55,33 +52,5 @@
 //!
 //! The checksum is verified when the human-readable format is turned into a public key. Its
 //! presence guarantees that simple copying mistakes will be caught.
-//!
-//! ## Private keys
-//!
-//! Examples:
-//!
-//! - `cry opinion donkey dolphin tobacco version pilot sponsor canal page vote main`
-//! - `canoe gravity deputy pottery glass cousin era cube double rather clutch crazy//Foo//Bar`
-//! - `//Alice`
-//!
-//! The human-readable format for private keys is also called a secret string.
-//!
-//! The format for private keys consists in:
-//!
-//! - An optional [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki) seed
-//! phrase. If it is missing, then the [`seed_phrase::DEFAULT_SEED_PHRASE`] is automatically used
-//! instead.
-//!
-//! - An optional derivation path. When using one `/`, this is called a *soft* derivation. When
-//! using two `/`, this is called a *hard* derivation. Soft derivations are reversible and can
-//! only be performed on public keys. Hard derivations are not reversible and can only be
-//! performed on private keys.
-//!
-//! - An optional password. The private key format can contain a `///password` suffix, in which
-//! case `password` will be used when decoding the BIP39 phrase. See the BIP39 specification. If
-//! no password is provided, then the empty string (`""`) is used.
-//!
 
-pub mod keystore;
-pub mod seed_phrase;
 pub mod ss58;

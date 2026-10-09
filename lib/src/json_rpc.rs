@@ -64,4 +64,3 @@
 pub mod methods;
 pub mod parse;
 pub mod payment_info;
-pub mod service;

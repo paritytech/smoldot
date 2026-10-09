@@ -1,9 +1,8 @@
 [workspace]
 resolver = "2"
-default-members = ["lib", "full-node"]
+default-members = ["lib"]
 members = [
     "lib",
-    "full-node",
     "light-base",
     "wasm-node/rust",
 ]

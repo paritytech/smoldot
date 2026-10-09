@@ -39,7 +39,7 @@ Check what changed since the last release tag (usually `npm-smoldot-v<prev>`):
 
 ```sh
 git log --oneline <prev-tag>..HEAD
-git diff --stat <prev-tag>..HEAD -- lib/ light-base/ wasm-node/ full-node/
+git diff --stat <prev-tag>..HEAD -- lib/ light-base/ wasm-node/
 ```
 
 Apply these rules per package:
@@ -94,7 +94,7 @@ Edit exactly these fields (do not edit anything else in the same commit):
 
 **Path-dep `version` strings: bump only on major crosses.** Leave the
 `version = "..."` on `smoldot` / `smoldot-light` path-deps in
-`full-node/Cargo.toml`, `light-base/Cargo.toml`, and `wasm-node/rust/Cargo.toml`
+`light-base/Cargo.toml` and `wasm-node/rust/Cargo.toml`
 alone on patch and minor releases. Bump them only when the dep crosses a major
 boundary (e.g. `smoldot 1.x.y` → `2.0.0`). Rationale: the `path` resolves the
 source locally regardless of the string; the string is a tripwire that only
@@ -214,7 +214,7 @@ git push origin release/npm-smoldot-v<X.Y.Z>
 ```
 
 On a **major** crate cross (see step 3), also stage the path-dep `version`
-string edits — `full-node/Cargo.toml`, `light-base/Cargo.toml`, and
+string edits — `light-base/Cargo.toml` and
 `wasm-node/rust/Cargo.toml` for a `smoldot` major; `wasm-node/rust/Cargo.toml`
 for a `smoldot-light` major.
 
@@ -347,7 +347,7 @@ Even `suffix=""` produces `dev-<YYYYMMDD>`, not `latest`.
   with `npm install --package-lock-only`.
 - Major crate cross only: also write the path-dep `version` strings on the
   crate that crossed (e.g. a `smoldot` major touches the `smoldot` dep string
-  in `full-node/Cargo.toml`, `light-base/Cargo.toml`, `wasm-node/rust/Cargo.toml`).
+  in `light-base/Cargo.toml`, `wasm-node/rust/Cargo.toml`).
 - Changelog: insert new section in `wasm-node/CHANGELOG.md` between
   `## Unreleased` and the previous version heading.
 - Scope detection: `git diff --stat <prev-tag>..HEAD -- <path>` for
