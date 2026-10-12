@@ -26,6 +26,8 @@ zombienet-sdk = "0.5.2"
 # build against crates.io; raise the `zombienet-sdk` version above to that release and make the
 # scenarios unconditional.
 jam = []
+# Local only: the JAM scenarios build by default against the forks patched in below.
+default = ["jam"]
 
 [[test]]
 name = "jam_aged"
@@ -46,3 +48,11 @@ required-features = ["jam"]
 [[test]]
 name = "jam_generate_snapshot"
 required-features = ["jam"]
+
+# Local only, never upstream: zombienet-sdk's JAM support from the fork branch
+# `skunert/polkajam-light-client`, and the PolkaJam `jam-*` crates that branch takes from the
+# PolkaJam branch of the same name (its own `[patch.crates-io]` does not apply here).
+[patch.crates-io]
+jam-std-common = { path = "/home/sebastian/work/repos/polkajam/crates/jam-std-common" }
+jam-types = { path = "/home/sebastian/work/repos/polkajam/crates/jam-types" }
+zombienet-sdk = { path = "/home/sebastian/work/repos/zombienet-sdk/crates/sdk" }
