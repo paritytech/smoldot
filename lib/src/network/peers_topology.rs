@@ -24,8 +24,9 @@
 //! one of the closest known peers for a topic is likely to reach a holder of that topic.
 //!
 //! The topology is built from peers learned through discovery, Identify and statement
-//! substreams, and remembers them after they disconnect, so that a peer close to a topic can be
-//! connected again later. It computes XOR distances locally over that learned peer set and
+//! substreams, and remembers them with their addresses after they disconnect, so that a peer
+//! close to a topic can be connected again later, even once the address book shared with the
+//! block sync has dropped it. It computes XOR distances locally over that learned peer set and
 //! never issues a topic-specific lookup, so that nobody learns which topics the local node
 //! subscribes to.
 //!
@@ -51,6 +52,9 @@ const PEER_STALENESS_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 /// Hard cap on the known peers. Bounds memory when discovery outruns staleness eviction.
 const MAX_KNOWN_PEERS: usize = 8192;
 
+/// Addresses remembered per peer, the newest ones.
+const MAX_ADDRESSES_PER_PEER: usize = 10;
+
 /// Configuration passed to [`PeersTopology::new`].
 pub struct Config {
     /// Seed used for the randomness of the hash map holding the peers.
@@ -71,6 +75,9 @@ struct PeerInfo<TNow> {
     /// Time of the most recent event observing this peer, the eviction key for both staleness
     /// and the capacity backstop.
     last_seen: TNow,
+    /// Multiaddresses the peer was discovered with, at most `MAX_ADDRESSES_PER_PEER`, the
+    /// newest last.
+    addresses: Vec<Vec<u8>>,
 }
 
 /// Local view of the statement peers of a chain. See the [module documentation](self).
@@ -103,10 +110,25 @@ where
         }
     }
 
-    /// Record that a FindNode response listed `peers`.
-    pub fn on_peers_discovered(&mut self, peers: impl IntoIterator<Item = PeerId>, now: &TNow) {
-        for peer in peers {
-            self.get_or_insert_peer(peer, now);
+    /// Record that a FindNode response listed `peers`, each with its multiaddresses.
+    pub fn on_peers_discovered<TAddrs>(
+        &mut self,
+        peers: impl IntoIterator<Item = (PeerId, TAddrs)>,
+        now: &TNow,
+    ) where
+        TAddrs: IntoIterator<Item = Vec<u8>>,
+    {
+        for (peer, addresses) in peers {
+            let info = self.get_or_insert_peer(peer, now);
+            for address in addresses {
+                if info.addresses.contains(&address) {
+                    continue;
+                }
+                if info.addresses.len() >= MAX_ADDRESSES_PER_PEER {
+                    info.addresses.remove(0);
+                }
+                info.addresses.push(address);
+            }
         }
     }
 
@@ -144,6 +166,23 @@ where
     /// support.
     pub fn known_peers_count(&self) -> usize {
         self.discovered.len()
+    }
+
+    /// Known peers that support the statement protocol, in no specific order.
+    pub fn statement_peers(&self) -> impl Iterator<Item = &PeerId> {
+        self.discovered
+            .iter()
+            .filter(|(_, info)| info.supports_protocol)
+            .map(|(peer, _)| peer)
+    }
+
+    /// Multiaddresses `peer` was discovered with. Empty for an unknown peer, or for a peer
+    /// learned only from Identify or from a statement substream.
+    pub fn peer_addresses(&self, peer: &PeerId) -> impl Iterator<Item = &[u8]> {
+        self.discovered
+            .get(peer)
+            .into_iter()
+            .flat_map(|info| info.addresses.iter().map(Vec::as_slice))
     }
 
     /// Closest known statement peers for `topic`.
@@ -220,6 +259,7 @@ where
                 connected: false,
                 key: peer_key(peer),
                 last_seen: now.clone(),
+                addresses: Vec::new(),
             });
         info.last_seen = now.clone().max(info.last_seen.clone());
         info
@@ -282,7 +322,10 @@ fn xor_distance(a: &Key, b: &Key) -> Key {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, MAX_KNOWN_PEERS, PEER_STALENESS_TTL, PeersTopology, peer_key};
+    use super::{
+        Config, MAX_ADDRESSES_PER_PEER, MAX_KNOWN_PEERS, PEER_STALENESS_TTL, PeersTopology,
+        peer_key,
+    };
     use crate::libp2p::{PeerId, peer_id::PublicKey};
     use core::{num::NonZeroUsize, time::Duration};
 
@@ -305,7 +348,7 @@ mod tests {
     }
 
     fn dht_peer(topology: &mut PeersTopology<Duration>, peer: PeerId, now: Duration) {
-        topology.on_peers_discovered([peer.clone()], &now);
+        topology.on_peers_discovered([(peer.clone(), Vec::new())], &now);
         topology.on_peer_identified(peer, true, &now);
     }
 
@@ -316,12 +359,27 @@ mod tests {
 
         dht_peer(&mut topology, peer(2), now);
         dht_peer(&mut topology, peer(2), now);
-        topology.on_peers_discovered([peer(3)], &now);
+        topology.on_peers_discovered([(peer(3), vec![vec![3], vec![3]])], &now);
         topology.on_peer_identified(peer(3), false, &now);
 
         assert_eq!(topology.known_peers_count(), 2);
         assert_eq!(topology.closest_known(&topic(9), 10), vec![peer(2)]);
         assert_eq!(topology.peers_for_topics(&[topic(9)]), vec![peer(2)]);
+        assert_eq!(
+            topology.statement_peers().collect::<Vec<_>>(),
+            vec![&peer(2)]
+        );
+
+        // Addresses are deduplicated and the oldest ones go once over the cap.
+        assert_eq!(topology.peer_addresses(&peer(3)).collect::<Vec<_>>(), [[3]]);
+        let addresses = (0..=MAX_ADDRESSES_PER_PEER as u8).map(|n| vec![n]);
+        topology.on_peers_discovered([(peer(3), addresses)], &now);
+        assert_eq!(
+            topology.peer_addresses(&peer(3)).count(),
+            MAX_ADDRESSES_PER_PEER
+        );
+        assert_eq!(topology.peer_addresses(&peer(3)).next(), Some(&[0][..]));
+        assert!(topology.peer_addresses(&peer(2)).next().is_none());
 
         topology.on_peer_identified(peer(2), false, &now);
         assert!(topology.closest_known(&topic(9), 10).is_empty());
@@ -342,7 +400,7 @@ mod tests {
         let start = Duration::from_secs(1);
 
         dht_peer(&mut topology, peer(2), start);
-        topology.on_peers_discovered([peer(3)], &start);
+        topology.on_peers_discovered([(peer(3), Vec::new())], &start);
         assert!(!topology.evict(&(start + PEER_STALENESS_TTL - Duration::from_secs(1))));
         assert_eq!(topology.known_peers_count(), 2);
 
@@ -358,7 +416,7 @@ mod tests {
         // `last_seen` in place.
         topology.on_substream_opened(peer(2), &start);
         dht_peer(&mut topology, peer(3), start);
-        topology.on_peers_discovered([peer(3)], &Duration::ZERO);
+        topology.on_peers_discovered([(peer(3), Vec::new())], &Duration::ZERO);
         assert!(!topology.evict(&(Duration::ZERO + PEER_STALENESS_TTL)));
         assert!(topology.evict(&(start + PEER_STALENESS_TTL)));
         assert_eq!(topology.closest_known(&topic(9), 10), vec![peer(2)]);
