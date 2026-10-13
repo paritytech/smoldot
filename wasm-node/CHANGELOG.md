@@ -15,6 +15,7 @@
 
 - A `chainHead_v1_follow` subscription no longer loses one slot of its pinned-blocks budget for every block that is unpinned before it is finalized or pruned. The runtime service charged every subscriber for each newly finalized and pruned block regardless of whether the subscriber still had it pinned, and an already-unpinned block could never be unpinned again to get the slot back, so a client that unpins early was eventually stopped for exceeding its limit. Only blocks the subscriber still has pinned are now charged. ([#3366](https://github.com/paritytech/smoldot/pull/3366))
 - A WebRTC connection no longer panics when the remote cancels an inbound substream before it is accepted. The multi-stream connection reported this as `InboundAcceptedCancel` and unwrapped user data that only an accepted substream has; it now reports `InboundNegotiatedCancel`, as single-stream connections do.
+- A WebRTC connection no longer writes a `FIN` or `FIN_ACK` flag when the outer stream has less room than the flag's frame. Writing it queued more bytes than the stream allowed, which failed the `total_length <= writable_bytes` assertion of the wasm node. The flag now waits until the stream is writable again.
 
 ## 3.5.0 - 2026-09-09
 
