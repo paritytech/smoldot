@@ -17,6 +17,7 @@
 - A WebRTC connection no longer panics when the remote cancels an inbound substream before it is accepted. The multi-stream connection reported this as `InboundAcceptedCancel` and unwrapped user data that only an accepted substream has; it now reports `InboundNegotiatedCancel`, as single-stream connections do.
 - A WebRTC connection no longer writes a `FIN` or `FIN_ACK` flag when the outer stream has less room than the flag's frame. Writing it queued more bytes than the stream allowed, which failed the `total_length <= writable_bytes` assertion of the wasm node. The flag now waits until the stream is writable again.
 - The JavaScript execution loop no longer leaks memory. It raced each of its waits against one promise that settles only at shutdown, and every race left a reaction on that promise until then: about 2 MiB of heap per second for a busy client, until the worker ran out of heap. Each wait now races a promise of its own.
+- The JavaScript side now keeps at most one timer pending per client. Each `start_timer` request used to get a `setTimeout` of its own, and as every call to `timer_finished`, spurious or not, asks for a new one, the timers superseded by a newer, earlier request never went away. On a light client following a relay chain and two parachains their number grew by about 14 per second, and after 7 minutes they called `timer_finished` 78,000 times per second, a share of the CPU that kept growing with the client's age.
 
 ## 3.5.0 - 2026-09-09
 
