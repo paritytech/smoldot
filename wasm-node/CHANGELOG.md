@@ -6,6 +6,7 @@
 
 - Add `AddChainOptions.maxPendingTransactions`: the maximum number of transactions submitted through the JSON-RPC API that a chain holds at the same time, from their submission until they are finalized or dropped. It defaults to 64, so the behaviour is unchanged unless it is set. Rust users of `smoldot-light` set the same limit through `AddChainConfig::max_pending_transactions`. ([#3394](https://github.com/paritytech/smoldot/pull/3394); fixes [#3393](https://github.com/paritytech/smoldot/issues/3393))
 - Add `ClientOptions.connectionFilter`, called with the address of each outgoing connection before it is opened. A connection it refuses is never opened, and is reported to the client as immediately reset. With the chain specification's `bootNodes` set to some nodes and every other address refused, the client connects to those nodes only, while peer discovery keeps proposing others. The address type is exported as `ConnectionAddress`.
+- On NodeJS, the new `ClientOptions.nodeWebRtc` option takes the `node-datachannel` module and enables WebRTC-direct connections on top of libdatachannel, with the same protocol as the browser implementation. The domain name of a WebRTC multiaddress is resolved with `node:dns`. Without the option, the NodeJS client keeps refusing WebRTC addresses.
 
 ### Changed
 
