@@ -69,7 +69,10 @@ use smoldot::{
         multiaddr::{self, Multiaddr},
         peer_id,
     },
-    network::{basic_peering_strategy, bitswap_peering_strategy, codec, service},
+    network::{
+        basic_peering_strategy, bitswap_peering_strategy, codec, peer_steering, peers_topology,
+        service,
+    },
 };
 
 pub use codec::{AffinityFilter, CallProofRequestConfig, Role};
@@ -237,6 +240,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             child_storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             chains_by_next_discovery: BTreeMap::new(),
+            next_peer_steering: None,
         }));
 
         config.platform.spawn_task("network-service".into(), {
@@ -294,6 +298,23 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     next_discovery_period: Duration::from_secs(2),
                     next_discovery_when: self.platform.now(),
                     metrics: config.metrics,
+                    statement_peering: config.enable_statement_protocol.then(|| {
+                        let seed = || {
+                            let mut seed = [0; 32];
+                            self.platform.fill_random_bytes(&mut seed);
+                            seed
+                        };
+                        StatementPeering {
+                            topology: peers_topology::PeersTopology::new(peers_topology::Config {
+                                randomness_seed: seed(),
+                                replication_factor: STATEMENT_REPLICATION_FACTOR,
+                            }),
+                            steering: peer_steering::PeerSteering::new(peer_steering::Config {
+                                randomness_seed: seed(),
+                            }),
+                            topics: Vec::new(),
+                        }
+                    }),
                 },
             };
 
@@ -755,9 +776,14 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
-    pub async fn update_topic_affinity(&self, filter: AffinityFilter) {
+    /// Updates the topic affinity filter sent to the statement peers, and the topics that the
+    /// statement links must cover.
+    ///
+    /// The topics stay in the node: the peers close to them are picked among the known peers,
+    /// and only the filter goes on the wire.
+    pub async fn update_topic_affinity(&self, filter: AffinityFilter, topics: Vec<[u8; 32]>) {
         self.messages_tx
-            .send(ToBackgroundChain::UpdateTopicAffinity { filter })
+            .send(ToBackgroundChain::UpdateTopicAffinity { filter, topics })
             .await
             .unwrap();
     }
@@ -1071,6 +1097,7 @@ enum ToBackgroundChain {
     },
     UpdateTopicAffinity {
         filter: AffinityFilter,
+        topics: Vec<[u8; 32]>,
     },
     Discover {
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
@@ -1256,6 +1283,32 @@ struct BackgroundTask<TPlat: PlatformRef> {
 
     /// All chains, indexed by the value of [`Chain::next_discovery_when`].
     chains_by_next_discovery: BTreeMap<(TPlat::Instant, ChainId), Pin<Box<TPlat::Delay>>>,
+
+    /// Delay until the next refresh of the statement links of every chain. `None` while no
+    /// chain has topics to cover or links left to close.
+    next_peer_steering: Option<Pin<Box<TPlat::Delay>>>,
+}
+
+/// Interval between two refreshes of the statement links.
+const PEER_STEERING_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Delay before the steering opens a link again with a peer that refused one, that lost its
+/// connection, or that has no known address.
+const PEER_STEERING_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// Number of full nodes storing a topic, the replication factor of the statement store.
+const STATEMENT_REPLICATION_FACTOR: NonZero<usize> = NonZero::new(20).unwrap();
+
+/// Peer choice for the statement protocol of a chain. See the `peers_topology` and
+/// `peer_steering` modules.
+struct StatementPeering<TInstant> {
+    /// Known statement peers, queried for the ones closest to the topics.
+    topology: peers_topology::PeersTopology<TInstant>,
+    /// Statement links held besides the gossip links.
+    steering: peer_steering::PeerSteering<TInstant>,
+    /// Topics of the subscriptions, the ones the links must cover. See
+    /// [`NetworkServiceChain::update_topic_affinity`].
+    topics: Vec<[u8; 32]>,
 }
 
 struct Chain<TPlat: PlatformRef> {
@@ -1280,6 +1333,9 @@ struct Chain<TPlat: PlatformRef> {
     /// After [`Chain::next_discovery_when`] is reached, the following discovery happens after
     /// the given duration.
     next_discovery_period: Duration,
+
+    /// `None` if the chain runs without the statement protocol.
+    statement_peering: Option<StatementPeering<TPlat::Instant>>,
 }
 
 #[derive(Clone)]
@@ -1319,6 +1375,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             BitswapEventSendersReady,
             StatementEventSendersReady,
             StartDiscovery(ChainId),
+            PeerSteering,
         }
 
         let wake_up_reason = {
@@ -1539,6 +1596,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let ((_, chain_id), _) = next_discovery.remove_entry();
                 WakeUpReason::StartDiscovery(chain_id)
             };
+            let peer_steering = async {
+                let Some(delay) = task.next_peer_steering.as_mut() else {
+                    future::pending().await
+                };
+                delay.await;
+                task.next_peer_steering = None;
+                WakeUpReason::PeerSteering
+            };
 
             message_for_chain_received
                 .or(message_received)
@@ -1549,6 +1614,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 .or(finished_sending_bitswap_event)
                 .or(finished_sending_statement_event)
                 .or(start_discovery)
+                .or(peer_steering)
                 .await
         };
 
@@ -1896,6 +1962,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         peer_id,
                         reason = "user-ban",
                     );
+                }
+                if let Some(peering) = &mut task.network[chain_id].statement_peering {
+                    peering
+                        .topology
+                        .on_substream_closed(peer_id.clone(), &task.platform.now());
+                    peering
+                        .steering
+                        .ban(peer_id.clone(), task.platform.now() + ban_duration);
                 }
                 if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
                     peers.remove(&peer_id);
@@ -2348,8 +2422,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::MessageForChain(
                 chain_id,
-                ToBackgroundChain::UpdateTopicAffinity { filter },
+                ToBackgroundChain::UpdateTopicAffinity { filter, topics },
             ) => {
+                if let Some(peering) = &mut task.network[chain_id].statement_peering {
+                    peering.topics = topics;
+                    if task.next_peer_steering.is_none() {
+                        task.next_peer_steering =
+                            Some(Box::pin(task.platform.sleep(Duration::ZERO)));
+                    }
+                }
+
                 task.current_affinity_filter
                     .insert(chain_id, filter.clone());
                 if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
@@ -2599,6 +2681,18 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 task.network
                     .gossip_remove_desired_all(&peer_id, service::GossipKind::Statement);
+                // A steered peer whose connection failed or closed is dialed again by the
+                // steering, after a delay rather than at the next refresh.
+                for chain_id in task.network.chains().collect::<Vec<_>>() {
+                    if let Some(peering) = &mut task.network[chain_id].statement_peering
+                        && peering.steering.is_desired(&peer_id)
+                    {
+                        peering.steering.ban(
+                            peer_id.clone(),
+                            task.platform.now() + PEER_STEERING_RETRY_DELAY,
+                        );
+                    }
+                }
                 for (&chain_id, what_happened) in task
                     .peering_strategy
                     .unassign_slots_and_ban(&peer_id, task.platform.now() + ban_duration)
@@ -2862,9 +2956,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     chain_id,
                     &peer_id,
                     service::GossipKind::Statement,
-                ) && let Some(peers) = task.v2_statement_peers.get_mut(&chain_id)
-                {
-                    peers.remove(&peer_id);
+                ) {
+                    if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                        peers.remove(&peer_id);
+                    }
+                    if let Some(peering) = &mut task.network[chain_id].statement_peering {
+                        peering
+                            .topology
+                            .on_substream_closed(peer_id.clone(), &task.platform.now());
+                    }
                 }
 
                 debug_assert!(task.events_pending_send.is_empty());
@@ -3260,6 +3360,18 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         }
                     }
 
+                    if !valid_addrs.is_empty()
+                        && let Some(peering) = &mut task.network[chain_id].statement_peering
+                    {
+                        peering.topology.on_peers_discovered(
+                            [(
+                                peer_id.clone(),
+                                valid_addrs.iter().map(|addr| addr.clone().into_bytes()),
+                            )],
+                            &task.platform.now(),
+                        );
+                    }
+
                     for addr in valid_addrs {
                         let _insert_result =
                             task.peering_strategy
@@ -3517,6 +3629,21 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     ?version,
                 );
 
+                // Only the steering desires peers under the statement kind, so a desired peer
+                // holds a steered link rather than a substream following block announces.
+                let steered = task
+                    .network
+                    .gossip_desired_iter(chain_id, service::GossipKind::Statement)
+                    .any(|p| *p == peer_id);
+                if let Some(peering) = &mut task.network[chain_id].statement_peering {
+                    peering
+                        .topology
+                        .on_substream_opened(peer_id.clone(), &task.platform.now());
+                    if steered {
+                        peering.steering.on_substream_opened(peer_id.clone());
+                    }
+                }
+
                 if matches!(version, codec::StatementProtocolVersion::V2) {
                     task.v2_statement_peers
                         .entry(chain_id)
@@ -3561,6 +3688,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &peer_id,
                     service::GossipKind::Statement,
                 );
+                // A full node without statement-only slots refuses the link. The gossip
+                // links keep serving statements in the meantime.
+                if let Some(peering) = &mut task.network[chain_id].statement_peering {
+                    peering
+                        .steering
+                        .ban(peer_id, task.platform.now() + PEER_STEERING_RETRY_DELAY);
+                }
             }
             WakeUpReason::NetworkEvent(service::Event::StatementProtocolDisconnected {
                 peer_id,
@@ -3582,6 +3716,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &peer_id,
                     service::GossipKind::Statement,
                 );
+                if let Some(peering) = &mut task.network[chain_id].statement_peering {
+                    peering
+                        .topology
+                        .on_substream_closed(peer_id.clone(), &task.platform.now());
+                    peering.steering.on_substream_closed(&peer_id);
+                }
 
                 if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
                     peers.remove(&peer_id);
@@ -3603,6 +3743,154 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 // TODO: disconnect peer
+            }
+            WakeUpReason::PeerSteering => {
+                let mut keep_steering = false;
+                for chain_id in task.network.chains().collect::<Vec<_>>() {
+                    let capable_peers = task
+                        .network
+                        .statement_capable_peers(chain_id)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let Some(peering) = &mut task.network[chain_id].statement_peering else {
+                        continue;
+                    };
+                    let now = task.platform.now();
+
+                    // Identify answers are not reported as events, so the capable peers are
+                    // picked up here.
+                    for peer_id in capable_peers {
+                        peering.topology.on_peer_identified(peer_id, true, &now);
+                    }
+                    peering.topology.evict(&now);
+
+                    let cover = peering.topology.peers_for_topics(&peering.topics);
+                    peering.steering.update_peers_needing_connections(
+                        cover,
+                        peering.topology.statement_peers(),
+                        &now,
+                    );
+                    let disconnect = peering.steering.peers_to_disconnect();
+                    let connect = peering
+                        .steering
+                        .peers_to_connect()
+                        .into_iter()
+                        .map(|peer_id| {
+                            let addresses = peering
+                                .topology
+                                .peer_addresses(&peer_id)
+                                .map(<[u8]>::to_vec)
+                                .collect::<Vec<_>>();
+                            (peer_id, addresses)
+                        })
+                        .collect::<Vec<_>>();
+                    let has_topics = !peering.topics.is_empty();
+
+                    for peer_id in &disconnect {
+                        task.network.gossip_remove_desired(
+                            chain_id,
+                            peer_id,
+                            service::GossipKind::Statement,
+                        );
+                        let _ = task.network.gossip_close(
+                            chain_id,
+                            peer_id,
+                            service::GossipKind::Statement,
+                        );
+                        log!(
+                            &task.platform,
+                            Debug,
+                            "network",
+                            "statement-link-closed",
+                            chain = &task.network[chain_id].log_name,
+                            peer_id,
+                            reason = "steering"
+                        );
+                    }
+
+                    let mut anchored = Vec::new();
+                    let mut unreachable = Vec::new();
+                    for (peer_id, addresses) in connect {
+                        if task.network.gossip_is_connected(
+                            chain_id,
+                            &peer_id,
+                            service::GossipKind::Statement,
+                        ) {
+                            // The statement substream following the block announces
+                            // substream anchors the link, with no new open.
+                            anchored.push(peer_id.clone());
+                        } else {
+                            // The topology outlives the address book, so the addresses it
+                            // remembers go back into the book before the dial. Note that we
+                            // must call this function before `insert_address`, as documented
+                            // in `basic_peering_strategy`.
+                            if !addresses.is_empty() {
+                                task.peering_strategy.insert_chain_peer(
+                                    chain_id,
+                                    peer_id.clone(),
+                                    30,
+                                ); // TODO: constant
+                                for address in addresses {
+                                    let _ =
+                                        task.peering_strategy.insert_address(&peer_id, address, 10); // TODO: constant
+                                }
+                            }
+                            if task
+                                .peering_strategy
+                                .peer_addresses(&peer_id)
+                                .next()
+                                .is_none()
+                            {
+                                unreachable.push(peer_id);
+                                continue;
+                            }
+                        }
+
+                        if task.network.gossip_insert_desired(
+                            chain_id,
+                            peer_id.clone(),
+                            service::GossipKind::Statement,
+                        ) {
+                            log!(
+                                &task.platform,
+                                Debug,
+                                "network",
+                                "statement-link-desired",
+                                chain = &task.network[chain_id].log_name,
+                                peer_id
+                            );
+                        }
+                    }
+
+                    // Links still desired, open or pending, need a refresh to be closed
+                    // once the topics are gone.
+                    keep_steering |= has_topics
+                        || task
+                            .network
+                            .gossip_desired_num(chain_id, service::GossipKind::Statement)
+                            > 0;
+
+                    let peering = task.network[chain_id]
+                        .statement_peering
+                        .as_mut()
+                        .expect("checked above; qed");
+                    for peer_id in &disconnect {
+                        peering.steering.on_substream_closed(peer_id);
+                    }
+                    for peer_id in anchored {
+                        peering.steering.on_substream_opened(peer_id);
+                    }
+                    for peer_id in unreachable {
+                        peering
+                            .steering
+                            .ban(peer_id, now.clone() + PEER_STEERING_RETRY_DELAY);
+                    }
+                }
+
+                if keep_steering {
+                    task.next_peer_steering =
+                        Some(Box::pin(task.platform.sleep(PEER_STEERING_INTERVAL)));
+                }
             }
             WakeUpReason::CanAssignSlot(peer_id, chain_id) => {
                 task.peering_strategy.assign_slot(&chain_id, &peer_id);

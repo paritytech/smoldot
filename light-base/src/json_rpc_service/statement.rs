@@ -364,28 +364,37 @@ impl StatementSubscriptions {
             .collect()
     }
 
+    /// Builds the affinity filter of all the subscriptions, and returns the topics it holds, so
+    /// that the network service can pick peers close to them. A subscription to every topic
+    /// yields a filter matching everything and no topic.
     pub(super) fn build_combined_affinity_filter(
         &self,
         config: &StatementProtocolConfig,
-    ) -> network_service::AffinityFilter {
-        let mut all_topics: Vec<&[u8; 32]> = Vec::new();
+    ) -> (network_service::AffinityFilter, Vec<[u8; 32]>) {
+        let mut all_topics: Vec<[u8; 32]> = Vec::new();
 
         for sub in self.subscriptions.values() {
             match &sub.topic_filter {
                 TopicFilter::Any => {
-                    return network_service::AffinityFilter::match_all(config.bloom_seed());
+                    return (
+                        network_service::AffinityFilter::match_all(config.bloom_seed()),
+                        Vec::new(),
+                    );
                 }
                 TopicFilter::MatchAll(topics) | TopicFilter::MatchAny(topics) => {
-                    all_topics.extend(topics.iter());
+                    all_topics.extend(topics.iter().copied());
                 }
             }
         }
 
-        network_service::AffinityFilter::from_topics(
-            all_topics.into_iter(),
+        all_topics.sort_unstable();
+        all_topics.dedup();
+        let filter = network_service::AffinityFilter::from_topics(
+            all_topics.iter(),
             config.bloom_seed(),
             config.false_positive_rate(),
-        )
+        );
+        (filter, all_topics)
     }
 }
 
@@ -590,10 +599,11 @@ mod tests {
     fn build_combined_affinity_empty_subscriptions() {
         let config = test_config();
         let subs = make_subscriptions(vec![]);
-        let filter = subs.build_combined_affinity_filter(&config);
+        let (filter, topics) = subs.build_combined_affinity_filter(&config);
 
         // Empty subscription set: no topics are ever in the filter.
         assert!(!filter.contains(&[1u8; 32]));
+        assert!(topics.is_empty());
         // A statement with no topics (broadcast) still matches.
         let broadcast: &[&[u8; 32]] = &[];
         assert!(filter.matches_statement(broadcast));
@@ -603,9 +613,11 @@ mod tests {
     fn build_combined_affinity_any_filter_matches_everything() {
         let config = test_config();
         let subs = make_subscriptions(vec![("s", TopicFilter::Any, None)]);
-        let filter = subs.build_combined_affinity_filter(&config);
+        let (filter, topics) = subs.build_combined_affinity_filter(&config);
 
-        // TopicFilter::Any returns the broadcast `match_all` filter: every topic matches.
+        // TopicFilter::Any returns the broadcast `match_all` filter: every topic matches, and
+        // there is no topic to pick peers for.
+        assert!(topics.is_empty());
         assert!(filter.contains(&[1u8; 32]));
         assert!(filter.contains(&[99u8; 32]));
         let t = [7u8; 32];
@@ -619,12 +631,13 @@ mod tests {
         let t2 = [2u8; 32];
         let subs = make_subscriptions(vec![
             ("a", TopicFilter::match_any(vec![t1]).unwrap(), None),
-            ("b", TopicFilter::match_any(vec![t2]).unwrap(), None),
+            ("b", TopicFilter::match_any(vec![t2, t1]).unwrap(), None),
         ]);
-        let filter = subs.build_combined_affinity_filter(&config);
+        let (filter, topics) = subs.build_combined_affinity_filter(&config);
 
         assert!(filter.contains(&t1));
         assert!(filter.contains(&t2));
+        assert_eq!(topics, vec![t1, t2]);
     }
 
     #[test]
