@@ -6,6 +6,10 @@
 
 - Add `AddChainOptions.maxPendingTransactions`: the maximum number of transactions submitted through the JSON-RPC API that a chain holds at the same time, from their submission until they are finalized or dropped. It defaults to 64, so the behaviour is unchanged unless it is set. Rust users of `smoldot-light` set the same limit through `AddChainConfig::max_pending_transactions`. ([#3394](https://github.com/paritytech/smoldot/pull/3394); fixes [#3393](https://github.com/paritytech/smoldot/issues/3393))
 
+### Fixed
+
+- No longer panic with `assertion failed: total_length <= self.stream.writable_bytes` when a WebRTC substream is closed, by either side, while its send buffer is almost full. The `FIN` or `FIN_ACK` flag that closes a substream was written even when the substream had less room left than the 5 bytes the flag takes. It is now sent once the substream is writable again, as data already was.
+
 ## 3.7.0 - 2026-10-07
 
 ### Added
