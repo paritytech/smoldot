@@ -19,8 +19,9 @@
 // bindings. JavaScript being JavaScript, some libraries (such as `websocket`) have issues working
 // with both at the same time.
 
-import { Client, ClientOptionsWithBytecode } from './public-types.js'
+import { Client, ClientOptionsWithBytecode, NodeWebRtcModule } from './public-types.js'
 import { start as innerStart, Connection, ConnectionConfig } from './internals/client.js'
+import { connectWebRtcNodeDatachannel, NodeWebRtcImplementation } from './internals/webrtc-node-datachannel.js'
 
 import { WebSocket } from 'ws';
 
@@ -41,7 +42,8 @@ export {
     CrashError,
     QueueFullError,
     JsonRpcDisabledError,
-    LogCallback
+    LogCallback,
+    NodeWebRtcModule
 } from './public-types.js';
 
 /**
@@ -52,7 +54,11 @@ export {
  * @param options Configuration of the client.
  */
 export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
-    options.forbidWebRtc = true;
+    // NodeJS has no WebRTC of its own: it is only available when the caller provides
+    // `node-datachannel` through `nodeWebRtc`.
+    const webRtc: NodeWebRtcModule | undefined = options.nodeWebRtc;
+    if (!webRtc)
+        options.forbidWebRtc = true;
 
     return innerStart(options || {}, options.bytecode, {
         performanceNow: () => {
@@ -64,6 +70,8 @@ export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
             randomFillSync(buffer)
         },
         connect: (config) => {
+            if (config.address.ty === "webrtc" && webRtc)
+                return connectWebRtcNodeDatachannel(config, webRtc as NodeWebRtcImplementation, (buffer) => { randomFillSync(buffer) });
             return connect(config)
         }
     })

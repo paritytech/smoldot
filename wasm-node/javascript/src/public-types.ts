@@ -366,6 +366,25 @@ export interface ClientOptions {
      * Defaults to accepting every connection.
      */
     connectionFilter?: (address: ConnectionAddress) => boolean;
+
+    /**
+     * NodeJS only: the `node-datachannel` module, as in
+     * `import * as nodeDataChannel from 'node-datachannel'`.
+     *
+     * NodeJS has no WebRTC API, so by default the NodeJS client refuses WebRTC addresses, as if
+     * {@link ClientOptions.forbidWebRtc} were `true`. Passing the module here enables WebRTC-direct
+     * connections on top of libdatachannel. `forbidWebRtc` still applies.
+     *
+     * Ignored on every other platform.
+     */
+    nodeWebRtc?: NodeWebRtcModule;
+}
+
+/**
+ * The parts of the `node-datachannel` module that {@link ClientOptions.nodeWebRtc} needs.
+ */
+export interface NodeWebRtcModule {
+    PeerConnection: new (peerName: string, config: any) => any;
 }
 
 /**
