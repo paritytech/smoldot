@@ -108,13 +108,14 @@ pub struct ConfigSubstrateCompatible {
     /// if it matches the Merkle value provided in the hint, use the storage value in the hint
     /// instead of downloading it. If the hint doesn't match, an extra round-trip will be needed,
     /// but if the hint matches it saves a big download.
-    pub runtime_code_hint: Option<ConfigSubstrateCompatibleRuntimeCodeHint>,
+    pub runtime_code_hint: Option<ConfigRuntimeCodeHint>,
 }
 
-/// See [`ConfigSubstrateCompatible::runtime_code_hint`].
-pub struct ConfigSubstrateCompatibleRuntimeCodeHint {
+/// See [`ConfigSubstrateCompatible::runtime_code_hint`] and
+/// [`ConfigParachain::runtime_code_hint`].
+pub struct ConfigRuntimeCodeHint {
     /// Storage value of the `:code` trie node corresponding to
-    /// [`ConfigSubstrateCompatibleRuntimeCodeHint::merkle_value`].
+    /// [`ConfigRuntimeCodeHint::merkle_value`].
     pub storage_value: Vec<u8>,
     /// Merkle value of the `:code` trie node in the storage main trie.
     pub merkle_value: Vec<u8>,
@@ -126,6 +127,13 @@ pub struct ConfigSubstrateCompatibleRuntimeCodeHint {
 pub struct ConfigParachain<TPlat: PlatformRef> {
     /// Parameters of the relay chain.
     pub relay_chain: ConfigRelayChain<TPlat>,
+
+    /// Known valid Merkle value and storage value combination for the `:code` key.
+    ///
+    /// If provided, the bootstrap first fetches the Merkle value of `:code` of the finalized
+    /// block, and if it matches the Merkle value provided in the hint, uses the storage value in
+    /// the hint instead of downloading it. If the hint doesn't match, `:code` is downloaded.
+    pub runtime_code_hint: Option<ConfigRuntimeCodeHint>,
 }
 
 /// See [`ConfigParachain::relay_chain`].
@@ -170,6 +178,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 config.block_number_bytes,
                 config_parachain.relay_chain.relay_chain_sync.clone(),
                 config_parachain.relay_chain.para_id,
+                config_parachain.runtime_code_hint,
                 from_foreground,
                 config.network_service.clone(),
                 config.metrics.clone(),
