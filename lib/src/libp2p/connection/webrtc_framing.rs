@@ -65,6 +65,8 @@ const RECEIVE_BUFFER_CAPACITY: usize = 2048;
 const PROTOBUF_FRAME_MIN_LEN: usize = 2;
 /// Maximum size in bytes of the protobuf frame surrounding the message.
 const PROTOBUF_FRAME_MAX_LEN: usize = 8; // TODO: calculate better?
+/// Size in bytes of a protobuf frame that carries a flag and no data.
+const PROTOBUF_FRAME_FLAG_ONLY_LEN: usize = 5;
 const MAX_PROTOBUF_MESSAGE_LEN: usize = 16384;
 
 impl WebRtcFraming {
@@ -202,7 +204,9 @@ impl WebRtcFraming {
                         .write_bytes_queueable
                         .map(|outer_writable| {
                             cmp::min(
-                                // TODO: what if the outer maximum queueable is <= PROTOBUF_FRAME_MAX_LEN? this will never happen in practice, but in theory it could
+                                // The outer stream has `PROTOBUF_FRAME_MAX_LEN` bytes of room or
+                                // less once data has filled it, and nothing is queued until it is
+                                // writable again.
                                 outer_writable.saturating_sub(PROTOBUF_FRAME_MAX_LEN),
                                 MAX_PROTOBUF_MESSAGE_LEN - PROTOBUF_FRAME_MAX_LEN,
                             )
@@ -278,19 +282,29 @@ impl<'a, TNow: Clone> Drop for InnerReadWrite<'a, TNow> {
         // Note that we never send the `RESET_STREAM` flag. It is unclear to me what purpose this
         // flag serves compares to simply closing the substream.
         // We also never send `STOP_SENDING`, as it doesn't fit in our API.
-        let flag_to_send_out: Option<u32> =
-            if matches!(self.framing.local_write_state, LocalWriteState::Open)
-                && self.inner_read_write.write_bytes_queueable.is_none()
-            {
-                self.framing.local_write_state = LocalWriteState::FinBuffered;
-                Some(0)
-            } else if matches!(self.framing.remote_write_state, RemoteWriteState::Closed) {
-                // `FIN_ACK`
-                self.framing.remote_write_state = RemoteWriteState::ClosedAckBuffered;
-                Some(3)
-            } else {
-                None
-            };
+        // The flag must fit in the room of the outer `ReadWrite`. Without data, it needs
+        // `PROTOBUF_FRAME_FLAG_ONLY_LEN` bytes, and if there are fewer, it is sent during a later
+        // call instead, once the outer stream is writable again. With data, it always fits, as
+        // the inner stream can queue at most `PROTOBUF_FRAME_MAX_LEN` bytes less than the outer
+        // one.
+        let room_for_flag = self
+            .outer_read_write
+            .write_bytes_queueable
+            .map_or(false, |queueable| queueable >= PROTOBUF_FRAME_FLAG_ONLY_LEN);
+        let flag_to_send_out: Option<u32> = if !room_for_flag {
+            None
+        } else if matches!(self.framing.local_write_state, LocalWriteState::Open)
+            && self.inner_read_write.write_bytes_queueable.is_none()
+        {
+            self.framing.local_write_state = LocalWriteState::FinBuffered;
+            Some(0)
+        } else if matches!(self.framing.remote_write_state, RemoteWriteState::Closed) {
+            // `FIN_ACK`
+            self.framing.remote_write_state = RemoteWriteState::ClosedAckBuffered;
+            Some(3)
+        } else {
+            None
+        };
 
         // Write out a message only if there is anything to write.
         // TODO: consider buffering data more before flushing, to reduce the overhead of the protobuf frame?
@@ -355,4 +369,81 @@ pub enum Error {
     EofIncompleteFrame,
     /// Received a `FIN_ACK` flag without having sent a `FIN` flag.
     FinAckWithoutFin,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WebRtcFraming;
+    use crate::libp2p::read_write::ReadWrite;
+
+    fn outer(incoming: &[u8], queueable: usize) -> ReadWrite<()> {
+        ReadWrite {
+            now: (),
+            incoming_buffer: incoming.to_vec(),
+            expected_incoming_bytes: Some(0),
+            read_bytes: 0,
+            write_buffers: Vec::new(),
+            write_bytes_queued: 0,
+            write_bytes_queueable: Some(queueable),
+            wake_up_after: None,
+        }
+    }
+
+    #[test]
+    fn fin_ack_waits_for_room_in_the_outer_stream() {
+        let mut framing = WebRtcFraming::new();
+
+        // The inner substream waits for a byte, which makes the next call read frames.
+        let mut read_write = outer(&[], 100);
+        framing
+            .read_write(&mut read_write)
+            .unwrap()
+            .expected_incoming_bytes = Some(1);
+        assert_eq!(read_write.write_bytes_queued, 0);
+
+        // The remote sends `FIN` while the outer stream has room for 4 bytes only: the `FIN_ACK`
+        // frame (5 bytes) is not written.
+        let mut read_write = outer(&[0x02, 0x08, 0x00], 4);
+        drop(framing.read_write(&mut read_write).unwrap());
+        assert!(read_write.write_buffers.concat().is_empty());
+        assert_eq!(read_write.write_bytes_queued, 0);
+        assert_eq!(read_write.write_bytes_queueable, Some(4));
+
+        // With room for 5 bytes, it is.
+        let mut read_write = outer(&[], 5);
+        drop(framing.read_write(&mut read_write).unwrap());
+        // Flags (field 1) = 3 (`FIN_ACK`), then an empty message (field 2).
+        assert_eq!(
+            read_write.write_buffers.concat(),
+            [0x04, 0x08, 0x03, 0x12, 0x00]
+        );
+        assert_eq!(read_write.write_bytes_queued, 5);
+        assert_eq!(read_write.write_bytes_queueable, Some(0));
+    }
+
+    #[test]
+    fn fin_waits_for_room_in_the_outer_stream() {
+        let mut framing = WebRtcFraming::new();
+        let mut read_write = outer(&[], 100);
+        drop(framing.read_write(&mut read_write).unwrap());
+
+        // The inner substream closes its writing side while the outer stream has room for 4
+        // bytes only: the `FIN` frame (5 bytes) is not written.
+        let mut read_write = outer(&[], 4);
+        framing.read_write(&mut read_write).unwrap().close_write();
+        assert!(read_write.write_buffers.concat().is_empty());
+        assert_eq!(read_write.write_bytes_queued, 0);
+        assert_eq!(read_write.write_bytes_queueable, Some(4));
+
+        // With room for 5 bytes, it is. Substreams close their writing side again at every call.
+        let mut read_write = outer(&[], 5);
+        framing.read_write(&mut read_write).unwrap().close_write();
+        // Flags (field 1) = 0 (`FIN`), then an empty message (field 2).
+        assert_eq!(
+            read_write.write_buffers.concat(),
+            [0x04, 0x08, 0x00, 0x12, 0x00]
+        );
+        assert_eq!(read_write.write_bytes_queued, 5);
+        assert_eq!(read_write.write_bytes_queueable, Some(0));
+    }
 }
