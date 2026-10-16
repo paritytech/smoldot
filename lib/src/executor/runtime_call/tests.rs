@@ -29,6 +29,8 @@ use super::{Config, RuntimeCall, StorageProofSizeBehavior, run};
 use crate::{executor::host, trie};
 use alloc::collections::BTreeMap;
 
+mod clear_prefix;
+
 #[test]
 fn execute_blocks() {
     // Tests ordered alphabetically.
