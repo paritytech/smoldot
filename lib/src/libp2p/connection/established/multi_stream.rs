@@ -366,9 +366,11 @@ where
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 protocol_name,
             },
-            substream::Event::InboundNegotiatedCancel => Event::InboundAcceptedCancel {
+            // The remote cancelled the substream before the API accepted it, so there is no user
+            // data yet: report it as the single-stream connection does. Now that the WebRTC
+            // framing parses frames in every state, a `RESET_STREAM` frame reaches this arm.
+            substream::Event::InboundNegotiatedCancel => Event::InboundNegotiatedCancel {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
-                user_data: substream_user_data.take().unwrap(),
             },
             substream::Event::RequestIn { request } => Event::RequestIn {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
