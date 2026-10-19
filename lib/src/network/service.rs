@@ -76,6 +76,9 @@
 
 // TODO: expand explanations once the API is finalized
 
+#[cfg(test)]
+mod tests;
+
 use crate::libp2p::collection;
 use crate::network::codec;
 use crate::util::{self, SipHasherBuild};
