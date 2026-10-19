@@ -1706,6 +1706,16 @@ async fn background_task(mut inner: Inner) {
                 debug_assert!(inner.event_pending_send.is_none());
                 inner.event_pending_send = Some(Event::Disconnected { chain_id, peer_id });
             }
+            WakeUpReason::NetworkEvent(service::Event::GossipSecondaryClosed {
+                peer_id,
+                chain_id,
+                ..
+            }) => {
+                // Reopened at once: the full node doesn't pace them. The link is open while this
+                // event can happen.
+                let _result = inner.network.gossip_reopen_secondaries(chain_id, &peer_id);
+                debug_assert!(_result.is_ok());
+            }
             WakeUpReason::NetworkEvent(service::Event::GossipOpenFailed {
                 chain_id,
                 peer_id,

@@ -2155,114 +2155,11 @@ where
                                         ));
                                     debug_assert!(_was_inserted);
 
-                                    for other_protocol in
-                                        iter::once(NotificationsProtocol::Transactions {
-                                            chain_index,
-                                        })
-                                        .chain(
-                                            self.chains[chain_index]
-                                                .grandpa_protocol_config
-                                                .is_some()
-                                                .then(|| NotificationsProtocol::Grandpa {
-                                                    chain_index,
-                                                }),
-                                        )
-                                        .chain(
-                                            self.chains[chain_index]
-                                                .enable_statement_protocol
-                                                .then_some(NotificationsProtocol::Statement {
-                                                    chain_index,
-                                                    version: codec::StatementProtocolVersion::V2,
-                                                }),
-                                        )
-                                    {
-                                        if self
-                                            .notification_substreams_by_peer_id
-                                            .range(
-                                                (
-                                                    other_protocol,
-                                                    peer_index,
-                                                    SubstreamDirection::Out,
-                                                    NotificationsSubstreamState::MIN,
-                                                    SubstreamId::MIN,
-                                                )
-                                                    ..=(
-                                                        other_protocol,
-                                                        peer_index,
-                                                        SubstreamDirection::Out,
-                                                        NotificationsSubstreamState::MAX,
-                                                        SubstreamId::MAX,
-                                                    ),
-                                            )
-                                            .next()
-                                            .is_some()
-                                        {
-                                            continue;
-                                        }
-
-                                        let new_substream_id = self.inner.open_out_notifications(
-                                            connection_id,
-                                            codec::encode_protocol_name_string(
-                                                match other_protocol {
-                                                    NotificationsProtocol::Transactions {
-                                                        chain_index,
-                                                    } => codec::ProtocolName::Transactions {
-                                                        genesis_hash: self.chains[chain_index]
-                                                            .genesis_hash,
-                                                        fork_id: self.chains[chain_index]
-                                                            .fork_id
-                                                            .as_deref(),
-                                                    },
-                                                    NotificationsProtocol::Grandpa {
-                                                        chain_index,
-                                                    } => codec::ProtocolName::Grandpa {
-                                                        genesis_hash: self.chains[chain_index]
-                                                            .genesis_hash,
-                                                        fork_id: self.chains[chain_index]
-                                                            .fork_id
-                                                            .as_deref(),
-                                                    },
-                                                    NotificationsProtocol::Statement {
-                                                        chain_index,
-                                                        version,
-                                                    } => codec::ProtocolName::Statement {
-                                                        genesis_hash: self.chains[chain_index]
-                                                            .genesis_hash,
-                                                        fork_id: self.chains[chain_index]
-                                                            .fork_id
-                                                            .as_deref(),
-                                                        version,
-                                                    },
-                                                    _ => unreachable!(),
-                                                },
-                                            ),
-                                            self.notifications_protocol_handshake_timeout(
-                                                other_protocol,
-                                            ),
-                                            self.notifications_protocol_handshake(other_protocol),
-                                            self.notifications_protocol_max_handshake_size(
-                                                other_protocol,
-                                            ),
-                                        );
-
-                                        self.substreams.insert(
-                                            new_substream_id,
-                                            SubstreamInfo {
-                                                connection_id,
-                                                protocol: Some(Protocol::Notifications(
-                                                    other_protocol,
-                                                )),
-                                            },
-                                        );
-
-                                        self.notification_substreams_by_peer_id.insert((
-                                            other_protocol,
-                                            peer_index,
-                                            SubstreamDirection::Out,
-                                            NotificationsSubstreamState::Pending,
-                                            new_substream_id,
-                                        ));
-                                    }
+                                    self.open_missing_secondary_substreams(
+                                        connection_id,
+                                        chain_index,
+                                        peer_index,
+                                    );
 
                                     return Some(Event::GossipConnected {
                                         peer_id: self.peers[peer_index.0].clone(),
@@ -2501,108 +2398,53 @@ where
                                     .is_some()
                             );
 
-                            // If the substream failed to open, we may try again.
-                            // `ProtocolNotAvailable` is the peer's explicit answer that
-                            // it doesn't speak this protocol; retrying it is a tight loop,
-                            // so treat it as permanent until the peer reconnects. Other
-                            // errors may be transient (timeout / reset / …) and are
-                            // retried — this also preserves a long-standing workaround
-                            // for an issue in Substrate where a protocol could be briefly
-                            // unavailable. Statement V2 is special: on `ProtocolNotAvailable`
-                            // we fall back once to V1.
-                            if result.is_err() {
+                            if let Err(error) = &result {
+                                // The block announces substream closes with the connection.
                                 if self.inner.connection_state(connection_id).shutting_down {
                                     continue;
                                 }
 
-                                let (substream_protocol, should_retry) = match (
-                                    &result,
-                                    substream_protocol,
-                                ) {
-                                    (
-                                        Err(collection::NotificationsOutErr::Substream(
-                                            established::NotificationsOutErr::ProtocolNotAvailable,
-                                        )),
+                                let protocol_not_available = matches!(
+                                    error,
+                                    collection::NotificationsOutErr::Substream(
+                                        established::NotificationsOutErr::ProtocolNotAvailable,
+                                    )
+                                );
+
+                                // Statement V2 unavailable: fall back to V1.
+                                if protocol_not_available
+                                    && matches!(
+                                        substream_protocol,
                                         NotificationsProtocol::Statement {
                                             version: codec::StatementProtocolVersion::V2,
                                             ..
-                                        },
-                                    ) => (
+                                        }
+                                    )
+                                {
+                                    self.open_secondary_substream(
+                                        connection_id,
+                                        peer_index,
                                         NotificationsProtocol::Statement {
                                             chain_index,
                                             version: codec::StatementProtocolVersion::V1,
                                         },
-                                        true,
-                                    ),
-                                    (
-                                        Err(collection::NotificationsOutErr::Substream(
-                                            established::NotificationsOutErr::ProtocolNotAvailable,
-                                        )),
-                                        p,
-                                    ) => (p, false),
-                                    (_, p) => (p, true),
-                                };
-
-                                if !should_retry {
+                                    );
                                     continue;
                                 }
 
-                                let new_substream_id = self.inner.open_out_notifications(
-                                    connection_id,
-                                    codec::encode_protocol_name_string(match substream_protocol {
-                                        NotificationsProtocol::Transactions { .. } => {
-                                            codec::ProtocolName::Transactions {
-                                                genesis_hash: self.chains[chain_index].genesis_hash,
-                                                fork_id: self.chains[chain_index]
-                                                    .fork_id
-                                                    .as_deref(),
-                                            }
-                                        }
-                                        NotificationsProtocol::Grandpa { .. } => {
-                                            codec::ProtocolName::Grandpa {
-                                                genesis_hash: self.chains[chain_index].genesis_hash,
-                                                fork_id: self.chains[chain_index]
-                                                    .fork_id
-                                                    .as_deref(),
-                                            }
-                                        }
-                                        NotificationsProtocol::Statement { version, .. } => {
-                                            codec::ProtocolName::Statement {
-                                                genesis_hash: self.chains[chain_index].genesis_hash,
-                                                fork_id: self.chains[chain_index]
-                                                    .fork_id
-                                                    .as_deref(),
-                                                version,
-                                            }
-                                        }
-                                        _ => unreachable!(),
-                                    }),
-                                    self.notifications_protocol_handshake_timeout(
-                                        substream_protocol,
-                                    ),
-                                    self.notifications_protocol_handshake(substream_protocol),
-                                    self.notifications_protocol_max_handshake_size(
-                                        substream_protocol,
-                                    ),
-                                );
-                                let _was_inserted =
-                                    self.notification_substreams_by_peer_id.insert((
-                                        substream_protocol,
-                                        peer_index,
-                                        SubstreamDirection::Out,
-                                        NotificationsSubstreamState::Pending,
-                                        new_substream_id,
-                                    ));
-                                debug_assert!(_was_inserted);
-                                let _prev_value = self.substreams.insert(
-                                    new_substream_id,
-                                    SubstreamInfo {
-                                        connection_id,
-                                        protocol: Some(Protocol::Notifications(substream_protocol)),
-                                    },
-                                );
-                                debug_assert!(_prev_value.is_none());
-                                continue;
+                                // The peer doesn't speak the protocol: final until the link
+                                // opens again.
+                                if protocol_not_available {
+                                    continue;
+                                }
+
+                                // Reopening here would loop against a peer that refuses every
+                                // time. The API user paces `gossip_reopen_secondaries`.
+                                return Some(Event::GossipSecondaryClosed {
+                                    peer_id: self.peers[peer_index.0].clone(),
+                                    chain_id: ChainId(chain_index),
+                                    error: Some(error.clone()),
+                                });
                             }
 
                             let _was_inserted = self.notification_substreams_by_peer_id.insert((
@@ -2874,62 +2716,23 @@ where
                             });
                         }
 
-                        // The transactions, grandpa, and statement protocols are tied to the block
-                        // announces substream. If there is a block announce substream with the
-                        // peer, we try to reopen these substreams.
-                        NotificationsProtocol::Transactions { .. }
-                        | NotificationsProtocol::Grandpa { .. }
-                        | NotificationsProtocol::Statement { .. } => {
-                            // Don't actually try to reopen if the connection is shutting down.
-                            // Note that we don't try to reopen on a different connection, as the
-                            // block announces substream will very soon be closed too anyway.
+                        // A substream following the block announces substream: its closing is
+                        // reported to the API user.
+                        NotificationsProtocol::Transactions { chain_index }
+                        | NotificationsProtocol::Grandpa { chain_index }
+                        | NotificationsProtocol::Statement { chain_index, .. } => {
+                            // The block announces substream closes with the connection.
                             if self.inner.connection_state(connection_id).shutting_down {
                                 continue;
                             }
 
-                            let new_substream_id = self.inner.open_out_notifications(
-                                connection_id,
-                                codec::encode_protocol_name_string(match substream_protocol {
-                                    NotificationsProtocol::Transactions { chain_index } => {
-                                        codec::ProtocolName::Transactions {
-                                            genesis_hash: self.chains[chain_index].genesis_hash,
-                                            fork_id: self.chains[chain_index].fork_id.as_deref(),
-                                        }
-                                    }
-                                    NotificationsProtocol::Grandpa { chain_index } => {
-                                        codec::ProtocolName::Grandpa {
-                                            genesis_hash: self.chains[chain_index].genesis_hash,
-                                            fork_id: self.chains[chain_index].fork_id.as_deref(),
-                                        }
-                                    }
-                                    NotificationsProtocol::Statement {
-                                        chain_index,
-                                        version,
-                                    } => codec::ProtocolName::Statement {
-                                        genesis_hash: self.chains[chain_index].genesis_hash,
-                                        fork_id: self.chains[chain_index].fork_id.as_deref(),
-                                        version,
-                                    },
-                                    _ => unreachable!(),
-                                }),
-                                self.notifications_protocol_handshake_timeout(substream_protocol),
-                                self.notifications_protocol_handshake(substream_protocol),
-                                self.notifications_protocol_max_handshake_size(substream_protocol),
-                            );
-                            self.substreams.insert(
-                                new_substream_id,
-                                SubstreamInfo {
-                                    connection_id,
-                                    protocol: Some(Protocol::Notifications(substream_protocol)),
-                                },
-                            );
-                            self.notification_substreams_by_peer_id.insert((
-                                substream_protocol,
-                                peer_index,
-                                SubstreamDirection::Out,
-                                NotificationsSubstreamState::Pending,
-                                new_substream_id,
-                            ));
+                            // Reopening here would loop against a peer that closes it every
+                            // time. The API user paces `gossip_reopen_secondaries`.
+                            return Some(Event::GossipSecondaryClosed {
+                                peer_id: self.peers[peer_index.0].clone(),
+                                chain_id: ChainId(chain_index),
+                                error: None,
+                            });
                         }
                     }
                 }
@@ -4619,6 +4422,62 @@ where
         }
     }
 
+    /// Opens the transactions, Grandpa and statement substreams missing from the
+    /// [`GossipKind::ConsensusTransactions`] link with the given peer, after an
+    /// [`Event::GossipSecondaryClosed`]. Pending and open ones are left alone. A refusal or
+    /// closing generates the event again.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn gossip_reopen_secondaries(
+        &mut self,
+        chain_id: ChainId,
+        peer_id: &PeerId,
+    ) -> Result<(), ReopenSecondariesError> {
+        let Some(&peer_index) = self.peers_by_peer_id.get(peer_id) else {
+            // An unknown `PeerId` has no gossip link either.
+            return Err(ReopenSecondariesError::NotOpen);
+        };
+
+        // Panic on an invalid chain even though its data isn't needed.
+        assert!(self.chains.contains(chain_id.0));
+        let chain_index = chain_id.0;
+
+        // On the block announces connection, unless it is shutting down: the substreams would
+        // close with it at once.
+        let connection_id = self
+            .notification_substreams_by_peer_id
+            .range(
+                (
+                    NotificationsProtocol::BlockAnnounces { chain_index },
+                    peer_index,
+                    SubstreamDirection::Out,
+                    NotificationsSubstreamState::OPEN_MIN_VALUE,
+                    SubstreamId::MIN,
+                )
+                    ..=(
+                        NotificationsProtocol::BlockAnnounces { chain_index },
+                        peer_index,
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::OPEN_MAX_VALUE,
+                        SubstreamId::MAX,
+                    ),
+            )
+            .map(|(_, _, _, _, substream_id)| {
+                self.substreams
+                    .get(substream_id)
+                    .unwrap_or_else(|| unreachable!())
+                    .connection_id
+            })
+            .find(|connection_id| !self.inner.connection_state(*connection_id).shutting_down)
+            .ok_or(ReopenSecondariesError::NotOpen)?;
+
+        self.open_missing_secondary_substreams(connection_id, chain_index, peer_index);
+        Ok(())
+    }
+
     /// Update the state of the local node with regards to GrandPa rounds.
     ///
     /// Calling this method does two things:
@@ -5297,6 +5156,141 @@ where
         }
     }
 
+    /// Opens the transactions, Grandpa and statement substreams of the peer that don't exist
+    /// yet, on the connection of its open block announces substream.
+    fn open_missing_secondary_substreams(
+        &mut self,
+        connection_id: collection::ConnectionId,
+        chain_index: usize,
+        peer_index: PeerIndex,
+    ) {
+        for protocol in iter::once(NotificationsProtocol::Transactions { chain_index })
+            .chain(
+                self.chains[chain_index]
+                    .grandpa_protocol_config
+                    .is_some()
+                    .then_some(NotificationsProtocol::Grandpa { chain_index }),
+            )
+            .chain(
+                self.chains[chain_index]
+                    .enable_statement_protocol
+                    .then_some(NotificationsProtocol::Statement {
+                        chain_index,
+                        version: codec::StatementProtocolVersion::V2,
+                    }),
+            )
+        {
+            // A statement substream of either version counts, as the V2 one may have fallen
+            // back to V1 already.
+            let already_exists = match protocol {
+                NotificationsProtocol::Statement { chain_index, .. } => [
+                    codec::StatementProtocolVersion::V1,
+                    codec::StatementProtocolVersion::V2,
+                ]
+                .into_iter()
+                .any(|version| {
+                    self.out_notification_substream_exists(
+                        peer_index,
+                        NotificationsProtocol::Statement {
+                            chain_index,
+                            version,
+                        },
+                    )
+                }),
+                protocol => self.out_notification_substream_exists(peer_index, protocol),
+            };
+            if already_exists {
+                continue;
+            }
+
+            self.open_secondary_substream(connection_id, peer_index, protocol);
+        }
+    }
+
+    /// Whether an outbound substream of the given protocol exists with the peer, pending or open.
+    fn out_notification_substream_exists(
+        &self,
+        peer_index: PeerIndex,
+        protocol: NotificationsProtocol,
+    ) -> bool {
+        self.notification_substreams_by_peer_id
+            .range(
+                (
+                    protocol,
+                    peer_index,
+                    SubstreamDirection::Out,
+                    NotificationsSubstreamState::MIN,
+                    SubstreamId::MIN,
+                )
+                    ..=(
+                        protocol,
+                        peer_index,
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::MAX,
+                        SubstreamId::MAX,
+                    ),
+            )
+            .next()
+            .is_some()
+    }
+
+    /// Opens an outbound substream of the given protocol, which must not be block announces,
+    /// and registers it as pending. The caller checks that none exists with the peer.
+    fn open_secondary_substream(
+        &mut self,
+        connection_id: collection::ConnectionId,
+        peer_index: PeerIndex,
+        protocol: NotificationsProtocol,
+    ) -> SubstreamId {
+        let protocol_name = codec::encode_protocol_name_string(match protocol {
+            NotificationsProtocol::Transactions { chain_index } => {
+                codec::ProtocolName::Transactions {
+                    genesis_hash: self.chains[chain_index].genesis_hash,
+                    fork_id: self.chains[chain_index].fork_id.as_deref(),
+                }
+            }
+            NotificationsProtocol::Grandpa { chain_index } => codec::ProtocolName::Grandpa {
+                genesis_hash: self.chains[chain_index].genesis_hash,
+                fork_id: self.chains[chain_index].fork_id.as_deref(),
+            },
+            NotificationsProtocol::Statement {
+                chain_index,
+                version,
+            } => codec::ProtocolName::Statement {
+                genesis_hash: self.chains[chain_index].genesis_hash,
+                fork_id: self.chains[chain_index].fork_id.as_deref(),
+                version,
+            },
+            NotificationsProtocol::BlockAnnounces { .. } => unreachable!(),
+        });
+
+        let substream_id = self.inner.open_out_notifications(
+            connection_id,
+            protocol_name,
+            self.notifications_protocol_handshake_timeout(protocol),
+            self.notifications_protocol_handshake(protocol),
+            self.notifications_protocol_max_handshake_size(protocol),
+        );
+        let _prev_value = self.substreams.insert(
+            substream_id,
+            SubstreamInfo {
+                connection_id,
+                protocol: Some(Protocol::Notifications(protocol)),
+            },
+        );
+        debug_assert!(_prev_value.is_none());
+        let _was_inserted = self.notification_substreams_by_peer_id.insert((
+            protocol,
+            peer_index,
+            SubstreamDirection::Out,
+            NotificationsSubstreamState::Pending,
+            substream_id,
+        ));
+        debug_assert!(_was_inserted);
+
+        substream_id
+    }
+
     /// Checks whether the given [`PeerIndex`] is still in use, and if no removes it from
     /// [`ChainNetwork::peers`].
     fn try_clean_up_peer(&mut self, peer_index: PeerIndex) {
@@ -5546,6 +5540,21 @@ pub enum Event<TConn> {
         kind: GossipKind,
     },
 
+    /// A transactions, Grandpa or statement substream of a [`GossipKind::ConsensusTransactions`]
+    /// link failed to open or was closed by the remote, while the link stays open. Nothing is
+    /// reopened on its own: see [`ChainNetwork::gossip_reopen_secondaries`].
+    ///
+    /// Not generated when the connection is shutting down, nor when the peer doesn't speak the
+    /// protocol.
+    GossipSecondaryClosed {
+        /// Peer concerned by the event.
+        peer_id: PeerId,
+        /// Chain of the gossip connection.
+        chain_id: ChainId,
+        /// Why the substream failed to open, or `None` if the remote closed it.
+        error: Option<NotificationsOutErr>,
+    },
+
     /// A peer would like to open a gossiping link with the local node.
     // TODO: document what to do
     // TODO: include handshake content?
@@ -5789,6 +5798,14 @@ pub enum OpenGossipError {
 #[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum CloseGossipError {
     /// There exists no outgoing nor ingoing attempt at a gossip link.
+    NotOpen,
+}
+
+/// Error potentially returned by [`ChainNetwork::gossip_reopen_secondaries`].
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
+pub enum ReopenSecondariesError {
+    /// No [`GossipKind::ConsensusTransactions`] link is open with the peer, or the connection
+    /// carrying it is shutting down.
     NotOpen,
 }
 
