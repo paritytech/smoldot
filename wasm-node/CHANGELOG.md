@@ -6,6 +6,11 @@
 
 - Add `AddChainOptions.maxPendingTransactions`: the maximum number of transactions submitted through the JSON-RPC API that a chain holds at the same time, from their submission until they are finalized or dropped. It defaults to 64, so the behaviour is unchanged unless it is set. Rust users of `smoldot-light` set the same limit through `AddChainConfig::max_pending_transactions`. ([#3394](https://github.com/paritytech/smoldot/pull/3394); fixes [#3393](https://github.com/paritytech/smoldot/issues/3393))
 
+### Fixed
+
+- WebRTC substreams now process the `FIN`, `FIN_ACK` and `RESET_STREAM` flags of the libp2p WebRTC framing in every state. Previously an open, closing or refused notifications substream never read the remote's `FIN`, so it never answered `FIN_ACK`, never noticed the remote closing it, and kept its data channel open until the remote reset it; full nodes waited 10 seconds for every such close. A `FIN` arriving while a large notification was being read was also held back until that many bytes had arrived. ([#3412](https://github.com/paritytech/smoldot/issues/3412))
+- A transactions, GrandPa or statement substream that a full node refuses or closes while the block announces link stays open is now reopened once immediately and then at most every 5.5 seconds, instead of in a tight loop with up to tens of attempts per second per peer. ([#3412](https://github.com/paritytech/smoldot/issues/3412))
+
 ## 3.7.0 - 2026-10-07
 
 ### Added
