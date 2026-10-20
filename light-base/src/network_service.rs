@@ -80,6 +80,11 @@ pub use service::{
 
 mod tasks;
 
+/// Delay before trying again a peer that refused a notifications substream. Exceeds the
+/// 5 seconds for which polkadot-sdk bans a peer whose substream it rejected, with a margin for
+/// network delay and clock skew.
+const REFUSED_SUBSTREAM_RETRY_DELAY: Duration = Duration::from_millis(5500);
+
 /// Configuration for a [`NetworkService`].
 pub struct Config<TPlat> {
     /// Access to the platform's capabilities.
@@ -2667,10 +2672,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     ?error,
                 );
-                // Must exceed polkadot-sdk's 5s notification-reject ban; otherwise we retry
-                // into a still-active remote ban. 0.5s margin covers network delay and
-                // clock skew between the two sides' ban timers.
-                let ban_duration = Duration::from_millis(5500);
+                let ban_duration = REFUSED_SUBSTREAM_RETRY_DELAY;
 
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
@@ -2781,10 +2783,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     ?error,
                 );
 
-                // Once per link, reopen at once: polkadot-sdk reserves the peer for these
-                // protocols slightly after block announces open. Afterwards wait 5.5 seconds,
-                // past polkadot-sdk's 5 seconds reject ban, rather than loop against a peer
-                // that refuses every time. The link is open while this event can happen.
+                // Reopen at once the first time, as polkadot-sdk reserves the peer for these
+                // protocols slightly after block announces open. Afterwards, wait out its ban.
+                // The link is open while this event can happen.
                 let link = task
                     .open_gossip_links
                     .get_mut(&(chain_id, peer_id.clone()))
@@ -2798,10 +2799,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .keys()
                     .any(|(_, c, p)| *c == chain_id && *p == peer_id)
                 {
-                    let delay = Duration::from_millis(5500);
                     task.secondary_reopens.insert(
-                        (task.platform.now() + delay, chain_id, peer_id),
-                        Box::pin(task.platform.sleep(delay)),
+                        (
+                            task.platform.now() + REFUSED_SUBSTREAM_RETRY_DELAY,
+                            chain_id,
+                            peer_id,
+                        ),
+                        Box::pin(task.platform.sleep(REFUSED_SUBSTREAM_RETRY_DELAY)),
                     );
                 }
             }
