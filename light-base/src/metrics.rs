@@ -582,7 +582,10 @@ mod tests {
         let labels = DiscoveredAddressDropReason::iter()
             .map(<&'static str>::from)
             .collect::<Vec<_>>();
-        assert_eq!(labels, ["peer-id-mismatch", "not-supported", "invalid"]);
+        assert_eq!(
+            labels,
+            ["peer-id-mismatch", "not-supported", "invalid", "non-global"]
+        );
     }
 
     #[test]

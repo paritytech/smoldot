@@ -220,6 +220,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             connections_open_pool_restore_delay: config.connections_open_pool_restore_delay,
             num_recent_connection_opening: 0,
             next_recent_connection_restore: None,
+            consecutive_dial_failures: HashMap::with_capacity_and_hasher(16, Default::default()),
             platform: config.platform.clone(),
             metrics: metrics.clone(),
             open_gossip_links: BTreeMap::new(),
@@ -1003,6 +1004,59 @@ pub(crate) enum DiscoveredAddressDropReason {
     NotSupported,
     /// Address failed to parse.
     Invalid,
+    /// EXPERIMENT (churn): loopback/private/link-local IP or cluster-internal hostname.
+    NonGlobal,
+}
+
+/// EXPERIMENT (churn): `true` for addresses a phone on the public internet can't usefully dial.
+fn is_non_global_address(addr: &address_parse::AddressOrMultiStreamAddress) -> bool {
+    use core::net::IpAddr;
+    use platform::{Address, MultiStreamAddress};
+
+    let ip_non_global = |ip: &IpAddr| match ip {
+        IpAddr::V4(ip) => {
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                // 100.64.0.0/10 (carrier-grade NAT)
+                || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                // fc00::/7 (unique local) and fe80::/10 (link-local)
+                || (ip.segments()[0] & 0xfe00) == 0xfc00
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+                || ip.to_ipv4_mapped().map_or(false, |v4| {
+                    v4.is_loopback() || v4.is_private() || v4.is_link_local()
+                })
+        }
+    };
+    let host_non_global = |host: &str| {
+        let host = host.trim_end_matches('.');
+        host == "localhost"
+            || host.ends_with(".localhost")
+            || host.ends_with(".local")
+            || host.ends_with(".internal")
+    };
+
+    match addr {
+        address_parse::AddressOrMultiStreamAddress::Address(
+            Address::TcpIp { ip, .. } | Address::WebSocketIp { ip, .. },
+        ) => ip_non_global(ip),
+        address_parse::AddressOrMultiStreamAddress::Address(
+            Address::TcpDns { hostname, .. } | Address::WebSocketDns { hostname, .. },
+        ) => host_non_global(hostname),
+        address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(
+            MultiStreamAddress::WebRtc { ip, .. },
+        ) => ip_non_global(ip),
+        address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(
+            MultiStreamAddress::WebRtcDns { hostname, .. },
+        ) => host_non_global(hostname),
+    }
 }
 
 /// Owned version of [`codec::ChildStorageProofRequestConfig`] for sending across channel.
@@ -1157,6 +1211,10 @@ struct BackgroundTask<TPlat: PlatformRef> {
 
     /// See [`Config::connections_open_pool_restore_delay`].
     connections_open_pool_restore_delay: Duration,
+
+    /// EXPERIMENT (churn): consecutive pre-handshake failures per peer, used for an exponential
+    /// ban. Cleared when a handshake with that peer finishes.
+    consecutive_dial_failures: HashMap<PeerId, u32, fnv::FnvBuildHasher>,
 
     /// Every time a connection is opened, the value in this field is increased by one. After
     /// [`BackgroundTask::next_recent_connection_restore`] has yielded, the value is reduced by
@@ -2559,8 +2617,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // Re-insert the chain in `chains_by_next_discovery`.
                 let chain = &mut task.network[chain_id];
                 chain.next_discovery_when = task.platform.now() + chain.next_discovery_period;
+                // EXPERIMENT (churn): cap raised from 120s to 600s.
                 chain.next_discovery_period =
-                    cmp::min(chain.next_discovery_period * 2, Duration::from_secs(120));
+                    cmp::min(chain.next_discovery_period * 2, Duration::from_secs(600));
                 task.chains_by_next_discovery.insert(
                     (chain.next_discovery_when.clone(), chain_id),
                     Box::pin(
@@ -2632,6 +2691,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 expected_peer_id,
                 id,
             }) => {
+                task.consecutive_dial_failures.remove(&peer_id);
                 let remote_addr =
                     Multiaddr::from_bytes(task.network.connection_remote_addr(id)).unwrap(); // TODO: review this unwrap
                 if let Some(expected_peer_id) = expected_peer_id.as_ref().filter(|p| **p != peer_id)
@@ -2717,10 +2777,21 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // Pre-handshake failures get a shorter ban: many parallel dials time out
                 // before any handshake completes, and a long slot-hold there dominates
                 // peer-discovery latency on restarts.
+                // EXPERIMENT (churn): pre-handshake failures back off exponentially per peer
+                // (2s, 4s, ... capped at 300s) instead of a flat 2s ban, so that a handful of
+                // dead/refusing peers can't be re-dialed every few seconds forever.
                 let ban_duration = if handshake_finished {
                     Duration::from_secs(5)
                 } else {
-                    Duration::from_secs(2)
+                    let failures = task
+                        .consecutive_dial_failures
+                        .entry(peer_id.clone())
+                        .or_insert(0);
+                    *failures = failures.saturating_add(1);
+                    cmp::min(
+                        Duration::from_secs(2) * (1u32 << cmp::min(*failures - 1, 8)),
+                        Duration::from_secs(300),
+                    )
                 };
                 task.network.gossip_remove_desired_all(
                     &peer_id,
@@ -3403,6 +3474,23 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 }
                                 if platform::address_parse::multiaddr_to_address(&a)
                                     .ok()
+                                    .map_or(false, |addr| is_non_global_address(&addr))
+                                {
+                                    let reason = DiscoveredAddressDropReason::NonGlobal;
+                                    log!(
+                                        &task.platform,
+                                        Debug,
+                                        "network",
+                                        "discovered-address-dropped",
+                                        chain = &task.network[chain_id].log_name,
+                                        reason,
+                                        peer_id,
+                                        addr = &a,
+                                        obtained_from = requestee_peer_id
+                                    );
+                                    task.metrics.discovery_addresses_dropped.inc(reason);
+                                } else if platform::address_parse::multiaddr_to_address(&a)
+                                    .ok()
                                     .map_or(false, |addr| {
                                         task.platform.supports_connection_type((&addr).into())
                                     })
@@ -3508,7 +3596,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peering.topology.evict(&task.platform.now());
                 }
 
-                if any_new_peer {
+                // EXPERIMENT (churn): with a 30-peer address book and a DHT of hundreds of
+                // peers every response looks "new", so the reset pinned the relay chain's
+                // discovery at one round per ~4s forever. Only reset while out slots aren't full.
+                if any_new_peer
+                    && task
+                        .network
+                        .gossip_desired_num(chain_id, service::GossipKind::ConsensusTransactions)
+                        < task.network[chain_id].num_out_slots
+                {
                     task.network[chain_id].next_discovery_period = Duration::from_secs(2);
                 }
             }
