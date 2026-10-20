@@ -8,8 +8,8 @@
 
 ### Fixed
 
-- WebRTC substreams now process the `FIN`, `FIN_ACK` and `RESET_STREAM` flags of the libp2p WebRTC framing in every state. Previously an open, closing or refused notifications substream never read the remote's `FIN`, so it never answered `FIN_ACK`, never noticed the remote closing it, and kept its data channel open until the remote reset it; full nodes waited 10 seconds for every such close. A `FIN` arriving while a large notification was being read was also held back until that many bytes had arrived. ([#3412](https://github.com/paritytech/smoldot/issues/3412))
-- A transactions, GrandPa or statement substream that a full node refuses or closes while the block announces link stays open is now reopened once immediately and then at most every 5.5 seconds, instead of in a tight loop with up to tens of attempts per second per peer. ([#3412](https://github.com/paritytech/smoldot/issues/3412))
+- WebRTC substreams now process `FIN`, `FIN_ACK` and `RESET_STREAM` in every state, and no longer hold a `FIN` back behind the bytes a large notification still expects. An open, closing or refused notifications substream previously never answered the remote's `FIN`, so its data channel stayed open until the remote reset it, and full nodes waited 10 seconds per close. ([#3418](https://github.com/paritytech/smoldot/pull/3418); mitigates [#3412](https://github.com/paritytech/smoldot/issues/3412))
+- A transactions, GrandPa or statement substream refused or closed by a full node while the block announces substream stays open is reopened once at once, then at most every 5.5 seconds, instead of in a tight loop. ([#3418](https://github.com/paritytech/smoldot/pull/3418); mitigates [#3412](https://github.com/paritytech/smoldot/issues/3412))
 
 ## 3.7.0 - 2026-10-07
 
