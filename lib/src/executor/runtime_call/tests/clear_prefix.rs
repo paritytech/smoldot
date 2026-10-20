@@ -44,6 +44,9 @@ use alloc::collections::BTreeMap;
 ///   of that child trie, then returns the value of `abc1` in the child trie.
 /// - `child_kill_then_get` writes `abc1` in the child trie `xyz`, kills that child trie, then
 ///   returns the value of `abc1` in the child trie.
+/// - `clear_in_transaction_then_get` writes `abc1`, starts a transaction, clears the prefix,
+///   rolls the transaction back, then returns the value of `abc1`.
+/// - `clear_prefix_key_then_get` writes `abc`, clears the prefix, then returns the value of `abc`.
 const RUNTIME: &str = r#"
 (module
     (import "env" "memory" (memory 16))
@@ -60,6 +63,8 @@ const RUNTIME: &str = r#"
         (func $child_clear_prefix (param i64 i64 i64) (result i64)))
     (import "env" "ext_default_child_storage_storage_kill_version_3"
         (func $child_kill (param i64 i64) (result i64)))
+    (import "env" "ext_storage_start_transaction_version_1" (func $start_transaction))
+    (import "env" "ext_storage_rollback_transaction_version_1" (func $rollback_transaction))
     (global (export "__heap_base") i32 (i32.const 1024))
     (data (i32.const 0) "abc")
     (data (i32.const 8) "abc1")
@@ -114,6 +119,18 @@ const RUNTIME: &str = r#"
             (i64.const 0x0000000300000020)
             (call $input (local.get 0) (local.get 1))))
         (call $child_get (i64.const 0x0000000300000020) (i64.const 0x0000000400000008)))
+
+    (func (export "clear_in_transaction_then_get") (param i32 i32) (result i64)
+        (call $set (i64.const 0x0000000400000008) (i64.const 0x0000000100000018))
+        (call $start_transaction)
+        (drop (call $clear (local.get 0) (local.get 1)))
+        (call $rollback_transaction)
+        (call $get (i64.const 0x0000000400000008)))
+
+    (func (export "clear_prefix_key_then_get") (param i32 i32) (result i64)
+        (call $set (i64.const 0x0000000300000000) (i64.const 0x0000000100000018))
+        (drop (call $clear (local.get 0) (local.get 1)))
+        (call $get (i64.const 0x0000000300000000)))
 )
 "#;
 
@@ -130,7 +147,7 @@ fn run_call(
     storage_main_trie_changes: storage_diff::TrieDiff,
 ) -> (Vec<u8>, StorageChanges) {
     let virtual_machine = host::HostVmPrototype::new(host::Config {
-        module: with_runtime_version_custom_sections(wat::parse_str(RUNTIME).unwrap()),
+        module: host::tests::with_core_version_custom_sections(wat::parse_str(RUNTIME).unwrap()),
         heap_pages: host::HeapPages::new(1024),
         exec_hint: crate::executor::vm::ExecHint::ExecuteOnceWithNonDeterministicValidation,
         allow_unresolved_imports: false,
@@ -194,38 +211,6 @@ fn run_call(
             _ => unreachable!(),
         }
     }
-}
-
-/// Appends to `wasm` the custom sections holding the runtime version and runtime APIs, which
-/// [`host::HostVmPrototype::new`] requires.
-fn with_runtime_version_custom_sections(mut wasm: Vec<u8>) -> Vec<u8> {
-    let mut runtime_version = Vec::new();
-    for name in ["foo", "bar"] {
-        runtime_version
-            .extend_from_slice(crate::util::encode_scale_compact_usize(name.len()).as_ref());
-        runtime_version.extend_from_slice(name.as_bytes());
-    }
-    // Authoring, spec and implementation versions.
-    runtime_version.extend_from_slice(&[0; 12]);
-    // No runtime APIs.
-    runtime_version.extend_from_slice(crate::util::encode_scale_compact_usize(0).as_ref());
-    // Transaction and state versions.
-    runtime_version.extend_from_slice(&[0; 5]);
-
-    for (name, content) in [
-        (&b"runtime_version"[..], &runtime_version[..]),
-        (b"runtime_apis", &[]),
-    ] {
-        let mut section = Vec::new();
-        section.extend(crate::util::leb128::encode_usize(name.len()));
-        section.extend_from_slice(name);
-        section.extend_from_slice(content);
-        wasm.push(0);
-        wasm.extend(crate::util::leb128::encode_usize(section.len()));
-        wasm.extend_from_slice(&section);
-    }
-
-    wasm
 }
 
 fn storage(keys: &[&[u8]]) -> BTreeMap<Vec<u8>, Vec<u8>> {
@@ -323,6 +308,32 @@ fn keys_written_earlier_removed_with_zero_limit() {
     assert_eq!(output, [1, 0, 0, 0, 0]);
     assert_eq!(changes.main_trie_diff_get(b"abc1"), Some(None));
     assert_eq!(changes.main_trie_diff_get(b"abc2"), None);
+}
+
+#[test]
+fn rollback_restores_key_written_before_transaction() {
+    let (output, changes) = run_call(
+        "clear_in_transaction_then_get",
+        NO_LIMIT,
+        &storage(&[]),
+        storage_diff::TrieDiff::empty(),
+    );
+    // `Some(b"v")`
+    assert_eq!(output, [1, 1 << 2, b'v']);
+    assert_eq!(changes.main_trie_diff_get(b"abc1"), Some(Some(&b"v"[..])));
+}
+
+#[test]
+fn get_after_clear_doesnt_return_key_equal_to_prefix() {
+    let (output, changes) = run_call(
+        "clear_prefix_key_then_get",
+        NO_LIMIT,
+        &storage(&[]),
+        storage_diff::TrieDiff::empty(),
+    );
+    // `None`
+    assert_eq!(output, [0]);
+    assert_eq!(changes.main_trie_diff_get(b"abc"), Some(None));
 }
 
 fn check_child_trie_keys_written_earlier_removed(function_to_call: &str) {
