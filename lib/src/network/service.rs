@@ -2327,11 +2327,9 @@ where
                                 )
                             );
 
-                            // A statement substream that anchors a `GossipKind::Statement`
-                            // link only gets the V2 to V1 fallback, and none when the
-                            // connection is shutting down. Any other failure is reported to
-                            // the API user, as a silent retry would hide a peer that refuses
-                            // statement-only links.
+                            // A statement substream anchoring a `GossipKind::Statement` link
+                            // has its own event. Only the V2 to V1 fallback comes first, and
+                            // not on a connection that is shutting down.
                             if let Err(error) = &result {
                                 let is_wanted_statement_link = matches!(
                                     substream_protocol,
@@ -5378,7 +5376,7 @@ where
                 self.chains[chain_index]
                     .grandpa_protocol_config
                     .is_some()
-                    .then(|| NotificationsProtocol::Grandpa { chain_index }),
+                    .then_some(NotificationsProtocol::Grandpa { chain_index }),
             )
             .chain(
                 self.chains[chain_index]
