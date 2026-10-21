@@ -36,7 +36,7 @@ itertools = { version = "0.14.0", default-features = false, features = ["use_all
 lru = { version = "0.18.4", default-features = false, features = ["hashbrown"] } # The `hashbrown` feature brings no-std compatibility.
 pin-project = "1.1.5"
 rand = { version = "0.8.6", default-features = false, features = ["alloc"] }
-rand_chacha = { version = "0.3.1", default-features = false }
+rand_chacha = { version = "0.10.0", default-features = false }
 serde = { version = "1.0.183", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.104", default-features = false, features = ["alloc"] }
 siphasher = { version = "1.0.1", default-features = false }
