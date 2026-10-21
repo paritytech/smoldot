@@ -134,12 +134,16 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         bufferIndices: Uint8Array[],
         advanceExecutionPromise: null | (() => void),
         onShutdownExecutorOrWasmPanic: () => void,
+        // The one JavaScript timer that will call `timer_finished`, if any: when it is due
+        // (`performanceNow` milliseconds) and how to cancel it. See `start_timer`.
+        timer: null | { when: number, cancel: () => void },
     } = {
         instance: null,
         currentTask: null,
         bufferIndices: new Array(),
         advanceExecutionPromise: null,
-        onShutdownExecutorOrWasmPanic: () => { }
+        onShutdownExecutorOrWasmPanic: () => { },
+        timer: null,
     };
 
     const smoldotJsBindings = {
@@ -244,6 +248,15 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         },
 
         // Must call `timer_finished` after the given number of milliseconds has elapsed.
+        //
+        // At most one JavaScript timer is pending. The Rust side asks for a timer whenever it
+        // creates a new earliest one, and again at the end of every `timer_finished`, including
+        // spurious ones, and it can't cancel what it asked for. Giving each request its own
+        // JavaScript timer leaves every superseded one to fire later, call `timer_finished` for
+        // nothing and ask again, so that their number only ever grows: thousands per client after
+        // a few minutes, each of them firing at every timer deadline. Since `timer_finished` may
+        // be called early, and every call asks again for the earliest timer still queued, a
+        // request for later than the pending timer is dropped, and one for earlier replaces it.
         start_timer: (ms: number) => {
             const instance = state.instance!;
 
@@ -254,23 +267,28 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             if (ms > 2147483647)
                 ms = 2147483647;
 
+            const when = config.performanceNow() + ms;
+            if (state.timer && state.timer.when <= when)
+                return;
+            state.timer?.cancel();
+
+            const fire = () => {
+                state.timer = null;
+                if (!state.instance) return;
+                try {
+                    instance.exports.timer_finished();
+                } catch (_error) { }
+            };
+
             // In browsers, `setTimeout` works as expected when `ms` equals 0. However, NodeJS
             // requires a minimum of 1 millisecond (if `0` is passed, it is automatically replaced
             // with `1`) and wants you to use `setImmediate` instead.
             if (ms < 1 && typeof setImmediate === "function") {
-                setImmediate(() => {
-                    if (!state.instance) return;
-                    try {
-                        instance.exports.timer_finished();
-                    } catch (_error) { }
-                })
+                const immediate = setImmediate(fire);
+                state.timer = { when, cancel: () => clearImmediate(immediate) };
             } else {
-                setTimeout(() => {
-                    if (!state.instance) return;
-                    try {
-                        instance.exports.timer_finished();
-                    } catch (_error) { }
-                }, ms)
+                const timeout = setTimeout(fire, ms);
+                state.timer = { when, cancel: () => clearTimeout(timeout) };
             }
         },
 
@@ -441,9 +459,24 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
     // configuration.
     state.instance.exports.init(config.maxLogLevel);
 
-    // Promise that is notified when the `shutdownExecutor` function is called or when a Wasm
-    // panic happens.
-    const shutdownExecutorOrWasmPanicPromise = new Promise<"stop">((resolve) => state.onShutdownExecutorOrWasmPanic = () => resolve("stop"));
+    // Notified when the `shutdownExecutor` function is called or when a Wasm panic happens.
+    //
+    // The execution loop below races each of its waits against `stopped()`, a promise of its own
+    // per wait. Racing them all against one long-lived promise instead (as was done before) leaves
+    // a reaction on that promise per wait, never released until the shutdown: millions per hour
+    // for a busy client, until the JavaScript heap runs out.
+    let stopRequested = false;
+    let interruptWait = () => { };
+    state.onShutdownExecutorOrWasmPanic = () => {
+        stopRequested = true;
+        interruptWait();
+    };
+    const stopped = () => new Promise<"stop">((resolve) => {
+        if (stopRequested)
+            resolve("stop");
+        else
+            interruptWait = () => resolve("stop");
+    });
 
     (async () => {
         const cpuRateLimit = config.cpuRateLimit;
@@ -508,11 +541,11 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                     missingSleep = 2147483646;
 
                 const sleepFinished = new Promise<"timeout" | "stop">((resolve) => setTimeout(() => resolve("timeout"), missingSleep));
-                if (await Promise.race([sleepFinished, shutdownExecutorOrWasmPanicPromise]) === "stop")
+                if (await Promise.race([sleepFinished, stopped()]) === "stop")
                     break;
             }
 
-            if (await Promise.race([whenReadyAgain, shutdownExecutorOrWasmPanicPromise]) === "stop")
+            if (await Promise.race([whenReadyAgain, stopped()]) === "stop")
                 break;
 
             const afterWait = config.performanceNow();
