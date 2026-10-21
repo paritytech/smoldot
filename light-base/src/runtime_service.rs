@@ -63,6 +63,7 @@ use alloc::{
     format,
     string::{String, ToString as _},
     sync::{Arc, Weak},
+    vec,
     vec::Vec,
 };
 use async_lock::Mutex;
@@ -340,16 +341,111 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         }
     }
 
+    /// Returns the runtime of the given block, downloading it from the network if necessary.
+    ///
+    /// The `:code` Merkle value of the block is fetched first. If a runtime with the same Merkle
+    /// value is already known, it is returned and `:code` isn't downloaded.
+    pub async fn download_and_pin_runtime(
+        &self,
+        block_hash: [u8; 32],
+        block_number: u64,
+        block_state_trie_root_hash: [u8; 32],
+    ) -> Result<PinnedRuntime, DownloadAndPinRuntimeError> {
+        let sync_service = &self.background_task_config.sync_service;
+
+        let mut code_merkle_value = None;
+        let mut code_closest_ancestor_excluding = None;
+        let mut storage_heap_pages = None;
+        for (request_index, item) in block_storage_query(
+            sync_service,
+            block_number,
+            block_hash,
+            block_state_trie_root_hash,
+            vec![
+                sync_service::StorageRequestItem {
+                    key: b":code".to_vec(),
+                    ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
+                },
+                sync_service::StorageRequestItem {
+                    key: b":heappages".to_vec(),
+                    ty: sync_service::StorageRequestItemTy::Value,
+                },
+            ],
+        )
+        .await?
+        {
+            match (request_index, item) {
+                (
+                    0,
+                    sync_service::StorageResultItem::ClosestDescendantMerkleValue {
+                        closest_descendant_merkle_value,
+                        found_closest_ancestor_excluding,
+                        ..
+                    },
+                ) => {
+                    code_merkle_value = closest_descendant_merkle_value;
+                    code_closest_ancestor_excluding = found_closest_ancestor_excluding;
+                }
+                (1, sync_service::StorageResultItem::Value { value, .. }) => {
+                    storage_heap_pages = value;
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        if let Some(code_merkle_value) = &code_merkle_value
+            && let Some(runtime) = self
+                .pin_runtime_by_code_merkle_value(
+                    code_merkle_value.clone(),
+                    storage_heap_pages.clone(),
+                )
+                .await
+        {
+            return Ok(runtime);
+        }
+
+        let mut storage_code = None;
+        for (_, item) in block_storage_query(
+            sync_service,
+            block_number,
+            block_hash,
+            block_state_trie_root_hash,
+            vec![sync_service::StorageRequestItem {
+                key: b":code".to_vec(),
+                ty: sync_service::StorageRequestItemTy::Value,
+            }],
+        )
+        .await?
+        {
+            match item {
+                sync_service::StorageResultItem::Value { value, .. } => storage_code = value,
+                _ => unreachable!(),
+            }
+        }
+        self.background_task_config
+            .metrics
+            .runtime_code_downloads
+            .inc();
+
+        self.compile_and_pin_runtime(
+            storage_code,
+            storage_heap_pages,
+            code_merkle_value,
+            code_closest_ancestor_excluding,
+        )
+        .await
+    }
+
     /// Tries to find a runtime within the [`RuntimeService`] that has the given storage code and
     /// heap pages. If none is found, compiles the runtime and stores it within the
     /// [`RuntimeService`].
-    pub async fn compile_and_pin_runtime(
+    async fn compile_and_pin_runtime(
         &self,
         storage_code: Option<Vec<u8>>,
         storage_heap_pages: Option<Vec<u8>>,
         code_merkle_value: Option<Vec<u8>>,
         closest_ancestor_excluding: Option<Vec<Nibble>>,
-    ) -> Result<PinnedRuntime, CompileAndPinRuntimeError> {
+    ) -> Result<PinnedRuntime, DownloadAndPinRuntimeError> {
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
@@ -365,8 +461,30 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         Ok(PinnedRuntime(
             result_rx
                 .await
-                .map_err(|_| CompileAndPinRuntimeError::Crash)?,
+                .map_err(|_| DownloadAndPinRuntimeError::Crash)?,
         ))
+    }
+
+    /// Returns an already-known runtime whose `:code` trie node has the given Merkle value and
+    /// whose `:heappages` storage value is the given one, without any network request.
+    ///
+    /// Returns `None` if no such runtime is known.
+    async fn pin_runtime_by_code_merkle_value(
+        &self,
+        code_merkle_value: Vec<u8>,
+        storage_heap_pages: Option<Vec<u8>>,
+    ) -> Option<PinnedRuntime> {
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let _ = self
+            .send_message_or_restart_service(ToBackground::PinRuntimeByCodeMerkleValue {
+                result_tx,
+                code_merkle_value,
+                storage_heap_pages,
+            })
+            .await;
+
+        result_rx.await.ok().flatten().map(PinnedRuntime)
     }
 
     /// Returns the runtime specification of the given runtime.
@@ -686,9 +804,12 @@ pub enum RuntimeError {
     Build(executor::host::NewErr),
 }
 
-/// Error potentially returned by [`RuntimeService::compile_and_pin_runtime`].
+/// Error potentially returned by [`RuntimeService::download_and_pin_runtime`].
 #[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
-pub enum CompileAndPinRuntimeError {
+pub enum DownloadAndPinRuntimeError {
+    /// Failed to download the storage items of the runtime.
+    #[display("{_0}")]
+    StorageQuery(sync_service::StorageQueryError),
     /// Background service has crashed while compiling this runtime. The crash might however not
     /// necessarily be caused by the runtime compilation.
     Crash,
@@ -703,6 +824,11 @@ enum ToBackground<TPlat: PlatformRef> {
         storage_heap_pages: Option<Vec<u8>>,
         code_merkle_value: Option<Vec<u8>>,
         closest_ancestor_excluding: Option<Vec<Nibble>>,
+    },
+    PinRuntimeByCodeMerkleValue {
+        result_tx: oneshot::Sender<Option<Arc<Runtime>>>,
+        code_merkle_value: Vec<u8>,
+        storage_heap_pages: Option<Vec<u8>>,
     },
     FinalizedRuntimeStorageMerkleValues {
         // TODO: overcomplicated
@@ -1404,6 +1530,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 .closest_ancestor_excluding,
                             runtime: Ok(finalized_block_runtime.virtual_machine),
                         });
+                        background.runtimes.insert(Arc::downgrade(&runtime));
 
                         match &runtime.runtime {
                             Ok(runtime) => {
@@ -1774,58 +1901,54 @@ async fn run_background<TPlat: PlatformRef>(
                 closest_ancestor_excluding,
             }) => {
                 // Foreground wants to compile the given runtime.
-
-                // Try to find an existing identical runtime.
-                let existing_runtime = background
-                    .runtimes
-                    .iter()
-                    .filter_map(|(_, rt)| rt.upgrade())
-                    .find(|rt| {
-                        rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages
-                    });
-
-                let runtime = if let Some(existing_runtime) = existing_runtime {
-                    log!(
+                let (runtime, compilation_duration) = background.find_or_compile_runtime(
+                    storage_code,
+                    storage_heap_pages,
+                    code_merkle_value,
+                    closest_ancestor_excluding,
+                );
+                match compilation_duration {
+                    None => log!(
                         &background.platform,
                         Trace,
                         &background.log_target,
                         "foreground-compile-and-pin-runtime-cache-hit"
-                    );
-                    background.metrics.runtime_cache_hits.inc();
-                    existing_runtime
-                } else {
-                    // No identical runtime was found. Try compiling the new runtime.
-                    let before_compilation = background.platform.now();
-                    let runtime = compile_runtime(
-                        &background.platform,
-                        &background.log_target,
-                        &storage_code,
-                        &storage_heap_pages,
-                    );
-                    let compilation_duration = background.platform.now() - before_compilation;
-                    log!(
+                    ),
+                    Some(compilation_duration) => log!(
                         &background.platform,
                         Debug,
                         &background.log_target,
                         "foreground-compile-and-pin-runtime-cache-miss",
                         ?compilation_duration,
-                        compilation_success = runtime.is_ok()
-                    );
-                    background
-                        .metrics
-                        .observe_runtime_compilation(compilation_duration, runtime.is_ok());
-                    let runtime = Arc::new(Runtime {
-                        heap_pages: storage_heap_pages,
-                        runtime_code: storage_code,
-                        code_merkle_value,
-                        closest_ancestor_excluding,
-                        runtime,
-                    });
-                    background.runtimes.insert(Arc::downgrade(&runtime));
-                    runtime
-                };
+                        compilation_success = runtime.runtime.is_ok()
+                    ),
+                }
 
                 let _ = result_tx.send(runtime);
+            }
+
+            WakeUpReason::ToBackground(ToBackground::PinRuntimeByCodeMerkleValue {
+                result_tx,
+                code_merkle_value,
+                storage_heap_pages,
+            }) => {
+                let existing_runtime = background.find_runtime(|rt| {
+                    rt.code_merkle_value.as_deref() == Some(&code_merkle_value[..])
+                        && rt.heap_pages == storage_heap_pages
+                });
+
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "foreground-pin-runtime-by-code-merkle-value",
+                    found = existing_runtime.is_some()
+                );
+                if existing_runtime.is_some() {
+                    background.metrics.runtime_cache_hits.inc();
+                }
+
+                let _ = result_tx.send(existing_runtime);
             }
 
             WakeUpReason::ToBackground(ToBackground::FinalizedRuntimeStorageMerkleValues {
@@ -2705,6 +2828,7 @@ async fn run_background<TPlat: PlatformRef>(
                 )),
             ) => {
                 // A runtime has successfully finished downloading.
+                background.metrics.runtime_code_downloads.inc();
 
                 let concerned_blocks = match &background.tree {
                     Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
@@ -2717,96 +2841,30 @@ async fn run_background<TPlat: PlatformRef>(
                 .format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash)))
                 .to_string();
 
-                // Try to find an existing runtime identical to the one that has just been
-                // downloaded. This loop is `O(n)`, but given that we expect this list to very
-                // small (at most 1 or 2 elements), this is not a problem.
-                let existing_runtime = background
-                    .runtimes
-                    .iter()
-                    .filter_map(|(_, rt)| rt.upgrade())
-                    .find(|rt| {
-                        rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages
-                    });
-
-                // If no identical runtime was found, try compiling the runtime.
-                let runtime = if let Some(existing_runtime) = existing_runtime {
-                    log!(
+                let (runtime, compilation_duration) = background.find_or_compile_runtime(
+                    storage_code,
+                    storage_heap_pages,
+                    code_merkle_value,
+                    closest_ancestor_excluding,
+                );
+                match compilation_duration {
+                    None => log!(
                         &background.platform,
                         Debug,
                         &background.log_target,
                         "runtime-download-finish-compilation-cache-hit",
                         block_hashes = concerned_blocks,
-                    );
-                    background.metrics.runtime_cache_hits.inc();
-                    existing_runtime
-                } else {
-                    let before_compilation = background.platform.now();
-                    let runtime = compile_runtime(
-                        &background.platform,
-                        &background.log_target,
-                        &storage_code,
-                        &storage_heap_pages,
-                    );
-                    let compilation_duration = background.platform.now() - before_compilation;
-                    log!(
+                    ),
+                    Some(compilation_duration) => log!(
                         &background.platform,
                         Debug,
                         &background.log_target,
                         "runtime-download-finish-compilation-cache-miss",
                         ?compilation_duration,
-                        compilation_success = runtime.is_ok(),
+                        compilation_success = runtime.runtime.is_ok(),
                         block_hashes = concerned_blocks,
-                    );
-                    background
-                        .metrics
-                        .observe_runtime_compilation(compilation_duration, runtime.is_ok());
-                    match &runtime {
-                        Ok(runtime) => {
-                            log!(
-                                &background.platform,
-                                Info,
-                                &background.log_target,
-                                format!(
-                                    "Successfully compiled runtime. Spec version: {}. \
-                                    Size of `:code`: {}.",
-                                    runtime.runtime_version().decode().spec_version,
-                                    BytesDisplay(
-                                        u64::try_from(storage_code.as_ref().map_or(0, |v| v.len()))
-                                            .unwrap()
-                                    )
-                                )
-                            );
-                        }
-                        Err(error) => {
-                            log!(
-                                &background.platform,
-                                Warn,
-                                &background.log_target,
-                                format!(
-                                    "Failed to compile runtime. Size of `:code`: {}.\nError: {}\n\
-                                    This indicates an incompatibility between smoldot and \
-                                    the chain.",
-                                    BytesDisplay(
-                                        u64::try_from(storage_code.as_ref().map_or(0, |v| v.len()))
-                                            .unwrap()
-                                    ),
-                                    error
-                                )
-                            );
-                        }
-                    }
-
-                    let runtime = Arc::new(Runtime {
-                        heap_pages: storage_heap_pages,
-                        runtime_code: storage_code,
-                        runtime,
-                        code_merkle_value,
-                        closest_ancestor_excluding,
-                    });
-
-                    background.runtimes.insert(Arc::downgrade(&runtime));
-                    runtime
-                };
+                    ),
+                }
 
                 // Insert the runtime into the tree.
                 match &mut background.tree {
@@ -3123,6 +3181,88 @@ struct Runtime {
     /// build.
     // TODO: consider storing hash instead
     heap_pages: Option<Vec<u8>>,
+}
+
+impl<TPlat: PlatformRef> Background<TPlat> {
+    /// Returns a runtime of [`Background::runtimes`] that matches the given predicate.
+    fn find_runtime(&self, mut predicate: impl FnMut(&Runtime) -> bool) -> Option<Arc<Runtime>> {
+        self.runtimes
+            .iter()
+            .filter_map(|(_, rt)| rt.upgrade())
+            .find(|rt| predicate(rt))
+    }
+
+    /// Returns a runtime of [`Background::runtimes`] with the given storage code and heap pages,
+    /// or compiles a new one and inserts it in [`Background::runtimes`].
+    ///
+    /// The second element of the returned tuple is the compilation duration, or `None` if an
+    /// existing runtime was found.
+    fn find_or_compile_runtime(
+        &mut self,
+        storage_code: Option<Vec<u8>>,
+        storage_heap_pages: Option<Vec<u8>>,
+        code_merkle_value: Option<Vec<u8>>,
+        closest_ancestor_excluding: Option<Vec<Nibble>>,
+    ) -> (Arc<Runtime>, Option<Duration>) {
+        if let Some(existing_runtime) = self.find_runtime(|rt| {
+            rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages
+        }) {
+            self.metrics.runtime_cache_hits.inc();
+            return (existing_runtime, None);
+        }
+
+        let before_compilation = self.platform.now();
+        let runtime = compile_runtime(
+            &self.platform,
+            &self.log_target,
+            &storage_code,
+            &storage_heap_pages,
+        );
+        let compilation_duration = self.platform.now() - before_compilation;
+        self.metrics
+            .observe_runtime_compilation(compilation_duration, runtime.is_ok());
+
+        let code_size =
+            BytesDisplay(u64::try_from(storage_code.as_ref().map_or(0, |v| v.len())).unwrap());
+        match &runtime {
+            Ok(runtime) => {
+                log!(
+                    &self.platform,
+                    Info,
+                    &self.log_target,
+                    format!(
+                        "Successfully compiled runtime. Spec version: {}. \
+                        Size of `:code`: {}.",
+                        runtime.runtime_version().decode().spec_version,
+                        code_size
+                    )
+                );
+            }
+            Err(error) => {
+                log!(
+                    &self.platform,
+                    Warn,
+                    &self.log_target,
+                    format!(
+                        "Failed to compile runtime. Size of `:code`: {}.\nError: {}\n\
+                        This indicates an incompatibility between smoldot and \
+                        the chain.",
+                        code_size, error
+                    )
+                );
+            }
+        }
+
+        let runtime = Arc::new(Runtime {
+            heap_pages: storage_heap_pages,
+            runtime_code: storage_code,
+            code_merkle_value,
+            closest_ancestor_excluding,
+            runtime,
+        });
+        self.runtimes.insert(Arc::downgrade(&runtime));
+        (runtime, Some(compilation_duration))
+    }
 }
 
 fn compile_runtime<TPlat: PlatformRef>(
@@ -4023,5 +4163,45 @@ async fn start_storage_request<TPlat: PlatformRef>(
                 state,
             }
         }));
+    }
+}
+
+async fn block_storage_query<TPlat: PlatformRef>(
+    sync_service: &Arc<sync_service::SyncService<TPlat>>,
+    block_number: u64,
+    block_hash: [u8; 32],
+    block_state_trie_root_hash: [u8; 32],
+    requests: Vec<sync_service::StorageRequestItem>,
+) -> Result<Vec<(usize, sync_service::StorageResultItem)>, DownloadAndPinRuntimeError> {
+    let mut results = Vec::with_capacity(requests.len());
+    let mut query = sync_service
+        .clone()
+        .storage_query(
+            block_number,
+            block_hash,
+            block_state_trie_root_hash,
+            requests.into_iter(),
+            3,
+            Duration::from_secs(20),
+            NonZero::<u32>::new(1).unwrap(),
+        )
+        .advance()
+        .await;
+
+    loop {
+        match query {
+            sync_service::StorageQueryProgress::Finished => return Ok(results),
+            sync_service::StorageQueryProgress::Progress {
+                request_index,
+                item,
+                query: next,
+            } => {
+                results.push((request_index, item));
+                query = next.advance().await;
+            }
+            sync_service::StorageQueryProgress::Error(error) => {
+                return Err(DownloadAndPinRuntimeError::StorageQuery(error));
+            }
+        }
     }
 }
