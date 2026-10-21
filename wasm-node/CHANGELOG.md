@@ -9,7 +9,7 @@
 ### Fixed
 
 - WebRTC substreams now process `FIN`, `FIN_ACK` and `RESET_STREAM` in every state, and no longer hold a `FIN` back behind the bytes a large notification still expects. An open, closing or refused notifications substream previously never answered the remote's `FIN`, so its data channel stayed open until the remote reset it, and full nodes waited 10 seconds per close. ([#3418](https://github.com/paritytech/smoldot/pull/3418); mitigates [#3412](https://github.com/paritytech/smoldot/issues/3412))
-- A transactions, GrandPa or statement substream refused or closed by a full node while the block announces substream stays open is reopened once at once, then at most every 5.5 seconds, instead of in a tight loop. ([#3418](https://github.com/paritytech/smoldot/pull/3418); mitigates [#3412](https://github.com/paritytech/smoldot/issues/3412))
+- A transactions, GrandPa or statement substream refused or closed by a full node while the block announces substream stays open is reopened once at once, whenever the full node opens its own side of the substream, and otherwise at most every 5.5 seconds, instead of in a tight loop. ([#3418](https://github.com/paritytech/smoldot/pull/3418); mitigates [#3412](https://github.com/paritytech/smoldot/issues/3412))
 
 ## 3.7.0 - 2026-10-07
 
