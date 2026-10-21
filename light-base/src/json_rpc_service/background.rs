@@ -3741,114 +3741,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     hashbrown::hash_map::Entry::Vacant(entry) => {
                         // No network request is in progress yet. Start one.
                         me.background_tasks.push(Box::pin({
-                            let sync_service = me.sync_service.clone();
                             let runtime_service = me.runtime_service.clone();
-                            // TODO: move to separate function
                             async move {
-                                let (
-                                    storage_code,
-                                    storage_heap_pages,
-                                    code_merkle_value,
-                                    code_closest_ancestor_excluding,
-                                ) = {
-                                    let mut storage_code = None;
-                                    let mut storage_heap_pages = None;
-                                    let mut code_merkle_value = None;
-                                    let mut code_closest_ancestor_excluding = None;
-
-                                    let mut query =
-                                        sync_service
-                                        .storage_query(
-                                            block_number,
-                                            block_hash,
-                                            block_state_trie_root_hash,
-                                            [
-                                                sync_service::StorageRequestItem {
-                                                    key: b":code".to_vec(),
-                                                    ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
-                                                },
-                                                sync_service::StorageRequestItem {
-                                                    key: b":code".to_vec(),
-                                                    ty: sync_service::StorageRequestItemTy::Value,
-                                                },
-                                                sync_service::StorageRequestItem {
-                                                    key: b":heappages".to_vec(),
-                                                    ty: sync_service::StorageRequestItemTy::Value,
-                                                },
-                                            ]
-                                            .into_iter(),
-                                            3,
-                                            Duration::from_secs(20),
-                                            NonZero::<u32>::new(1).unwrap(),
-                                        )
-                                        .advance()
-                                        .await;
-
-                                    loop {
-                                        match query {
-                                            sync_service::StorageQueryProgress::Finished => {
-                                                break (
-                                                    storage_code,
-                                                    storage_heap_pages,
-                                                    code_merkle_value,
-                                                    code_closest_ancestor_excluding,
-                                                )
-                                            }
-                                            sync_service::StorageQueryProgress::Progress {
-                                                request_index: 0,
-                                                item:
-                                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue {
-                                                        closest_descendant_merkle_value,
-                                                        found_closest_ancestor_excluding,
-                                                        ..
-                                                    },
-                                                query: next,
-                                            } => {
-                                                code_merkle_value = closest_descendant_merkle_value;
-                                                code_closest_ancestor_excluding = found_closest_ancestor_excluding;
-                                                query = next.advance().await;
-                                            }
-                                            sync_service::StorageQueryProgress::Progress {
-                                                request_index: 1,
-                                                item: sync_service::StorageResultItem::Value { value, .. },
-                                                query: next,
-                                            } => {
-                                                storage_code = value;
-                                                query = next.advance().await;
-                                            }
-                                            sync_service::StorageQueryProgress::Progress {
-                                                request_index: 2,
-                                                item: sync_service::StorageResultItem::Value { value, .. },
-                                                query: next,
-                                            } => {
-                                                storage_heap_pages = value;
-                                                query = next.advance().await;
-                                            }
-                                            sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
-                                            sync_service::StorageQueryProgress::Error(error) => {
-                                                return Event::RuntimeDownloaded {
-                                                    block_hash,
-                                                    result: Err(error.to_string()),
-                                                }
-                                            }
-                                        }
-                                    }
-                                };
-
-                                // Give the code and heap pages to the runtime service. The runtime service will
-                                // try to find any similar runtime it might have, and if not will compile it.
-                                let pinned_runtime = runtime_service
-                                    .compile_and_pin_runtime(
-                                        storage_code,
-                                        storage_heap_pages,
-                                        code_merkle_value,
-                                        code_closest_ancestor_excluding,
-                                    )
-                                    .await;
-
                                 Event::RuntimeDownloaded {
                                     block_hash,
-                                    result: pinned_runtime.map_err(|error| error.to_string()),
+                                    result: runtime_service
+                                        .download_and_pin_runtime(
+                                            block_hash,
+                                            block_number,
+                                            block_state_trie_root_hash,
+                                        )
+                                        .await
+                                        .map_err(|error| error.to_string()),
                                 }
                             }
                         }));

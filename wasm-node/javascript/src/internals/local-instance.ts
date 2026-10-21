@@ -459,9 +459,24 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
     // configuration.
     state.instance.exports.init(config.maxLogLevel);
 
-    // Promise that is notified when the `shutdownExecutor` function is called or when a Wasm
-    // panic happens.
-    const shutdownExecutorOrWasmPanicPromise = new Promise<"stop">((resolve) => state.onShutdownExecutorOrWasmPanic = () => resolve("stop"));
+    // Notified when the `shutdownExecutor` function is called or when a Wasm panic happens.
+    //
+    // The execution loop below races each of its waits against `stopped()`, a promise of its own
+    // per wait. Racing them all against one long-lived promise instead (as was done before) leaves
+    // a reaction on that promise per wait, never released until the shutdown: millions per hour
+    // for a busy client, until the JavaScript heap runs out.
+    let stopRequested = false;
+    let interruptWait = () => { };
+    state.onShutdownExecutorOrWasmPanic = () => {
+        stopRequested = true;
+        interruptWait();
+    };
+    const stopped = () => new Promise<"stop">((resolve) => {
+        if (stopRequested)
+            resolve("stop");
+        else
+            interruptWait = () => resolve("stop");
+    });
 
     (async () => {
         const cpuRateLimit = config.cpuRateLimit;
@@ -526,11 +541,11 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                     missingSleep = 2147483646;
 
                 const sleepFinished = new Promise<"timeout" | "stop">((resolve) => setTimeout(() => resolve("timeout"), missingSleep));
-                if (await Promise.race([sleepFinished, shutdownExecutorOrWasmPanicPromise]) === "stop")
+                if (await Promise.race([sleepFinished, stopped()]) === "stop")
                     break;
             }
 
-            if (await Promise.race([whenReadyAgain, shutdownExecutorOrWasmPanicPromise]) === "stop")
+            if (await Promise.race([whenReadyAgain, stopped()]) === "stop")
                 break;
 
             const afterWait = config.performanceNow();
