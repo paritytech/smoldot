@@ -2852,6 +2852,16 @@ where
                             self.notifications_protocol_handshake(substream_protocol),
                             self.notifications_protocol_max_notification_size(substream_protocol),
                         );
+
+                        // litep2p force-closes the whole connection 5 seconds after opening its
+                        // side of a substream pair that we never complete. Answer its open with
+                        // ours at once, whatever the pacing of `gossip_reopen_secondaries`.
+                        if !matches!(
+                            substream_protocol,
+                            NotificationsProtocol::BlockAnnounces { .. }
+                        ) {
+                            let _ = self.reopen_secondaries(chain_index, peer_index);
+                        }
                         continue;
                     }
 
@@ -4428,7 +4438,8 @@ where
     /// Opens the transactions, Grandpa and statement substreams missing from the
     /// [`GossipKind::ConsensusTransactions`] link with the given peer, after an
     /// [`Event::GossipSecondaryClosed`]. Pending and open ones are left alone. A refusal or
-    /// closing generates the event again.
+    /// closing generates the event again. The same happens on its own when the peer opens its
+    /// side of such a substream.
     ///
     /// # Panic
     ///
@@ -4446,8 +4457,15 @@ where
 
         // Panic on an invalid chain even though its data isn't needed.
         assert!(self.chains.contains(chain_id.0));
-        let chain_index = chain_id.0;
+        self.reopen_secondaries(chain_id.0, peer_index)
+    }
 
+    /// Implementation of [`ChainNetwork::gossip_reopen_secondaries`] by chain and peer index.
+    fn reopen_secondaries(
+        &mut self,
+        chain_index: usize,
+        peer_index: PeerIndex,
+    ) -> Result<(), ReopenSecondariesError> {
         // On the block announces connection, unless it is shutting down: the substreams would
         // close with it at once.
         let connection_id = self
@@ -5545,7 +5563,8 @@ pub enum Event<TConn> {
 
     /// A transactions, Grandpa or statement substream of a [`GossipKind::ConsensusTransactions`]
     /// link failed to open or was closed by the remote, while the link stays open. Nothing is
-    /// reopened on its own: see [`ChainNetwork::gossip_reopen_secondaries`].
+    /// reopened on its own, unless the remote opens its side of the substream: see
+    /// [`ChainNetwork::gossip_reopen_secondaries`].
     ///
     /// Not generated when the connection is shutting down, nor when the peer doesn't speak the
     /// protocol.

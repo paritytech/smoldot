@@ -111,13 +111,16 @@ enum SecondaryReply {
 /// Alice is a light client (`ChainNetwork`) that opens a gossip link with Bob. Bob is a bare
 /// libp2p node that accepts the block announces substream and answers the transactions
 /// substreams with `replies`, in order, refusing past the end. If `reopen_on_event` is set, Alice
-/// calls `gossip_reopen_secondaries` on every [`Event::GossipSecondaryClosed`].
+/// calls `gossip_reopen_secondaries` on every [`Event::GossipSecondaryClosed`]. If
+/// `bob_opens_after_refusal` is set, Bob opens his own transactions substream to Alice right
+/// after his first refusal, as a full node does once it reserves the light client.
 ///
 /// Returns how many transactions substreams Bob saw, the error of each
 /// [`Event::GossipSecondaryClosed`] Alice got, and Alice.
 fn secondary_substream_exchange(
     replies: &[SecondaryReply],
     reopen_on_event: bool,
+    bob_opens_after_refusal: bool,
 ) -> (usize, Vec<Option<NotificationsOutErr>>, Node) {
     use crate::libp2p::collection;
     use alloc::collections::BTreeMap;
@@ -207,6 +210,7 @@ fn secondary_substream_exchange(
     let mut idle_advances = 0u32;
     let mut bob_protocols: BTreeMap<collection::SubstreamId, String> = BTreeMap::new();
     let mut opens = 0usize;
+    let mut bob_opened = false;
     let mut errors = Vec::new();
 
     loop {
@@ -330,7 +334,19 @@ fn secondary_substream_exchange(
                         .copied()
                         .unwrap_or(SecondaryReply::Refuse)
                     {
-                        SecondaryReply::Refuse => bob_network.reject_in_notifications(substream_id),
+                        SecondaryReply::Refuse => {
+                            bob_network.reject_in_notifications(substream_id);
+                            if bob_opens_after_refusal && !bob_opened {
+                                bob_opened = true;
+                                bob_network.open_out_notifications(
+                                    bob_conn_id,
+                                    transactions_name.clone(),
+                                    Duration::from_secs(10),
+                                    Vec::new(),
+                                    1024,
+                                );
+                            }
+                        }
                         SecondaryReply::Accept => {
                             bob_network.accept_in_notifications(substream_id, Vec::new(), 1024)
                         }
@@ -367,7 +383,8 @@ fn secondary_substream_exchange(
 /// the gossip link stays open.
 #[test]
 fn secondary_substream_refusal_is_reported_not_reopened() {
-    let (opens, errors, alice) = secondary_substream_exchange(&[SecondaryReply::Refuse], false);
+    let (opens, errors, alice) =
+        secondary_substream_exchange(&[SecondaryReply::Refuse], false, false);
     assert_eq!(opens, 1);
     assert!(matches!(
         errors.as_slice(),
@@ -386,8 +403,25 @@ fn secondary_substream_refusal_is_reported_not_reopened() {
 /// substream again, and nothing more happens once the peer accepts it.
 #[test]
 fn gossip_reopen_secondaries_opens_the_missing_substream() {
-    let (opens, errors, _) =
-        secondary_substream_exchange(&[SecondaryReply::Refuse, SecondaryReply::Accept], true);
+    let (opens, errors, _) = secondary_substream_exchange(
+        &[SecondaryReply::Refuse, SecondaryReply::Accept],
+        true,
+        false,
+    );
+    assert_eq!(opens, 2);
+    assert_eq!(errors.len(), 1);
+}
+
+/// litep2p force-closes the whole connection 5 seconds after opening its side of a substream
+/// pair that the peer never completes. A transactions substream Bob opens while Alice's is
+/// missing is therefore answered with hers at once, without a `gossip_reopen_secondaries` call.
+#[test]
+fn secondary_substream_opened_by_the_peer_is_answered_at_once() {
+    let (opens, errors, _) = secondary_substream_exchange(
+        &[SecondaryReply::Refuse, SecondaryReply::Accept],
+        false,
+        true,
+    );
     assert_eq!(opens, 2);
     assert_eq!(errors.len(), 1);
 }
