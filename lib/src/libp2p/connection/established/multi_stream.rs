@@ -366,9 +366,7 @@ where
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 protocol_name,
             },
-            // The remote cancelled the substream before the API accepted it, so there is no user
-            // data yet: as on single-stream connections. Mapping it to `InboundAcceptedCancel`
-            // unwrapped that missing user data and panicked on WebRTC connections.
+            // The substream was never accepted, so there is no user data to hand back.
             substream::Event::InboundNegotiatedCancel => Event::InboundNegotiatedCancel {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
             },
