@@ -21,4 +21,5 @@ pub mod basic_peering_strategy;
 pub mod bitswap_peering_strategy;
 pub mod codec;
 pub mod kademlia;
+pub mod peers_topology;
 pub mod service;
