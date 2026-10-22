@@ -1,0 +1,6 @@
+# What an image built with this checkout as its context has no use for: build output, installed
+# packages and the repository's history. The JavaScript `dist` is rebuilt from source.
+target
+**/node_modules
+.git
+wasm-node/javascript/dist
