@@ -46,8 +46,9 @@ pub use crate::executor::vm::ExecHint;
 pub use blocks_tree::{CommitVerifyError, JustificationVerifyError};
 pub use warp_sync::{
     BuildChainInformationError as WarpSyncBuildChainInformationError,
-    BuildRuntimeError as WarpSyncBuildRuntimeError, ConfigCodeTrieNodeHint, VerifyFragmentError,
-    WarpSyncFragment,
+    BuildRuntimeError as WarpSyncBuildRuntimeError,
+    BuildRuntimeOutcome as WarpSyncBuildRuntimeOutcome, ConfigCodeTrieNodeHint,
+    VerifyFragmentError, WarpSyncFragment,
 };
 
 use super::{all_forks::AllForksSync, warp_sync::RuntimeInformation};
@@ -2464,7 +2465,7 @@ impl<TRq, TSrc, TBl> WarpSyncBuildRuntime<TRq, TSrc, TBl> {
         allow_unresolved_imports: bool,
     ) -> (
         AllSync<TRq, TSrc, TBl>,
-        Result<(), WarpSyncBuildRuntimeError>,
+        Result<WarpSyncBuildRuntimeOutcome, WarpSyncBuildRuntimeError>,
     ) {
         let (warp_sync, outcome) = self.inner.build(exec_hint, allow_unresolved_imports);
 
