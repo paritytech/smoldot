@@ -60,6 +60,7 @@ fn validate_from_proof() {
         storage_main_trie_changes: Default::default(),
         max_log_level: 0,
         calculate_trie_changes: false,
+        calculate_child_tries_roots_on_finish: false,
     })
     .unwrap();
 
