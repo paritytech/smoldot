@@ -332,7 +332,17 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             }
             case "json-rpc-responses-non-empty": {
                 // Notify every single promise found in `jsonRpcResponsesPromises`.
-                const callbacks = state.chains.get(event.chainId)!.jsonRpcResponsesPromises;
+                //
+                // The chain might be gone already: `removeChain` and `terminate` both delete from
+                // `state.chains` synchronously, while an event the worker had already posted is
+                // still travelling through the `MessagePort`. Asserting the entry is there throws
+                // from within the port's event handler, where nothing catches it, and Node kills
+                // the process -- during `terminate`, that means whatever the caller was doing on
+                // the way out (saving a database, for instance) never finishes.
+                const chain = state.chains.get(event.chainId);
+                if (!chain)
+                    break;
+                const callbacks = chain.jsonRpcResponsesPromises;
                 while (callbacks.length !== 0) {
                     (callbacks.shift()!)();
                 }
