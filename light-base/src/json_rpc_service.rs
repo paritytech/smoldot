@@ -39,6 +39,8 @@
 
 mod background;
 mod statement;
+#[cfg(all(test, feature = "std"))]
+mod tests;
 
 use crate::{
     bitswap_service, log, network_service, platform::PlatformRef, runtime_service, sync_service,
