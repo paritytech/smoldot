@@ -505,8 +505,13 @@ where
     /// Panics if the [`AsyncOpId`] is invalid.
     ///
     pub fn async_op_failure(&mut self, async_op_id: AsyncOpId, now: &TNow) {
-        let new_timeout = now.clone() + self.retry_after_failed;
+        let retry_after = now.clone() + self.retry_after_failed;
+        self.async_op_failure_retry_at(async_op_id, &retry_after);
+    }
 
+    /// Similar to [`AsyncTree::async_op_failure`], but retries at the given time
+    /// instead of `now + retry_after_failed`.
+    pub fn async_op_failure_retry_at(&mut self, async_op_id: AsyncOpId, retry_after: &TNow) {
         // Update the blocks that were performing this operation.
         // The blocks are iterated from child to parent, so that we can check, for each node,
         // whether its parent has the same asynchronous operation id.
@@ -523,11 +528,11 @@ where
                 AsyncOpState::InProgress {
                     async_op_id: id,
                     timeout: Some(ref timeout),
-                } if id == async_op_id => Some(cmp::min(timeout.clone(), new_timeout.clone())),
+                } if id == async_op_id => Some(cmp::min(timeout.clone(), retry_after.clone())),
                 AsyncOpState::InProgress {
                     async_op_id: id,
                     timeout: None,
-                } if id == async_op_id => Some(new_timeout.clone()),
+                } if id == async_op_id => Some(retry_after.clone()),
                 _ => continue,
             };
 
