@@ -16,6 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import * as buffer from './buffer.js';
+import type { ConnectionAddress } from '../public-types.js';
 
 /**
  * Configuration for {@link startLocalInstance}.
@@ -73,13 +74,7 @@ export type Event =
     { ty: "stream-send", connectionId: number, streamId?: number, data: Array<Uint8Array> } |
     { ty: "stream-send-close", connectionId: number, streamId?: number };
 
-export type ParsedMultiaddr =
-    { ty: "tcp", hostname: string, port: number } |
-    { ty: "websocket", url: string } |
-    { ty: "webrtc", targetPort: number, ipVersion: 4 | 6, targetIp: string, remoteTlsCertificateSha256: Uint8Array } |
-    // WebRTC requires a literal IP address; the platform must resolve `hostname` before
-    // connecting. `family` restricts the address family, or is `undefined` for either.
-    { ty: "webrtc", targetPort: number, hostname: string, family: 4 | 6 | undefined, remoteTlsCertificateSha256: Uint8Array };
+export type ParsedMultiaddr = ConnectionAddress;
 
 export interface Instance {
     request: (request: string, chainId: number) => number,

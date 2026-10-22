@@ -340,7 +340,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             }
             case "new-connection": {
                 const connectionId = event.connectionId;
-                state.connections.set(connectionId, platformBindings.connect({
+                const connectionConfig: ConnectionConfig = {
                     address: event.address,
                     onConnectionReset(message) {
                         if (state.instance.status !== "ready")
@@ -373,7 +373,15 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                             throw new Error();
                         state.instance.instance.streamReset(connectionId, streamId, message);
                     },
-                }));
+                };
+
+                // The filter is applied here rather than in the platform bindings so that it
+                // behaves identically on every platform, including when the client runs in a
+                // worker: connections are opened on this side of the `MessagePort` even then.
+                const accepted = !options.connectionFilter || options.connectionFilter(event.address);
+                state.connections.set(connectionId, accepted
+                    ? platformBindings.connect(connectionConfig)
+                    : refusedConnection(connectionConfig));
                 break;
             }
             case "connection-reset": {
@@ -684,4 +692,25 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             state.chains.clear();
         }
     }
+}
+
+/**
+ * Stand-in for a connection refused by `ClientOptions.connectionFilter`. Nothing is opened; the
+ * client is instead told that the connection has been reset.
+ *
+ * The reset is reported asynchronously because this is called from within the instance's event
+ * callback, and the instance can't be called back into from there.
+ */
+function refusedConnection(config: ConnectionConfig): Connection {
+    let resetByClient = false;
+    setTimeout(() => {
+        if (!resetByClient)
+            config.onConnectionReset("Connection refused by connectionFilter");
+    }, 0);
+    return {
+        reset: () => { resetByClient = true; },
+        send: () => { },
+        closeSend: () => { },
+        openOutSubstream: () => { },
+    };
 }
