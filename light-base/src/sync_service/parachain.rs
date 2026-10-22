@@ -16,7 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{
-    BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground, paraheads,
+    BlockNotification, ConfigRuntimeCodeHint, FinalizedBlockRuntime, Notification, SubscribeAll,
+    ToBackground, paraheads,
 };
 use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 
@@ -47,6 +48,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     block_number_bytes: usize,
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
     parachain_id: u32,
+    runtime_code_hint: Option<ConfigRuntimeCodeHint>,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     metrics: Arc<crate::metrics::ChainMetrics>,
@@ -73,6 +75,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
 
     // Phase 2: Download the parachain runtime from a P2P peer and determine Aura
     // consensus parameters. Retries indefinitely until successful.
+    let mut runtime_code_hint = runtime_code_hint;
     let (effective_chain_info, finalized_runtime) = loop {
         match bootstrap_parachain_consensus(
             &log_target,
@@ -80,6 +83,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             &network_service,
             &effective_chain_info,
             block_number_bytes,
+            runtime_code_hint.as_ref(),
             &metrics,
         )
         .await
@@ -92,6 +96,8 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     &log_target,
                     format!("Failed to bootstrap parachain consensus: {err}. Retrying in 5s...")
                 );
+                // The hint might be the cause of the failure, for example a corrupted `:code`.
+                runtime_code_hint = None;
                 platform.sleep(Duration::from_secs(5)).await;
             }
         }
@@ -1360,6 +1366,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
     network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
+    runtime_code_hint: Option<&ConfigRuntimeCodeHint>,
     metrics: &Arc<crate::metrics::ChainMetrics>,
 ) -> Result<BootstrappedParachain, String> {
     let ci_ref = chain_info.as_ref();
@@ -1396,6 +1403,7 @@ async fn bootstrap_parachain_consensus<TPlat: PlatformRef>(
             chain_info,
             block_number_bytes,
             peer_id,
+            runtime_code_hint,
             metrics,
         )
     })
@@ -1454,45 +1462,82 @@ async fn attempt_bootstrap_with_peer<TPlat: PlatformRef>(
     chain_info: &chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
     peer_id: libp2p::PeerId,
+    runtime_code_hint: Option<&ConfigRuntimeCodeHint>,
     metrics: &Arc<crate::metrics::ChainMetrics>,
 ) -> Result<BootstrappedParachain, String> {
     let ci_ref = chain_info.as_ref();
     let state_root = *ci_ref.finalized_block_header.state_root;
     let block_hash = ci_ref.finalized_block_header.hash(block_number_bytes);
 
-    log!(
-        platform,
-        Info,
-        log_target,
-        format!("Downloading parachain runtime from peer {peer_id}")
-    );
+    let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
 
-    // Download :code and :heappages.
-    let proof = network_service
-        .clone()
-        .storage_proof_request(
-            peer_id.clone(),
-            codec::StorageProofRequestConfig {
+    // Querying the parent key of `:code` gives the Merkle value of `:code` without its value.
+    let hint_proof = match runtime_code_hint {
+        Some(hint) => {
+            let proof = request_storage_proof(
+                network_service,
+                &peer_id,
                 block_hash,
-                keys: [&b":code"[..], &b":heappages"[..]].into_iter(),
-            },
-            Duration::from_secs(60),
-        )
-        .await
-        .map_err(|e| format!("Storage proof request failed: {e}"))?;
-    metrics.runtime_code_downloads.inc();
+                &[b":cod", b":heappages"],
+                Duration::from_secs(16),
+            )
+            .await?;
+            let code_merkle_value = proof
+                .closest_descendant_merkle_value(&state_root, code_nibbles.iter().copied())
+                .ok()
+                .flatten();
+            if code_merkle_value == Some(&hint.merkle_value[..]) {
+                log!(
+                    platform,
+                    Info,
+                    log_target,
+                    format!(
+                        "Reusing parachain runtime from the database ({} bytes)",
+                        hint.storage_value.len()
+                    )
+                );
+                Some((hint.storage_value.clone(), proof))
+            } else {
+                log!(
+                    platform,
+                    Debug,
+                    log_target,
+                    "runtime-code-hint-mismatch",
+                    peer_id
+                );
+                None
+            }
+        }
+        None => None,
+    };
 
-    let decoded_proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-        proof: proof.decode().to_vec(),
-    })
-    .map_err(|e| format!("Failed to decode storage proof: {e}"))?;
-
-    let code = decoded_proof
-        .storage_value(&state_root, b":code")
-        .map_err(|_| String::from("Proof doesn't contain :code"))?
-        .ok_or_else(|| String::from("Runtime :code not found in storage"))?
-        .0
-        .to_vec();
+    let (code, decoded_proof) = match hint_proof {
+        Some(hint_proof) => hint_proof,
+        None => {
+            log!(
+                platform,
+                Info,
+                log_target,
+                format!("Downloading parachain runtime from peer {peer_id}")
+            );
+            let proof = request_storage_proof(
+                network_service,
+                &peer_id,
+                block_hash,
+                &[b":code", b":heappages"],
+                Duration::from_secs(60),
+            )
+            .await?;
+            metrics.runtime_code_downloads.inc();
+            let code = proof
+                .storage_value(&state_root, b":code")
+                .map_err(|_| String::from("Proof doesn't contain :code"))?
+                .ok_or_else(|| String::from("Runtime :code not found in storage"))?
+                .0
+                .to_vec();
+            (code, proof)
+        }
+    };
 
     let heap_pages_raw = decoded_proof
         .storage_value(&state_root, b":heappages")
@@ -1500,30 +1545,19 @@ async fn attempt_bootstrap_with_peer<TPlat: PlatformRef>(
 
     let storage_heap_pages = heap_pages_raw.map(|(v, _)| v.to_vec());
 
-    let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied());
     let code_merkle_value = decoded_proof
-        .closest_descendant_merkle_value(&state_root, code_nibbles.clone())
+        .closest_descendant_merkle_value(&state_root, code_nibbles.iter().copied())
         .ok()
         .flatten()
         .map(|mv| mv.to_vec());
     let closest_ancestor_excluding = decoded_proof
-        .closest_ancestor_in_proof(&state_root, code_nibbles)
+        .closest_ancestor_in_proof(&state_root, code_nibbles.iter().copied())
         .ok()
         .flatten()
         .map(|ancestor| ancestor.collect::<Vec<_>>());
 
     let heap_pages = executor::storage_heap_pages_to_value(storage_heap_pages.as_deref())
         .map_err(|e| format!("Invalid :heappages value: {e}"))?;
-
-    log!(
-        platform,
-        Info,
-        log_target,
-        format!(
-            "Downloaded parachain runtime ({} bytes), compiling...",
-            code.len()
-        )
-    );
 
     let before_compilation = platform.now();
     let vm = executor::host::HostVmPrototype::new(executor::host::Config {
@@ -1636,6 +1670,33 @@ async fn attempt_bootstrap_with_peer<TPlat: PlatformRef>(
             closest_ancestor_excluding,
         },
     })
+}
+
+/// Requests a storage proof of the given keys from a peer and decodes it.
+async fn request_storage_proof<TPlat: PlatformRef>(
+    network_service: &Arc<network_service::NetworkServiceChain<TPlat>>,
+    peer_id: &libp2p::PeerId,
+    block_hash: [u8; 32],
+    keys: &[&[u8]],
+    timeout: Duration,
+) -> Result<trie::proof_decode::DecodedTrieProof<Vec<u8>>, String> {
+    let proof = network_service
+        .clone()
+        .storage_proof_request(
+            peer_id.clone(),
+            codec::StorageProofRequestConfig {
+                block_hash,
+                keys: keys.iter().copied(),
+            },
+            timeout,
+        )
+        .await
+        .map_err(|e| format!("Storage proof request failed: {e}"))?;
+
+    trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+        proof: proof.decode().to_vec(),
+    })
+    .map_err(|e| format!("Failed to decode storage proof: {e}"))
 }
 
 /// Runs a single runtime call, serving storage reads from the given proof.
