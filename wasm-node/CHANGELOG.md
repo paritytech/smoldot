@@ -15,6 +15,7 @@
 ### Fixed
 
 - A notification that JSON-RPC responses are available for a chain that has just been removed is now ignored. A worker can still deliver one after `removeChain` or `terminate` have removed the chain. It threw from the `MessagePort` event handler, where nothing catches it, and NodeJS ended the process: during `terminate`, for example, before the caller had finished saving a database.
+- A `chainHead_v1_storage` call with several items now gives back every operation slot it took once it is done, instead of one. Every such call leaked the others, until the `chainHead_v1_follow` subscription had no slot left and answered every storage call with `limitReached`.
 
 ## 3.7.0 - 2026-10-07
 
