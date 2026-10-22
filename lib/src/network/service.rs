@@ -4459,12 +4459,8 @@ where
                         SubstreamId::MAX,
                     ),
             )
-            .map(|(_, _, _, _, substream_id)| {
-                self.substreams
-                    .get(substream_id)
-                    .unwrap_or_else(|| unreachable!())
-                    .connection_id
-            })
+            .filter_map(|(_, _, _, _, substream_id)| self.substreams.get(substream_id))
+            .map(|substream| substream.connection_id)
             .find(|connection_id| !self.inner.connection_state(*connection_id).shutting_down)
             .ok_or(ReopenSecondariesError::NotOpen)?;
 
