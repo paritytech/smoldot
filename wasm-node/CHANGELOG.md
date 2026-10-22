@@ -16,7 +16,7 @@
 ### Fixed
 
 - A notification that JSON-RPC responses are available for a chain that has just been removed is now ignored. A worker can still deliver one after `removeChain` or `terminate` have removed the chain. It threw from the `MessagePort` event handler, where nothing catches it, and NodeJS ended the process: during `terminate`, for example, before the caller had finished saving a database.
-- A `chainHead_v1_storage` call with several items now gives back every operation slot it took once it is done, instead of one. Every such call leaked the others, until the `chainHead_v1_follow` subscription had no slot left and answered every storage call with `limitReached`.
+- A `chainHead_v1_storage` call now gives back, once it ends, every operation slot it took: one for each item it started. It gave back one, so each call of several items took slots from the `chainHead_v1_follow` subscription for good. After 31 calls of two items, a subscription was down to its last slot: it ran one operation at a time, a call of several items started only its first item, and any other operation started meanwhile got `limitReached`.
 - A WebRTC connection no longer writes a `FIN` or `FIN_ACK` flag when the outer stream has less room than the flag's frame. Writing it queued more bytes than the stream allowed, which failed the `total_length <= writable_bytes` assertion of the wasm node. The flag now waits until the stream is writable again.
 
 ## 3.7.0 - 2026-10-07

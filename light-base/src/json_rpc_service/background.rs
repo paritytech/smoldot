@@ -2482,10 +2482,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             continue;
                         }
 
-                        // One slot was taken per item above, but the operation is tracked, and
-                        // later released, as a single entry. Remember how many slots it actually
-                        // holds, or every multi-item query would give back one slot and leak the
-                        // rest, until the subscription stopped accepting operations for good.
+                        // One slot was taken above for each item started. The operation gives
+                        // back the slots it holds when it ends, so it must hold all of them.
                         let occupied_slots =
                             u32::try_from(storage_operations.len()).unwrap_or(u32::MAX);
 
