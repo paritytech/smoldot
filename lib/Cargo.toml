@@ -88,7 +88,7 @@ soketto = { version = "0.8.0", optional = true }
 wasmtime = { version = "36.0.19", default-features = false, features = ["async", "cranelift", "gc", "gc-null", "component-model", "threads"], optional = true }
 
 [dev-dependencies]
-criterion = "0.5.1"
+criterion = "0.8.2"
 rand = { version = "0.8.6", default-features = false, features = ["std", "std_rng"] }
 wat = "1.216.0"
 
