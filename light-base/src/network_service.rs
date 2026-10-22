@@ -2930,15 +2930,31 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 // Reopen at once the first time, as polkadot-sdk reserves the peer for these
                 // protocols slightly after block announces open. Afterwards, wait out its ban.
-                // The link is open while this event can happen.
-                let link = task
-                    .open_gossip_links
-                    .get_mut(&(chain_id, peer_id.clone()))
-                    .unwrap();
+                let link = task.open_gossip_links.get_mut(&(chain_id, peer_id.clone()));
+                let Some(link) = link else {
+                    // The link is open while this event can happen.
+                    log!(
+                        &task.platform,
+                        Warn,
+                        "network",
+                        "gossip-secondary-closed-unknown-link",
+                        chain = &task.network[chain_id].log_name,
+                        peer_id,
+                    );
+                    continue;
+                };
                 if !link.secondary_reopened_at_once {
                     link.secondary_reopened_at_once = true;
-                    let _result = task.network.gossip_reopen_secondaries(chain_id, &peer_id);
-                    debug_assert!(_result.is_ok());
+                    let outcome = task.network.gossip_reopen_secondaries(chain_id, &peer_id);
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "gossip-secondaries-reopen",
+                        chain = &task.network[chain_id].log_name,
+                        peer_id,
+                        ?outcome,
+                    );
                 } else if !task
                     .secondary_reopens
                     .keys()
