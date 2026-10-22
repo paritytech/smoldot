@@ -1192,7 +1192,7 @@ async fn fetch_parahead<TPlat: PlatformRef>(
                 a.extend_from_slice(b.as_ref());
                 a
             }),
-            6,
+            12,
             Duration::from_secs(10),
             NonZero::<u32>::new(2).unwrap(),
         )
