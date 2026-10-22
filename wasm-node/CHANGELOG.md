@@ -10,6 +10,7 @@
 ### Changed
 
 - A call proof request that fails at the network level no longer gets the peer banned and disconnected, and its retry waits 500 ms instead of being sent at once. A node whose light-client request queue is full drops a request without answering, which looks the same as a network failure, and banning it for that disconnected a client that has no other peer, such as one restricted to a single node. The relay chain calls that fetch parachain heads get 12 attempts instead of 6.
+- A storage request that fails at the network level no longer gets the peer banned and disconnected, and its retry waits 500 ms. As for call proofs, an overloaded node that drops a request without answering was banned, and the query then failed at once when no other peer had the block, without using its attempts. An invalid or incomplete proof still gets the peer banned.
 
 ### Fixed
 
