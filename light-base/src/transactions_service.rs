@@ -402,6 +402,7 @@ enum InvalidOrError {
 enum ValidationError {
     InvalidOrError(InvalidOrError),
     ObsoleteSubscription,
+    ObsoleteBlock,
 }
 
 /// Message sent from the foreground service to the background.
@@ -1154,6 +1155,11 @@ async fn background_task<TPlat: PlatformRef>(
                             // rebuild it.
                             continue 'channels_rebuild;
                         }
+                        Err(ValidationError::ObsoleteBlock) => {
+                            // The block was unpinned before validation started. Retry against the
+                            // current best block on the next loop iteration.
+                            continue;
+                        }
                         Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(error))) => {
                             log!(
                                 &worker.platform,
@@ -1508,10 +1514,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
         .await
     {
         Ok(r) => r,
-        Err(runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
-            return Err(ValidationError::ObsoleteSubscription);
-        }
-        Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => unreachable!(),
+        Err(error) => return Err(pin_error_to_validation_error(error)),
     };
 
     let runtime_call_future = relay_chain_sync.runtime_call(
@@ -1577,7 +1580,42 @@ async fn validate_transaction<TPlat: PlatformRef>(
     }
 }
 
+fn pin_error_to_validation_error(
+    error: runtime_service::PinPinnedBlockRuntimeError,
+) -> ValidationError {
+    match error {
+        runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription => {
+            ValidationError::ObsoleteSubscription
+        }
+        runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned => {
+            ValidationError::ObsoleteBlock
+        }
+    }
+}
+
 /// Utility. Calculates the BLAKE2 hash of the given bytes.
 fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
     <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ValidationError, pin_error_to_validation_error};
+    use crate::runtime_service::PinPinnedBlockRuntimeError;
+
+    #[test]
+    fn block_not_pinned_is_reported_as_an_obsolete_block() {
+        assert!(matches!(
+            pin_error_to_validation_error(PinPinnedBlockRuntimeError::BlockNotPinned),
+            ValidationError::ObsoleteBlock
+        ));
+    }
+
+    #[test]
+    fn obsolete_subscription_keeps_its_existing_error_classification() {
+        assert!(matches!(
+            pin_error_to_validation_error(PinPinnedBlockRuntimeError::ObsoleteSubscription),
+            ValidationError::ObsoleteSubscription
+        ));
+    }
 }
