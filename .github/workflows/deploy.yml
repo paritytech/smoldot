@@ -128,15 +128,15 @@ jobs:
           mkdir -p ./upload/doc-rust
           mkdir -p ./upload/tests-coverage
           touch ./upload/.nojekyll
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: javascript-documentation
           path: ./upload/doc-javascript
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: rust-documentation
           path: ./upload/doc-rust
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: code-coverage-report
           path: ./upload/tests-coverage
