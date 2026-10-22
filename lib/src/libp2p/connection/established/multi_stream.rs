@@ -366,9 +366,9 @@ where
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 protocol_name,
             },
-            substream::Event::InboundNegotiatedCancel => Event::InboundAcceptedCancel {
+            // The substream was never accepted, so there is no user data to hand back.
+            substream::Event::InboundNegotiatedCancel => Event::InboundNegotiatedCancel {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
-                user_data: substream_user_data.take().unwrap(),
             },
             substream::Event::RequestIn { request } => Event::RequestIn {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
