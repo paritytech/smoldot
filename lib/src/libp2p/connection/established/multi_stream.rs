@@ -366,7 +366,7 @@ where
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 protocol_name,
             },
-            // No user data yet, as the API hasn't accepted the substream: same as single-stream.
+            // The substream was never accepted, so there is no user data to hand back.
             substream::Event::InboundNegotiatedCancel => Event::InboundNegotiatedCancel {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
             },

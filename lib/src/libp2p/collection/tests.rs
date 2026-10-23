@@ -1319,6 +1319,103 @@ fn multi_stream_queue_notification_crossing_remote_reset() {
         )));
 }
 
+/// The remote resets the data channel that carries an inbound substream while the API's answer
+/// to `InboundNegotiated` is still in flight: the substream is still waiting for that answer
+/// (`InboundNegotiatingApiWait`) when the reset reaches the state machine.
+///
+/// Only an accepted substream carries user data, so the state machine must report the reset as
+/// `InboundNegotiatedCancel`. The connection task must then turn the late accept into an
+/// `InboundAcceptedCancel` for the coordinator instead of accepting a substream that no longer
+/// exists, and the connection must stay up on both sides.
+#[test]
+fn multi_stream_accept_inbound_crossing_remote_reset() {
+    let mut harness = MultiHarness::new();
+
+    // Complete the connection handshake on both sides.
+    let events = harness.pump(true, true);
+    assert!(
+        events
+            .iter()
+            .any(|(s, e)| *s == Side::Alice && matches!(e, Event::HandshakeFinished { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|(s, e)| *s == Side::Bob && matches!(e, Event::HandshakeFinished { .. }))
+    );
+    accept_ping_inbounds(&mut harness, &events);
+
+    // Bob opens an outbound notifications substream. The data channel that will carry it is the
+    // next one that the harness allocates.
+    let notif_channel = harness.next_channel_id;
+    let bob_sub = harness.bob.network.open_out_notifications(
+        harness.bob.conn_id,
+        "/test-notif/1.0.0".to_string(),
+        Duration::from_secs(10),
+        b"hello".to_vec(),
+        1024,
+    );
+
+    // Alice negotiates the inbound substream and reports the protocol name to the API.
+    let events = harness.pump(true, true);
+    assert_eq!(harness.next_channel_id, notif_channel + 1);
+    accept_ping_inbounds(&mut harness, &events);
+    let alice_inbound = events
+        .iter()
+        .find_map(|(side, ev)| match ev {
+            Event::InboundNegotiated {
+                substream_id,
+                protocol_name,
+                ..
+            } if *side == Side::Alice && protocol_name == "/test-notif/1.0.0" => {
+                Some(*substream_id)
+            }
+            _ => None,
+        })
+        .expect("Alice should report InboundNegotiated");
+
+    // Alice accepts the protocol. The accept message is now queued in Alice's coordinator but is
+    // deliberately NOT delivered to Alice's connection task yet, so the substream stays in
+    // `InboundNegotiatingApiWait`.
+    harness.alice.network.accept_inbound(
+        alice_inbound,
+        InboundTy::Notifications {
+            max_handshake_size: 1024,
+        },
+    );
+
+    // The data channel carrying the substream abruptly dies. Alice's state machine must report
+    // the reset as `InboundNegotiatedCancel`, since the substream has no user data yet. The
+    // held-back accept is NOT delivered during this phase.
+    harness.kill_channel(notif_channel);
+    let events_reset = harness.pump(false, true);
+
+    // Bob observes the failure of the substream he opened, since its channel was killed.
+    assert!(events_reset.iter().any(|(side, ev)| *side == Side::Bob
+        && matches!(
+            ev,
+            Event::NotificationsOutResult { substream_id, result: Err(_) }
+                if *substream_id == bob_sub
+        )));
+
+    // Deliver the held-back accept. The task knows that the substream is gone and reports its
+    // cancellation to the coordinator instead of accepting a substream that no longer exists.
+    let events_final = harness.pump(true, true);
+    assert!(events_final.iter().any(|(side, ev)| *side == Side::Alice
+        && matches!(
+            ev,
+            Event::InboundAcceptedCancel { substream_id } if *substream_id == alice_inbound
+        )));
+
+    // The connection survives the crossing on both sides rather than being torn down.
+    assert!(
+        !events_reset
+            .iter()
+            .chain(&events_final)
+            .any(|(_, ev)| { matches!(ev, Event::StartShutdown { .. } | Event::Shutdown { .. }) })
+    );
+}
+
 /// Completes the connection handshake, then opens a notifications substream from Bob to Alice
 /// up to Alice reporting it as negotiated. Returns the data channel id, Bob's (outbound)
 /// substream id and Alice's (inbound) substream id.
