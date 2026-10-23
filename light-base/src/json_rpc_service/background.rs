@@ -355,15 +355,19 @@ enum RuntimeServiceSubscription<TPlat: PlatformRef> {
 /// bound the memory usage when subscribing to large storage values.
 type LegacyApiStorageNotifiedValue = Option<[u8; 32]>;
 
+/// Builds the [`LegacyApiStorageNotifiedValue`] corresponding to the given storage value.
+fn legacy_api_storage_notified_value(value: Option<&[u8]>) -> LegacyApiStorageNotifiedValue {
+    value.map(|value| {
+        <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], value).as_bytes()).unwrap()
+    })
+}
+
 /// Updates `last_notified` with the given storage value, and returns `true` if the value is
 /// different from the one last reported, meaning that the JSON-RPC client must be notified.
 fn legacy_api_storage_update_notified(
     last_notified: &mut Option<LegacyApiStorageNotifiedValue>,
-    value: Option<&[u8]>,
+    new_value: LegacyApiStorageNotifiedValue,
 ) -> bool {
-    let new_value = value.map(|value| {
-        <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], value).as_bytes()).unwrap()
-    });
     if *last_notified == Some(new_value) {
         return false;
     }
@@ -6111,6 +6115,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     let sync_service::StorageResultItem::Value { key, value } = item else {
                         unreachable!()
                     };
+                    let notified_value = legacy_api_storage_notified_value(value.as_deref());
                     for subscription_id in me
                         .legacy_api_storage_subscriptions_by_key
                         .range((key.clone(), Arc::from(String::new()))..)
@@ -6124,7 +6129,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .get_mut(&(subscription_id.clone(), key.clone()))
                             .unwrap();
                         let changed =
-                            legacy_api_storage_update_notified(last_notified, value.as_deref());
+                            legacy_api_storage_update_notified(last_notified, notified_value);
+                        // The entry is inserted even if nothing changed, so that the
+                        // subscription is marked as no longer stale below.
                         let changes = notifications_to_send
                             .entry(subscription_id)
                             .or_insert_with(Vec::new);
@@ -6140,7 +6147,15 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // Send the notifications and mark the subscriptions as no longer stale if
                 // relevant.
                 for (subscription_id, changes) in notifications_to_send {
-                    if is_up_to_date {
+                    // A subscription created while the query was in progress might have keys
+                    // that weren't part of the query. It must stay stale until each of its keys
+                    // has been reported at least once.
+                    let all_keys_notified = me
+                        .legacy_api_storage_subscriptions
+                        .range((subscription_id.clone(), Vec::new())..)
+                        .take_while(|((s, _), _)| *s == subscription_id)
+                        .all(|(_, last_notified)| last_notified.is_some());
+                    if is_up_to_date && all_keys_notified {
                         me.legacy_api_stale_storage_subscriptions
                             .remove(&subscription_id);
                     }
@@ -6484,37 +6499,43 @@ fn convert_runtime_version(
 
 #[cfg(test)]
 mod tests {
-    use super::legacy_api_storage_update_notified;
+    use super::{legacy_api_storage_notified_value, legacy_api_storage_update_notified};
 
     #[test]
     fn legacy_api_storage_notifies_only_changes() {
         let mut last_notified = None;
 
         // The first value is always reported, even if the item is absent.
-        assert!(legacy_api_storage_update_notified(&mut last_notified, None));
+        assert!(legacy_api_storage_update_notified(
+            &mut last_notified,
+            legacy_api_storage_notified_value(None)
+        ));
         assert!(!legacy_api_storage_update_notified(
             &mut last_notified,
-            None
+            legacy_api_storage_notified_value(None)
         ));
 
         assert!(legacy_api_storage_update_notified(
             &mut last_notified,
-            Some(&[1, 2, 3])
+            legacy_api_storage_notified_value(Some(&[1, 2, 3]))
         ));
         assert!(!legacy_api_storage_update_notified(
             &mut last_notified,
-            Some(&[1, 2, 3])
+            legacy_api_storage_notified_value(Some(&[1, 2, 3]))
         ));
         assert!(legacy_api_storage_update_notified(
             &mut last_notified,
-            Some(&[1, 2, 4])
+            legacy_api_storage_notified_value(Some(&[1, 2, 4]))
         ));
 
         // An empty value is distinct from an absent one.
         assert!(legacy_api_storage_update_notified(
             &mut last_notified,
-            Some(&[])
+            legacy_api_storage_notified_value(Some(&[]))
         ));
-        assert!(legacy_api_storage_update_notified(&mut last_notified, None));
+        assert!(legacy_api_storage_update_notified(
+            &mut last_notified,
+            legacy_api_storage_notified_value(None)
+        ));
     }
 }
