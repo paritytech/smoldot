@@ -631,7 +631,6 @@ async fn background_task<TPlat: PlatformRef>(
                         .scale_encoding(to_start_validate)
                         .unwrap()
                         .to_owned();
-                    // TODO: race condition /!\ the block could be pruned and unpinned before this future starts executing
                     async move {
                         let result = validate_transaction(
                             &platform,
@@ -1156,8 +1155,8 @@ async fn background_task<TPlat: PlatformRef>(
                             continue 'channels_rebuild;
                         }
                         Err(ValidationError::ObsoleteBlock) => {
-                            // The block was unpinned before validation started. Retry against the
-                            // current best block on the next loop iteration.
+                            // Not expected: blocks are unpinned only once removed from the pool, which the
+                            // `has_block` check above already handles.
                             continue;
                         }
                         Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(error))) => {
