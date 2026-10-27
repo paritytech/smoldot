@@ -9,6 +9,7 @@
 ### Fixed
 
 - `Client.terminate()` no longer risks ending the NodeJS process with an uncaught exception when smoldot runs in a worker (`ClientOptions.portToWorker`), which could happen before the application had finished shutting down, for example before it had saved its database. The worker can still send a JSON-RPC response after it has shut down, and such a response arriving once `terminate()` has removed the chains is now ignored.
+- A `chainHead_v1_storage` call now gives back, once it ends, every operation slot it took: one for each item it started. It gave back one, so each call of several items took slots from the `chainHead_v1_follow` subscription for good. After 31 calls of two items, a subscription was down to its last slot: it ran one operation at a time, a call of several items started only its first item, and any other operation started meanwhile got `limitReached`.
 
 ## 3.7.0 - 2026-10-07
 
