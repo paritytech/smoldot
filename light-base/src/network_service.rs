@@ -80,10 +80,9 @@ pub use service::{
 
 mod tasks;
 
-/// Delay before trying again a peer that refused a notifications substream. Exceeds the
-/// 5 seconds for which polkadot-sdk bans a peer whose substream it rejected, with a margin for
-/// network delay and clock skew.
-const REFUSED_SUBSTREAM_RETRY_DELAY: Duration = Duration::from_millis(5500);
+/// Delay between two attempts to reopen the transactions, GrandPa and statement substreams
+/// of a gossip link. The first attempt after a closing is made at once.
+const SECONDARY_SUBSTREAM_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// Configuration for a [`NetworkService`].
 pub struct Config<TPlat> {
@@ -2809,7 +2808,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     ?error,
                 );
-                let ban_duration = REFUSED_SUBSTREAM_RETRY_DELAY;
+                // Must exceed polkadot-sdk's 5s notification-reject ban; otherwise we retry
+                // into a still-active remote ban. 0.5s margin covers network delay and
+                // clock skew between the two sides' ban timers.
+                let ban_duration = Duration::from_millis(5500);
 
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
@@ -2929,7 +2931,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 // Reopen at once the first time, as polkadot-sdk reserves the peer for these
-                // protocols slightly after block announces open. Afterwards, wait out its ban.
+                // protocols slightly after block announces open. Afterwards, retry at a short
+                // interval rather than in a tight loop.
                 let link = task.open_gossip_links.get_mut(&(chain_id, peer_id.clone()));
                 let Some(link) = link else {
                     // The link is open while this event can happen.
@@ -2962,11 +2965,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 {
                     task.secondary_reopens.insert(
                         (
-                            task.platform.now() + REFUSED_SUBSTREAM_RETRY_DELAY,
+                            task.platform.now() + SECONDARY_SUBSTREAM_RETRY_DELAY,
                             chain_id,
                             peer_id,
                         ),
-                        Box::pin(task.platform.sleep(REFUSED_SUBSTREAM_RETRY_DELAY)),
+                        Box::pin(task.platform.sleep(SECONDARY_SUBSTREAM_RETRY_DELAY)),
                     );
                 }
             }
