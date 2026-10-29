@@ -245,6 +245,10 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
         collection::SubstreamId,
     )>,
 
+    /// Transactions, Grandpa and statement protocols a peer answered it doesn't speak while its
+    /// block announces substream of the chain is open.
+    secondary_protocols_unavailable: BTreeSet<(PeerIndex, NotificationsProtocol)>,
+
     /// List of peers that have been marked as desired for Bitswap connections. Can include peers
     /// not connected to the local node yet, even though the current implementation of
     /// `BitswapPeeringStrategy` only allocates Bitswap slots to connected peers. This is because
@@ -462,6 +466,7 @@ where
             ),
             connections_by_peer_id: BTreeSet::new(),
             notification_substreams_by_peer_id: BTreeSet::new(),
+            secondary_protocols_unavailable: BTreeSet::new(),
             gossip_desired_peers_by_chain: BTreeSet::new(),
             gossip_desired_peers: BTreeSet::new(),
             unconnected_desired: hashbrown::HashSet::with_capacity_and_hasher(
@@ -2372,8 +2377,23 @@ where
                                     continue;
                                 }
 
+                                // A protocol the peer doesn't speak is remembered for as long
+                                // as the block announces substream stays open, so that no
+                                // reopening asks for it again.
+                                let link_open = self.has_out_notification_substream(
+                                    peer_index,
+                                    iter::once(NotificationsProtocol::BlockAnnounces {
+                                        chain_index,
+                                    }),
+                                    true,
+                                );
+
                                 // Statement V2 unavailable: fall back to V1.
                                 if is_v2_fallback {
+                                    if link_open {
+                                        self.secondary_protocols_unavailable
+                                            .insert((peer_index, substream_protocol));
+                                    }
                                     self.open_secondary_substream(
                                         connection_id,
                                         peer_index,
@@ -2393,6 +2413,10 @@ where
                                         established::NotificationsOutErr::ProtocolNotAvailable,
                                     )
                                 ) {
+                                    if link_open {
+                                        self.secondary_protocols_unavailable
+                                            .insert((peer_index, substream_protocol));
+                                    }
                                     continue;
                                 }
 
@@ -2561,6 +2585,8 @@ where
                                     ));
                                 debug_assert!(_was_inserted);
                             }
+
+                            self.forget_unavailable_secondaries(chain_index, peer_index);
 
                             // The transactions and Grandpa protocols, and the statement protocol
                             // without a `GossipKind::Statement` link, are tied to the block
@@ -2832,11 +2858,14 @@ where
 
                         // litep2p force-closes the whole connection 5 seconds after opening its
                         // side of a substream pair that we never complete. Answer its open with
-                        // ours at once, whatever the pacing of `gossip_reopen_secondaries`.
+                        // ours at once, whatever the pacing of `gossip_reopen_secondaries`. The
+                        // peer speaks the protocol after all, whatever it answered before.
                         if !matches!(
                             substream_protocol,
                             NotificationsProtocol::BlockAnnounces { .. }
                         ) {
+                            self.secondary_protocols_unavailable
+                                .remove(&(peer_index, substream_protocol));
                             let _ = self.reopen_secondaries(chain_index, peer_index);
                         }
                         continue;
@@ -4292,6 +4321,9 @@ where
         let close_consensus_transactions = kind == GossipKind::ConsensusTransactions;
         let close_statement =
             kind == GossipKind::Statement || !self.statement_link_wanted(chain_id.0, peer_index);
+        if close_consensus_transactions {
+            self.forget_unavailable_secondaries(chain_id.0, peer_index);
+        }
         let protocols_to_close = close_consensus_transactions
             .then(|| consensus_transactions_protocols(chain_id.0))
             .into_iter()
@@ -4410,9 +4442,9 @@ where
 
     /// Opens the transactions, Grandpa and statement substreams missing from the
     /// [`GossipKind::ConsensusTransactions`] link with the given peer, after an
-    /// [`Event::GossipSecondaryClosed`]. Pending and open ones are left alone. A refusal or
-    /// closing generates the event again. The same happens on its own when the peer opens its
-    /// side of such a substream.
+    /// [`Event::GossipSecondaryClosed`]. Pending and open ones are left alone, as are the
+    /// protocols the peer answered it doesn't speak. A refusal or closing generates the event
+    /// again. The same happens on its own when the peer opens its side of such a substream.
     ///
     /// # Panic
     ///
@@ -5378,7 +5410,8 @@ where
     }
 
     /// Opens the transactions, Grandpa and statement substreams of the peer that don't exist
-    /// yet, on the connection of its open block announces substream.
+    /// yet, on the connection of its open block announces substream. Those the peer answered it
+    /// doesn't speak are left alone.
     fn open_missing_secondary_substreams(
         &mut self,
         connection_id: collection::ConnectionId,
@@ -5415,16 +5448,42 @@ where
                 continue;
             }
 
+            // Statement V2 unavailable: V1 may do.
+            let protocol = match protocol {
+                NotificationsProtocol::Statement {
+                    version: codec::StatementProtocolVersion::V2,
+                    ..
+                } if self
+                    .secondary_protocols_unavailable
+                    .contains(&(peer_index, protocol)) =>
+                {
+                    NotificationsProtocol::Statement {
+                        chain_index,
+                        version: codec::StatementProtocolVersion::V1,
+                    }
+                }
+                protocol => protocol,
+            };
+            if self
+                .secondary_protocols_unavailable
+                .contains(&(peer_index, protocol))
+            {
+                continue;
+            }
+
             self.open_secondary_substream(connection_id, peer_index, protocol);
         }
 
-        // The statement substream opened above anchors a `GossipKind::Statement` link if the
-        // peer is desired under that kind, so there is nothing left to open for it.
-        self.connected_unopened_gossip_desired.remove(&(
-            peer_index,
-            ChainId(chain_index),
-            GossipKind::Statement,
-        ));
+        // A statement substream now pending or open anchors a `GossipKind::Statement` link if
+        // the peer is desired under that kind, so there is nothing left to open for it. When the
+        // peer doesn't speak the protocol, the API user opens the link and gets its refusal.
+        if self.gossip_link_exists(chain_index, peer_index, GossipKind::Statement) {
+            self.connected_unopened_gossip_desired.remove(&(
+                peer_index,
+                ChainId(chain_index),
+                GossipKind::Statement,
+            ));
+        }
     }
 
     /// Opens an outbound substream of the given protocol, which must not be block announces,
@@ -5484,6 +5543,18 @@ where
         substream_id
     }
 
+    /// Forgets the protocols the peer answered it doesn't speak, once its block announces
+    /// substream of the chain is gone.
+    fn forget_unavailable_secondaries(&mut self, chain_index: usize, peer_index: PeerIndex) {
+        for protocol in consensus_transactions_protocols(chain_index)
+            .into_iter()
+            .chain(statement_protocols(chain_index))
+        {
+            self.secondary_protocols_unavailable
+                .remove(&(peer_index, protocol));
+        }
+    }
+
     /// Checks whether the given [`PeerIndex`] is still in use, and if no removes it from
     /// [`ChainNetwork::peers`].
     fn try_clean_up_peer(&mut self, peer_index: PeerIndex) {
@@ -5522,6 +5593,8 @@ where
             .retain(|(_, p)| *p != peer_index);
         self.statement_capable_peers
             .retain(|(_, p)| *p != peer_index);
+        self.secondary_protocols_unavailable
+            .retain(|(p, _)| *p != peer_index);
 
         let peer_id = self.peers.remove(peer_index.0);
         let _was_in = self.peers_by_peer_id.remove(&peer_id);
@@ -5807,7 +5880,8 @@ pub enum Event<TConn> {
     /// [`ChainNetwork::gossip_reopen_secondaries`].
     ///
     /// Not generated when the connection is shutting down, nor when the peer doesn't speak the
-    /// protocol. A statement substream of a [`GossipKind::Statement`] link reports through
+    /// protocol, which is remembered for as long as the link stays open. A statement substream
+    /// of a [`GossipKind::Statement`] link reports through
     /// [`Event::StatementProtocolOpenFailed`] and [`Event::StatementProtocolDisconnected`].
     GossipSecondaryClosed {
         /// Peer concerned by the event.

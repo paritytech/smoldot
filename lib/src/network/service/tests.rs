@@ -20,9 +20,9 @@
 
 use super::{
     ChainConfig, ChainId, ChainNetwork, CloseGossipError, Config, ConnectionId, Event, GossipKind,
-    NotificationsOutErr, OpenGossipError, PeerId, QueueNotificationError, RemoveChainError,
-    SendTopicAffinityError, SingleStreamConnectionTask, SingleStreamHandshakeKind, established,
-    peer_id,
+    GrandpaState, NotificationsOutErr, OpenGossipError, PeerId, QueueNotificationError,
+    RemoveChainError, SendTopicAffinityError, SingleStreamConnectionTask,
+    SingleStreamHandshakeKind, established, peer_id,
 };
 use crate::libp2p::{connection::noise::NoiseKey, read_write::ReadWrite};
 use crate::network::codec::{self, Role};
@@ -92,6 +92,7 @@ fn make_node(
     remote_noise_key: &NoiseKey,
     seed: [u8; 32],
     enable_statement_protocol: bool,
+    grandpa: bool,
 ) -> Node {
     let mut network = ChainNetwork::<(), (), Duration>::new(Config {
         connections_capacity: 1,
@@ -106,7 +107,11 @@ fn make_node(
             genesis_hash: [1; 32],
             fork_id: None,
             block_number_bytes: 4,
-            grandpa_protocol_config: None,
+            grandpa_protocol_config: grandpa.then_some(GrandpaState {
+                round_number: 1,
+                set_id: 0,
+                commit_finalized_height: 0,
+            }),
             allow_inbound_block_requests: false,
             best_hash: [1; 32],
             best_number: 0,
@@ -151,8 +156,16 @@ impl Harness {
                 &bob_key,
                 [7; 32],
                 alice_statement_protocol,
+                false,
             ),
-            bob: make_node(false, &bob_key, &alice_key, [9; 32], bob_statement_protocol),
+            bob: make_node(
+                false,
+                &bob_key,
+                &alice_key,
+                [9; 32],
+                bob_statement_protocol,
+                false,
+            ),
             a2b: Vec::new(),
             b2a: Vec::new(),
             now: Duration::ZERO,
@@ -1179,26 +1192,27 @@ enum SecondaryReply {
     Accept,
 }
 
-/// Alice is a light client (`ChainNetwork`) that opens a gossip link with Bob. Bob is a bare
-/// libp2p node that accepts the block announces substream and answers the transactions
-/// substreams with `replies`, in order, refusing past the end. If `reopen_on_event` is set, Alice
-/// calls `gossip_reopen_secondaries` on every [`Event::GossipSecondaryClosed`]. If
-/// `bob_opens_after_refusal` is set, Bob opens his own transactions substream to Alice right
-/// after his first refusal, as a full node does once it reserves the light client.
+/// Alice is a light client (`ChainNetwork`) with GrandPa enabled that opens a gossip link with
+/// Bob. Bob is a bare libp2p node that accepts the block announces substream, answers the
+/// transactions substreams with `replies`, in order, refusing past the end, and doesn't have
+/// the GrandPa protocol. If `reopen_on_event` is set, Alice calls `gossip_reopen_secondaries`
+/// on every [`Event::GossipSecondaryClosed`]. If `bob_opens_after_refusal` is set, Bob opens
+/// his own transactions substream to Alice right after his first refusal, as a full node does
+/// once it reserves the light client.
 ///
-/// Returns how many transactions substreams Bob saw, the error of each
-/// [`Event::GossipSecondaryClosed`] Alice got, and Alice.
+/// Returns how many transactions substreams Bob saw, how many times Alice asked for the GrandPa
+/// protocol, the error of each [`Event::GossipSecondaryClosed`] Alice got, and Alice.
 fn secondary_substream_exchange(
     replies: &[SecondaryReply],
     reopen_on_event: bool,
     bob_opens_after_refusal: bool,
-) -> (usize, Vec<Option<NotificationsOutErr>>, Node) {
+) -> (usize, usize, Vec<Option<NotificationsOutErr>>, Node) {
     use crate::libp2p::collection;
     use alloc::collections::BTreeMap;
 
     let alice_key = NoiseKey::new(&[1; 32], &[2; 32]);
     let bob_key = NoiseKey::new(&[3; 32], &[4; 32]);
-    let mut alice = make_node(true, &alice_key, &bob_key, [7; 32], false);
+    let mut alice = make_node(true, &alice_key, &bob_key, [7; 32], false, true);
     let bob_peer_id = alice.remote.clone();
 
     let mut bob_network = collection::Network::<(), Duration>::new(collection::Config {
@@ -1226,6 +1240,10 @@ fn secondary_substream_exchange(
             fork_id: None,
         });
     let transactions_name = codec::encode_protocol_name_string(codec::ProtocolName::Transactions {
+        genesis_hash: [1; 32],
+        fork_id: None,
+    });
+    let grandpa_name = codec::encode_protocol_name_string(codec::ProtocolName::Grandpa {
         genesis_hash: [1; 32],
         fork_id: None,
     });
@@ -1281,6 +1299,7 @@ fn secondary_substream_exchange(
     let mut idle_advances = 0u32;
     let mut bob_protocols: BTreeMap<collection::SubstreamId, String> = BTreeMap::new();
     let mut opens = 0usize;
+    let mut grandpa_asked = 0usize;
     let mut bob_opened = false;
     let mut errors = Vec::new();
 
@@ -1382,6 +1401,9 @@ fn secondary_substream_exchange(
                             },
                         );
                     } else {
+                        if protocol_name == grandpa_name {
+                            grandpa_asked += 1;
+                        }
                         bob_network.reject_inbound(substream_id);
                     }
                 }
@@ -1446,7 +1468,7 @@ fn secondary_substream_exchange(
         }
     }
 
-    (opens, errors, alice)
+    (opens, grandpa_asked, errors, alice)
 }
 
 /// Issue #3412: a peer that refuses the transactions substream, as a full node without a slot
@@ -1454,7 +1476,7 @@ fn secondary_substream_exchange(
 /// the gossip link stays open.
 #[test]
 fn secondary_substream_refusal_is_reported_not_reopened() {
-    let (opens, errors, alice) =
+    let (opens, _, errors, alice) =
         secondary_substream_exchange(&[SecondaryReply::Refuse], false, false);
     assert_eq!(opens, 1);
     assert!(matches!(
@@ -1474,7 +1496,7 @@ fn secondary_substream_refusal_is_reported_not_reopened() {
 /// substream again, and nothing more happens once the peer accepts it.
 #[test]
 fn gossip_reopen_secondaries_opens_the_missing_substream() {
-    let (opens, errors, _) = secondary_substream_exchange(
+    let (opens, _, errors, _) = secondary_substream_exchange(
         &[SecondaryReply::Refuse, SecondaryReply::Accept],
         true,
         false,
@@ -1488,11 +1510,30 @@ fn gossip_reopen_secondaries_opens_the_missing_substream() {
 /// missing is therefore answered with hers at once, without a `gossip_reopen_secondaries` call.
 #[test]
 fn secondary_substream_opened_by_the_peer_is_answered_at_once() {
-    let (opens, errors, _) = secondary_substream_exchange(
+    let (opens, _, errors, _) = secondary_substream_exchange(
         &[SecondaryReply::Refuse, SecondaryReply::Accept],
         false,
         true,
     );
     assert_eq!(opens, 2);
     assert_eq!(errors.len(), 1);
+}
+
+/// A protocol Bob answers he doesn't have (`ProtocolNotAvailable`) is asked once per link:
+/// the reopening that follows the transactions refusal leaves it alone.
+#[test]
+fn secondary_protocol_not_available_is_not_asked_again() {
+    let (opens, grandpa_asked, errors, alice) = secondary_substream_exchange(
+        &[SecondaryReply::Refuse, SecondaryReply::Accept],
+        true,
+        false,
+    );
+    assert_eq!(grandpa_asked, 1);
+    assert_eq!(opens, 2);
+    assert_eq!(errors.len(), 1);
+    assert!(alice.network.gossip_is_connected(
+        alice.chain_id,
+        &alice.remote,
+        GossipKind::ConsensusTransactions
+    ));
 }
