@@ -308,7 +308,7 @@ pub enum ResumeOutcome {
     InProgress(PrefixScan),
     /// Scan has succeeded.
     Success {
-        /// List of entries who key starts with the requested prefix, ordered by key.
+        /// List of entries whose key starts with the requested prefix, ordered by key.
         entries: Vec<(Vec<u8>, StorageValue)>,
         /// Value that was passed as [`Config::full_storage_values_required`].
         full_storage_values_required: bool,

@@ -37,14 +37,13 @@ fn regression_test_174() {
                 prefix_scan = scan;
                 continue;
             }
-            Ok(ResumeOutcome::Success { mut entries, .. }) => {
+            Ok(ResumeOutcome::Success { entries, .. }) => {
                 let mut expected = test_data
                     .expected_entries
                     .into_iter()
                     .map(|e| e.0)
                     .collect::<Vec<_>>();
                 expected.sort();
-                entries.sort_by(|(key1, _), (key2, _)| key1.cmp(key2));
                 assert_eq!(
                     entries.into_iter().map(|(key, _)| key).collect::<Vec<_>>(),
                     expected
