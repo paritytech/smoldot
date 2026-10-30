@@ -265,6 +265,10 @@ impl PrefixScan {
 
             // Finished when nothing more to request.
             if next.is_empty() && self.next_queries.is_empty() {
+                // The trie is traversed in no particular order, but the entries are returned
+                // ordered by key.
+                self.final_result
+                    .sort_unstable_by(|(key1, _), (key2, _)| key1.cmp(key2));
                 return Ok(ResumeOutcome::Success {
                     entries: self.final_result,
                     full_storage_values_required: self.full_storage_values_required,
@@ -304,7 +308,7 @@ pub enum ResumeOutcome {
     InProgress(PrefixScan),
     /// Scan has succeeded.
     Success {
-        /// List of entries who key starts with the requested prefix.
+        /// List of entries whose key starts with the requested prefix, ordered by key.
         entries: Vec<(Vec<u8>, StorageValue)>,
         /// Value that was passed as [`Config::full_storage_values_required`].
         full_storage_values_required: bool,
