@@ -860,9 +860,9 @@ fn accept_ping_inbounds(harness: &mut MultiHarness, events: &[(Side, Event<()>)]
 /// Contrary to yamux, a remote-initiated substream death is not carried by the connection's byte
 /// stream: it materializes as the platform observing the closure of the data channel and calling
 /// `reset_substream`. A graceful `FIN` from the remote would reach the same
-/// `NotificationsInOpenCancel`, as over yamux, since the WebRTC framing parses its frames in every
-/// state, even while an unaccepted notifications substream back-pressures its channel. This test
-/// exercises the abrupt death.
+/// `NotificationsInOpenCancel`, as over yamux, since the WebRTC framing parses flag-only frames
+/// in every state, even while an unaccepted notifications substream back-pressures its channel.
+/// This test exercises the abrupt death.
 #[test]
 fn multi_stream_reject_in_notifications_double_send_after_remote_reset() {
     let mut harness = MultiHarness::new();
