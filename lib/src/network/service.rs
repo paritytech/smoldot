@@ -2437,9 +2437,10 @@ where
 
                             // If the substream failed to open, we may try again.
                             // `ProtocolNotAvailable` is the peer's explicit answer that
-                            // it doesn't speak this protocol; retrying it is a tight loop,
-                            // so treat it as permanent until the peer reconnects. Other
-                            // errors may be transient (timeout / reset / …) and are
+                            // it doesn't speak this protocol, and a `HandshakeRecvError`
+                            // means its handshake doesn't fit; retrying either is a tight
+                            // loop, so treat them as permanent until the peer reconnects.
+                            // Other errors may be transient (timeout / reset / …) and are
                             // retried — this also preserves a long-standing workaround
                             // for an issue in Substrate where a protocol could be briefly
                             // unavailable. Statement V2 is special: on `ProtocolNotAvailable`
@@ -2504,7 +2505,8 @@ where
                                     ),
                                     (
                                         collection::NotificationsOutErr::Substream(
-                                            established::NotificationsOutErr::ProtocolNotAvailable,
+                                            established::NotificationsOutErr::ProtocolNotAvailable
+                                            | established::NotificationsOutErr::HandshakeRecvError(_),
                                         ),
                                         p,
                                     ) => (p, false),

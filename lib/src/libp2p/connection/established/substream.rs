@@ -623,22 +623,23 @@ where
                         match read_write.incoming_bytes_take_leb128(handshake_in_max_size) {
                             Ok(Some(s)) => handshake_in_size = Some(s),
                             Ok(None) => {}
-                            Err(error) => return (
-                                None,
-                                Some(Event::Response {
-                                    response: Err(match error {
-                                        read_write::IncomingBytesTakeLeb128Error::InvalidLeb128 => {
-                                            RequestError::ResponseInvalidLeb128
-                                        }
-                                        read_write::IncomingBytesTakeLeb128Error::ReadClosed => {
-                                            RequestError::SubstreamClosed
-                                        }
-                                        read_write::IncomingBytesTakeLeb128Error::TooLarge => {
-                                            RequestError::ResponseTooLarge
-                                        }
+                            Err(read_write::IncomingBytesTakeLeb128Error::ReadClosed) => {
+                                read_write.wake_up_asap();
+                                return (
+                                    Some(SubstreamInner::NotificationsOutNegotiationFailed),
+                                    Some(Event::NotificationsOutResult {
+                                        result: Err(NotificationsOutErr::RefusedHandshake),
                                     }),
-                                }),
-                            ),
+                                );
+                            }
+                            Err(error) => {
+                                return (
+                                    None,
+                                    Some(Event::NotificationsOutResult {
+                                        result: Err(NotificationsOutErr::HandshakeRecvError(error)),
+                                    }),
+                                );
+                            }
                         }
                     }
                 }
