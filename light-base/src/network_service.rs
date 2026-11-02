@@ -81,7 +81,8 @@ pub use service::{
 mod tasks;
 
 /// Delay between two attempts to reopen the transactions, GrandPa and statement substreams
-/// of a gossip link. The first attempt after a closing is made at once.
+/// of a gossip link. Only the first closing on a link is answered at once, every later one
+/// waits this delay.
 const SECONDARY_SUBSTREAM_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// Configuration for a [`NetworkService`].

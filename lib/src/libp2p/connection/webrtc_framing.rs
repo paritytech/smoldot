@@ -252,14 +252,27 @@ impl<'a, TNow: Clone> Drop for InnerReadWrite<'a, TNow> {
     fn drop(&mut self) {
         // The timer is copied back before the wake-up below, so that it can't overwrite it.
         //
-        // If the inner stream consumed bytes of `receive_buffer`, it expects to be called again
-        // although nothing may have been read from the outer `ReadWrite`, hence the wake-up.
+        // The inner stream expects a call before something new arrives in two cases: it
+        // consumed bytes of `receive_buffer`, or a complete frame was withheld and it now asks
+        // for more than it holds. The second happens on every substream that reads a length
+        // prefix in one call and the body in the next. Both get an immediate wake-up. A frame
+        // was withheld if the outer demand is already met: the platform starts each call at
+        // zero, and the parsing loop raises the demand above the buffer only when the next
+        // frame is incomplete.
         //
         // The outer demand is left at the size of the next frame rather than raised to what the
         // inner stream expects: a small `FIN` or `RESET_STREAM` frame must not wait until that
         // many bytes have arrived.
         self.outer_read_write.wake_up_after = self.inner_read_write.wake_up_after.clone();
-        if self.inner_read_write.read_bytes != 0 {
+        let frame_withheld = self
+            .outer_read_write
+            .expected_incoming_bytes
+            .is_some_and(|expected| expected <= self.outer_read_write.incoming_buffer.len());
+        let inner_asks_for_more = self
+            .inner_read_write
+            .expected_incoming_bytes
+            .is_some_and(|expected| expected > self.inner_read_write.incoming_buffer.len());
+        if self.inner_read_write.read_bytes != 0 || (frame_withheld && inner_asks_for_more) {
             self.outer_read_write.wake_up_asap();
         }
         self.framing.inner_expected_incoming_bytes =
@@ -472,7 +485,10 @@ mod tests {
     }
 
     /// A data frame the substream didn't ask for stays in the outer buffer: `receive_buffer`
-    /// holds at most one such frame. It is parsed once the substream asks for more than it holds.
+    /// holds at most one such frame. Substreams read a length prefix in one call and ask for the
+    /// body in the next, without consuming anything: the framing must then request an immediate
+    /// wake-up, as the outer demand (the next frame's size) is already met, and the next call
+    /// parses the waiting frame.
     #[test]
     fn unrequested_data_frame_waits_in_outer_buffer() {
         let mut framing = WebRtcFraming::new();
@@ -500,6 +516,12 @@ mod tests {
             let mut inner = framing.read_write(&mut rw).unwrap();
             assert!(matches!(inner.incoming_bytes_take(6), Ok(None)));
         }
+        assert_eq!(
+            rw.wake_up_after,
+            Some(5),
+            "no wake-up for the waiting frame"
+        );
+
         let inner = framing.read_write(&mut rw).unwrap();
         assert_eq!(
             inner.incoming_buffer, b"abcdef",
