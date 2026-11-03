@@ -1250,6 +1250,13 @@ fn start_services<TPlat: platform::PlatformRef>(
                             para_id,
                             relay_chain_sync: relay_chain.runtime_service.clone(),
                         },
+                        runtime_code_hint: runtime_code_hint.map(|hint| {
+                            sync_service::ConfigRuntimeCodeHint {
+                                storage_value: hint.code,
+                                merkle_value: hint.code_merkle_value,
+                                closest_ancestor_excluding: hint.closest_ancestor_excluding,
+                            }
+                        }),
                     },
                 ),
             }));
@@ -1285,7 +1292,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                     sync_service::ConfigSubstrateCompatible {
                         chain_information: chain_information.clone(),
                         runtime_code_hint: runtime_code_hint.map(|hint| {
-                            sync_service::ConfigSubstrateCompatibleRuntimeCodeHint {
+                            sync_service::ConfigRuntimeCodeHint {
                                 storage_value: hint.code,
                                 merkle_value: hint.code_merkle_value,
                                 closest_ancestor_excluding: hint.closest_ancestor_excluding,
