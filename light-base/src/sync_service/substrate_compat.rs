@@ -16,8 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{
-    BlockNotification, ConfigSubstrateCompatibleRuntimeCodeHint, FinalizedBlockRuntime,
-    Notification, SubscribeAll, SyncStatus, ToBackground,
+    BlockNotification, ConfigRuntimeCodeHint, FinalizedBlockRuntime, Notification, SubscribeAll,
+    SyncStatus, ToBackground,
 };
 use crate::{log, network_service, platform::PlatformRef, util};
 
@@ -61,7 +61,7 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
     platform: TPlat,
     chain_information: chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
-    runtime_code_hint: Option<ConfigSubstrateCompatibleRuntimeCodeHint>,
+    runtime_code_hint: Option<ConfigRuntimeCodeHint>,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     metrics: Arc<crate::metrics::ChainMetrics>,
