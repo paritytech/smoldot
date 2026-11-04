@@ -6031,7 +6031,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.background_tasks.push(Box::pin({
                     let block_hash = *current_best_block;
                     let sync_service = me.sync_service.clone();
-                    let platform = me.platform.clone();
                     async move {
                         let mut out = Vec::with_capacity(keys.len());
                         let mut query = sync_service
@@ -6067,10 +6066,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     };
                                 }
                                 sync_service::StorageQueryProgress::Error(error) => {
-                                    // The subscriptions remain stale after a failure. Wait a bit
-                                    // before reporting it, otherwise the query would be retried
-                                    // immediately in a loop, for example if no peer is reachable.
-                                    platform.sleep(Duration::from_secs(2)).await;
                                     break Event::LegacyApiStorageSubscriptionsUpdate {
                                         block_hash,
                                         result: Err(error),
@@ -6186,13 +6181,27 @@ pub(super) async fn run<TPlat: PlatformRef>(
             // Background task dedicated to performing a storage query for the storage
             // subscription has finished but was unsuccessful.
             WakeUpReason::Event(Event::LegacyApiStorageSubscriptionsUpdate {
+                block_hash,
                 result: Err(_),
-                ..
             }) => {
                 // Background task dedicated to performing a storage query for the storage
                 // subscriptions has failed.
                 debug_assert!(me.legacy_api_storage_query_in_progress);
                 me.legacy_api_storage_query_in_progress = false;
+
+                // If the query targeted the current best block, the subscriptions are marked as
+                // no longer stale, so that the query is retried when the next best block is
+                // reported rather than immediately, which would loop if no peer can answer.
+                let is_up_to_date = match me.runtime_service_subscription {
+                    RuntimeServiceSubscription::Active {
+                        current_best_block, ..
+                    } => current_best_block == block_hash,
+                    RuntimeServiceSubscription::NotCreated
+                    | RuntimeServiceSubscription::Pending(_) => true,
+                };
+                if is_up_to_date {
+                    me.legacy_api_stale_storage_subscriptions.clear();
+                }
             }
 
             WakeUpReason::Event(Event::BitswapGetResult {
