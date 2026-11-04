@@ -37,14 +37,13 @@ fn regression_test_174() {
                 prefix_scan = scan;
                 continue;
             }
-            Ok(ResumeOutcome::Success { mut entries, .. }) => {
+            Ok(ResumeOutcome::Success { entries, .. }) => {
                 let mut expected = test_data
                     .expected_entries
                     .into_iter()
                     .map(|e| e.0)
                     .collect::<Vec<_>>();
                 expected.sort();
-                entries.sort_by(|(key1, _), (key2, _)| key1.cmp(key2));
                 assert_eq!(
                     entries.into_iter().map(|(key, _)| key).collect::<Vec<_>>(),
                     expected
@@ -54,6 +53,37 @@ fn regression_test_174() {
             Err((_, err)) => panic!("{err:?}"),
         }
     }
+}
+
+#[test]
+fn entries_ordered_by_key() {
+    // `state_getKeysPaged` relies on the entries being ordered by key in order to paginate.
+    let test_data = serde_json::from_str::<TestData>(include_str!("./test.json")).unwrap();
+
+    let mut prefix_scan = prefix_scan(Config {
+        prefix: &test_data.prefix.0,
+        trie_root_hash: <[u8; 32]>::try_from(&test_data.trie_root_hash.0[..]).unwrap(),
+        full_storage_values_required: true,
+    });
+
+    for proof in test_data.proofs {
+        match prefix_scan.resume_all_keys(&proof.0) {
+            Ok(ResumeOutcome::InProgress(scan)) => {
+                prefix_scan = scan;
+                continue;
+            }
+            Ok(ResumeOutcome::Success { entries, .. }) => {
+                let keys = entries.into_iter().map(|(key, _)| key).collect::<Vec<_>>();
+                let mut sorted = keys.clone();
+                sorted.sort();
+                assert_eq!(keys, sorted);
+                return;
+            }
+            Err((_, err)) => panic!("{err:?}"),
+        }
+    }
+
+    panic!("scan didn't finish")
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
