@@ -19,9 +19,13 @@
 
 use super::{
     Config, ConnectionId, Event, InboundTy, MultiStreamConnectionTask, MultiStreamHandshakeKind,
-    Network, SingleStreamConnectionTask, SingleStreamHandshakeKind, SubstreamFate, SubstreamId,
+    Network, NotificationsOutErr, SingleStreamConnectionTask, SingleStreamHandshakeKind,
+    SubstreamFate, SubstreamId,
 };
-use crate::libp2p::{connection::noise::NoiseKey, read_write::ReadWrite};
+use crate::libp2p::{
+    connection::{established, noise::NoiseKey},
+    read_write::{IncomingBytesTakeLeb128Error, ReadWrite},
+};
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::{cmp, mem, time::Duration};
 
@@ -490,6 +494,82 @@ fn close_in_notifications_crossing_remote_reset() {
             .iter()
             .chain(&events_final)
             .any(|(_, ev)| { matches!(ev, Event::StartShutdown { .. } | Event::Shutdown { .. }) })
+    );
+}
+
+/// A remote handshake whose length prefix exceeds the limit fails the outbound notifications
+/// substream with a [`NotificationsOutErr`] and leaves the connection alive. The substream used
+/// to report it as a request-response `Response`, which the coordinator has no record of.
+#[test]
+fn out_notifications_oversized_handshake_fails_cleanly() {
+    let mut harness = Harness::new();
+    let events = harness.pump(true, true);
+    assert!(
+        events
+            .iter()
+            .any(|(s, e)| *s == Side::Alice && matches!(e, Event::HandshakeFinished { .. }))
+    );
+
+    // Alice accepts a remote handshake of at most 32 bytes.
+    let alice_sub = harness.alice.network.open_out_notifications(
+        harness.alice.conn_id,
+        "/test-notif/1.0.0".to_string(),
+        Duration::from_secs(1),
+        b"hello".to_vec(),
+        32,
+    );
+
+    let events = harness.pump(true, true);
+    let bob_inbound = events
+        .iter()
+        .find_map(|(side, ev)| match ev {
+            Event::InboundNegotiated { substream_id, .. } if *side == Side::Bob => {
+                Some(*substream_id)
+            }
+            _ => None,
+        })
+        .expect("Bob should report InboundNegotiated");
+    harness.bob.network.accept_inbound(
+        bob_inbound,
+        InboundTy::Notifications {
+            max_handshake_size: 1024,
+        },
+    );
+
+    let events = harness.pump(true, true);
+    let bob_sub = events
+        .iter()
+        .find_map(|(side, ev)| match ev {
+            Event::NotificationsInOpen { substream_id, .. } if *side == Side::Bob => {
+                Some(*substream_id)
+            }
+            _ => None,
+        })
+        .expect("Bob should report NotificationsInOpen");
+
+    // Bob answers with a 33-byte handshake.
+    harness
+        .bob
+        .network
+        .accept_in_notifications(bob_sub, vec![0; 33], 1024);
+
+    let events = harness.pump(true, true);
+    assert!(events.iter().any(|(side, ev)| *side == Side::Alice
+        && matches!(
+            ev,
+            Event::NotificationsOutResult {
+                substream_id,
+                result: Err(NotificationsOutErr::Substream(
+                    established::NotificationsOutErr::HandshakeRecvError(
+                        IncomingBytesTakeLeb128Error::TooLarge
+                    )
+                )),
+            } if *substream_id == alice_sub
+        )));
+    assert!(
+        !events
+            .iter()
+            .any(|(_, ev)| matches!(ev, Event::StartShutdown { .. } | Event::Shutdown { .. }))
     );
 }
 
