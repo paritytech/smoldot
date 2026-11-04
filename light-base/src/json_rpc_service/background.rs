@@ -353,26 +353,24 @@ enum RuntimeServiceSubscription<TPlat: PlatformRef> {
 /// Blake2 hash of a storage value as last reported to a `state_subscribeStorage` subscription,
 /// or `None` if the storage item was reported as absent. Only the hash is kept in order to
 /// bound the memory usage when subscribing to large storage values.
-type LegacyApiStorageNotifiedValue = Option<[u8; 32]>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LegacyApiStorageNotifiedValue(Option<[u8; 32]>);
 
-/// Builds the [`LegacyApiStorageNotifiedValue`] corresponding to the given storage value.
-fn legacy_api_storage_notified_value(value: Option<&[u8]>) -> LegacyApiStorageNotifiedValue {
-    value.map(|value| {
-        <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], value).as_bytes()).unwrap()
-    })
-}
-
-/// Updates `last_notified` with the given storage value, and returns `true` if the value is
-/// different from the one last reported, meaning that the JSON-RPC client must be notified.
-fn legacy_api_storage_update_notified(
-    last_notified: &mut Option<LegacyApiStorageNotifiedValue>,
-    new_value: LegacyApiStorageNotifiedValue,
-) -> bool {
-    if *last_notified == Some(new_value) {
-        return false;
+impl LegacyApiStorageNotifiedValue {
+    /// Builds the [`LegacyApiStorageNotifiedValue`] corresponding to the given storage value.
+    fn new(value: Option<&[u8]>) -> Self {
+        LegacyApiStorageNotifiedValue(value.map(|value| {
+            <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], value).as_bytes())
+                .expect("value obtained from storage is always valid; qed")
+        }))
     }
-    *last_notified = Some(new_value);
-    true
+
+    /// Replaces `last_notified` with `new_value`, and returns `true` if they are different,
+    /// meaning that the JSON-RPC client must be notified. `last_notified` is `None` if no
+    /// notification has been sent yet.
+    fn update_if_different(last_notified: &mut Option<Self>, new_value: Self) -> bool {
+        last_notified.replace(new_value) != Some(new_value)
+    }
 }
 
 struct RecentBlock {
@@ -6120,7 +6118,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     let sync_service::StorageResultItem::Value { key, value } = item else {
                         unreachable!()
                     };
-                    let notified_value = legacy_api_storage_notified_value(value.as_deref());
+                    let notified_value = LegacyApiStorageNotifiedValue::new(value.as_deref());
                     for subscription_id in me
                         .legacy_api_storage_subscriptions_by_key
                         .range((key.clone(), Arc::from(String::new()))..)
@@ -6133,8 +6131,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .legacy_api_storage_subscriptions
                             .get_mut(&(subscription_id.clone(), key.clone()))
                             .unwrap();
-                        let changed =
-                            legacy_api_storage_update_notified(last_notified, notified_value);
+                        let changed = LegacyApiStorageNotifiedValue::update_if_different(
+                            last_notified,
+                            notified_value,
+                        );
                         // The entry is inserted even if nothing changed, so that the
                         // subscription is marked as no longer stale below.
                         let changes = notifications_to_send
@@ -6504,43 +6504,43 @@ fn convert_runtime_version(
 
 #[cfg(test)]
 mod tests {
-    use super::{legacy_api_storage_notified_value, legacy_api_storage_update_notified};
+    use super::LegacyApiStorageNotifiedValue;
 
     #[test]
     fn legacy_api_storage_notifies_only_changes() {
         let mut last_notified = None;
 
         // The first value is always reported, even if the item is absent.
-        assert!(legacy_api_storage_update_notified(
+        assert!(LegacyApiStorageNotifiedValue::update_if_different(
             &mut last_notified,
-            legacy_api_storage_notified_value(None)
+            LegacyApiStorageNotifiedValue::new(None)
         ));
-        assert!(!legacy_api_storage_update_notified(
+        assert!(!LegacyApiStorageNotifiedValue::update_if_different(
             &mut last_notified,
-            legacy_api_storage_notified_value(None)
+            LegacyApiStorageNotifiedValue::new(None)
         ));
 
-        assert!(legacy_api_storage_update_notified(
+        assert!(LegacyApiStorageNotifiedValue::update_if_different(
             &mut last_notified,
-            legacy_api_storage_notified_value(Some(&[1, 2, 3]))
+            LegacyApiStorageNotifiedValue::new(Some(&[1, 2, 3]))
         ));
-        assert!(!legacy_api_storage_update_notified(
+        assert!(!LegacyApiStorageNotifiedValue::update_if_different(
             &mut last_notified,
-            legacy_api_storage_notified_value(Some(&[1, 2, 3]))
+            LegacyApiStorageNotifiedValue::new(Some(&[1, 2, 3]))
         ));
-        assert!(legacy_api_storage_update_notified(
+        assert!(LegacyApiStorageNotifiedValue::update_if_different(
             &mut last_notified,
-            legacy_api_storage_notified_value(Some(&[1, 2, 4]))
+            LegacyApiStorageNotifiedValue::new(Some(&[1, 2, 4]))
         ));
 
         // An empty value is distinct from an absent one.
-        assert!(legacy_api_storage_update_notified(
+        assert!(LegacyApiStorageNotifiedValue::update_if_different(
             &mut last_notified,
-            legacy_api_storage_notified_value(Some(&[]))
+            LegacyApiStorageNotifiedValue::new(Some(&[]))
         ));
-        assert!(legacy_api_storage_update_notified(
+        assert!(LegacyApiStorageNotifiedValue::update_if_different(
             &mut last_notified,
-            legacy_api_storage_notified_value(None)
+            LegacyApiStorageNotifiedValue::new(None)
         ));
     }
 }
