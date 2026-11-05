@@ -28,15 +28,16 @@ use core::{cmp, fmt, mem, ops};
 
 /// State of the framing.
 pub struct WebRtcFraming {
-    /// Data of the parsed frames that the underlying substream hasn't consumed yet. Holds at
-    /// most one frame more than the substream asked for (see [`WebRtcFraming::read_write`]).
+    /// Value of [`ReadWrite::expected_incoming_bytes`] of the inner stream the last time that
+    /// [`WebRtcFraming::read_write`] was called. `None` if unknown.
+    inner_stream_expected_incoming_bytes: Option<usize>,
+
+    /// Buffer containing data from a previous frame, but that doesn't contain enough data for
+    /// the underlying substream to accept it.
+    ///
+    /// In other words, `receive_buffer.len() < inner_stream_expected_incoming_bytes`.
     // TODO: shrink_to_fit?
     receive_buffer: Vec<u8>,
-
-    /// Value of [`ReadWrite::expected_incoming_bytes`] of the inner stream the last time that
-    /// [`WebRtcFraming::read_write`] was called. `0` before the first call, or once the remote
-    /// has closed its writing side.
-    inner_expected_incoming_bytes: usize,
 
     /// State of the writing side of the remote.
     remote_write_state: RemoteWriteState,
@@ -70,8 +71,8 @@ impl WebRtcFraming {
     /// Initializes a new [`WebRtcFraming`].
     pub fn new() -> Self {
         WebRtcFraming {
+            inner_stream_expected_incoming_bytes: None,
             receive_buffer: Vec::with_capacity(RECEIVE_BUFFER_CAPACITY),
-            inner_expected_incoming_bytes: 0,
             remote_write_state: RemoteWriteState::Open,
             local_write_state: LocalWriteState::Open,
         }
@@ -120,7 +121,10 @@ impl WebRtcFraming {
                         let has_data = framed_message.message.is_some_and(|msg| !msg.is_empty());
                         if has_data
                             && self.receive_buffer.len()
-                                >= cmp::max(self.inner_expected_incoming_bytes, 1)
+                                >= cmp::max(
+                                    self.inner_stream_expected_incoming_bytes.unwrap_or(0),
+                                    1,
+                                )
                         {
                             break;
                         }
@@ -275,9 +279,9 @@ impl<'a, TNow: Clone> Drop for InnerReadWrite<'a, TNow> {
         if self.inner_read_write.read_bytes != 0 || (frame_withheld && inner_asks_for_more) {
             self.outer_read_write.wake_up_asap();
         }
-        self.framing.inner_expected_incoming_bytes =
-            self.inner_read_write.expected_incoming_bytes.unwrap_or(0);
         self.framing.receive_buffer = mem::take(&mut self.inner_read_write.incoming_buffer);
+        self.framing.inner_stream_expected_incoming_bytes =
+            Some(self.inner_read_write.expected_incoming_bytes.unwrap_or(0));
 
         // Flag to send out, if any: `FIN` once the inner stream closes its writing side,
         // `FIN_ACK` once the remote's `FIN` has been processed. `RESET_STREAM` is never sent, as
