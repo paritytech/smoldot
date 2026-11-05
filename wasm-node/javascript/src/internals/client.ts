@@ -332,7 +332,15 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             }
             case "json-rpc-responses-non-empty": {
                 // Notify every single promise found in `jsonRpcResponsesPromises`.
-                const callbacks = state.chains.get(event.chainId)!.jsonRpcResponsesPromises;
+                //
+                // The chain might have been removed already: when smoldot runs in a worker, a
+                // JSON-RPC response can still arrive once `terminate` has cleared `state.chains`.
+                // There is nobody left to notify, and throwing from the `MessagePort` event
+                // handler would end the NodeJS process.
+                const chain = state.chains.get(event.chainId);
+                if (!chain)
+                    break;
+                const callbacks = chain.jsonRpcResponsesPromises;
                 while (callbacks.length !== 0) {
                     (callbacks.shift()!)();
                 }

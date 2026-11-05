@@ -1190,6 +1190,8 @@ enum SecondaryReply {
     /// Close it before the handshake, like a full node without a slot for the light client.
     Refuse,
     Accept,
+    /// Accept it with a handshake over Alice's 32-byte limit for secondaries.
+    OversizedHandshake,
 }
 
 /// Alice is a light client (`ChainNetwork`) with GrandPa enabled that opens a gossip link with
@@ -1443,6 +1445,9 @@ fn secondary_substream_exchange(
                         SecondaryReply::Accept => {
                             bob_network.accept_in_notifications(substream_id, Vec::new(), 1024)
                         }
+                        SecondaryReply::OversizedHandshake => {
+                            bob_network.accept_in_notifications(substream_id, vec![0; 33], 1024)
+                        }
                     }
                 }
                 _ => {}
@@ -1531,6 +1536,25 @@ fn secondary_protocol_not_available_is_not_asked_again() {
     assert_eq!(grandpa_asked, 1);
     assert_eq!(opens, 2);
     assert_eq!(errors.len(), 1);
+    assert!(alice.network.gossip_is_connected(
+        alice.chain_id,
+        &alice.remote,
+        GossipKind::ConsensusTransactions
+    ));
+}
+
+/// A secondary substream whose handshake exceeds the limit is final, like a protocol the peer
+/// doesn't have: no `GossipSecondaryClosed`, so no reopening asks for it again.
+#[test]
+fn secondary_handshake_too_large_is_final() {
+    let (opens, grandpa_asked, errors, alice) = secondary_substream_exchange(
+        &[SecondaryReply::OversizedHandshake, SecondaryReply::Accept],
+        true,
+        false,
+    );
+    assert_eq!(opens, 1);
+    assert!(errors.is_empty());
+    assert_eq!(grandpa_asked, 1);
     assert!(alice.network.gossip_is_connected(
         alice.chain_id,
         &alice.remote,

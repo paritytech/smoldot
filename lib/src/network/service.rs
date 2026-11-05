@@ -2405,12 +2405,15 @@ where
                                     continue;
                                 }
 
-                                // The peer doesn't speak the protocol: final until the link
-                                // opens again.
+                                // The peer doesn't speak the protocol, or its handshake doesn't
+                                // fit: final until the link opens again.
                                 if matches!(
                                     error,
                                     collection::NotificationsOutErr::Substream(
-                                        established::NotificationsOutErr::ProtocolNotAvailable,
+                                        established::NotificationsOutErr::ProtocolNotAvailable
+                                            | established::NotificationsOutErr::HandshakeRecvError(
+                                                _
+                                            ),
                                     )
                                 ) {
                                     if link_open {
