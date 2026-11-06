@@ -24,6 +24,10 @@
 - WebRTC substreams now process `FIN`, `FIN_ACK` and `RESET_STREAM` in every state, and no longer hold a `FIN` back behind the bytes a large notification still expects. An open, closing or refused notifications substream previously never answered the remote's `FIN`, so its data channel stayed open until the remote reset it, and full nodes waited 10 seconds per close. ([#3418](https://github.com/paritytech/smoldot/pull/3418); mitigates [#3412](https://github.com/paritytech/smoldot/issues/3412))
 - A transactions, GrandPa or statement substream refused or closed by a full node while the block announces substream stays open is reopened once at once, whenever the full node opens its own side of the substream, and otherwise at most every 200 milliseconds, instead of in a tight loop. A protocol the full node answers it doesn't have is not asked again for as long as the block announces substream stays open. ([#3418](https://github.com/paritytech/smoldot/pull/3418); mitigates [#3412](https://github.com/paritytech/smoldot/issues/3412))
 
+### Fixed
+
+- Runtime calls (`state_call`, `chainHead_v1_call`, and the runtime calls smoldot makes itself) that write several entries to a child trie, such as a dry run of a smart contract call through `ContractsApi_call`, no longer fail with an inaccessible storage error depending on where the new keys land in the trie. Once such a call had finished, smoldot calculated the new root of every child trie the call had modified, although nothing used it, and this needs trie nodes and storage values that the runtime never read. A full node doesn't calculate these roots when it executes a runtime call, so the call proof it serves doesn't contain them: smoldot treated that proof as invalid, banned the peer that had served it, and tried again with other peers, which failed in the same way.
+
 ## 3.7.0 - 2026-10-07
 
 ### Added
