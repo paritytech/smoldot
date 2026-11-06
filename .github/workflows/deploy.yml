@@ -41,7 +41,7 @@ jobs:
     container:
       image: rust:1.92
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           path: repo
       - run: rustup target add wasm32-unknown-unknown
@@ -69,7 +69,7 @@ jobs:
     container:
       image: rust:1.92
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           path: repo
       - uses: Swatinem/rust-cache@v2
@@ -93,7 +93,7 @@ jobs:
     steps:
       - run: apt update && apt install -y jq
       - run: rustup component add llvm-tools-preview
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           path: repo
       - uses: Swatinem/rust-cache@v2
@@ -120,7 +120,7 @@ jobs:
     permissions:
       contents: write   # Necessary to push on the `gh-pages` branch.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           path: repo
       - run: |
@@ -162,7 +162,7 @@ jobs:
     container:
       image: rust:1.92
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - run: rustup target add wasm32-unknown-unknown
       - uses: actions/setup-node@v6.1.0
         with:
@@ -257,7 +257,7 @@ jobs:
     # This action checks if a certain git tag exists. If not, it compiles the JavaScript package,
     # then commits the compilation artifacts, tags the commit, and pushes the tag.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
       - run: rustup target add wasm32-unknown-unknown
@@ -302,7 +302,7 @@ jobs:
     container:
       image: rust:1.92
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - run: cargo publish --dry-run --locked
         working-directory: ./lib
         # Note that no dry run is performed for the crates that have dependencies towards the
@@ -334,7 +334,7 @@ jobs:
     permissions:
       contents: write   # to push tags
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: tags
         name: Compute and validate tag names
         run: |
