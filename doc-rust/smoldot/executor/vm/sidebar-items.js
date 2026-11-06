@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ExecHint","ExecOutcome","GlobalValueErr","NewErr","RunErr","StartErr","ValueType","WasmValue"],"struct":["Config","HeapPages","OutOfBoundsError","Prepare","Signature","Trap","UnsupportedTypeError","VirtualMachine","VirtualMachinePrototype"]};

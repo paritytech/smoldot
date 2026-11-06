@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["MinimizeProofError"],"fn":["merge_proofs","minimize_proof"]};
