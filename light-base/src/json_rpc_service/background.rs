@@ -211,8 +211,9 @@ struct Background<TPlat: PlatformRef> {
         BTreeMap<(Arc<str>, Vec<u8>), Option<LegacyApiStorageNotifiedValue>>,
     /// Identical to [`Background::legacy_api_storage_subscriptions`] but indexed by requested key.
     legacy_api_storage_subscriptions_by_key: BTreeSet<(Vec<u8>, Arc<str>)>,
-    /// List of storage subscriptions whose latest sent notification isn't about the current
-    /// best block.
+    /// List of storage subscriptions whose values haven't been checked against the current
+    /// best block. Emptied when the query for the current best block fails, in which case the
+    /// check is retried at the next best block.
     legacy_api_stale_storage_subscriptions: hashbrown::HashSet<Arc<str>, fnv::FnvBuildHasher>,
     /// `true` if there exists a background task in [`Background::background_tasks`] currently
     /// fetching storage items for storage subscriptions.
@@ -6122,10 +6123,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     {
                         // Like Substrate full nodes, only report the keys whose value has
                         // changed since the last notification sent to this subscription.
+                        // Entries are always inserted into and removed from both
+                        // `legacy_api_storage_subscriptions` and
+                        // `legacy_api_storage_subscriptions_by_key` together.
                         let last_notified = me
                             .legacy_api_storage_subscriptions
                             .get_mut(&(subscription_id.clone(), key.clone()))
-                            .unwrap();
+                            .expect("legacy storage subscription maps are always in sync; qed");
                         let changed = LegacyApiStorageNotifiedValue::update_if_different(
                             last_notified,
                             notified_value,
