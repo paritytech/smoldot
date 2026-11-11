@@ -23,7 +23,7 @@ jobs:
       ZOMBIENET_SDK_LARGE_RUNNER: ${{ steps.vars.outputs.ZOMBIENET_SDK_LARGE_RUNNER }}
       POLKADOT_SDK_MASTER_SHA: ${{ steps.vars.outputs.POLKADOT_SDK_MASTER_SHA }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Source zombienet-env
         id: vars
@@ -121,7 +121,7 @@ jobs:
             runner-type: "default"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6.1.0
         with:
