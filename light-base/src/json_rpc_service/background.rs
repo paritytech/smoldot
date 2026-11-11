@@ -27,7 +27,7 @@ use crate::{
 use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     format,
     string::{String, ToString as _},
     sync::Arc,
@@ -204,12 +204,16 @@ struct Background<TPlat: PlatformRef> {
     bitswap_subscriptions: hashbrown::HashMap<String, BitswapSubscription, fnv::FnvBuildHasher>,
 
     /// List of all active `state_subscribeStorage` subscriptions, indexed by the subscription ID.
-    /// Values are the list of keys requested by this subscription.
-    legacy_api_storage_subscriptions: BTreeSet<(Arc<str>, Vec<u8>)>,
+    /// Keys are the list of keys requested by this subscription. Values are the state of the
+    /// storage item as last reported to the JSON-RPC client, or `None` if no notification has
+    /// been sent yet for this key. Used in order to only notify the JSON-RPC client of changes.
+    legacy_api_storage_subscriptions:
+        BTreeMap<(Arc<str>, Vec<u8>), Option<LegacyApiStorageNotifiedValue>>,
     /// Identical to [`Background::legacy_api_storage_subscriptions`] but indexed by requested key.
     legacy_api_storage_subscriptions_by_key: BTreeSet<(Vec<u8>, Arc<str>)>,
-    /// List of storage subscriptions whose latest sent notification isn't about the current
-    /// best block.
+    /// List of storage subscriptions whose values haven't been checked against the current
+    /// best block. Emptied when the query for the current best block fails, in which case the
+    /// check is retried at the next best block.
     legacy_api_stale_storage_subscriptions: hashbrown::HashSet<Arc<str>, fnv::FnvBuildHasher>,
     /// `true` if there exists a background task in [`Background::background_tasks`] currently
     /// fetching storage items for storage subscriptions.
@@ -345,6 +349,29 @@ enum RuntimeServiceSubscription<TPlat: PlatformRef> {
     /// Subscription not requested yet. Should transition to
     /// [`RuntimeServiceSubscription::Pending`] as soon as possible.
     NotCreated,
+}
+
+/// Blake2 hash of a storage value as last reported to a `state_subscribeStorage` subscription,
+/// or `None` if the storage item was reported as absent. Only the hash is kept in order to
+/// bound the memory usage when subscribing to large storage values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LegacyApiStorageNotifiedValue(Option<[u8; 32]>);
+
+impl LegacyApiStorageNotifiedValue {
+    /// Builds the [`LegacyApiStorageNotifiedValue`] corresponding to the given storage value.
+    fn new(value: Option<&[u8]>) -> Self {
+        LegacyApiStorageNotifiedValue(value.map(|value| {
+            <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], value).as_bytes())
+                .expect("value obtained from storage is always valid; qed")
+        }))
+    }
+
+    /// Replaces `last_notified` with `new_value`, and returns `true` if they are different,
+    /// meaning that the JSON-RPC client must be notified. `last_notified` is `None` if no
+    /// notification has been sent yet.
+    fn update_if_different(last_notified: &mut Option<Self>, new_value: Self) -> bool {
+        last_notified.replace(new_value) != Some(new_value)
+    }
 }
 
 struct RecentBlock {
@@ -698,7 +725,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
         ),
         bitswap_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
         chain_head_follow_subscriptions: hashbrown::HashMap::with_hasher(Default::default()),
-        legacy_api_storage_subscriptions: BTreeSet::new(),
+        legacy_api_storage_subscriptions: BTreeMap::new(),
         legacy_api_storage_subscriptions_by_key: BTreeSet::new(),
         legacy_api_stale_storage_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
             0,
@@ -1829,10 +1856,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .legacy_api_storage_subscriptions_by_key
                                 .insert((key.0.clone(), subscription_id.clone()));
                             debug_assert!(_was_inserted);
-                            let _was_inserted = me
+                            let _prev_value = me
                                 .legacy_api_storage_subscriptions
-                                .insert((subscription_id.clone(), key.0));
-                            debug_assert!(_was_inserted);
+                                .insert((subscription_id.clone(), key.0), None);
+                            debug_assert!(_prev_value.is_none());
                         }
 
                         // The subscription is inserted in a list of "stale" subscriptions.
@@ -1874,7 +1901,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .legacy_api_storage_subscriptions
                                 .split_off(&(subscription.clone(), Vec::new()));
                             if let Some(first_entry_after) =
-                                after.iter().find(|(s, _)| *s != subscription).cloned()
+                                after.keys().find(|(s, _)| *s != subscription).cloned()
                             // TODO: O(n) ^
                             {
                                 me.legacy_api_storage_subscriptions
@@ -1883,7 +1910,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             after
                         };
                         let exists = !subscribed_keys.is_empty();
-                        for (_, key) in subscribed_keys {
+                        for (_, key) in subscribed_keys.into_keys() {
                             let _was_removed = me
                                 .legacy_api_storage_subscriptions_by_key
                                 .remove(&(key, subscription.clone()));
@@ -5983,6 +6010,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         .map(|s_id| {
                             me.legacy_api_storage_subscriptions
                                 .range((s_id.clone(), Vec::new())..)
+                                .map(|(k, _)| k)
                                 .take_while(move |(s, _)| s == s_id)
                                 .map(|(_, key)| key)
                         })
@@ -6086,28 +6114,57 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     let sync_service::StorageResultItem::Value { key, value } = item else {
                         unreachable!()
                     };
+                    let notified_value = LegacyApiStorageNotifiedValue::new(value.as_deref());
                     for subscription_id in me
                         .legacy_api_storage_subscriptions_by_key
                         .range((key.clone(), Arc::from(String::new()))..)
                         .take_while(|(k, _)| *k == key)
                         .map(|(_, s_id)| s_id.clone())
                     {
-                        notifications_to_send
+                        // Like Substrate full nodes, only report the keys whose value has
+                        // changed since the last notification sent to this subscription.
+                        // Entries are always inserted into and removed from both
+                        // `legacy_api_storage_subscriptions` and
+                        // `legacy_api_storage_subscriptions_by_key` together.
+                        let last_notified = me
+                            .legacy_api_storage_subscriptions
+                            .get_mut(&(subscription_id.clone(), key.clone()))
+                            .expect("legacy storage subscription maps are always in sync; qed");
+                        let changed = LegacyApiStorageNotifiedValue::update_if_different(
+                            last_notified,
+                            notified_value,
+                        );
+                        // The entry is inserted even if nothing changed, so that the
+                        // subscription is marked as no longer stale below.
+                        let changes = notifications_to_send
                             .entry(subscription_id)
-                            .or_insert_with(Vec::new)
-                            .push((
+                            .or_insert_with(Vec::new);
+                        if changed {
+                            changes.push((
                                 methods::HexString(key.clone()),
                                 value.clone().map(methods::HexString),
                             ));
+                        }
                     }
                 }
 
                 // Send the notifications and mark the subscriptions as no longer stale if
                 // relevant.
                 for (subscription_id, changes) in notifications_to_send {
-                    if is_up_to_date {
+                    // A subscription created while the query was in progress might have keys
+                    // that weren't part of the query. It must stay stale until each of its keys
+                    // has been reported at least once.
+                    let all_keys_notified = me
+                        .legacy_api_storage_subscriptions
+                        .range((subscription_id.clone(), Vec::new())..)
+                        .take_while(|((s, _), _)| *s == subscription_id)
+                        .all(|(_, last_notified)| last_notified.is_some());
+                    if is_up_to_date && all_keys_notified {
                         me.legacy_api_stale_storage_subscriptions
                             .remove(&subscription_id);
+                    }
+                    if changes.is_empty() {
+                        continue;
                     }
                     let _ = me
                         .responses_tx
@@ -6128,14 +6185,27 @@ pub(super) async fn run<TPlat: PlatformRef>(
             // Background task dedicated to performing a storage query for the storage
             // subscription has finished but was unsuccessful.
             WakeUpReason::Event(Event::LegacyApiStorageSubscriptionsUpdate {
+                block_hash,
                 result: Err(_),
-                ..
             }) => {
                 // Background task dedicated to performing a storage query for the storage
                 // subscriptions has failed.
                 debug_assert!(me.legacy_api_storage_query_in_progress);
                 me.legacy_api_storage_query_in_progress = false;
-                // TODO: add a delay or something?
+
+                // If the query targeted the current best block, the subscriptions are marked as
+                // no longer stale, so that the query is retried when the next best block is
+                // reported rather than immediately, which would loop if no peer can answer.
+                let is_up_to_date = match me.runtime_service_subscription {
+                    RuntimeServiceSubscription::Active {
+                        current_best_block, ..
+                    } => current_best_block == block_hash,
+                    RuntimeServiceSubscription::NotCreated
+                    | RuntimeServiceSubscription::Pending(_) => true,
+                };
+                if is_up_to_date {
+                    me.legacy_api_stale_storage_subscriptions.clear();
+                }
             }
 
             WakeUpReason::Event(Event::BitswapGetResult {
@@ -6401,7 +6471,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // out the notifications.
                 me.legacy_api_stale_storage_subscriptions.extend(
                     me.legacy_api_storage_subscriptions
-                        .iter()
+                        .keys()
                         .map(|(s_id, _)| s_id.clone()),
                 );
             }
@@ -6442,5 +6512,48 @@ fn convert_runtime_version(
             .apis
             .map(|api| (methods::HexString(api.name_hash.to_vec()), api.version))
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LegacyApiStorageNotifiedValue;
+
+    #[test]
+    fn legacy_api_storage_notifies_only_changes() {
+        let mut last_notified = None;
+
+        // The first value is always reported, even if the item is absent.
+        assert!(LegacyApiStorageNotifiedValue::update_if_different(
+            &mut last_notified,
+            LegacyApiStorageNotifiedValue::new(None)
+        ));
+        assert!(!LegacyApiStorageNotifiedValue::update_if_different(
+            &mut last_notified,
+            LegacyApiStorageNotifiedValue::new(None)
+        ));
+
+        assert!(LegacyApiStorageNotifiedValue::update_if_different(
+            &mut last_notified,
+            LegacyApiStorageNotifiedValue::new(Some(&[1, 2, 3]))
+        ));
+        assert!(!LegacyApiStorageNotifiedValue::update_if_different(
+            &mut last_notified,
+            LegacyApiStorageNotifiedValue::new(Some(&[1, 2, 3]))
+        ));
+        assert!(LegacyApiStorageNotifiedValue::update_if_different(
+            &mut last_notified,
+            LegacyApiStorageNotifiedValue::new(Some(&[1, 2, 4]))
+        ));
+
+        // An empty value is distinct from an absent one.
+        assert!(LegacyApiStorageNotifiedValue::update_if_different(
+            &mut last_notified,
+            LegacyApiStorageNotifiedValue::new(Some(&[]))
+        ));
+        assert!(LegacyApiStorageNotifiedValue::update_if_different(
+            &mut last_notified,
+            LegacyApiStorageNotifiedValue::new(None)
+        ));
     }
 }
