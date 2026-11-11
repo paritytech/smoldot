@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["MultihashType","ParseError"],"struct":["Cid","CidPrefix"]};
