@@ -17,11 +17,14 @@
 
 #![cfg(test)]
 
-//! The test in this module reads various JSON files containing test fixtures and executes them.
+//! [`execute_blocks`] reads various JSON files containing test fixtures and executes them.
 //!
 //! Each test fixture contains a block (header and body), plus the storage of its parent. The
 //! test consists in executing the block, to make sure that the state trie root matches the one
 //! calculated by smoldot.
+//!
+//! The other tests check which storage a runtime call accesses once it has finished, depending
+//! on [`Config::calculate_child_tries_roots_on_finish`].
 
 use core::{iter, ops};
 
@@ -91,13 +94,14 @@ fn execute_blocks() {
 
         // Start executing `Core_execute_block`. This runtime call will verify at the end whether
         // the trie root hash of the block matches the one calculated by smoldot.
-        let mut execution = run(Config {
+        let execution = run(Config {
             virtual_machine,
             function_to_call: "Core_execute_block",
             max_log_level: 3,
             storage_proof_size_behavior: StorageProofSizeBehavior::Unimplemented,
             storage_main_trie_changes: Default::default(),
             calculate_trie_changes: false,
+            calculate_child_tries_roots_on_finish: false,
             parameter: {
                 // Block header + number of extrinsics + extrinsics
                 let encoded_body_len =
@@ -109,82 +113,297 @@ fn execute_blocks() {
         })
         .unwrap();
 
-        loop {
-            match execution {
-                RuntimeCall::Finished(Ok(_)) => break, // Test successful!
-                RuntimeCall::Finished(Err(err)) => {
-                    panic!("Error during test #{}: {:?}", test_num, err)
-                }
-                RuntimeCall::SignatureVerification(sig) => execution = sig.verify_and_resume(),
-                RuntimeCall::ClosestDescendantMerkleValue(req) => execution = req.resume_unknown(),
-                RuntimeCall::StorageGet(get) => {
-                    let value = storage
-                        .get(&(
-                            get.child_trie().map(|c| c.as_ref().to_owned()),
-                            get.key().as_ref().to_owned(),
-                        ))
-                        .map(|v| (iter::once(&v[..]), state_version));
-                    execution = get.inject_value(value);
-                }
-                RuntimeCall::NextKey(req) => {
-                    // Because `NextKey` might ask for branch nodes, and that we don't build the
-                    // trie in its entirety, we have to use an algorithm that finds the branch
-                    // nodes for us.
-                    let next_key = {
-                        let mut search = trie::branch_search::BranchSearch::NextKey(
-                            trie::branch_search::start_branch_search(trie::branch_search::Config {
-                                key_before: req.key().collect::<Vec<_>>().into_iter(),
-                                or_equal: req.or_equal(),
-                                prefix: req.prefix().collect::<Vec<_>>().into_iter(),
-                                no_branch_search: !req.branch_nodes(),
-                            }),
-                        );
+        if let Err(err) = run_to_completion(&storage, state_version, execution, |_| {}) {
+            panic!("Error during test #{}: {:?}", test_num, err)
+        }
+    }
+}
 
-                        loop {
-                            match search {
-                                trie::branch_search::BranchSearch::Found {
-                                    branch_trie_node_key,
-                                } => break branch_trie_node_key,
-                                trie::branch_search::BranchSearch::NextKey(bs_req) => {
-                                    let result = storage
-                                        .range((
-                                            if bs_req.or_equal() {
-                                                ops::Bound::Included((
-                                                    req.child_trie().map(|c| c.as_ref().to_owned()),
-                                                    bs_req.key_before().collect::<Vec<_>>(),
-                                                ))
-                                            } else {
-                                                ops::Bound::Excluded((
-                                                    req.child_trie().map(|c| c.as_ref().to_owned()),
-                                                    bs_req.key_before().collect::<Vec<_>>(),
-                                                ))
-                                            },
-                                            ops::Bound::Unbounded,
-                                        ))
-                                        .next()
-                                        .filter(|((trie, key), _)| {
-                                            *trie == req.child_trie().map(|c| c.as_ref().to_owned())
-                                                && key.starts_with(
-                                                    &bs_req.prefix().collect::<Vec<_>>(),
-                                                )
-                                        })
-                                        .map(|((_, k), _)| k);
+/// Runtime with a single function, `write_child_trie`, that writes three entries, `key0`,
+/// `key1` and `key2`, to the default child trie `child`, and reads nothing.
+fn child_trie_writer_runtime() -> host::HostVmPrototype {
+    // A pointer-size, as passed to host functions: the size in the upper 32 bits.
+    let module = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory 1))
+        (import "env" "ext_default_child_storage_set_version_1"
+            (func $child_storage_set (param i64 i64 i64)))
+        (global (export "__heap_base") i32 (i32.const 1024))
+        (data (i32.const 0) "child")
+        (data (i32.const 8) "key0key1key2")
+        (data (i32.const 32) "new value")
+        (func (export "write_child_trie") (param i32 i32) (result i64)
+            (call $child_storage_set
+                (i64.const 0x0000000500000000) (i64.const 0x0000000400000008)
+                (i64.const 0x0000000900000020))
+            (call $child_storage_set
+                (i64.const 0x0000000500000000) (i64.const 0x000000040000000c)
+                (i64.const 0x0000000900000020))
+            (call $child_storage_set
+                (i64.const 0x0000000500000000) (i64.const 0x0000000400000010)
+                (i64.const 0x0000000900000020))
+            (i64.const 0))
+    )
+    "#,
+    )
+    .unwrap();
 
-                                    search = bs_req.inject(result.map(|k| k.iter().copied()));
-                                }
+    host::HostVmPrototype::new(host::Config {
+        module: with_runtime_version_custom_section(module),
+        heap_pages: host::HeapPages::new(1024),
+        exec_hint: crate::executor::vm::ExecHint::ExecuteOnceWithNonDeterministicValidation,
+        allow_unresolved_imports: false,
+    })
+    .unwrap()
+}
+
+/// The storage of the parent block of [`child_trie_writer_runtime`]'s call: the child trie
+/// `child` holds a single entry, `key3`, that the call never reads. Inserting `key0`, `key1`
+/// and `key2` turns the leaf node of `key3` into a child of a new branch node.
+fn child_trie_writer_parent_storage() -> Entries {
+    let mut storage = BTreeMap::new();
+    storage.insert(
+        (Some(b"child".to_vec()), b"key3".to_vec()),
+        b"existing value".to_vec(),
+    );
+    storage.insert(
+        (None, trie::default_child_trie_root_key(b"child")),
+        trie::trie_root(
+            host::TrieEntryVersion::V0,
+            trie::HashFunction::Blake2,
+            &[(b"key3", b"existing value")],
+        )
+        .to_vec(),
+    );
+    storage
+}
+
+fn start_child_trie_writer(
+    calculate_trie_changes: bool,
+    calculate_child_tries_roots_on_finish: bool,
+) -> RuntimeCall {
+    run(Config {
+        virtual_machine: child_trie_writer_runtime(),
+        function_to_call: "write_child_trie",
+        parameter: iter::empty::<&[u8]>(),
+        max_log_level: 0,
+        storage_proof_size_behavior: StorageProofSizeBehavior::proof_recording_disabled(),
+        storage_main_trie_changes: Default::default(),
+        calculate_trie_changes,
+        calculate_child_tries_roots_on_finish,
+    })
+    .unwrap()
+}
+
+#[test]
+fn child_tries_roots_not_calculated_on_finish() {
+    // A full node executing this call never calculates the root of `child`, and the call proof
+    // it generates for it holds only what the runtime has accessed: nothing. The call must then
+    // access nothing either, as it would otherwise fail against that proof.
+    let success = run_to_completion(
+        &child_trie_writer_parent_storage(),
+        host::TrieEntryVersion::V0,
+        start_child_trie_writer(false, false),
+        |access| panic!("storage accessed but never read by the runtime: {access}"),
+    )
+    .unwrap();
+
+    assert!(success.virtual_machine.value().as_ref().is_empty());
+    assert_eq!(
+        success
+            .storage_changes
+            .child_trie_storage_changes_iter_unordered(b"child")
+            .count(),
+        3
+    );
+    assert!(
+        success
+            .storage_changes
+            .main_trie_diff_get(&trie::default_child_trie_root_key(b"child"))
+            .is_none()
+    );
+}
+
+#[test]
+fn child_tries_roots_calculated_on_finish() {
+    let root_key = trie::default_child_trie_root_key(b"child");
+    let parent_root = child_trie_writer_parent_storage()[&(None, root_key.clone())].clone();
+
+    let mut roots = Vec::new();
+    for (calculate_trie_changes, calculate_child_tries_roots_on_finish) in
+        [(false, true), (true, true), (true, false)]
+    {
+        let mut accesses = Vec::new();
+        let success = run_to_completion(
+            &child_trie_writer_parent_storage(),
+            host::TrieEntryVersion::V0,
+            start_child_trie_writer(
+                calculate_trie_changes,
+                calculate_child_tries_roots_on_finish,
+            ),
+            |access| accesses.push(access),
+        )
+        .unwrap();
+
+        // Calculating the new root needs the value of `key3`, which the runtime never read.
+        assert!(
+            accesses.contains(&"child trie 6368696c64, value of 0x6b657933".to_owned()),
+            "{accesses:?}"
+        );
+
+        match success.storage_changes.main_trie_diff_get(&root_key) {
+            Some(Some(root)) => roots.push(root.to_vec()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // `calculate_trie_changes` requires these roots, and implies
+    // `calculate_child_tries_roots_on_finish`. The root is the same either way.
+    assert_eq!(roots[0].len(), 32);
+    assert_ne!(roots[0], parent_root);
+    assert!(roots.iter().all(|root| *root == roots[0]));
+}
+
+/// Storage entries: the child trie (`None` for the main trie) and key, and the value.
+type Entries = BTreeMap<(Option<Vec<u8>>, Vec<u8>), Vec<u8>>;
+
+/// Runs `execution` to its end, answering its storage accesses from `storage`. Calls
+/// `on_access` with a description of each storage access.
+fn run_to_completion(
+    storage: &Entries,
+    state_version: host::TrieEntryVersion,
+    mut execution: RuntimeCall,
+    mut on_access: impl FnMut(String),
+) -> Result<super::Success, super::Error> {
+    // Keys are printed as hexadecimal digits, one per nibble.
+    let describe = |child_trie: Option<&[u8]>, what: &str, key: String| match child_trie {
+        Some(child_trie) => format!("child trie {}, {what} 0x{key}", hex::encode(child_trie)),
+        None => format!("main trie, {what} 0x{key}"),
+    };
+    let nibbles = |nibbles: &mut dyn Iterator<Item = trie::Nibble>| -> String {
+        nibbles.map(|n| format!("{:x}", u8::from(n))).collect()
+    };
+
+    loop {
+        match execution {
+            RuntimeCall::Finished(result) => return result,
+            RuntimeCall::SignatureVerification(sig) => execution = sig.verify_and_resume(),
+            RuntimeCall::ClosestDescendantMerkleValue(req) => {
+                on_access(describe(
+                    req.child_trie().as_ref().map(|c| c.as_ref()),
+                    "closest descendant Merkle value of",
+                    nibbles(&mut req.key()),
+                ));
+                execution = req.resume_unknown()
+            }
+            RuntimeCall::StorageGet(get) => {
+                on_access(describe(
+                    get.child_trie().as_ref().map(|c| c.as_ref()),
+                    "value of",
+                    hex::encode(get.key().as_ref()),
+                ));
+                let value = storage
+                    .get(&(
+                        get.child_trie().map(|c| c.as_ref().to_owned()),
+                        get.key().as_ref().to_owned(),
+                    ))
+                    .map(|v| (iter::once(&v[..]), state_version));
+                execution = get.inject_value(value);
+            }
+            RuntimeCall::NextKey(req) => {
+                on_access(describe(
+                    req.child_trie().as_ref().map(|c| c.as_ref()),
+                    "next key after",
+                    nibbles(&mut req.key()),
+                ));
+                // Because `NextKey` might ask for branch nodes, and that we don't build the
+                // trie in its entirety, we have to use an algorithm that finds the branch
+                // nodes for us.
+                let next_key = {
+                    let mut search = trie::branch_search::BranchSearch::NextKey(
+                        trie::branch_search::start_branch_search(trie::branch_search::Config {
+                            key_before: req.key().collect::<Vec<_>>().into_iter(),
+                            or_equal: req.or_equal(),
+                            prefix: req.prefix().collect::<Vec<_>>().into_iter(),
+                            no_branch_search: !req.branch_nodes(),
+                        }),
+                    );
+
+                    loop {
+                        match search {
+                            trie::branch_search::BranchSearch::Found {
+                                branch_trie_node_key,
+                            } => break branch_trie_node_key,
+                            trie::branch_search::BranchSearch::NextKey(bs_req) => {
+                                let result = storage
+                                    .range((
+                                        if bs_req.or_equal() {
+                                            ops::Bound::Included((
+                                                req.child_trie().map(|c| c.as_ref().to_owned()),
+                                                bs_req.key_before().collect::<Vec<_>>(),
+                                            ))
+                                        } else {
+                                            ops::Bound::Excluded((
+                                                req.child_trie().map(|c| c.as_ref().to_owned()),
+                                                bs_req.key_before().collect::<Vec<_>>(),
+                                            ))
+                                        },
+                                        ops::Bound::Unbounded,
+                                    ))
+                                    .next()
+                                    .filter(|((trie, key), _)| {
+                                        *trie == req.child_trie().map(|c| c.as_ref().to_owned())
+                                            && key.starts_with(&bs_req.prefix().collect::<Vec<_>>())
+                                    })
+                                    .map(|((_, k), _)| k);
+
+                                search = bs_req.inject(result.map(|k| k.iter().copied()));
                             }
                         }
-                    };
+                    }
+                };
 
-                    execution = req.inject_key(next_key.map(|nk| nk.into_iter()));
-                }
-                RuntimeCall::LogEmit(log) => execution = log.resume(),
-                RuntimeCall::OffchainStorageSet(_) | RuntimeCall::Offchain(_) => {
-                    unimplemented!()
-                }
+                execution = req.inject_key(next_key.map(|nk| nk.into_iter()));
+            }
+            RuntimeCall::LogEmit(log) => execution = log.resume(),
+            RuntimeCall::OffchainStorageSet(_) | RuntimeCall::Offchain(_) => {
+                unimplemented!()
             }
         }
     }
+}
+
+/// Appends to `wasm` the custom section holding the runtime version, which
+/// [`host::HostVmPrototype::new`] requires.
+fn with_runtime_version_custom_section(mut wasm: Vec<u8>) -> Vec<u8> {
+    let mut runtime_version = Vec::new();
+    for name in ["foo", "bar"] {
+        runtime_version
+            .extend_from_slice(crate::util::encode_scale_compact_usize(name.len()).as_ref());
+        runtime_version.extend_from_slice(name.as_bytes());
+    }
+    // Authoring, spec and implementation versions.
+    runtime_version.extend_from_slice(&[0; 12]);
+    // No runtime APIs.
+    runtime_version.extend_from_slice(crate::util::encode_scale_compact_usize(0).as_ref());
+    // Transaction and state versions.
+    runtime_version.extend_from_slice(&[0; 5]);
+
+    for (name, content) in [
+        (&b"runtime_version"[..], &runtime_version[..]),
+        (b"runtime_apis", &[]),
+    ] {
+        let mut section = Vec::new();
+        section.extend(crate::util::leb128::encode_usize(name.len()));
+        section.extend_from_slice(name);
+        section.extend_from_slice(content);
+        wasm.push(0);
+        wasm.extend(crate::util::leb128::encode_usize(section.len()));
+        wasm.extend_from_slice(&section);
+    }
+
+    wasm
 }
 
 // Serde structs used to decode the test fixtures.
