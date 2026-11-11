@@ -45,7 +45,7 @@ jobs:
         with:
           path: repo
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v6.1.0
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: current
       - run: npm install
@@ -164,7 +164,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v6.1.0
+      - uses: actions/setup-node@v7.1.0
         with:
           # Set to the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 22
@@ -261,7 +261,7 @@ jobs:
         with:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v6.1.0
+      - uses: actions/setup-node@v7.1.0
         with:
           # Set to the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 22
