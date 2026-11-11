@@ -61,10 +61,10 @@ enum RemoteWriteState {
 }
 
 const RECEIVE_BUFFER_CAPACITY: usize = 2048;
-/// Minimum size in bytes of the protobuf frame surrounding the message.
-const PROTOBUF_FRAME_MIN_LEN: usize = 2;
 /// Maximum size in bytes of the protobuf frame surrounding the message.
 const PROTOBUF_FRAME_MAX_LEN: usize = 8; // TODO: calculate better?
+/// Size in bytes of a frame carrying a flag and no data: length prefix, flag, empty data.
+const FLAG_ONLY_FRAME_LEN: usize = 5;
 const MAX_PROTOBUF_MESSAGE_LEN: usize = 16384;
 
 impl WebRtcFraming {
@@ -89,18 +89,15 @@ impl WebRtcFraming {
         &'a mut self,
         outer_read_write: &'a mut ReadWrite<TNow>,
     ) -> Result<InnerReadWrite<'a, TNow>, Error> {
-        // Read from the incoming buffer until we have enough data for the underlying substream.
+        // A flag-only frame is parsed whatever the underlying substream expects: a `FIN` or
+        // `RESET_STREAM` arriving in a state that reads nothing (an outbound notifications
+        // substream, a refused inbound one, ...) must still be processed, or no `FIN_ACK` is
+        // sent and the closing goes unreported. A data frame is parsed only while the substream
+        // has room for it, so that the rest stays in the outer buffer and back-pressures the
+        // remote. A substream that asks for nothing still gets one frame at a time: states that
+        // discard what they receive must drain the remote's in-flight data to reach the `FIN`
+        // behind it. Consuming it requests the next call.
         loop {
-            // Immediately stop looping if there is enough data for the underlying substream.
-            // Also stop looping if `inner_stream_expected_incoming_bytes` is `None`, as we always
-            // want to process the inner substream the first time ever.
-            if self
-                .inner_stream_expected_incoming_bytes
-                .map_or(true, |rq_bytes| rq_bytes <= self.receive_buffer.len())
-            {
-                break;
-            }
-
             // Try to parse a frame from the incoming buffer.
             let bytes_to_discard = {
                 // TODO: we could in theory demand from the outside just the protobuf header, and then later the data, which would save some copying but might considerably complexifies the code
@@ -120,10 +117,20 @@ impl WebRtcFraming {
                             return Err(Error::RemoteResetDesired);
                         }
 
-                        // Some protocol check.
-                        if framed_message.message.map_or(false, |msg| !msg.is_empty())
-                            && !matches!(self.remote_write_state, RemoteWriteState::Open)
+                        // Leave a data frame the substream has no room for in the outer buffer.
+                        let has_data = framed_message.message.is_some_and(|msg| !msg.is_empty());
+                        if has_data
+                            && self.receive_buffer.len()
+                                >= cmp::max(
+                                    self.inner_stream_expected_incoming_bytes.unwrap_or(0),
+                                    1,
+                                )
                         {
+                            break;
+                        }
+
+                        // Some protocol check.
+                        if has_data && !matches!(self.remote_write_state, RemoteWriteState::Open) {
                             return Err(Error::DataAfterFin);
                         }
 
@@ -247,50 +254,64 @@ impl<'a, TNow: Clone> ops::DerefMut for InnerReadWrite<'a, TNow> {
 
 impl<'a, TNow: Clone> Drop for InnerReadWrite<'a, TNow> {
     fn drop(&mut self) {
-        // It is possible that the inner stream processes some bytes of `self.receive_buffer`
-        // and expects to be called again while no bytes was pulled from the outer `ReadWrite`.
-        // If that happens, the API user will not call `read_write` again and we will have a stall.
-        // For this reason, if the inner stream has read some bytes, we make sure that the outer
-        // `ReadWrite` wakes up as soon as possible.
-        // Additionally, we also do a first dummy substream processing without reading anything,
-        // in order to populate `inner_stream_expected_incoming_bytes`. If this is the case, we
-        // also immediately wake up again.
-        if self.framing.inner_stream_expected_incoming_bytes.is_none()
-            || self.inner_read_write.read_bytes != 0
-        {
+        // The timer is copied back before the wake-up below, so that it can't overwrite it.
+        //
+        // The inner stream expects a call before something new arrives in two cases: it
+        // consumed bytes of `receive_buffer`, or a complete frame was withheld and it now asks
+        // for more than it holds. The second happens on every substream that reads a length
+        // prefix in one call and the body in the next. Both get an immediate wake-up. A frame
+        // was withheld if the outer demand is already met: the platform starts each call at
+        // zero, and the parsing loop raises the demand above the buffer only when the next
+        // frame is incomplete.
+        //
+        // The outer demand is left at the size of the next frame rather than raised to what the
+        // inner stream expects: a small `FIN` or `RESET_STREAM` frame must not wait until that
+        // many bytes have arrived.
+        self.outer_read_write.wake_up_after = self.inner_read_write.wake_up_after.clone();
+        let frame_withheld = self
+            .outer_read_write
+            .expected_incoming_bytes
+            .is_some_and(|expected| expected <= self.outer_read_write.incoming_buffer.len());
+        let inner_asks_for_more = self
+            .inner_read_write
+            .expected_incoming_bytes
+            .is_some_and(|expected| expected > self.inner_read_write.incoming_buffer.len());
+        if self.inner_read_write.read_bytes != 0 || (frame_withheld && inner_asks_for_more) {
             self.outer_read_write.wake_up_asap();
         }
-
-        // Updating the timer and reading side of things.
-        self.outer_read_write.wake_up_after = self.inner_read_write.wake_up_after.clone();
         self.framing.receive_buffer = mem::take(&mut self.inner_read_write.incoming_buffer);
         self.framing.inner_stream_expected_incoming_bytes =
             Some(self.inner_read_write.expected_incoming_bytes.unwrap_or(0));
-        if let Some(expected_incoming_bytes) = &mut self.outer_read_write.expected_incoming_bytes {
-            *expected_incoming_bytes = cmp::max(
-                *expected_incoming_bytes,
-                self.inner_read_write.expected_incoming_bytes.unwrap_or(0) + PROTOBUF_FRAME_MIN_LEN,
-            );
-        }
 
-        // Update the local state, and figure out the flag (if any) that we want to send out to
-        // the remote.
-        // Note that we never send the `RESET_STREAM` flag. It is unclear to me what purpose this
-        // flag serves compares to simply closing the substream.
-        // We also never send `STOP_SENDING`, as it doesn't fit in our API.
-        let flag_to_send_out: Option<u32> =
-            if matches!(self.framing.local_write_state, LocalWriteState::Open)
-                && self.inner_read_write.write_bytes_queueable.is_none()
-            {
-                self.framing.local_write_state = LocalWriteState::FinBuffered;
-                Some(0)
-            } else if matches!(self.framing.remote_write_state, RemoteWriteState::Closed) {
-                // `FIN_ACK`
-                self.framing.remote_write_state = RemoteWriteState::ClosedAckBuffered;
-                Some(3)
-            } else {
-                None
-            };
+        // Flag to send out, if any: `FIN` once the inner stream closes its writing side,
+        // `FIN_ACK` once the remote's `FIN` has been processed. `RESET_STREAM` is never sent, as
+        // closing the substream serves the same purpose, nor is `STOP_SENDING`, which doesn't
+        // fit in our API.
+        //
+        // A frame carrying data always fits in the outer credit, as the inner stream was given
+        // that credit minus `PROTOBUF_FRAME_MAX_LEN`. A frame carrying only a flag might not,
+        // right after a frame that used the credit up. It is then sent on a later call: the
+        // inner stream asks for the close again, and `remote_write_state` stays `Closed`. The
+        // platform re-polls the stream when it reports flushed bytes, so a wake-up here would
+        // only spin until then.
+        let flag_fits = self.inner_read_write.write_bytes_queued != 0
+            || self
+                .outer_read_write
+                .write_bytes_queueable
+                .is_some_and(|queueable| queueable >= FLAG_ONLY_FRAME_LEN);
+        let flag_to_send_out: Option<u32> = if !flag_fits {
+            None
+        } else if matches!(self.framing.local_write_state, LocalWriteState::Open)
+            && self.inner_read_write.write_bytes_queueable.is_none()
+        {
+            self.framing.local_write_state = LocalWriteState::FinBuffered;
+            Some(0)
+        } else if matches!(self.framing.remote_write_state, RemoteWriteState::Closed) {
+            self.framing.remote_write_state = RemoteWriteState::ClosedAckBuffered;
+            Some(3)
+        } else {
+            None
+        };
 
         // Write out a message only if there is anything to write.
         // TODO: consider buffering data more before flushing, to reduce the overhead of the protobuf frame?
@@ -329,6 +350,10 @@ impl<'a, TNow: Clone> Drop for InnerReadWrite<'a, TNow> {
             // Now write the length prefix.
             let length_prefix = leb128::encode_usize(length_prefix_value).collect::<Vec<_>>();
             let total_length = length_prefix_value + length_prefix.len();
+            debug_assert!(
+                self.inner_read_write.write_bytes_queued != 0
+                    || total_length == FLAG_ONLY_FRAME_LEN
+            );
             self.outer_read_write.write_buffers[message_length_prefix_index] = length_prefix;
 
             // Properly update the outer `ReadWrite`.
@@ -355,4 +380,192 @@ pub enum Error {
     EofIncompleteFrame,
     /// Received a `FIN_ACK` flag without having sent a `FIN` flag.
     FinAckWithoutFin,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WebRtcFraming;
+    use crate::libp2p::read_write::ReadWrite;
+
+    /// Builds the outer `ReadWrite`, as the platform would: `incoming` has arrived from the data
+    /// channel, and `queueable` bytes can be written to it.
+    fn outer(incoming: &[u8], queueable: usize) -> ReadWrite<u64> {
+        ReadWrite {
+            now: 5,
+            incoming_buffer: incoming.to_vec(),
+            expected_incoming_bytes: Some(0),
+            read_bytes: 0,
+            write_buffers: Vec::new(),
+            write_bytes_queued: 0,
+            write_bytes_queueable: Some(queueable),
+            wake_up_after: None,
+        }
+    }
+
+    /// The inner substream does not ask for bytes (`NotificationsOut`, `NotificationsOutClosed`,
+    /// `NotificationsInRefused`, ...). A remote `FIN` must still be parsed, the inner stream told
+    /// that the remote closed its side, and a `FIN_ACK` written.
+    #[test]
+    fn fin_parsed_while_inner_expects_no_bytes() {
+        let mut framing = WebRtcFraming::new();
+        let mut rw = outer(&[], 100);
+        // The inner substream leaves `expected_incoming_bytes` at `Some(0)`.
+        drop(framing.read_write(&mut rw).unwrap());
+
+        // Length-prefixed protobuf `Message { flag: FIN }`.
+        let mut rw = outer(&[0x02, 0x08, 0x00], 100);
+        let inner = framing.read_write(&mut rw).unwrap();
+        let inner_expected = inner.expected_incoming_bytes;
+        drop(inner);
+        assert_eq!(rw.read_bytes, 3, "FIN frame left unparsed");
+        assert_eq!(
+            inner_expected, None,
+            "inner stream not told that the remote closed"
+        );
+        // `Message { flag: FIN_ACK, message: "" }`.
+        assert_eq!(
+            rw.write_buffers.concat(),
+            [0x04, 0x08, 0x03, 0x12, 0x00],
+            "no FIN_ACK written"
+        );
+    }
+
+    /// When the inner substream consumes bytes of `receive_buffer`, `InnerReadWrite::drop`
+    /// requests an immediate wake-up of the outer `ReadWrite`. Copying the inner stream's timer
+    /// back to the outer `ReadWrite` must not overwrite that wake-up.
+    #[test]
+    fn wake_up_asap_survives_drop() {
+        let mut framing = WebRtcFraming::new();
+        // A data frame carrying "abc" already arrived before the first processing.
+        let mut rw = outer(&[0x05, 0x12, 0x03, b'a', b'b', b'c'], 100);
+        {
+            let mut inner = framing.read_write(&mut rw).unwrap();
+            // The inner substream reads part of the data and expects to be called again.
+            let _ = inner.incoming_bytes_take(3);
+        }
+        assert_eq!(rw.wake_up_after, Some(5), "wake-up lost");
+    }
+
+    /// While the inner substream waits for a large amount of data (e.g. a notification body),
+    /// the outer stream must still be asked for what the *next frame* needs, so that a small
+    /// `FIN` frame reaches the framing. Asking for the whole inner need makes the platform hold
+    /// the `FIN` until that many bytes are buffered.
+    #[test]
+    fn outer_demand_is_next_frame_not_whole_inner_need() {
+        let mut framing = WebRtcFraming::new();
+        let mut rw = outer(&[], 100);
+        {
+            let mut inner = framing.read_write(&mut rw).unwrap();
+            let _ = inner.incoming_bytes_take(1000);
+        }
+        assert!(
+            rw.expected_incoming_bytes.unwrap() <= 8,
+            "outer stream asked for {:?} bytes",
+            rw.expected_incoming_bytes
+        );
+    }
+
+    /// A frame carrying only a flag is not written while the outer credit can't hold it, as
+    /// happens right after a data frame used the credit up, and is written once it can.
+    #[test]
+    fn flag_frame_waits_for_outer_credit() {
+        let mut framing = WebRtcFraming::new();
+        // `Message { flag: FIN }` arrives while only 3 bytes can be written.
+        let mut rw = outer(&[0x02, 0x08, 0x00], 3);
+        drop(framing.read_write(&mut rw).unwrap());
+        assert!(
+            rw.write_buffers.is_empty(),
+            "FIN_ACK written without credit"
+        );
+        assert_eq!(rw.write_bytes_queueable, Some(3));
+
+        let mut rw = outer(&[], 100);
+        drop(framing.read_write(&mut rw).unwrap());
+        assert_eq!(
+            rw.write_buffers.concat(),
+            [0x04, 0x08, 0x03, 0x12, 0x00],
+            "no FIN_ACK written once there is credit"
+        );
+    }
+
+    /// A data frame the substream didn't ask for stays in the outer buffer: `receive_buffer`
+    /// holds at most one such frame. Substreams read a length prefix in one call and ask for the
+    /// body in the next, without consuming anything: the framing must then request an immediate
+    /// wake-up, as the outer demand (the next frame's size) is already met, and the next call
+    /// parses the waiting frame.
+    #[test]
+    fn unrequested_data_frame_waits_in_outer_buffer() {
+        let mut framing = WebRtcFraming::new();
+        // Data frames "abc" and "def" arrive while the substream expects no bytes.
+        let mut rw = outer(
+            &[
+                0x05, 0x12, 0x03, b'a', b'b', b'c', 0x05, 0x12, 0x03, b'd', b'e', b'f',
+            ],
+            100,
+        );
+        let inner = framing.read_write(&mut rw).unwrap();
+        assert_eq!(
+            inner.incoming_buffer, b"abc",
+            "more than one unrequested frame parsed"
+        );
+        drop(inner);
+        assert_eq!(
+            rw.read_bytes, 6,
+            "second frame not left in the outer buffer"
+        );
+        assert_eq!(rw.wake_up_after, None);
+
+        // The substream now asks for 6 bytes.
+        {
+            let mut inner = framing.read_write(&mut rw).unwrap();
+            assert!(matches!(inner.incoming_bytes_take(6), Ok(None)));
+        }
+        assert_eq!(
+            rw.wake_up_after,
+            Some(5),
+            "no wake-up for the waiting frame"
+        );
+
+        let inner = framing.read_write(&mut rw).unwrap();
+        assert_eq!(
+            inner.incoming_buffer, b"abcdef",
+            "waiting frame not parsed once asked for"
+        );
+    }
+
+    /// A substream that discards what it receives asks for nothing, yet must reach the `FIN`
+    /// behind the remote's in-flight data: it gets one frame per call, and parsing resumes once
+    /// it drained it.
+    #[test]
+    fn discarding_inner_reaches_fin_behind_data() {
+        let mut framing = WebRtcFraming::new();
+        // Data frames "abc" and "def", then `Message { flag: FIN }`.
+        let mut rw = outer(
+            &[
+                0x05, 0x12, 0x03, b'a', b'b', b'c', 0x05, 0x12, 0x03, b'd', b'e', b'f', 0x02, 0x08,
+                0x00,
+            ],
+            100,
+        );
+        {
+            let mut inner = framing.read_write(&mut rw).unwrap();
+            assert_eq!(inner.incoming_buffer, b"abc");
+            inner.discard_all_incoming();
+        }
+        assert_eq!(rw.wake_up_after, Some(5), "no wake-up after draining");
+
+        let mut inner = framing.read_write(&mut rw).unwrap();
+        assert_eq!(inner.incoming_buffer, b"def");
+        assert_eq!(
+            inner.expected_incoming_bytes, None,
+            "FIN behind the data not reached"
+        );
+        inner.discard_all_incoming();
+        drop(inner);
+        assert_eq!(
+            rw.write_buffers.concat(),
+            [0x04, 0x08, 0x03, 0x12, 0x00],
+            "no FIN_ACK written"
+        );
+    }
 }

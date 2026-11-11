@@ -2,14 +2,27 @@
 
 ## Unreleased
 
+## 3.8.0 - 2026-11-05
+
 ### Added
 
 - Add `AddChainOptions.maxPendingTransactions`: the maximum number of transactions submitted through the JSON-RPC API that a chain holds at the same time, from their submission until they are finalized or dropped. It defaults to 64, so the behaviour is unchanged unless it is set. Rust users of `smoldot-light` set the same limit through `AddChainConfig::max_pending_transactions`. ([#3394](https://github.com/paritytech/smoldot/pull/3394); fixes [#3393](https://github.com/paritytech/smoldot/issues/3393))
+- Add the `runtimeCodeDownloadsTotal` metric to `sudo_unstable_metrics`: the number of times the runtime code (`:code`) has been downloaded. `runtimeCacheHitsTotal` now also counts runtimes found again by the Merkle value of `:code`. ([#3403](https://github.com/paritytech/smoldot/pull/3403))
 
 ### Fixed
 
-- `Client.terminate()` no longer risks ending the NodeJS process with an uncaught exception when smoldot runs in a worker (`ClientOptions.portToWorker`), which could happen before the application had finished shutting down, for example before it had saved its database. The worker can still send a JSON-RPC response after it has shut down, and such a response arriving once `terminate()` has removed the chains is now ignored.
-- A `chainHead_v1_storage` call now gives back, once it ends, every operation slot it took: one for each item it started. It gave back one, so each call of several items took slots from the `chainHead_v1_follow` subscription for good. After 31 calls of two items, a subscription was down to its last slot: it ran one operation at a time, a call of several items started only its first item, and any other operation started meanwhile got `limitReached`.
+- Legacy JSON-RPC runtime calls (`state_call`, `state_getRuntimeVersion`, ...) no longer download the full runtime code at every new block when the runtime has not changed. The Merkle value of `:code` is fetched first, and the code is downloaded only if no known runtime matches. ([#3403](https://github.com/paritytech/smoldot/pull/3403); fixes [#3396](https://github.com/paritytech/smoldot/issues/3396))
+- A parachain restarted with a saved database no longer downloads its runtime code again when the runtime has not changed. ([#3416](https://github.com/paritytech/smoldot/pull/3416); fixes [#3204](https://github.com/paritytech/smoldot/issues/3204))
+- Fix a decompression bomb where a crafted zstd-compressed runtime could bypass the decompressed size limit (RUSTSEC-2026-0344). ([#3410](https://github.com/paritytech/smoldot/pull/3410); fixes [#3405](https://github.com/paritytech/smoldot/issues/3405))
+- Fix a memory leak of about 2 MiB of heap per second for a busy client: the execution loop left a promise reaction behind at every wait. ([#3406](https://github.com/paritytech/smoldot/pull/3406))
+- Keep at most one JavaScript timer pending per client. Superseded timers kept firing, so their number and the CPU spent on them grew for as long as the client ran. ([#3409](https://github.com/paritytech/smoldot/pull/3409))
+- A WebRTC substream cancelled by the remote before smoldot accepted it no longer panics smoldot. ([#3407](https://github.com/paritytech/smoldot/pull/3407))
+- `Client.terminate()` no longer risks ending the NodeJS process with an uncaught exception when smoldot runs in a worker (`ClientOptions.portToWorker`), which could happen before the application had finished shutting down, for example before it had saved its database. The worker can still send a JSON-RPC response after it has shut down, and such a response arriving once `terminate()` has removed the chains is now ignored. ([#3438](https://github.com/paritytech/smoldot/pull/3438))
+- A `chainHead_v1_storage` call now gives back, once it ends, every operation slot it took: one for each item it started. It gave back one, so each call of several items took slots from the `chainHead_v1_follow` subscription for good. After 31 calls of two items, a subscription was down to its last slot: it ran one operation at a time, a call of several items started only its first item, and any other operation started meanwhile got `limitReached`. ([#3437](https://github.com/paritytech/smoldot/pull/3437))
+- `state_getKeysPaged` no longer skips or repeats keys between pages. The keys are now sorted before the `startKey` and `count` parameters are applied. Before, they were in the order in which the storage proofs were traversed, so a page did not always contain the keys that follow `startKey`. ([#3444](https://github.com/paritytech/smoldot/pull/3444); fixes [#3443](https://github.com/paritytech/smoldot/issues/3443))
+- A notifications handshake whose length prefix is invalid or exceeds the limit no longer panics smoldot, the substream fails to open instead. ([#3446](https://github.com/paritytech/smoldot/pull/3446))
+- WebRTC substreams now process `FIN`, `FIN_ACK` and `RESET_STREAM` in every state, and no longer hold a `FIN` back behind the bytes a large notification still expects. An open, closing or refused notifications substream previously never answered the remote's `FIN`, so its data channel stayed open until the remote reset it, and full nodes waited 10 seconds per close. ([#3418](https://github.com/paritytech/smoldot/pull/3418); mitigates [#3412](https://github.com/paritytech/smoldot/issues/3412))
+- A transactions, GrandPa or statement substream refused or closed by a full node while the block announces substream stays open is reopened once at once, whenever the full node opens its own side of the substream, and otherwise at most every 200 milliseconds, instead of in a tight loop. A protocol the full node answers it doesn't have is not asked again for as long as the block announces substream stays open. ([#3418](https://github.com/paritytech/smoldot/pull/3418); mitigates [#3412](https://github.com/paritytech/smoldot/issues/3412))
 
 ## 3.7.0 - 2026-10-07
 
