@@ -3009,6 +3009,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         peering
                             .topology
                             .on_substream_closed(peer_id.clone(), &task.platform.now());
+                        peering.steering.on_substream_closed(&peer_id);
                     }
                 }
 
@@ -3732,19 +3733,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     ?version,
                 );
 
-                // Only the steering desires peers under the statement kind, so a desired peer
-                // holds a steered link rather than a substream following block announces.
-                let steered = task
-                    .network
-                    .gossip_desired_iter(chain_id, service::GossipKind::Statement)
-                    .any(|p| *p == peer_id);
                 if let Some(peering) = &mut task.network[chain_id].statement_peering {
                     peering
                         .topology
                         .on_substream_opened(peer_id.clone(), &task.platform.now());
-                    if steered {
-                        peering.steering.on_substream_opened(peer_id.clone());
-                    }
+                    peering.steering.on_substream_opened(peer_id.clone());
                 }
 
                 if matches!(version, codec::StatementProtocolVersion::V2) {
@@ -3855,10 +3848,17 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .statement_capable_peers(chain_id)
                         .cloned()
                         .collect::<Vec<_>>();
+                    // Only the steering desires peers under the statement kind.
+                    let reserved = task
+                        .network
+                        .gossip_desired_iter(chain_id, service::GossipKind::Statement)
+                        .cloned()
+                        .collect::<Vec<_>>();
                     let Some(peering) = &mut task.network[chain_id].statement_peering else {
                         continue;
                     };
                     let now = task.platform.now();
+                    peering.steering.update_reserved_peers(reserved);
 
                     // Identify answers are not reported as events, so the capable peers are
                     // picked up here.
@@ -3873,10 +3873,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         peering.topology.statement_peers(),
                         &now,
                     );
-                    let disconnect = peering.steering.peers_to_disconnect();
-                    let connect = peering
+                    let release = peering.steering.peers_to_release();
+                    let reserve = peering
                         .steering
-                        .peers_to_connect()
+                        .peers_to_reserve()
                         .into_iter()
                         .map(|peer_id| {
                             let addresses = peering
@@ -3889,40 +3889,53 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .collect::<Vec<_>>();
                     let has_topics = !peering.topics.is_empty();
 
-                    for peer_id in &disconnect {
+                    let mut closed = Vec::new();
+                    for peer_id in release {
                         task.network.gossip_remove_desired(
                             chain_id,
-                            peer_id,
+                            &peer_id,
                             service::GossipKind::Statement,
                         );
-                        let _ = task.network.gossip_close(
+                        // A statement substream that has a block announces substream to
+                        // follow stays open, so that the gossip peer keeps serving statements.
+                        // Closing reports no event.
+                        let follows_block_announces = task.network.gossip_is_connected(
                             chain_id,
-                            peer_id,
-                            service::GossipKind::Statement,
+                            &peer_id,
+                            service::GossipKind::ConsensusTransactions,
                         );
+                        if !follows_block_announces
+                            && task
+                                .network
+                                .gossip_close(chain_id, &peer_id, service::GossipKind::Statement)
+                                .is_ok()
+                        {
+                            if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                                peers.remove(&peer_id);
+                            }
+                            closed.push(peer_id.clone());
+                        }
                         log!(
                             &task.platform,
                             Debug,
                             "network",
-                            "statement-link-closed",
+                            "statement-link-released",
                             chain = &task.network[chain_id].log_name,
                             peer_id,
-                            reason = "steering"
+                            closed = !follows_block_announces
                         );
                     }
 
-                    let mut anchored = Vec::new();
                     let mut unreachable = Vec::new();
-                    for (peer_id, addresses) in connect {
-                        if task.network.gossip_is_connected(
+                    for (peer_id, addresses) in reserve {
+                        // A peer with an open statement substream, one that follows the block
+                        // announces substream, needs no dial: marking it as desired turns the
+                        // substream into the anchor of the link.
+                        if !task.network.gossip_is_connected(
                             chain_id,
                             &peer_id,
                             service::GossipKind::Statement,
                         ) {
-                            // The statement substream following the block announces
-                            // substream anchors the link, with no new open.
-                            anchored.push(peer_id.clone());
-                        } else {
                             // The topology outlives the address book, so the addresses it
                             // remembers go back into the book before the dial. Note that we
                             // must call this function before `insert_address`, as documented
@@ -3977,11 +3990,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .statement_peering
                         .as_mut()
                         .expect("checked above; qed");
-                    for peer_id in &disconnect {
-                        peering.steering.on_substream_closed(peer_id);
-                    }
-                    for peer_id in anchored {
-                        peering.steering.on_substream_opened(peer_id);
+                    for peer_id in closed {
+                        peering.topology.on_substream_closed(peer_id.clone(), &now);
+                        peering.steering.on_substream_closed(&peer_id);
                     }
                     for peer_id in unreachable {
                         peering
