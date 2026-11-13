@@ -866,6 +866,10 @@ where
     ///
     /// Has no effect if it was not marked as desired.
     ///
+    /// An open [`GossipKind::Statement`] link whose peer also has a block announces substream
+    /// stays open and follows that substream from then on. Any other open link is listed by
+    /// [`ChainNetwork::opened_gossip_undesired`] until it is closed.
+    ///
     /// Returns `true` if the peer was desired on this chain.
     ///
     /// # Panic
@@ -920,7 +924,11 @@ where
             self.unconnected_desired.remove(&peer_index);
         }
 
-        if self.gossip_link_exists(chain_id.0, peer_index, kind) {
+        // A statement substream no longer desired goes back to following the block announces
+        // substream when there is one, rather than standing as a link of its own.
+        let follows_block_announces = kind == GossipKind::Statement
+            && self.gossip_link_exists(chain_id.0, peer_index, GossipKind::ConsensusTransactions);
+        if self.gossip_link_exists(chain_id.0, peer_index, kind) && !follows_block_announces {
             let _was_inserted = self
                 .opened_gossip_undesired
                 .insert((chain_id, peer_index, kind));

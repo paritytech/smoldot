@@ -118,6 +118,20 @@ pub async fn spawn_network(
     base_dir: &Path,
     para_spec_path: &Path,
 ) -> Result<Network<LocalFileSystem>, anyhow::Error> {
+    spawn_network_with(base_dir, para_spec_path, &["alice", "bob"], &[]).await
+}
+
+/// Same as [`spawn_network`], with the given collators, each started with `extra_collator_args`
+/// on top of the usual ones.
+pub async fn spawn_network_with(
+    base_dir: &Path,
+    para_spec_path: &Path,
+    collators: &[&str],
+    extra_collator_args: &[&str],
+) -> Result<Network<LocalFileSystem>, anyhow::Error> {
+    let (first_collator, other_collators) = collators
+        .split_first()
+        .ok_or_else(|| anyhow!("a network needs at least one collator"))?;
     let images = zombienet_sdk::environment::get_images_from_env();
     let base_dir_str = base_dir
         .to_str()
@@ -138,6 +152,7 @@ pub async fn spawn_network(
             "--enable-statement-store".into(),
             log_arg.as_str().into(),
         ];
+        args.extend(extra_collator_args.iter().map(|arg| Arg::from(*arg)));
         args.extend(crate::webrtc_args());
         args
     };
@@ -162,17 +177,20 @@ pub async fn spawn_network(
                 })
         })
         .with_parachain(|p| {
-            p.with_id(PARA_ID)
+            let p = p
+                .with_id(PARA_ID)
                 .with_chain(PARA_CHAIN)
                 .with_chain_spec_path(para_spec_path.to_str().expect("Valid UTF-8 path"))
                 .with_default_command("polkadot-parachain")
                 .with_default_image(images.cumulus.as_str())
                 .with_collator(|n| {
-                    n.with_name("alice")
+                    n.with_name(*first_collator)
                         .bootnode(true)
                         .with_args(collator_args())
-                })
-                .with_collator(|n| n.with_name("bob").bootnode(true).with_args(collator_args()))
+                });
+            other_collators.iter().fold(p, |p, name| {
+                p.with_collator(|n| n.with_name(*name).bootnode(true).with_args(collator_args()))
+            })
         })
         .with_global_settings(|g| {
             g.with_base_dir(base_dir_str.as_str())
