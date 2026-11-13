@@ -1,6 +1,6 @@
 [package]
 name = "smoldot-light-wasm"
-version = "3.6.0"
+version = "3.8.0"
 description = "Browser bindings to a light client for Substrate-based blockchains"
 authors.workspace = true
 license.workspace = true
@@ -18,7 +18,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 async-lock = { version = "3.0.0", default-features = false }
 async-task = { version = "4.4.0", default-features = false }
-crossbeam-queue = { version = "0.3.11", default-features = false }
+crossbeam-queue = { version = "0.3.11", default-features = false, features = ["alloc"] }
 derive_more = { version = "2.0", default-features = false, features = ["full"] }
 dlmalloc = { version = "0.2.11", default-features = false, features = ["global"] }
 event-listener = { version = "5.3.0", default-features = false }
@@ -29,5 +29,5 @@ hashbrown = { version = "0.16.0", default-features = false }
 nom = { version = "8.0.0", default-features = false }
 pin-project = "1.1.5"
 slab = { version = "0.4.8", default-features = false }
-smoldot = { version = "4.0.0", path = "../../lib", default-features = false }
-smoldot-light = { version = "2.0.0", path = "../../light-base", default-features = false }
+smoldot = { version = "6.0.0", path = "../../lib", default-features = false }
+smoldot-light = { version = "4.0.0", path = "../../light-base", default-features = false }

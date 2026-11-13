@@ -24,15 +24,6 @@ This repository contains the following components:
   - 📚 <https://paritytech.github.io/smoldot/doc-rust/smoldot_light/index.html> (latest commit)
   - Has a semi-stable API that might change occasionally in minor ways.
 
-- `smoldot-full-node` (`/full-node`): A work-in-progress prototype of a full node binary that can connect to Substrate-base chains. Doesn't yet support many features that the official client supports.
-  - 🐳 <https://github.com/paritytech/smoldot/pkgs/container/full-node>
-  - 📦 `cargo install --locked smoldot-full-node`
-  - Has semi-stable CLI commands that might change occasionally in minor ways.
-  - Can also be used as a library to be embedded in other programs:
-    - 📦 <https://crates.io/crates/smoldot-full-node>
-    - 📚 <https://docs.rs/smoldot-full-node> (latest published version)
-    - 📚 <https://paritytech.github.io/smoldot/doc-rust/smoldot_full_node/index.html> (latest commit)
-
 [![dependency status](https://deps.rs/repo/github/paritytech/smoldot/status.svg)](https://deps.rs/repo/github/paritytech/smoldot)
 
 # Frequently asked questions
@@ -103,8 +94,6 @@ Anyone contributing to this project pledges to propose a welcoming, constructive
 
 ## Security
 
-While the light client is fully maintained, please be aware that at the moment the full node is completely experimental. While none of the source code in this repository comes with any guarantee, it is even more true for the full node. You are at the moment strongly encouraged to not run a validator using the smoldot full node in a production environment, as it could result in a loss of money.
-
 **The following are considered critical security issues**. If you find such an issue, please use the GitHub private disclosure feature found at <https://github.com/paritytech/smoldot/security/advisories>:
 
 - Smoldot believes that a certain block has been finalized, when it is not actually the case on the blockchain it is connected to.
@@ -138,15 +127,3 @@ In order to run the wasm light node, you must have installed [rustup](https://ru
 The wasm light node can be tested with `cd wasm-node/javascript` and `npm install; npm start`. This will compile the smoldot wasm light node and start a WebSocket server capable of answering JSON-RPC requests. This demo will print a list of URLs that you can navigate to in order to connect to a certain chain. For example you can navigate to <https://ipfs.io/ipns/dotapps.io/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestend2> in order to interact with the Westend chain.
 
 > Note: The `npm start` command starts a small JavaScript shim, on top of the wasm light node, that hard codes the chain to Westend and starts the WebSocket server. The wasm light node itself can connect to a variety of different chains (not only Westend) and doesn't start any server.
-
-### Full client
-
-The full client is a binary similar to the official Polkadot client, and can be tested with `cargo run`.
-
-> Note: The `Cargo.toml` contains a section `[profile.dev] opt-level = 2`, and as such `cargo run` alone should give performances close to the ones in release mode.
-
-The following list is a best-effort list of packages that must be available on the system in order to compile the full node:
-
-- `clang` or `gcc`
-- `pkg-config`
-- `sqlite`

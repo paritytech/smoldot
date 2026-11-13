@@ -83,6 +83,11 @@ pub use service::{
 
 mod tasks;
 
+/// Delay between two attempts to reopen the transactions, GrandPa and statement substreams
+/// of a gossip link. Only the first closing on a link is answered at once, every later one
+/// waits this delay.
+const SECONDARY_SUBSTREAM_RETRY_DELAY: Duration = Duration::from_millis(200);
+
 /// Configuration for a [`NetworkService`].
 pub struct Config<TPlat> {
     /// Access to the platform's capabilities.
@@ -240,6 +245,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             child_storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             chains_by_next_discovery: BTreeMap::new(),
+            secondary_reopens: BTreeMap::new(),
             next_peer_steering: None,
         }));
 
@@ -1284,6 +1290,11 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// All chains, indexed by the value of [`Chain::next_discovery_when`].
     chains_by_next_discovery: BTreeMap<(TPlat::Instant, ChainId), Pin<Box<TPlat::Delay>>>,
 
+    /// Gossip links missing a transactions, Grandpa or statement substream, by when to call
+    /// [`service::ChainNetwork::gossip_reopen_secondaries`]. One entry per link at most. An
+    /// entry that outlives its link is harmless: the call is refused.
+    secondary_reopens: BTreeMap<(TPlat::Instant, ChainId, PeerId), Pin<Box<TPlat::Delay>>>,
+
     /// Delay until the next refresh of the statement links of every chain. `None` while no
     /// chain has topics to cover or links left to close.
     next_peer_steering: Option<Pin<Box<TPlat::Delay>>>,
@@ -1345,6 +1356,8 @@ struct OpenGossipLinkState {
     best_block_hash: [u8; 32],
     /// `None` if unknown.
     finalized_block_height: Option<u64>,
+    /// Whether a [`service::Event::GossipSecondaryClosed`] was already answered at once.
+    secondary_reopened_at_once: bool,
 }
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
@@ -1375,6 +1388,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             BitswapEventSendersReady,
             StatementEventSendersReady,
             StartDiscovery(ChainId),
+            ReopenSecondaries {
+                chain_id: ChainId,
+                peer_id: PeerId,
+            },
             PeerSteering,
         }
 
@@ -1596,6 +1613,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let ((_, chain_id), _) = next_discovery.remove_entry();
                 WakeUpReason::StartDiscovery(chain_id)
             };
+            let reopen_secondaries = async {
+                let Some(mut next_reopen) = task.secondary_reopens.first_entry() else {
+                    future::pending().await
+                };
+                next_reopen.get_mut().await;
+                let ((_, chain_id, peer_id), _) = next_reopen.remove_entry();
+                WakeUpReason::ReopenSecondaries { chain_id, peer_id }
+            };
             let peer_steering = async {
                 let Some(delay) = task.next_peer_steering.as_mut() else {
                     future::pending().await
@@ -1614,6 +1639,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 .or(finished_sending_bitswap_event)
                 .or(finished_sending_statement_event)
                 .or(start_discovery)
+                .or(reopen_secondaries)
                 .or(peer_steering)
                 .await
         };
@@ -1834,6 +1860,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .chains_by_next_discovery
                     .remove(&(task.network[chain_id].next_discovery_when.clone(), chain_id));
                 debug_assert!(_was_in.is_some());
+                task.secondary_reopens.retain(|(_, c, _), _| *c != chain_id);
 
                 log!(
                     &task.platform,
@@ -2508,6 +2535,19 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .collect(),
                 );
             }
+            WakeUpReason::ReopenSecondaries { chain_id, peer_id } => {
+                // Refused if the link is gone meanwhile.
+                let outcome = task.network.gossip_reopen_secondaries(chain_id, &peer_id);
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "gossip-secondaries-reopen",
+                    chain = &task.network[chain_id].log_name,
+                    peer_id,
+                    ?outcome,
+                );
+            }
             WakeUpReason::StartDiscovery(chain_id) => {
                 // Re-insert the chain in `chains_by_next_discovery`.
                 let chain = &mut task.network[chain_id];
@@ -2829,6 +2869,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         best_block_hash: best_hash,
                         role,
                         finalized_block_height: None,
+                        secondary_reopened_at_once: false,
                     },
                 );
                 debug_assert!(_prev_value.is_none());
@@ -2919,6 +2960,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 let ban_duration = Duration::from_secs(10);
 
+                // The secondary substreams close with the block announces substream.
+                task.secondary_reopens
+                    .retain(|(_, c, p), _| *c != chain_id || *p != peer_id);
+
                 let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
                 debug_assert!(_was_in.is_some());
                 task.network[chain_id].metrics.gossip_peers_connected.dec();
@@ -2970,6 +3015,64 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 debug_assert!(task.events_pending_send.is_empty());
                 task.events_pending_send
                     .push_back((chain_id, Event::Disconnected { peer_id }));
+            }
+            WakeUpReason::NetworkEvent(service::Event::GossipSecondaryClosed {
+                peer_id,
+                chain_id,
+                error,
+            }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "gossip-secondary-closed",
+                    chain = &task.network[chain_id].log_name,
+                    peer_id,
+                    ?error,
+                );
+
+                // Reopen at once the first time, as polkadot-sdk reserves the peer for these
+                // protocols slightly after block announces open. Afterwards, retry at a short
+                // interval rather than in a tight loop.
+                let link = task.open_gossip_links.get_mut(&(chain_id, peer_id.clone()));
+                let Some(link) = link else {
+                    // The link is open while this event can happen.
+                    log!(
+                        &task.platform,
+                        Warn,
+                        "network",
+                        "gossip-secondary-closed-unknown-link",
+                        chain = &task.network[chain_id].log_name,
+                        peer_id,
+                    );
+                    continue;
+                };
+                if !link.secondary_reopened_at_once {
+                    link.secondary_reopened_at_once = true;
+                    let outcome = task.network.gossip_reopen_secondaries(chain_id, &peer_id);
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "gossip-secondaries-reopen",
+                        chain = &task.network[chain_id].log_name,
+                        peer_id,
+                        ?outcome,
+                    );
+                } else if !task
+                    .secondary_reopens
+                    .keys()
+                    .any(|(_, c, p)| *c == chain_id && *p == peer_id)
+                {
+                    task.secondary_reopens.insert(
+                        (
+                            task.platform.now() + SECONDARY_SUBSTREAM_RETRY_DELAY,
+                            chain_id,
+                            peer_id,
+                        ),
+                        Box::pin(task.platform.sleep(SECONDARY_SUBSTREAM_RETRY_DELAY)),
+                    );
+                }
             }
             WakeUpReason::NetworkEvent(service::Event::BitswapConnected { peer_id }) => {
                 task.bitswap_connected_peers = task.bitswap_connected_peers.saturating_add(1);

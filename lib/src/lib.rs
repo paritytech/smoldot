@@ -196,7 +196,6 @@ extern crate alloc;
 #[cfg(test)]
 use criterion as _;
 
-pub mod author;
 pub mod chain;
 pub mod chain_spec;
 pub mod database;

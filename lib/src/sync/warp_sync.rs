@@ -1869,6 +1869,16 @@ pub enum BuildRuntimeError {
     SourceMisbehavior(SourceMisbehavior),
 }
 
+/// Outcome of [`BuildRuntime::build`] when no error happened.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BuildRuntimeOutcome {
+    /// The runtime has been compiled.
+    Compiled,
+    /// The Merkle value of `:code` doesn't match the one of the `:code` hint. Nothing has been
+    /// compiled, and `:code` will be downloaded.
+    CodeHintMismatch,
+}
+
 /// Ready to build the runtime of the finalized chain.
 pub struct BuildRuntime<TSrc, TRq> {
     inner: WarpSync<TSrc, TRq>,
@@ -1884,7 +1894,10 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
         mut self,
         exec_hint: ExecHint,
         allow_unresolved_imports: bool,
-    ) -> (WarpSync<TSrc, TRq>, Result<(), BuildRuntimeError>) {
+    ) -> (
+        WarpSync<TSrc, TRq>,
+        Result<BuildRuntimeOutcome, BuildRuntimeError>,
+    ) {
         let RuntimeDownload::NotVerified {
             downloaded_source,
             hint_doesnt_match,
@@ -1989,7 +2002,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 self.inner.runtime_download = RuntimeDownload::NotStarted {
                     hint_doesnt_match: true,
                 };
-                return (self.inner, Ok(()));
+                return (self.inner, Ok(BuildRuntimeOutcome::CodeHintMismatch));
             }
         } else {
             match decoded_downloaded_runtime
@@ -2106,7 +2119,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             chain_info_builder,
         };
 
-        (self.inner, Ok(()))
+        (self.inner, Ok(BuildRuntimeOutcome::Compiled))
     }
 }
 
