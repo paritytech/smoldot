@@ -215,7 +215,7 @@ pub use zstd::Error as ModuleFormatError;
 
 mod elliptic_curves;
 mod functions;
-mod tests;
+pub(super) mod tests;
 mod zstd;
 
 /// Configuration for [`HostVmPrototype::new`].
