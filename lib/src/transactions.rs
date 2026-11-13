@@ -32,8 +32,7 @@
 //!
 //! - The transaction is then processed by a node, generally the node that belongs to the author
 //! of the transaction, where it is *validated* by passing it as parameter to a runtime entry
-//! point. See the [`validate`] module for more info. The [`pool`] module contains a data
-//! structure that manages the list of pending transactions.
+//! point. See the [`validate`] module for more info.
 //!
 //! - If the validation process indicates that the transaction can be propagated, it is then sent
 //! over the peer-to-peer network to other peers. Each node that receives the transaction
@@ -86,5 +85,4 @@
 //! client also attempts to not cache that information for *too long* through heuristics.
 
 pub mod light_pool;
-pub mod pool;
 pub mod validate;

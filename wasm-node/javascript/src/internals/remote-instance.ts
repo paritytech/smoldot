@@ -167,8 +167,8 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
     };
 
     return {
-        async addChain(chainSpec, databaseContent, potentialRelayChains, disableJsonRpc, jsonRpcMaxPendingRequests, jsonRpcMaxSubscriptions, statementStoreMaxSeenStatements, statementStoreFalsePositiveRate, statementStoreAffinityUpdateIntervalMs) {
-            const msg: ClientToServer = { ty: "add-chain", chainSpec, databaseContent, potentialRelayChains, disableJsonRpc, jsonRpcMaxPendingRequests, jsonRpcMaxSubscriptions, statementStoreMaxSeenStatements, statementStoreFalsePositiveRate, statementStoreAffinityUpdateIntervalMs };
+        async addChain(chainSpec, databaseContent, potentialRelayChains, disableJsonRpc, jsonRpcMaxPendingRequests, jsonRpcMaxSubscriptions, statementStoreMaxSeenStatements, statementStoreFalsePositiveRate, statementStoreAffinityUpdateIntervalMs, maxPendingTransactions) {
+            const msg: ClientToServer = { ty: "add-chain", chainSpec, databaseContent, potentialRelayChains, disableJsonRpc, jsonRpcMaxPendingRequests, jsonRpcMaxSubscriptions, statementStoreMaxSeenStatements, statementStoreFalsePositiveRate, statementStoreAffinityUpdateIntervalMs, maxPendingTransactions };
             portToServer.postMessage(msg);
         },
 
@@ -359,7 +359,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
 
         switch (message.ty) {
             case "add-chain": {
-                state.instance!.addChain(message.chainSpec, message.databaseContent, message.potentialRelayChains, message.disableJsonRpc, message.jsonRpcMaxPendingRequests, message.jsonRpcMaxSubscriptions, message.statementStoreMaxSeenStatements, message.statementStoreFalsePositiveRate, message.statementStoreAffinityUpdateIntervalMs);
+                state.instance!.addChain(message.chainSpec, message.databaseContent, message.potentialRelayChains, message.disableJsonRpc, message.jsonRpcMaxPendingRequests, message.jsonRpcMaxSubscriptions, message.statementStoreMaxSeenStatements, message.statementStoreFalsePositiveRate, message.statementStoreAffinityUpdateIntervalMs, message.maxPendingTransactions);
                 break;
             }
             case "remove-chain": {
@@ -470,7 +470,7 @@ type ServerToClient = Exclude<instance.Event, { ty: "json-rpc-responses-non-empt
 { ty: "json-rpc-response", chainId: number, response: string };
 
 type ClientToServer =
-    { ty: "add-chain", chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number, statementStoreMaxSeenStatements: number, statementStoreFalsePositiveRate: number, statementStoreAffinityUpdateIntervalMs: number } |
+    { ty: "add-chain", chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number, statementStoreMaxSeenStatements: number, statementStoreFalsePositiveRate: number, statementStoreAffinityUpdateIntervalMs: number, maxPendingTransactions: number } |
     { ty: "remove-chain", chainId: number } |
     { ty: "request", chainId: number, request: string } |
     { ty: "accept-more-json-rpc-answers", chainId: number } |

@@ -2,11 +2,47 @@
 
 ## Unreleased
 
+## 3.8.0 - 2026-11-05
+
+### Added
+
+- Add `AddChainOptions.maxPendingTransactions`: the maximum number of transactions submitted through the JSON-RPC API that a chain holds at the same time, from their submission until they are finalized or dropped. It defaults to 64, so the behaviour is unchanged unless it is set. Rust users of `smoldot-light` set the same limit through `AddChainConfig::max_pending_transactions`. ([#3394](https://github.com/paritytech/smoldot/pull/3394); fixes [#3393](https://github.com/paritytech/smoldot/issues/3393))
+- Add the `runtimeCodeDownloadsTotal` metric to `sudo_unstable_metrics`: the number of times the runtime code (`:code`) has been downloaded. `runtimeCacheHitsTotal` now also counts runtimes found again by the Merkle value of `:code`. ([#3403](https://github.com/paritytech/smoldot/pull/3403))
+
+### Fixed
+
+- Legacy JSON-RPC runtime calls (`state_call`, `state_getRuntimeVersion`, ...) no longer download the full runtime code at every new block when the runtime has not changed. The Merkle value of `:code` is fetched first, and the code is downloaded only if no known runtime matches. ([#3403](https://github.com/paritytech/smoldot/pull/3403); fixes [#3396](https://github.com/paritytech/smoldot/issues/3396))
+- A parachain restarted with a saved database no longer downloads its runtime code again when the runtime has not changed. ([#3416](https://github.com/paritytech/smoldot/pull/3416); fixes [#3204](https://github.com/paritytech/smoldot/issues/3204))
+- Fix a decompression bomb where a crafted zstd-compressed runtime could bypass the decompressed size limit (RUSTSEC-2026-0344). ([#3410](https://github.com/paritytech/smoldot/pull/3410); fixes [#3405](https://github.com/paritytech/smoldot/issues/3405))
+- Fix a memory leak of about 2 MiB of heap per second for a busy client: the execution loop left a promise reaction behind at every wait. ([#3406](https://github.com/paritytech/smoldot/pull/3406))
+- Keep at most one JavaScript timer pending per client. Superseded timers kept firing, so their number and the CPU spent on them grew for as long as the client ran. ([#3409](https://github.com/paritytech/smoldot/pull/3409))
+- A WebRTC substream cancelled by the remote before smoldot accepted it no longer panics smoldot. ([#3407](https://github.com/paritytech/smoldot/pull/3407))
+- `Client.terminate()` no longer risks ending the NodeJS process with an uncaught exception when smoldot runs in a worker (`ClientOptions.portToWorker`), which could happen before the application had finished shutting down, for example before it had saved its database. The worker can still send a JSON-RPC response after it has shut down, and such a response arriving once `terminate()` has removed the chains is now ignored. ([#3438](https://github.com/paritytech/smoldot/pull/3438))
+- A `chainHead_v1_storage` call now gives back, once it ends, every operation slot it took: one for each item it started. It gave back one, so each call of several items took slots from the `chainHead_v1_follow` subscription for good. After 31 calls of two items, a subscription was down to its last slot: it ran one operation at a time, a call of several items started only its first item, and any other operation started meanwhile got `limitReached`. ([#3437](https://github.com/paritytech/smoldot/pull/3437))
+- `state_getKeysPaged` no longer skips or repeats keys between pages. The keys are now sorted before the `startKey` and `count` parameters are applied. Before, they were in the order in which the storage proofs were traversed, so a page did not always contain the keys that follow `startKey`. ([#3444](https://github.com/paritytech/smoldot/pull/3444); fixes [#3443](https://github.com/paritytech/smoldot/issues/3443))
+- A notifications handshake whose length prefix is invalid or exceeds the limit no longer panics smoldot, the substream fails to open instead. ([#3446](https://github.com/paritytech/smoldot/pull/3446))
+- WebRTC substreams now process `FIN`, `FIN_ACK` and `RESET_STREAM` in every state, and no longer hold a `FIN` back behind the bytes a large notification still expects. An open, closing or refused notifications substream previously never answered the remote's `FIN`, so its data channel stayed open until the remote reset it, and full nodes waited 10 seconds per close. ([#3418](https://github.com/paritytech/smoldot/pull/3418); mitigates [#3412](https://github.com/paritytech/smoldot/issues/3412))
+- A transactions, GrandPa or statement substream refused or closed by a full node while the block announces substream stays open is reopened once at once, whenever the full node opens its own side of the substream, and otherwise at most every 200 milliseconds, instead of in a tight loop. A protocol the full node answers it doesn't have is not asked again for as long as the block announces substream stays open. ([#3418](https://github.com/paritytech/smoldot/pull/3418); mitigates [#3412](https://github.com/paritytech/smoldot/issues/3412))
+
+## 3.7.0 - 2026-10-07
+
+### Added
+
+- WebRTC multiaddresses whose host is a domain name (`/dns/<host>/udp/<port>/webrtc-direct/certhash/<hash>`, and likewise `/dns4/` and `/dns6/`) are now dialed in browsers instead of being silently dropped. A browser cannot put a domain name in a WebRTC session description, so smoldot resolves the name itself over DNS-over-HTTPS, in the standard RFC 8484 wire format, and then connects to the resolved address. ([#3385](https://github.com/paritytech/smoldot/pull/3385))
+
+### Changed
+
+- The statement substream can now be opened, kept open and closed on its own, without the block announces substream, so the light client can keep a statement link with a peer that is not one of its block sync peers. A refused or closed statement link removes the peer from the set of wanted statement peers instead of being retried in a loop. Statement links do not count against the limit of inbound block announces links. ([#3382](https://github.com/paritytech/smoldot/pull/3382), [#3383](https://github.com/paritytech/smoldot/pull/3383), [#3384](https://github.com/paritytech/smoldot/pull/3384); fixes [#3378](https://github.com/paritytech/smoldot/issues/3378); related to [paritytech/polkadot-sdk#11288](https://github.com/paritytech/polkadot-sdk/issues/11288))
+
+### Fixed
+
+- Closing a gossip link with a peer now also closes the statement substreams with that peer. Before, the peer kept sending statements over a link that smoldot had already closed. ([#3387](https://github.com/paritytech/smoldot/pull/3387))
+- `trie_root_calculator` no longer reports the same removed trie node twice when a node is replaced by its only remaining child, and now reports the removed root node when a change empties a trie whose root is a branch node without a value, for example when a child trie is deleted. The calculated root hash was already correct. ([#3373](https://github.com/paritytech/smoldot/pull/3373))
+
 ## 3.6.0 - 2026-09-16
 
 ### Added
 
-- WebRTC multiaddresses whose host is a domain name (`/dns/<host>/udp/<port>/webrtc-direct/certhash/<hash>`, and likewise `/dns4/` and `/dns6/`) are now dialed in browsers instead of being silently dropped. A browser cannot put a domain name in a WebRTC session description, so smoldot resolves the name itself over DNS-over-HTTPS, in the standard RFC 8484 wire format, and then connects to the resolved address. ([#3385](https://github.com/paritytech/smoldot/issues/3385))
 - Add the `sudo_unstable_metrics` JSON-RPC function, returning a snapshot of internal counters and gauges (network connections, per-protocol request outcomes and durations, peer bans, connected gossip peers, verified blocks and finality proofs, best/finalized block height, warp-sync progress and target height, runtime compilations, dropped transactions). The list of metrics and their labels is unstable and may change between versions. ([#3285](https://github.com/paritytech/smoldot/issues/3285))
 - Add the `lifecycle_unstable_follow` and `lifecycle_unstable_unfollow` JSON-RPC functions. The subscription reports the lifecycle state of the chain: whether it is still connecting, warp syncing (with the current and target block heights), or ready, how many peers are connected, and whether the built-in watchdog considers it stalled (no peers, or no warp sync progress). The first notification is the current state, reported as syncing as soon as warp sync fragments are requested, and every later notification carries the whole new state, so an embedder can show what the light client is doing without parsing log output. The schema is unstable. ([#3353](https://github.com/paritytech/smoldot/pull/3353); fixes [#3301](https://github.com/paritytech/smoldot/issues/3301))
 

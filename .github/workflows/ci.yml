@@ -58,7 +58,7 @@ jobs:
     - uses: actions/setup-node@v6.1.0
       with:
         # Set to the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
-        node-version: '18'
+        node-version: '22'
     - uses: denoland/setup-deno@v2
       with:
         deno-version: v1.x
@@ -77,18 +77,10 @@ jobs:
     # conditional compilation within the source code.
     - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features
     - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite
     - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features std
     - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features std
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features wasmtime
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features wasmtime
     - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features std --features wasmtime
     - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features std --features wasmtime
-    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std --features wasmtime
-    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std --features wasmtime
     - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot-light --locked --no-default-features
     - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot-light --locked --no-default-features
     - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features std

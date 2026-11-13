@@ -458,6 +458,27 @@ export interface AddChainOptions {
     jsonRpcMaxSubscriptions?: number
 
     /**
+     * Maximum number of transactions that the client holds at the same time for this chain.
+     *
+     * A transaction submitted through the JSON-RPC API is held from its submission until it is
+     * finalized, found invalid, or dropped. A transaction submitted while this many are held is
+     * dropped immediately, without being broadcast.
+     *
+     * Every transaction held costs memory, validations (through call proofs) and announcements
+     * to peers, as each one is periodically re-announced until it leaves the pool. Embedders whose
+     * JSON-RPC clients are entirely trusted and that need to submit more transactions per
+     * finality delay can raise it.
+     *
+     * The chain's services are shared between all the chains added with the same specification.
+     * If such a chain is already running, the value of the addition that started it applies.
+     *
+     * A zero, negative or NaN value is invalid and will generate a {@link AddChainError}.
+     *
+     * If this value is not set, it defaults to 64.
+     */
+    maxPendingTransactions?: number,
+
+    /**
      * If set, enables the Statement Store protocol on this chain.
      *
      * `maxSeenStatements` is the maximum number of seen statements to cache. Defaults to 65536.
