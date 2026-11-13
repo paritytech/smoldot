@@ -2719,18 +2719,26 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &peer_id,
                     service::GossipKind::ConsensusTransactions,
                 );
-                task.network
-                    .gossip_remove_desired_all(&peer_id, service::GossipKind::Statement);
-                // A steered peer whose connection failed or closed is dialed again by the
-                // steering, after a delay rather than at the next refresh.
-                for chain_id in task.network.chains().collect::<Vec<_>>() {
-                    if let Some(peering) = &mut task.network[chain_id].statement_peering
-                        && peering.steering.is_desired(&peer_id)
-                    {
-                        peering.steering.ban(
-                            peer_id.clone(),
-                            task.platform.now() + PEER_STEERING_RETRY_DELAY,
-                        );
+                // A peer is dialed on several addresses, and a failed one says nothing while
+                // another connection is open or still opening: the statement link goes there.
+                if task
+                    .network
+                    .num_potential_and_established_connections(&peer_id)
+                    == 0
+                {
+                    task.network
+                        .gossip_remove_desired_all(&peer_id, service::GossipKind::Statement);
+                    // A steered peer whose connection failed or closed is dialed again by the
+                    // steering, after a delay rather than at the next refresh.
+                    for chain_id in task.network.chains().collect::<Vec<_>>() {
+                        if let Some(peering) = &mut task.network[chain_id].statement_peering
+                            && peering.steering.is_desired(&peer_id)
+                        {
+                            peering.steering.ban(
+                                peer_id.clone(),
+                                task.platform.now() + PEER_STEERING_RETRY_DELAY,
+                            );
+                        }
                     }
                 }
                 for (&chain_id, what_happened) in task
@@ -3787,6 +3795,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // A full node without statement-only slots refuses the link. The gossip
                 // links keep serving statements in the meantime.
                 if let Some(peering) = &mut task.network[chain_id].statement_peering {
+                    // The topology counts a discovered peer as a statement peer until it
+                    // answers that it lacks the protocol.
+                    if matches!(
+                        error,
+                        service::NotificationsOutErr::Substream(
+                            connection::established::NotificationsOutErr::ProtocolNotAvailable
+                        )
+                    ) {
+                        peering.topology.on_peer_identified(
+                            peer_id.clone(),
+                            false,
+                            &task.platform.now(),
+                        );
+                    }
                     peering
                         .steering
                         .ban(peer_id, task.platform.now() + PEER_STEERING_RETRY_DELAY);

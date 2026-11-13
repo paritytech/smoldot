@@ -30,6 +30,11 @@
 //! never issues a topic-specific lookup, so that nobody learns which topics the local node
 //! subscribes to.
 //!
+//! The full node counts a peer as a statement peer only once Identify confirms it. A light
+//! client connects to a handful of peers and gets no Identify answer from the other ones, so a
+//! discovered peer counts as a statement peer until Identify or a refused statement substream
+//! says otherwise.
+//!
 //! A light client is never a replica of a topic, so the affinity oracle and the routing of
 //! statements between replicas of the full node have no counterpart here.
 
@@ -67,6 +72,7 @@ pub struct Config {
 
 #[derive(Debug)]
 struct PeerInfo<TNow> {
+    /// `false` once the peer is known to lack the statement protocol.
     supports_protocol: bool,
     /// The statement substream to the peer is open.
     connected: bool,
@@ -132,7 +138,8 @@ where
         }
     }
 
-    /// Record statement protocol support from the Identify response.
+    /// Record statement protocol support from the Identify response, or the lack of it from a
+    /// statement substream refused for an unknown protocol.
     ///
     /// Peers that do not support the statement protocol remain known but are excluded from
     /// the candidates for a topic.
@@ -162,13 +169,12 @@ where
         }
     }
 
-    /// Number of known remote peers, including peers without confirmed statement protocol
-    /// support.
+    /// Number of known remote peers, including peers without the statement protocol.
     pub fn known_peers_count(&self) -> usize {
         self.discovered.len()
     }
 
-    /// Known peers that support the statement protocol, in no specific order.
+    /// Known peers not known to lack the statement protocol, in no specific order.
     pub fn statement_peers(&self) -> impl Iterator<Item = &PeerId> {
         self.discovered
             .iter()
@@ -255,7 +261,7 @@ where
             .discovered
             .entry(peer)
             .or_insert_with_key(|peer| PeerInfo {
-                supports_protocol: false,
+                supports_protocol: true,
                 connected: false,
                 key: peer_key(peer),
                 last_seen: now.clone(),
@@ -359,7 +365,9 @@ mod tests {
 
         dht_peer(&mut topology, peer(2), now);
         dht_peer(&mut topology, peer(2), now);
+        // A discovered peer is a candidate until it is known to lack the protocol.
         topology.on_peers_discovered([(peer(3), vec![vec![3], vec![3]])], &now);
+        assert_eq!(topology.statement_peers().count(), 2);
         topology.on_peer_identified(peer(3), false, &now);
 
         assert_eq!(topology.known_peers_count(), 2);
@@ -400,12 +408,12 @@ mod tests {
         let start = Duration::from_secs(1);
 
         dht_peer(&mut topology, peer(2), start);
-        topology.on_peers_discovered([(peer(3), Vec::new())], &start);
+        topology.on_peer_identified(peer(3), false, &start);
         assert!(!topology.evict(&(start + PEER_STALENESS_TTL - Duration::from_secs(1))));
         assert_eq!(topology.known_peers_count(), 2);
 
         // Re-seeing peer 2 keeps it past the moment peer 3 goes stale. Dropping peer 3, which
-        // never confirmed support, leaves the candidates unchanged.
+        // lacks the protocol, leaves the candidates unchanged.
         dht_peer(&mut topology, peer(2), start + Duration::from_secs(1));
         assert!(!topology.evict(&(start + PEER_STALENESS_TTL)));
         assert_eq!(topology.known_peers_count(), 1);
