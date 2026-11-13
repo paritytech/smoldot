@@ -5,7 +5,7 @@ ZOMBIE_PROVIDER=native
 
 # Container image that executes the test harness. Pinned for reproducibility;
 # bump together with polkadot-sdk's `.github/env` to stay on a common toolchain.
-ZOMBIENET_SDK_IMAGE_FOR_NATIVE=docker.io/paritytech/ci-unified:bullseye-1.93.0-2026-01-27-v202609081126
+ZOMBIENET_SDK_IMAGE_FOR_NATIVE=docker.io/paritytech/ci-unified:bookworm-1.93.0-2026-01-27-v202610221141
 
 # Parity self-hosted runner pool used by polkadot-sdk's zombienet tests.
 ZOMBIENET_SDK_DEFAULT_RUNNER_FOR_NATIVE=parity-zombienet-native-default
@@ -17,9 +17,8 @@ ZOMBIENET_SDK_LARGE_RUNNER_FOR_NATIVE=parity-zombienet-native-large
 #  docker.io/paritypr/{polkadot-debug,polkadot-parachain-debug}:master-<sha8>
 #
 # Any master merge at or after polkadot-sdk#12870 (2026-08-28, WebRTC on by
-# default) qualifies. Current pin: the latest master merge with both images
-# published as of 2026-09-10 (polkadot-sdk#13049, 2026-09-09).
-POLKADOT_SDK_MASTER_SHA=9c4d3c48
+# default) qualifies. Current pin: polkadot-sdk#13826 (2026-11-13).
+POLKADOT_SDK_MASTER_SHA=c413aa5e
 
 # Logging passed to the test process.
 RUST_LOG=info
