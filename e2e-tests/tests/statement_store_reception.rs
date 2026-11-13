@@ -35,6 +35,8 @@ fn decode_hex_0x(s: &str) -> Vec<u8> {
 ///      topic.
 ///   4. Smoldot must deliver stmt_A exactly once, never stmt_B, and nothing
 ///      else.
+///   5. Smoldot unsubscribes and subscribes to stmt_A's topic again; it must
+///      deliver stmt_A exactly once more.
 #[tokio::test(flavor = "multi_thread")]
 async fn receives_only_subscribed_statements() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
