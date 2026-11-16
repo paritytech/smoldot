@@ -187,6 +187,78 @@ fn execute_blocks() {
     }
 }
 
+/// As in Substrate, clearing a main trie prefix that starts with `:child_storage:` is ignored.
+#[test]
+fn clear_prefix_keeps_child_trie_root() {
+    // `clear_root_key` clears the main trie prefix `:child_storage:default:xyz` without limit
+    // and returns the result of the clearing.
+    let wasm = wat::parse_str(
+        r#"
+        (module
+            (import "env" "memory" (memory 16))
+            (import "env" "ext_storage_clear_prefix_version_2"
+                (func $clear_prefix (param i64 i64) (result i64)))
+            (global (export "__heap_base") i32 (i32.const 1024))
+            (data (i32.const 0) ":child_storage:default:xyz")
+            ;; SCALE encoding of `None`, used as the limit.
+            (data (i32.const 32) "\00")
+
+            ;; The parameters are the 26 bytes at offset 0 and the byte at offset 32.
+            (func (export "clear_root_key") (param i32 i32) (result i64)
+                (call $clear_prefix
+                    (i64.const 0x0000001A00000000)
+                    (i64.const 0x0000000100000020)))
+        )
+        "#,
+    )
+    .unwrap();
+
+    let virtual_machine = host::HostVmPrototype::new(host::Config {
+        module: host::tests::with_core_version_custom_sections(wasm),
+        heap_pages: host::HeapPages::new(1024),
+        exec_hint: crate::executor::vm::ExecHint::ExecuteOnceWithNonDeterministicValidation,
+        allow_unresolved_imports: false,
+    })
+    .unwrap();
+
+    let mut execution = run(Config {
+        virtual_machine,
+        function_to_call: "clear_root_key",
+        max_log_level: 0,
+        storage_proof_size_behavior: StorageProofSizeBehavior::Unimplemented,
+        storage_main_trie_changes: Default::default(),
+        calculate_trie_changes: false,
+        parameter: iter::empty::<Vec<u8>>(),
+    })
+    .unwrap();
+
+    // The storage contains only the root of the child trie `xyz`.
+    let root_key = trie::default_child_trie_root_key(b"xyz");
+
+    let success = loop {
+        match execution {
+            RuntimeCall::Finished(Ok(success)) => break success,
+            RuntimeCall::Finished(Err(err)) => panic!("{err:?}"),
+            // Only requested if the clearing isn't ignored.
+            RuntimeCall::NextKey(req) => {
+                let key = trie::nibbles_to_bytes_suffix_extend(req.key()).collect::<Vec<_>>();
+                let found = if req.or_equal() {
+                    root_key >= key
+                } else {
+                    root_key > key
+                };
+                execution =
+                    req.inject_key(found.then(|| trie::bytes_to_nibbles(root_key.iter().copied())));
+            }
+            _ => unreachable!(),
+        }
+    };
+
+    // `AllRemoved(0)`
+    assert_eq!(success.virtual_machine.value().as_ref(), [0, 0, 0, 0, 0]);
+    assert_eq!(success.storage_changes.main_trie_diff_get(&root_key), None);
+}
+
 // Serde structs used to decode the test fixtures.
 
 #[derive(serde::Deserialize)]

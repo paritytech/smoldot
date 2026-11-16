@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- `ext_storage_clear_prefix` now ignores a prefix that starts with `:child_storage:`, as Substrate does. Before, such a call deleted the root entry of a child trie from the main trie while the child trie kept its content. ([#3456](https://github.com/paritytech/smoldot/pull/3456))
+
 ## 3.8.0 - 2026-11-05
 
 ### Added

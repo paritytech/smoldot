@@ -1706,7 +1706,8 @@ impl Inner {
                     // Any attempt at clear a prefix that "intersects" (see code) with
                     // `CHILD_STORAGE_SPECIAL_PREFIX` is silently ignored, as per spec.
                     if req.child_trie().is_none()
-                        && CHILD_STORAGE_SPECIAL_PREFIX.starts_with(req.prefix().as_ref())
+                        && iter::zip(req.prefix().as_ref(), CHILD_STORAGE_SPECIAL_PREFIX)
+                            .all(|(a, b)| a == b)
                     {
                         self.vm = req.resume(0, false); // TODO: what's the correct return value for `some_keys_remain`?
                         continue;
