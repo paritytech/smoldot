@@ -764,8 +764,9 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
-    /// Broadcast a statement notification to the connected statement peers that store one of its
-    /// topics, or to all of them when none of those peers takes it.
+    /// Broadcast a statement notification to the connected statement peers that are among the
+    /// closest known peers of one of its topics, or to all of them when none of those peers takes
+    /// it.
     pub async fn broadcast_statement(
         self: Arc<Self>,
         statement: Vec<u8>,
@@ -2418,9 +2419,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 ToBackgroundChain::BroadcastStatement { statement, result },
             ) => {
-                // The statement goes to the connected peers that store its topics. When none of
-                // them takes it, it goes to every connected peer: a full node routes a statement
-                // with topics onwards to the peers that store them.
+                // The statement goes to the connected peers that are among the closest known
+                // peers of its topics, the likely replicas. When none of them takes it, it goes
+                // to every connected peer: a full node routes a statement with topics onwards to
+                // the peers that store them.
                 let close_peers = match (
                     &task.network[chain_id].statement_peering,
                     codec::decode_statement(&statement),
