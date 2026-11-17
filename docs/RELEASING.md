@@ -161,9 +161,11 @@ place), groups entries under `### Added` / `### Changed` / `### Fixed` /
 `### Removed`, links each PR and its `fixes` / `related` issues, and deletes
 the files. Pass `--date YYYY-MM-DD` to override today's date.
 
-The PR number comes from the subject of the commit that added each file, so run
-this in a clone with full history (not a shallow one). If a subject has no
-`(#N)`, the script stops: rename that file to `pr_<N>.prdoc` and run it again.
+The PR number comes from the subject of the commit on `main` that added each
+file, so run this in a clone with full history; the script stops in a shallow
+clone. If a subject has no `(#N)`, the script stops too: rename that file to
+`pr_<N>.prdoc` and run it again. With no prdoc files, the section says
+"No user-visible changes."
 
 Read the result and edit the wording in `CHANGELOG.md` if needed. Also check
 `git log <prev-tag>..HEAD` for merged PRs with a user-visible change but no

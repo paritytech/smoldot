@@ -60,7 +60,11 @@ def load(path):
         raise PrdocError("file name must match `[a-z0-9][a-z0-9._-]*.prdoc`")
 
     try:
-        doc = yaml.safe_load(path.read_text())
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError:
+        raise PrdocError("not valid UTF-8")
+    except OSError as e:
+        raise PrdocError(e.strerror or str(e))
     except yaml.YAMLError as e:
         raise PrdocError(f"invalid YAML: {e}")
     if not isinstance(doc, dict):
@@ -103,19 +107,31 @@ def pending_files():
     return sorted(f for f in PRDOC_DIR.glob("*.prdoc") if not f.name.startswith("."))
 
 
+def git(*args):
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise PrdocError(f"`git {' '.join(args)}` failed: {getattr(e, 'stderr', '') or e}".strip())
+
+
 def pr_number(path):
     m = PR_FILE_NAME.match(path.name)
     if m:
         return int(m.group(1))
-    subject = subprocess.run(
-        ["git", "log", "-1", "--diff-filter=A", "--format=%s", "--", str(path.relative_to(ROOT))],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    ).stdout.strip()
+    if git("rev-parse", "--is-shallow-repository") == "true":
+        raise PrdocError("the clone is shallow, so the commit that added it can't be found; run `git fetch --unshallow`")
+    subject = git(
+        "log", "-1", "--first-parent", "--diff-filter=A",
+        "--format=%s", "--", str(path.relative_to(ROOT)),
+    )
+    if not subject:
+        raise PrdocError("no commit adds it; commit it, or rename it to `pr_<PR number>.prdoc`")
     m = PR_SUBJECT.search(subject)
     if not m:
         raise PrdocError(
-            f"no PR number found in the subject of the commit that added it ({subject or 'no commit, or a shallow clone'!r}),"
-            " rename it to `pr_<PR number>.prdoc`"
+            f"no PR number in the subject of the commit that added it ({subject!r}), rename it to `pr_<PR number>.prdoc`"
         )
     return int(m.group(1) or m.group(2))
 
@@ -127,7 +143,7 @@ def cmd_check(files):
         try:
             load(f)
             print(f"ok: {f}")
-        except (PrdocError, OSError) as e:
+        except PrdocError as e:
             print(f"error: {f}: {e}", file=sys.stderr)
             failed = True
     return 1 if failed else 0
@@ -138,9 +154,6 @@ def cmd_release(version, date):
         print(f"error: bad version `{version}`", file=sys.stderr)
         return 1
     files = pending_files()
-    if not files:
-        print("error: no prdoc files in prdoc/", file=sys.stderr)
-        return 1
     prdocs = []
     for f in files:
         try:
@@ -157,6 +170,8 @@ def cmd_release(version, date):
         entries = [bullet(p, c) for p in prdocs for c in p["changes"] if c["section"] == section]
         if entries:
             lines += ["", f"### {section.capitalize()}", ""] + entries
+    if not prdocs:
+        lines += ["", "No user-visible changes."]
     new_section = "\n".join(lines) + "\n"
 
     changelog = CHANGELOG.read_text()

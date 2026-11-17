@@ -14,10 +14,12 @@ WORK="$(mktemp -d)"
 errors=()
 missing=false
 
-if [ "$SKIP" != "true" ]; then
-    gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" \
-        --jq '.[] | select(.status != "removed") | "\(.status) \(.filename)"' > "$WORK/files"
-
+if [ "$SKIP" != "true" ] && [ -z "$HEAD_REPO" ]; then
+    errors+=("The repository of this PR's branch was deleted, so its files can't be read. Push the branch again from an existing fork.")
+elif [ "$SKIP" != "true" ] && ! gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" \
+        --jq '.[] | select(.status != "removed") | "\(.status) \(.filename)"' > "$WORK/files"; then
+    errors+=("Could not list the files of this PR through the GitHub API. Re-run the check.")
+elif [ "$SKIP" != "true" ]; then
     if grep -qx '[a-z]* wasm-node/CHANGELOG.md' "$WORK/files"; then
         errors+=("This PR edits \`wasm-node/CHANGELOG.md\`. Revert that change and put the entry in a prdoc file instead.")
     fi
@@ -35,20 +37,31 @@ if [ "$SKIP" != "true" ]; then
             errors+=("\`$file\`: file name must match \`[a-z0-9][a-z0-9._-]*.prdoc\`.")
             continue
         fi
-        gh api -H 'Accept: application/vnd.github.raw' \
-            "repos/$HEAD_REPO/contents/$file?ref=$HEAD_SHA" > "$WORK/$file"
+        if ! gh api -H 'Accept: application/vnd.github.raw' \
+            "repos/$HEAD_REPO/contents/$file?ref=$HEAD_SHA" > "$WORK/$file"; then
+            errors+=("Could not download \`$file\` from \`$HEAD_REPO\` through the GitHub API. Re-run the check.")
+            continue
+        fi
         if ! python3 "$SCRIPTS/prdoc.py" check "$WORK/$file" 2> "$WORK/check.err" > /dev/null; then
             errors+=("\`$file\` is invalid:"$'\n\n~~~~\n'"$(sed "s|$WORK/||" "$WORK/check.err" | tr -d '~')"$'\n~~~~')
         fi
     done < "$WORK/prdocs"
 fi
 
-existing="$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
-    --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id" | head -n1)"
+for e in "${errors[@]}"; do
+    echo "::error::${e%%$'\n'*}"
+done
+
+if ! existing="$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+    --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id")"; then
+    echo "::warning::Could not list the PR comments, the PR comment is not updated."
+    [ ${#errors[@]} -eq 0 ] && exit 0 || exit 1
+fi
+existing="${existing%%$'\n'*}"
 
 if [ ${#errors[@]} -eq 0 ]; then
-    if [ -n "$existing" ]; then
-        gh api -X DELETE "repos/$REPO/issues/comments/$existing" > /dev/null
+    if [ -n "$existing" ] && ! gh api -X DELETE "repos/$REPO/issues/comments/$existing" > /dev/null; then
+        echo "::warning::Could not delete the old PR comment."
     fi
     echo "prdoc check passed"
     exit 0
@@ -79,14 +92,13 @@ EOF
     echo "If this PR has no user-visible change (refactor, tests, CI, docs), a maintainer can add the \`no-changelog\` label instead."
 } > "$WORK/comment.md"
 
-if [ -n "$existing" ]; then
-    gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F "body=@$WORK/comment.md" > /dev/null
-else
-    gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -F "body=@$WORK/comment.md" > /dev/null
-fi
-
 cat "$WORK/comment.md" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-for e in "${errors[@]}"; do
-    echo "::error::${e%%$'\n'*}"
-done
+
+if [ -n "$existing" ]; then
+    gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F "body=@$WORK/comment.md" > /dev/null \
+        || echo "::warning::Could not update the PR comment."
+else
+    gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -F "body=@$WORK/comment.md" > /dev/null \
+        || echo "::warning::Could not post the PR comment."
+fi
 exit 1
