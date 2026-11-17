@@ -1,4 +1,4 @@
-# Copy to `prdoc/pr_<PR number>.prdoc`. See `prdoc/README.md`.
+# Copy to `prdoc/<name>.prdoc`, for example the branch name. See `prdoc/README.md`.
 changes:
   - section: fixed # added | changed | fixed | removed
     description: |

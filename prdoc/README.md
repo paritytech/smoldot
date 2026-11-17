@@ -1,6 +1,6 @@
 # prdoc
 
-Each PR with a user-visible change adds `prdoc/pr_<PR number>.prdoc`. The
+Each PR with a user-visible change adds a `prdoc/<name>.prdoc` file. The
 release writes `wasm-node/CHANGELOG.md` from these files, so PRs never edit
 `CHANGELOG.md` and never conflict on it.
 
@@ -18,8 +18,12 @@ fixes: [3393]   # optional, issues the PR closes
 related: [3412] # optional, issues the PR only touches
 ```
 
-Start from `prdoc/.template.prdoc`. The PR number is known only once the PR is
-open, so add the file after opening it.
+Start from `prdoc/.template.prdoc`. The name must match
+`[a-z0-9][a-z0-9._-]*.prdoc`. Pick a short descriptive name or the branch name,
+so it doesn't clash with another PR. The file can be pushed together with the
+code, before the PR exists: at release, the PR number is read from the subject
+of the commit that added the file (`... (#1234)` for squash merges). A file
+named `pr_<PR number>.prdoc` uses that number directly.
 
 Validate locally (needs PyYAML):
 
@@ -37,8 +41,8 @@ skipped automatically. Release PRs also carry the label.
 
 `.github/workflows/check-prdoc.yml` fails a PR when:
 
-- `prdoc/pr_<PR number>.prdoc` is missing or invalid, unless the PR has the
-  `no-changelog` label.
+- The PR adds no `prdoc/<name>.prdoc` file, or one of its prdoc files is
+  invalid, unless the PR has the `no-changelog` label.
 - The PR edits `wasm-node/CHANGELOG.md` without the `no-changelog` label.
 
 On failure it posts a comment on the PR explaining the fix, with a link that

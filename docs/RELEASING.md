@@ -148,7 +148,7 @@ Then commit whichever locks actually changed (`git diff --name-only`).
 
 ## 5. Update `wasm-node/CHANGELOG.md`
 
-PRs don't edit `CHANGELOG.md`. Each one adds `prdoc/pr_<PR>.prdoc` instead
+PRs don't edit `CHANGELOG.md`. Each one adds a `prdoc/<name>.prdoc` file instead
 (see `prdoc/README.md`). Generate the new section from these files:
 
 ```sh
@@ -160,6 +160,10 @@ This inserts `## <X.Y.Z> - <YYYY-MM-DD>` below `## Unreleased` (which stays in
 place), groups entries under `### Added` / `### Changed` / `### Fixed` /
 `### Removed`, links each PR and its `fixes` / `related` issues, and deletes
 the files. Pass `--date YYYY-MM-DD` to override today's date.
+
+The PR number comes from the subject of the commit that added each file, so run
+this in a clone with full history (not a shallow one). If a subject has no
+`(#N)`, the script stops: rename that file to `pr_<N>.prdoc` and run it again.
 
 Read the result and edit the wording in `CHANGELOG.md` if needed. Also check
 `git log <prev-tag>..HEAD` for merged PRs with a user-visible change but no
@@ -346,7 +350,7 @@ Even `suffix=""` produces `dev-<YYYYMMDD>`, not `latest`.
   in `light-base/Cargo.toml`, `wasm-node/rust/Cargo.toml`).
 - Changelog: `python3 .github/scripts/prdoc.py release <X.Y.Z>` inserts the
   new section in `wasm-node/CHANGELOG.md` between `## Unreleased` and the
-  previous version heading, and deletes `prdoc/pr_*.prdoc`.
+  previous version heading, and deletes `prdoc/*.prdoc`.
 - Scope detection: `git diff --stat <prev-tag>..HEAD -- <path>` for
   `lib/`, `light-base/`, `wasm-node/`.
 - Commit message: `npm smoldot v<X.Y.Z>`.

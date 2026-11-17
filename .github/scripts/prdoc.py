@@ -26,6 +26,7 @@ import argparse
 import datetime
 import pathlib
 import re
+import subprocess
 import sys
 
 import yaml
@@ -35,7 +36,9 @@ PRDOC_DIR = ROOT / "prdoc"
 CHANGELOG = ROOT / "wasm-node" / "CHANGELOG.md"
 REPO_URL = "https://github.com/paritytech/smoldot"
 SECTIONS = ["added", "changed", "fixed", "removed"]
-FILE_NAME = re.compile(r"^pr_(\d+)\.prdoc$")
+FILE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*\.prdoc$")
+PR_FILE_NAME = re.compile(r"^pr_(\d+)\.prdoc$")
+PR_SUBJECT = re.compile(r"\(#(\d+)\)\s*$|^Merge pull request #(\d+)")
 
 
 class PrdocError(Exception):
@@ -53,9 +56,8 @@ def _issue_list(doc, key):
 
 def load(path):
     path = pathlib.Path(path)
-    m = FILE_NAME.match(path.name)
-    if not m:
-        raise PrdocError("file name must be `pr_<PR number>.prdoc`")
+    if not FILE_NAME.match(path.name):
+        raise PrdocError("file name must match `[a-z0-9][a-z0-9._-]*.prdoc`")
 
     try:
         doc = yaml.safe_load(path.read_text())
@@ -80,7 +82,7 @@ def load(path):
             raise PrdocError(f"changes[{i}].description must be a non-empty string")
 
     return {
-        "pr": int(m.group(1)),
+        "path": path,
         "changes": changes,
         "fixes": _issue_list(doc, "fixes"),
         "related": _issue_list(doc, "related"),
@@ -98,7 +100,24 @@ def bullet(prdoc, change):
 
 
 def pending_files():
-    return sorted(PRDOC_DIR.glob("pr_*.prdoc"))
+    return sorted(f for f in PRDOC_DIR.glob("*.prdoc") if not f.name.startswith("."))
+
+
+def pr_number(path):
+    m = PR_FILE_NAME.match(path.name)
+    if m:
+        return int(m.group(1))
+    subject = subprocess.run(
+        ["git", "log", "-1", "--diff-filter=A", "--format=%s", "--", str(path.relative_to(ROOT))],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    m = PR_SUBJECT.search(subject)
+    if not m:
+        raise PrdocError(
+            f"no PR number found in the subject of the commit that added it ({subject or 'no commit, or a shallow clone'!r}),"
+            " rename it to `pr_<PR number>.prdoc`"
+        )
+    return int(m.group(1) or m.group(2))
 
 
 def cmd_check(files):
@@ -122,11 +141,16 @@ def cmd_release(version, date):
     if not files:
         print("error: no prdoc files in prdoc/", file=sys.stderr)
         return 1
-    try:
-        prdocs = sorted((load(f) for f in files), key=lambda p: p["pr"])
-    except PrdocError as e:
-        print(f"error: {e} (run `prdoc.py check`)", file=sys.stderr)
-        return 1
+    prdocs = []
+    for f in files:
+        try:
+            prdoc = load(f)
+            prdoc["pr"] = pr_number(f)
+        except PrdocError as e:
+            print(f"error: {f.relative_to(ROOT)}: {e}", file=sys.stderr)
+            return 1
+        prdocs.append(prdoc)
+    prdocs.sort(key=lambda p: (p["pr"], p["path"].name))
 
     lines = [f"## {version} - {date}"]
     for section in SECTIONS:

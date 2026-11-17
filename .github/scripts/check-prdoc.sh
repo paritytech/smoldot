@@ -15,23 +15,32 @@ errors=()
 missing=false
 
 if [ "$SKIP" != "true" ]; then
-    gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename' > "$WORK/files"
+    gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" \
+        --jq '.[] | select(.status != "removed") | "\(.status) \(.filename)"' > "$WORK/files"
 
-    if grep -qx 'wasm-node/CHANGELOG.md' "$WORK/files"; then
-        errors+=("This PR edits \`wasm-node/CHANGELOG.md\`. Revert that change and put the entry in \`$PRDOC\` instead.")
+    if grep -qx '[a-z]* wasm-node/CHANGELOG.md' "$WORK/files"; then
+        errors+=("This PR edits \`wasm-node/CHANGELOG.md\`. Revert that change and put the entry in a prdoc file instead.")
     fi
 
-    if ! grep -qx "$PRDOC" "$WORK/files"; then
+    grep -E '^[a-z]+ prdoc/[^./][^/]*\.prdoc$' "$WORK/files" > "$WORK/prdocs" || true
+    if ! grep -qE '^(added|renamed|copied) ' "$WORK/prdocs"; then
         missing=true
-        errors+=("\`$PRDOC\` is missing.")
-    else
-        mkdir "$WORK/prdoc"
-        gh api -H 'Accept: application/vnd.github.raw' \
-            "repos/$HEAD_REPO/contents/$PRDOC?ref=$HEAD_SHA" > "$WORK/$PRDOC"
-        if ! python3 "$SCRIPTS/prdoc.py" check "$WORK/$PRDOC" 2> "$WORK/check.err"; then
-            errors+=("\`$PRDOC\` is invalid:"$'\n\n~~~~\n'"$(sed "s|$WORK/||" "$WORK/check.err" | tr -d '~')"$'\n~~~~')
-        fi
+        errors+=("This PR adds no \`prdoc/<name>.prdoc\` file.")
     fi
+
+    mkdir "$WORK/prdoc"
+    while read -r _ file; do
+        name="${file#prdoc/}"
+        if [[ ! "$name" =~ ^[a-z0-9][a-z0-9._-]*\.prdoc$ ]]; then
+            errors+=("\`$file\`: file name must match \`[a-z0-9][a-z0-9._-]*.prdoc\`.")
+            continue
+        fi
+        gh api -H 'Accept: application/vnd.github.raw' \
+            "repos/$HEAD_REPO/contents/$file?ref=$HEAD_SHA" > "$WORK/$file"
+        if ! python3 "$SCRIPTS/prdoc.py" check "$WORK/$file" 2> "$WORK/check.err" > /dev/null; then
+            errors+=("\`$file\` is invalid:"$'\n\n~~~~\n'"$(sed "s|$WORK/||" "$WORK/check.err" | tr -d '~')"$'\n~~~~')
+        fi
+    done < "$WORK/prdocs"
 fi
 
 existing="$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
@@ -49,7 +58,7 @@ fi
     echo "$MARKER"
     echo "### Changelog entry needed"
     echo
-    echo "Changes to \`wasm-node/CHANGELOG.md\` are written at release time from one \`prdoc/pr_<PR number>.prdoc\` file per PR, so that PRs don't conflict on it. See [\`prdoc/README.md\`](https://github.com/$REPO/blob/main/prdoc/README.md)."
+    echo "Changes to \`wasm-node/CHANGELOG.md\` are written at release time from \`prdoc/<name>.prdoc\` files added by each PR, so that PRs don't conflict on it. See [\`prdoc/README.md\`](https://github.com/$REPO/blob/main/prdoc/README.md)."
     echo
     for e in "${errors[@]}"; do
         echo "- $e"
@@ -64,7 +73,7 @@ head_ref = urllib.parse.quote(os.environ["HEAD_REF"])
 print(f"https://github.com/{os.environ['HEAD_REPO']}/new/{head_ref}?{q}")
 EOF
 )"
-        echo "[Create \`$PRDOC\` from the template]($url), then edit the description."
+        echo "[Create \`$PRDOC\` from the template]($url), then edit the description. Any other name works too, for example the branch name."
         echo
     fi
     echo "If this PR has no user-visible change (refactor, tests, CI, docs), a maintainer can add the \`no-changelog\` label instead."
