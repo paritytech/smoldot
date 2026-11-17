@@ -237,8 +237,7 @@ where
     /// closest to the first topic first.
     ///
     /// The full node also routes to connected peers closer to a topic than itself. A light
-    /// client is no replica and the full nodes route a statement onwards themselves, so it keeps
-    /// only the replicas.
+    /// client is no replica and has no position in the key space, so it keeps only the replicas.
     pub fn routing_targets(&self, topics: &[Key]) -> Vec<PeerId> {
         let mut targets = Vec::new();
         for topic in topics {
