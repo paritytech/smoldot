@@ -919,13 +919,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.statement_affinity_stale = false;
                 me.last_statement_affinity_update = Some(me.platform.now());
 
-                let combined_filter = me.statement_subscriptions.build_combined_affinity_filter(
-                    me.statement_protocol_config
-                        .as_ref()
-                        .expect("statement affinity requires statement protocol; qed"),
-                );
+                let (combined_filter, topics) =
+                    me.statement_subscriptions.build_combined_affinity_filter(
+                        me.statement_protocol_config
+                            .as_ref()
+                            .expect("statement affinity requires statement protocol; qed"),
+                    );
                 me.network_service
-                    .update_topic_affinity(combined_filter)
+                    .update_topic_affinity(combined_filter, topics)
                     .await;
             }
 
