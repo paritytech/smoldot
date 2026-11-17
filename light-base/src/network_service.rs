@@ -3009,7 +3009,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     chain_id,
                     &peer_id,
                     service::GossipKind::Statement,
-                ) {
+                ) && !task
+                    .network
+                    .gossip_desired_iter(chain_id, service::GossipKind::Statement)
+                    .any(|p| *p == peer_id)
+                {
                     if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
                         peers.remove(&peer_id);
                     }
