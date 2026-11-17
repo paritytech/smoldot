@@ -39,7 +39,7 @@
 //! statements between replicas of the full node have no counterpart here.
 
 use crate::util;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::{cmp::Reverse, num::NonZeroUsize, ops::Add, time::Duration};
 use rand_chacha::{
     ChaCha20Rng,
@@ -127,10 +127,10 @@ where
         for (peer, addresses) in peers {
             let info = self.get_or_insert_peer(peer, now);
             for address in addresses {
-                if info.addresses.contains(&address) {
-                    continue;
-                }
-                if info.addresses.len() >= MAX_ADDRESSES_PER_PEER {
+                // An address reported again moves to the newest end.
+                if let Some(position) = info.addresses.iter().position(|a| *a == address) {
+                    info.addresses.remove(position);
+                } else if info.addresses.len() >= MAX_ADDRESSES_PER_PEER {
                     info.addresses.remove(0);
                 }
                 info.addresses.push(address);
@@ -142,14 +142,16 @@ where
     /// statement substream refused for an unknown protocol.
     ///
     /// Peers that do not support the statement protocol remain known but are excluded from
-    /// the candidates for a topic.
+    /// the candidates for a topic. An open statement substream proves support and outweighs a
+    /// negative answer.
     pub fn on_peer_identified(
         &mut self,
         peer: PeerId,
         supports_statement_protocol: bool,
         now: &TNow,
     ) {
-        self.get_or_insert_peer(peer, now).supports_protocol = supports_statement_protocol;
+        let info = self.get_or_insert_peer(peer, now);
+        info.supports_protocol = supports_statement_protocol || info.connected;
     }
 
     /// Record that the statement substream to `peer` opened.
@@ -165,7 +167,9 @@ where
     pub fn on_substream_closed(&mut self, peer: PeerId, now: &TNow) {
         if let Some(info) = self.discovered.get_mut(&peer) {
             info.connected = false;
-            info.last_seen = now.clone().max(info.last_seen.clone());
+            if *now > info.last_seen {
+                info.last_seen = now.clone();
+            }
         }
     }
 
@@ -233,24 +237,33 @@ where
     /// Returns whether the candidates for a topic changed.
     pub fn evict(&mut self, now: &TNow) -> bool {
         let mut changed = false;
-        loop {
-            let over_cap = self.discovered.len() > MAX_KNOWN_PEERS;
-            let Some((victim, last_seen)) = self
-                .discovered
-                .iter()
-                .filter(|(_, info)| !info.connected)
-                .min_by_key(|(_, info)| &info.last_seen)
-                .map(|(peer, info)| (peer.clone(), info.last_seen.clone()))
-            else {
-                return changed;
-            };
-            if !over_cap && last_seen + PEER_STALENESS_TTL > *now {
-                return changed;
-            }
-            if let Some(info) = self.discovered.remove(&victim) {
+        self.discovered.retain(|_, info| {
+            let keep = info.connected || info.last_seen.clone() + PEER_STALENESS_TTL > *now;
+            changed |= !keep && info.supports_protocol;
+            keep
+        });
+
+        let excess = self.discovered.len().saturating_sub(MAX_KNOWN_PEERS);
+        if excess == 0 {
+            return changed;
+        }
+        let mut victims = self
+            .discovered
+            .iter()
+            .filter(|(_, info)| !info.connected)
+            .map(|(peer, info)| (info.last_seen.clone(), peer.clone()))
+            .collect::<Vec<_>>();
+        // Connected peers are never evicted, so there may be fewer victims than `excess`.
+        let excess = excess.min(victims.len());
+        if excess > 0 {
+            victims.select_nth_unstable(excess - 1);
+        }
+        for (_, peer) in victims.into_iter().take(excess) {
+            if let Some(info) = self.discovered.remove(&peer) {
                 changed |= info.supports_protocol;
             }
         }
+        changed
     }
 
     /// Insert `peer` if absent, refresh its `last_seen`, and return its record.
@@ -267,7 +280,9 @@ where
                 last_seen: now.clone(),
                 addresses: Vec::new(),
             });
-        info.last_seen = now.clone().max(info.last_seen.clone());
+        if *now > info.last_seen {
+            info.last_seen = now.clone();
+        }
         info
     }
 
@@ -280,10 +295,14 @@ where
             .filter(|(_, info)| info.supports_protocol)
             .map(|(peer, info)| (xor_distance(topic, &info.key), peer, info.key))
             .collect::<Vec<_>>();
+        // Only the `limit` closest peers are kept, so the rest need no sorting.
+        if limit < candidates.len() {
+            candidates.select_nth_unstable(limit);
+            candidates.truncate(limit);
+        }
         candidates.sort_unstable();
         candidates
             .into_iter()
-            .take(limit)
             .map(|(_, peer, key)| (peer.clone(), key))
             .collect()
     }
@@ -292,21 +311,19 @@ where
 /// The peer covering the most uncovered topics, breaking ties by the smallest distance to any
 /// topic it covers, then by the smallest peer id.
 fn best_candidate(uncovered: &[(&Key, Vec<(PeerId, Key)>)]) -> Option<PeerId> {
-    uncovered
-        .iter()
-        .flat_map(|(_, pool)| pool)
-        .map(|(peer, key)| {
-            let (covered_count, best_distance) = uncovered
-                .iter()
-                .filter(|(_, pool)| pool_contains(pool, peer))
-                .map(|(topic, _)| xor_distance(topic, key))
-                .fold((0usize, [u8::MAX; 32]), |(count, best), distance| {
-                    (count + 1, best.min(distance))
-                });
-            (Reverse(covered_count), best_distance, peer)
-        })
-        .min()
-        .map(|(_, _, peer)| peer.clone())
+    // Per peer, the number of uncovered topics it covers and its distance to the closest one.
+    let mut scores = BTreeMap::<&PeerId, (usize, Key)>::new();
+    for (topic, pool) in uncovered {
+        for (peer, key) in pool {
+            let (count, best) = scores.entry(peer).or_insert((0, [u8::MAX; 32]));
+            *count += 1;
+            *best = (*best).min(xor_distance(topic, key));
+        }
+    }
+    scores
+        .into_iter()
+        .min_by_key(|(peer, (count, best))| (Reverse(*count), *best, *peer))
+        .map(|(peer, _)| peer.clone())
 }
 
 fn pool_contains(pool: &[(PeerId, Key)], peer: &PeerId) -> bool {
@@ -378,7 +395,8 @@ mod tests {
             vec![&peer(2)]
         );
 
-        // Addresses are deduplicated and the oldest ones go once over the cap.
+        // Addresses are deduplicated, an address reported again becomes the newest, and the
+        // oldest ones go once over the cap.
         assert_eq!(topology.peer_addresses(&peer(3)).collect::<Vec<_>>(), [[3]]);
         let addresses = (0..=MAX_ADDRESSES_PER_PEER as u8).map(|n| vec![n]);
         topology.on_peers_discovered([(peer(3), addresses)], &now);
@@ -386,7 +404,7 @@ mod tests {
             topology.peer_addresses(&peer(3)).count(),
             MAX_ADDRESSES_PER_PEER
         );
-        assert_eq!(topology.peer_addresses(&peer(3)).next(), Some(&[0][..]));
+        assert_eq!(topology.peer_addresses(&peer(3)).next(), Some(&[1][..]));
         assert!(topology.peer_addresses(&peer(2)).next().is_none());
 
         topology.on_peer_identified(peer(2), false, &now);
@@ -394,8 +412,10 @@ mod tests {
         assert!(topology.peers_for_topics(&[topic(9)]).is_empty());
         assert_eq!(topology.known_peers_count(), 2);
 
-        // An open substream implies support, and closing it keeps the peer known.
+        // An open substream implies support, even against a later negative answer, and closing
+        // it keeps the peer known.
         topology.on_substream_opened(peer(3), &now);
+        topology.on_peer_identified(peer(3), false, &now);
         assert_eq!(topology.closest_known(&topic(9), 10), vec![peer(3)]);
         topology.on_substream_closed(peer(3), &now);
         assert_eq!(topology.closest_known(&topic(9), 10), vec![peer(3)]);
