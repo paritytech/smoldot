@@ -158,8 +158,8 @@ python3 .github/scripts/prdoc.py release <X.Y.Z>
 
 This inserts `## <X.Y.Z> - <YYYY-MM-DD>` below `## Unreleased` (which stays in
 place), groups entries under `### Added` / `### Changed` / `### Fixed` /
-`### Removed`, links each PR and its `fixes` / `related` issues, and moves the
-files to `prdoc/<X.Y.Z>/`. Pass `--date YYYY-MM-DD` to override today's date.
+`### Removed`, links each PR and its `fixes` / `related` issues, and deletes
+the files. Pass `--date YYYY-MM-DD` to override today's date.
 
 Read the result and edit the wording in `CHANGELOG.md` if needed. Also check
 `git log <prev-tag>..HEAD` for merged PRs with a user-visible change but no
@@ -346,7 +346,7 @@ Even `suffix=""` produces `dev-<YYYYMMDD>`, not `latest`.
   in `light-base/Cargo.toml`, `wasm-node/rust/Cargo.toml`).
 - Changelog: `python3 .github/scripts/prdoc.py release <X.Y.Z>` inserts the
   new section in `wasm-node/CHANGELOG.md` between `## Unreleased` and the
-  previous version heading, and moves `prdoc/pr_*.prdoc` to `prdoc/<X.Y.Z>/`.
+  previous version heading, and deletes `prdoc/pr_*.prdoc`.
 - Scope detection: `git diff --stat <prev-tag>..HEAD -- <path>` for
   `lib/`, `light-base/`, `wasm-node/`.
 - Commit message: `npm smoldot v<X.Y.Z>`.

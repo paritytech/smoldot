@@ -118,11 +118,6 @@ def cmd_release(version, date):
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         print(f"error: bad version `{version}`", file=sys.stderr)
         return 1
-    target = PRDOC_DIR / version
-    if target.exists():
-        print(f"error: {target} already exists", file=sys.stderr)
-        return 1
-
     files = pending_files()
     if not files:
         print("error: no prdoc files in prdoc/", file=sys.stderr)
@@ -152,12 +147,11 @@ def cmd_release(version, date):
         return 1
     CHANGELOG.write_text(f"{head}{marker}\n{new_section}\n{rest}")
 
-    target.mkdir()
     for f in files:
-        f.rename(target / f.name)
+        f.unlink()
 
     print(new_section)
-    print(f"moved {len(files)} prdoc file(s) to {target.relative_to(ROOT)}/")
+    print(f"deleted {len(files)} prdoc file(s)")
     return 0
 
 
@@ -166,7 +160,7 @@ def main():
     sub = parser.add_subparsers(dest="cmd", required=True)
     check = sub.add_parser("check", help="validate prdoc files (default: all pending ones)")
     check.add_argument("files", nargs="*")
-    release = sub.add_parser("release", help="write the CHANGELOG section and archive the files")
+    release = sub.add_parser("release", help="write the CHANGELOG section and delete the files")
     release.add_argument("version")
     release.add_argument("--date", default=datetime.date.today().isoformat())
     args = parser.parse_args()

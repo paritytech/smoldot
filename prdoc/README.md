@@ -53,5 +53,5 @@ these files take effect only once merged.
 ## Release
 
 `python3 .github/scripts/prdoc.py release <X.Y.Z>` inserts the new section under
-`## Unreleased` in `wasm-node/CHANGELOG.md` and moves the files to
-`prdoc/<X.Y.Z>/`. See `docs/RELEASING.md`.
+`## Unreleased` in `wasm-node/CHANGELOG.md` and deletes the files. Git history
+keeps them. See `docs/RELEASING.md`.
