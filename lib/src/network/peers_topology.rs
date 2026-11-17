@@ -585,8 +585,8 @@ mod tests {
 
     #[test]
     fn routing_targets_are_connected_replicas() {
-        // Closest to topic 1 with seeds 2 to 30: 15, 7, 12, 21. Closest to topic 17: 12, 21,
-        // 4, 15.
+        // Closest to topic 1 with seeds 2 to 30: 15, 7, 12, 21. Closest to topic 9: 15, 7, 21,
+        // 4. Closest to topic 17: 12, 21, 4, 15.
         let mut topology = topology(2);
         for seed in 2..=30 {
             dht_peer(&mut topology, peer(seed), Duration::ZERO);
@@ -601,6 +601,10 @@ mod tests {
         assert!(topology.routing_targets(&[]).is_empty());
 
         // A peer close to several topics comes once.
+        assert_eq!(
+            topology.routing_targets(&[topic(1), topic(9)]),
+            vec![peer(7)]
+        );
         topology.on_substream_opened(peer(12), &Duration::ZERO);
         assert_eq!(
             topology.routing_targets(&[topic(17), topic(1), topic(17)]),

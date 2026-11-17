@@ -765,7 +765,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     }
 
     /// Broadcast a statement notification to the connected statement peers that store one of its
-    /// topics, or to all of them when none does.
+    /// topics, or to all of them when none of those peers takes it.
     pub async fn broadcast_statement(
         self: Arc<Self>,
         statement: Vec<u8>,
@@ -2418,8 +2418,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 ToBackgroundChain::BroadcastStatement { statement, result },
             ) => {
-                // The statement goes to the connected peers that store its topics. The full
-                // nodes route it onwards, so any connected peer works when none of them does.
+                // The statement goes to the connected peers that store its topics. When none of
+                // them takes it, it goes to every connected peer: a full node routes a statement
+                // with topics onwards to the peers that store them.
                 let close_peers = match (
                     &task.network[chain_id].statement_peering,
                     codec::decode_statement(&statement),
@@ -2429,26 +2430,28 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                     _ => Vec::new(),
                 };
-                let to_close_peers = !close_peers.is_empty();
-                let peers_to_send = if to_close_peers {
-                    close_peers
-                } else {
-                    task.network
-                        .gossip_connected_peers(chain_id, service::GossipKind::Statement)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                };
+                let all_peers = task
+                    .network
+                    .gossip_connected_peers(chain_id, service::GossipKind::Statement)
+                    .cloned()
+                    .collect::<Vec<_>>();
 
-                let total = peers_to_send.len();
-                let mut sent = 0;
-                for peer in &peers_to_send {
-                    if task
-                        .network
-                        .gossip_send_statement(peer, chain_id, statement.clone())
-                        .is_ok()
-                    {
-                        sent += 1;
-                    }
+                let mut send_to = |peers: &[_]| {
+                    peers
+                        .iter()
+                        .filter(|peer| {
+                            task.network
+                                .gossip_send_statement(peer, chain_id, statement.clone())
+                                .is_ok()
+                        })
+                        .count()
+                };
+                let mut total = close_peers.len();
+                let mut sent = send_to(&close_peers);
+                let to_close_peers = sent != 0;
+                if !to_close_peers {
+                    total = all_peers.len();
+                    sent = send_to(&all_peers);
                 }
 
                 log!(
