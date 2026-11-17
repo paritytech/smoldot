@@ -3495,6 +3495,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
 
+                // The steering refresh runs only while a statement subscription exists, so
+                // discovery bounds the topology on its own.
+                if let Some(peering) = &mut task.network[chain_id].statement_peering {
+                    peering.topology.evict(&task.platform.now());
+                }
+
                 if any_new_peer {
                     task.network[chain_id].next_discovery_period = Duration::from_secs(2);
                 }
