@@ -187,11 +187,12 @@ fn execute_blocks() {
     }
 }
 
-/// As in Substrate, clearing a main trie prefix that starts with `:child_storage:` is ignored.
-#[test]
-fn clear_prefix_keeps_child_trie_root() {
-    // `clear_root_key` clears the main trie prefix `:child_storage:default:xyz` without limit
-    // and returns the result of the clearing.
+/// Calls `ext_storage_clear_prefix_version_2` on `prefix` in the main trie, without limit. The
+/// storage contains the root of the child trie `xyz` and the key `:child_storagXyz`.
+///
+/// Returns the SCALE-encoded result of the clearing and the erased keys.
+fn clear_main_trie_prefix(prefix: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
+    // `clear_prefix` clears the prefix passed as input and returns the result of the clearing.
     let wasm = wat::parse_str(
         r#"
         (module
@@ -199,15 +200,15 @@ fn clear_prefix_keeps_child_trie_root() {
             (import "env" "ext_storage_clear_prefix_version_2"
                 (func $clear_prefix (param i64 i64) (result i64)))
             (global (export "__heap_base") i32 (i32.const 1024))
-            (data (i32.const 0) ":child_storage:default:xyz")
             ;; SCALE encoding of `None`, used as the limit.
-            (data (i32.const 32) "\00")
+            (data (i32.const 0) "\00")
 
-            ;; The parameters are the 26 bytes at offset 0 and the byte at offset 32.
-            (func (export "clear_root_key") (param i32 i32) (result i64)
+            (func (export "clear_prefix") (param $ptr i32) (param $len i32) (result i64)
                 (call $clear_prefix
-                    (i64.const 0x0000001A00000000)
-                    (i64.const 0x0000000100000020)))
+                    (i64.or
+                        (i64.extend_i32_u (local.get $ptr))
+                        (i64.shl (i64.extend_i32_u (local.get $len)) (i64.const 32)))
+                    (i64.const 0x0000000100000000)))
         )
         "#,
     )
@@ -223,17 +224,17 @@ fn clear_prefix_keeps_child_trie_root() {
 
     let mut execution = run(Config {
         virtual_machine,
-        function_to_call: "clear_root_key",
+        function_to_call: "clear_prefix",
         max_log_level: 0,
         storage_proof_size_behavior: StorageProofSizeBehavior::Unimplemented,
         storage_main_trie_changes: Default::default(),
         calculate_trie_changes: false,
-        parameter: iter::empty::<Vec<u8>>(),
+        parameter: iter::once(prefix),
     })
     .unwrap();
 
-    // The storage contains only the root of the child trie `xyz`.
     let root_key = trie::default_child_trie_root_key(b"xyz");
+    let keys = [&root_key[..], b":child_storagXyz"];
 
     let success = loop {
         match execution {
@@ -241,22 +242,58 @@ fn clear_prefix_keeps_child_trie_root() {
             RuntimeCall::Finished(Err(err)) => panic!("{err:?}"),
             // Only requested if the clearing isn't ignored.
             RuntimeCall::NextKey(req) => {
-                let key = trie::nibbles_to_bytes_suffix_extend(req.key()).collect::<Vec<_>>();
-                let found = if req.or_equal() {
-                    root_key >= key
-                } else {
-                    root_key > key
-                };
+                let after = trie::nibbles_to_bytes_suffix_extend(req.key()).collect::<Vec<_>>();
+                let next = keys
+                    .into_iter()
+                    .filter(|key| {
+                        key.starts_with(prefix)
+                            && if req.or_equal() {
+                                **key >= after[..]
+                            } else {
+                                **key > after[..]
+                            }
+                    })
+                    .min();
                 execution =
-                    req.inject_key(found.then(|| trie::bytes_to_nibbles(root_key.iter().copied())));
+                    req.inject_key(next.map(|key| trie::bytes_to_nibbles(key.iter().copied())));
             }
             _ => unreachable!(),
         }
     };
 
+    let erased = success
+        .storage_changes
+        .main_trie_storage_changes_iter_unordered()
+        .map(|(key, _)| key.to_vec())
+        .collect();
+    (success.virtual_machine.value().as_ref().to_vec(), erased)
+}
+
+/// As in Substrate, clearing a main trie prefix that starts with `:child_storage:` is ignored.
+#[test]
+fn clear_prefix_ignored_under_child_storage() {
+    let (result, erased) = clear_main_trie_prefix(b":child_storage:default:xyz");
     // `AllRemoved(0)`
-    assert_eq!(success.virtual_machine.value().as_ref(), [0, 0, 0, 0, 0]);
-    assert_eq!(success.storage_changes.main_trie_diff_get(&root_key), None);
+    assert_eq!(result, [0, 0, 0, 0, 0]);
+    assert!(erased.is_empty());
+}
+
+/// As in Substrate, clearing a main trie prefix that `:child_storage:` starts with is ignored.
+#[test]
+fn clear_prefix_ignored_on_beginning_of_child_storage() {
+    let (result, erased) = clear_main_trie_prefix(b":child_st");
+    // `AllRemoved(0)`
+    assert_eq!(result, [0, 0, 0, 0, 0]);
+    assert!(erased.is_empty());
+}
+
+/// A main trie prefix that differs from `:child_storage:` is cleared.
+#[test]
+fn clear_prefix_not_ignored_outside_child_storage() {
+    let (result, erased) = clear_main_trie_prefix(b":child_storagX");
+    // `AllRemoved(1)`
+    assert_eq!(result, [0, 1, 0, 0, 0]);
+    assert_eq!(erased, [b":child_storagXyz"]);
 }
 
 // Serde structs used to decode the test fixtures.
