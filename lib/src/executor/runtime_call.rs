@@ -95,9 +95,10 @@ pub struct Config<'a, TParams> {
     pub calculate_trie_changes: bool,
 
     /// If `true`, the roots of the child tries modified by the call are calculated once it has
-    /// finished and written to the main trie diff. Required if the [`StorageChanges`] are used
-    /// after the call. Pass `false` if only the output is needed, as calculating these roots can
-    /// require storage that a call proof doesn't contain.
+    /// finished and written to the main trie diff. Required if the main trie diff (for example
+    /// [`StorageChanges::into_main_trie_diff`]) is used after the call, for example to run another
+    /// call on top of it or to build a block. Pass `false` if only the output is needed, as
+    /// calculating these roots can require storage that a call proof doesn't contain.
     ///
     /// Has no effect if [`Config::calculate_trie_changes`] is `true`, as calculating the trie
     /// changes requires these roots.
