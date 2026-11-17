@@ -3040,6 +3040,24 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     ?error,
                 );
 
+                // The event doesn't say which substream closed. If it was the statement one,
+                // the peer stays unreachable for statements until a reopen succeeds.
+                if !task.network.gossip_is_connected(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::Statement,
+                ) {
+                    if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                        peers.remove(&peer_id);
+                    }
+                    if let Some(peering) = &mut task.network[chain_id].statement_peering {
+                        peering
+                            .topology
+                            .on_substream_closed(peer_id.clone(), &task.platform.now());
+                        peering.steering.on_substream_closed(&peer_id);
+                    }
+                }
+
                 // Reopen at once the first time, as polkadot-sdk reserves the peer for these
                 // protocols slightly after block announces open. Afterwards, retry at a short
                 // interval rather than in a tight loop.
