@@ -232,6 +232,29 @@ where
         selected
     }
 
+    /// Connected peers to send a statement on `topics` to: every connected peer among the
+    /// `replication_factor` closest known statement peers of one of the topics, each peer once,
+    /// closest to the first topic first.
+    ///
+    /// The full node also routes to connected peers closer to a topic than itself. A light
+    /// client is no replica and the full nodes route a statement onwards themselves, so it keeps
+    /// only the replicas.
+    pub fn routing_targets(&self, topics: &[Key]) -> Vec<PeerId> {
+        let mut targets = Vec::new();
+        for topic in topics {
+            for (peer, _) in self.closest_known_keyed(topic, self.replication_factor.get()) {
+                let connected = self
+                    .discovered
+                    .get(&peer)
+                    .is_some_and(|info| info.connected);
+                if connected && !targets.contains(&peer) {
+                    targets.push(peer);
+                }
+            }
+        }
+        targets
+    }
+
     /// Evict disconnected peers unseen for `PEER_STALENESS_TTL` as of `now`, plus any excess
     /// over `MAX_KNOWN_PEERS`, least recently seen first.
     /// Returns whether the candidates for a topic changed.
@@ -558,5 +581,33 @@ mod tests {
             let actual = topology.peers_for_topics(&topics);
             assert_eq!(actual.into_iter().map(seed_of).collect::<Vec<_>>(), cover);
         }
+    }
+
+    #[test]
+    fn routing_targets_are_connected_replicas() {
+        // Closest to topic 1 with seeds 2 to 30: 15, 7, 12, 21. Closest to topic 17: 12, 21,
+        // 4, 15.
+        let mut topology = topology(2);
+        for seed in 2..=30 {
+            dht_peer(&mut topology, peer(seed), Duration::ZERO);
+        }
+        assert!(topology.routing_targets(&[topic(1)]).is_empty());
+
+        // Peer 21 is connected but is no replica of topic 1.
+        for seed in [7, 21, 4] {
+            topology.on_substream_opened(peer(seed), &Duration::ZERO);
+        }
+        assert_eq!(topology.routing_targets(&[topic(1)]), vec![peer(7)]);
+        assert!(topology.routing_targets(&[]).is_empty());
+
+        // A peer close to several topics comes once.
+        topology.on_substream_opened(peer(12), &Duration::ZERO);
+        assert_eq!(
+            topology.routing_targets(&[topic(17), topic(1), topic(17)]),
+            vec![peer(12), peer(21), peer(7)]
+        );
+
+        topology.on_substream_closed(peer(7), &Duration::ZERO);
+        assert!(topology.routing_targets(&[topic(1)]).is_empty());
     }
 }

@@ -764,7 +764,8 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
-    /// Broadcast a statement notification to all gossip-connected peers.
+    /// Broadcast a statement notification to the connected statement peers that store one of its
+    /// topics, or to all of them when none does.
     pub async fn broadcast_statement(
         self: Arc<Self>,
         statement: Vec<u8>,
@@ -2417,11 +2418,26 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 ToBackgroundChain::BroadcastStatement { statement, result },
             ) => {
-                let peers_to_send = task
-                    .network
-                    .gossip_connected_peers(chain_id, service::GossipKind::Statement)
-                    .cloned()
-                    .collect::<Vec<_>>();
+                // The statement goes to the connected peers that store its topics. The full
+                // nodes route it onwards, so any connected peer works when none of them does.
+                let close_peers = match (
+                    &task.network[chain_id].statement_peering,
+                    codec::decode_statement(&statement),
+                ) {
+                    (Some(peering), Ok(decoded)) => {
+                        peering.topology.routing_targets(&decoded.topics)
+                    }
+                    _ => Vec::new(),
+                };
+                let to_close_peers = !close_peers.is_empty();
+                let peers_to_send = if to_close_peers {
+                    close_peers
+                } else {
+                    task.network
+                        .gossip_connected_peers(chain_id, service::GossipKind::Statement)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                };
 
                 let total = peers_to_send.len();
                 let mut sent = 0;
@@ -2443,6 +2459,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     chain = task.network[chain_id].log_name,
                     sent,
                     total,
+                    to_close_peers,
                 );
 
                 let _ = result.send(BroadcastStatementResult { sent, total });
