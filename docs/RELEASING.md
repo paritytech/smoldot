@@ -148,30 +148,26 @@ Then commit whichever locks actually changed (`git diff --name-only`).
 
 ## 5. Update `wasm-node/CHANGELOG.md`
 
-Insert a new section **below** the `## Unreleased` heading (leave `Unreleased`
-in place). Use the current date in `YYYY-MM-DD`. Group entries under
-`### Added` / `### Changed` / `### Fixed` / `### Removed`. Each bullet must
-link to its PR, and — when the PR fixes or relates to a GitHub issue
-(check the PR/commit body for `Fixes #N` / `Closes #N` / issue mentions) —
-also link the issue(s).
+PRs don't edit `CHANGELOG.md`. Each one adds `prdoc/pr_<PR>.prdoc` instead
+(see `prdoc/README.md`). Generate the new section from these files:
 
-Template:
-
-```md
-## <X.Y.Z> - <YYYY-MM-DD>
-
-### Fixed
-
-- <user-facing description>. ([#<PR>](https://github.com/paritytech/smoldot/pull/<PR>); fixes [#<issue>](https://github.com/paritytech/smoldot/issues/<issue>))
+```sh
+python3 .github/scripts/prdoc.py check
+python3 .github/scripts/prdoc.py release <X.Y.Z>
 ```
 
-Use `fixes [#N]` when the PR closes the issue, `related to [#N]` when it
-only touches it. Omit the clause when there is no linked issue.
+This inserts `## <X.Y.Z> - <YYYY-MM-DD>` below `## Unreleased` (which stays in
+place), groups entries under `### Added` / `### Changed` / `### Fixed` /
+`### Removed`, links each PR and its `fixes` / `related` issues, and moves the
+files to `prdoc/<X.Y.Z>/`. Pass `--date YYYY-MM-DD` to override today's date.
 
-Rules of thumb:
+Read the result and edit the wording in `CHANGELOG.md` if needed. Also check
+`git log <prev-tag>..HEAD` for merged PRs with a user-visible change but no
+prdoc (for example merged with the `no-changelog` label by mistake), and add
+their entries by hand.
 
-- Describe the observable change, not the code path.
-- Skip internal refactors, test-only changes, CI tweaks, and doc updates.
+Add the `no-changelog` label to the release PR, since it edits
+`CHANGELOG.md`.
 
 ---
 
@@ -206,7 +202,7 @@ Run this **only if `smoldot` is not being bumped**. Otherwise it fails on
 ```sh
 git add lib/Cargo.toml light-base/Cargo.toml wasm-node/rust/Cargo.toml \
         wasm-node/javascript/package.json wasm-node/javascript/package-lock.json \
-        wasm-node/CHANGELOG.md Cargo.lock e2e-tests/Cargo.lock benchmarks/Cargo.lock
+        wasm-node/CHANGELOG.md prdoc/ Cargo.lock e2e-tests/Cargo.lock benchmarks/Cargo.lock
 # Plus every other npm lock refreshed in step 4 (discovered, not hardcoded):
 git add $(git diff --name-only -- '*package-lock.json')
 git commit -m "npm smoldot v<X.Y.Z>"
@@ -348,8 +344,9 @@ Even `suffix=""` produces `dev-<YYYYMMDD>`, not `latest`.
 - Major crate cross only: also write the path-dep `version` strings on the
   crate that crossed (e.g. a `smoldot` major touches the `smoldot` dep string
   in `light-base/Cargo.toml`, `wasm-node/rust/Cargo.toml`).
-- Changelog: insert new section in `wasm-node/CHANGELOG.md` between
-  `## Unreleased` and the previous version heading.
+- Changelog: `python3 .github/scripts/prdoc.py release <X.Y.Z>` inserts the
+  new section in `wasm-node/CHANGELOG.md` between `## Unreleased` and the
+  previous version heading, and moves `prdoc/pr_*.prdoc` to `prdoc/<X.Y.Z>/`.
 - Scope detection: `git diff --stat <prev-tag>..HEAD -- <path>` for
   `lib/`, `light-base/`, `wasm-node/`.
 - Commit message: `npm smoldot v<X.Y.Z>`.

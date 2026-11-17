@@ -1,0 +1,7 @@
+# Copy to `prdoc/pr_<PR number>.prdoc`. See `prdoc/README.md`.
+changes:
+  - section: fixed # added | changed | fixed | removed
+    description: |
+      What users of smoldot observe, not the code path.
+fixes: []
+related: []
