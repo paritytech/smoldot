@@ -3041,12 +3041,18 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 // The event doesn't say which substream closed. If it was the statement one,
-                // the peer stays unreachable for statements until a reopen succeeds.
+                // the peer stays unreachable for statements until a reopen succeeds. A peer
+                // desired under the statement kind has a statement link of its own, which has
+                // its own events and might still be opening.
                 if !task.network.gossip_is_connected(
                     chain_id,
                     &peer_id,
                     service::GossipKind::Statement,
-                ) {
+                ) && !task
+                    .network
+                    .gossip_desired_iter(chain_id, service::GossipKind::Statement)
+                    .any(|p| *p == peer_id)
+                {
                     if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
                         peers.remove(&peer_id);
                     }
