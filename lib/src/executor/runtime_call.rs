@@ -1709,7 +1709,8 @@ impl Inner {
                         && iter::zip(req.prefix().as_ref(), CHILD_STORAGE_SPECIAL_PREFIX)
                             .all(|(a, b)| a == b)
                     {
-                        self.vm = req.resume(0, false); // TODO: what's the correct return value for `some_keys_remain`?
+                        // Substrate answers `AllRemoved(0)` here, even though keys remain.
+                        self.vm = req.resume(0, false);
                         continue;
                     }
 
