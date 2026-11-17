@@ -48,7 +48,7 @@ use crate::{
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     format,
     string::{String, ToString as _},
     sync::Arc,
@@ -2418,40 +2418,40 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 ToBackgroundChain::BroadcastStatement { statement, result },
             ) => {
-                // Any connected peer works when no close peer takes the statement: a full node
-                // routes a statement with topics onwards to the peers that store them.
-                let close_peers = match (
-                    &task.network[chain_id].statement_peering,
-                    codec::decode_statement(&statement),
-                ) {
-                    (Some(peering), Ok(decoded)) => {
-                        peering.topology.routing_targets(&decoded.topics)
-                    }
-                    _ => Vec::new(),
+                let close_peers = if let Some(peering) = &task.network[chain_id].statement_peering
+                    && let Ok(decoded) = codec::decode_statement(&statement)
+                {
+                    peering.topology.routing_targets(&decoded.topics)
+                } else {
+                    BTreeSet::new()
                 };
                 let all_peers = task
                     .network
                     .gossip_connected_peers(chain_id, service::GossipKind::Statement)
                     .cloned()
-                    .collect::<Vec<_>>();
+                    .collect::<BTreeSet<_>>();
 
-                let mut send_to = |peers: &[_]| {
-                    peers
+                let mut send_to = |peers: &BTreeSet<PeerId>| {
+                    let sent = peers
                         .iter()
-                        .filter(|peer| {
+                        .map(|peer| {
                             task.network
                                 .gossip_send_statement(peer, chain_id, statement.clone())
-                                .is_ok()
                         })
-                        .count()
+                        .filter(Result::is_ok)
+                        .count();
+                    BroadcastStatementResult {
+                        sent,
+                        total: peers.len(),
+                    }
                 };
-                let mut total = close_peers.len();
-                let mut sent = send_to(&close_peers);
-                let to_close_peers = sent != 0;
-                if !to_close_peers {
-                    total = all_peers.len();
-                    sent = send_to(&all_peers);
-                }
+
+                // Any connected peer works when no close peer takes the statement: a full node
+                // routes a statement with topics onwards to the peers that store them.
+                let (broadcast, to_close_peers) = match send_to(&close_peers) {
+                    BroadcastStatementResult { sent: 0, .. } => (send_to(&all_peers), false),
+                    broadcast => (broadcast, true),
+                };
 
                 log!(
                     &task.platform,
@@ -2459,12 +2459,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "network",
                     "statement-broadcast",
                     chain = task.network[chain_id].log_name,
-                    sent,
-                    total,
+                    sent = broadcast.sent,
+                    total = broadcast.total,
                     to_close_peers,
                 );
 
-                let _ = result.send(BroadcastStatementResult { sent, total });
+                let _ = result.send(broadcast);
             }
             WakeUpReason::MessageForChain(
                 chain_id,

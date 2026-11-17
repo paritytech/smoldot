@@ -39,7 +39,10 @@
 //! statements between replicas of the full node have no counterpart here.
 
 use crate::util;
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    vec::Vec,
+};
 use core::{cmp::Reverse, num::NonZeroUsize, ops::Add, time::Duration};
 use rand_chacha::{
     ChaCha20Rng,
@@ -199,7 +202,6 @@ where
     ///
     /// "Closest" is computed over the locally learned statement peers, not by querying the
     /// network for the true global closest peers.
-    #[cfg(test)]
     fn closest_known(&self, topic: &Key, limit: usize) -> Vec<PeerId> {
         self.closest_known_keyed(topic, limit)
             .into_iter()
@@ -233,25 +235,16 @@ where
     }
 
     /// Connected peers to send a statement on `topics` to: every connected peer among the
-    /// `replication_factor` closest known statement peers of one of the topics, each peer once,
-    /// closest to the first topic first.
+    /// `replication_factor` closest known statement peers of one of the topics.
     ///
     /// The full node also routes to connected peers closer to a topic than itself. A light
     /// client is no replica and has no position in the key space, so it keeps only the replicas.
-    pub fn routing_targets(&self, topics: &[Key]) -> Vec<PeerId> {
-        let mut targets = Vec::new();
-        for topic in topics {
-            for (peer, _) in self.closest_known_keyed(topic, self.replication_factor.get()) {
-                let connected = self
-                    .discovered
-                    .get(&peer)
-                    .is_some_and(|info| info.connected);
-                if connected && !targets.contains(&peer) {
-                    targets.push(peer);
-                }
-            }
-        }
-        targets
+    pub fn routing_targets(&self, topics: &[Key]) -> BTreeSet<PeerId> {
+        topics
+            .iter()
+            .flat_map(|topic| self.closest_known(topic, self.replication_factor.get()))
+            .filter(|peer| self.discovered.get(peer).is_some_and(|info| info.connected))
+            .collect()
     }
 
     /// Evict disconnected peers unseen for `PEER_STALENESS_TTL` as of `now`, plus any excess
@@ -372,6 +365,7 @@ mod tests {
         peer_key,
     };
     use crate::libp2p::{PeerId, peer_id::PublicKey};
+    use alloc::collections::BTreeSet;
     use core::{num::NonZeroUsize, time::Duration};
 
     fn topology(replication_factor: usize) -> PeersTopology<Duration> {
@@ -596,18 +590,21 @@ mod tests {
         for seed in [7, 21, 4] {
             topology.on_substream_opened(peer(seed), &Duration::ZERO);
         }
-        assert_eq!(topology.routing_targets(&[topic(1)]), vec![peer(7)]);
+        assert_eq!(
+            topology.routing_targets(&[topic(1)]),
+            BTreeSet::from([peer(7)])
+        );
         assert!(topology.routing_targets(&[]).is_empty());
 
         // A peer close to several topics comes once.
         assert_eq!(
             topology.routing_targets(&[topic(1), topic(9)]),
-            vec![peer(7)]
+            BTreeSet::from([peer(7)])
         );
         topology.on_substream_opened(peer(12), &Duration::ZERO);
         assert_eq!(
             topology.routing_targets(&[topic(17), topic(1), topic(17)]),
-            vec![peer(12), peer(21), peer(7)]
+            BTreeSet::from([peer(12), peer(21), peer(7)])
         );
 
         topology.on_substream_closed(peer(7), &Duration::ZERO);
