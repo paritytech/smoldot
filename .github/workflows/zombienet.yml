@@ -112,6 +112,9 @@ jobs:
           - job-name: "zombienet-smoldot-0020-statement_store_peer_steering"
             test: "statement_store_peer_steering"
             runner-type: "large"
+          - job-name: "zombienet-smoldot-0021-legacy_storage_subscription"
+            test: "legacy_storage_subscription"
+            runner-type: "default"
             # Browser-host only (WebRTC regressions).
           - job-name: "zombienet-smoldot-0014-webrtc_double_open"
             test: "webrtc_double_open"
