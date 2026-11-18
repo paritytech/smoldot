@@ -1454,6 +1454,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
         // Yield at every loop in order to provide better tasks granularity.
         futures_lite::future::yield_now().await;
 
+        for chain_id in task.network.chains() {
+            task.network[chain_id]
+                .metrics
+                .traffic
+                .set(task.network.chain_traffic(chain_id));
+        }
+
         enum WakeUpReason<TPlat: PlatformRef> {
             ForegroundClosed,
             Message(ToBackground<TPlat>),
@@ -4353,6 +4360,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 connection_task,
                                 coordinator_to_connection_rx,
                                 task.tasks_messages_tx.clone(),
+                                task.metrics.clone(),
                             ),
                         );
                     }
@@ -4408,6 +4416,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 connection_task,
                                 coordinator_to_connection_rx,
                                 task.tasks_messages_tx.clone(),
+                                task.metrics.clone(),
                             ),
                         );
                     }

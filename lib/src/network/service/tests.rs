@@ -19,9 +19,9 @@
 //! over an in-memory encrypted byte pipe, the same way `collection::tests` does.
 
 use super::{
-    ChainConfig, ChainId, ChainNetwork, CloseGossipError, Config, ConnectionId, Event, GossipKind,
-    GrandpaState, NotificationsOutErr, OpenGossipError, PeerId, QueueNotificationError,
-    RemoveChainError, SendTopicAffinityError, SingleStreamConnectionTask,
+    ChainConfig, ChainId, ChainNetwork, ChainTraffic, CloseGossipError, Config, ConnectionId,
+    Event, GossipKind, GrandpaState, NotificationsOutErr, OpenGossipError, PeerId, ProtocolTraffic,
+    QueueNotificationError, RemoveChainError, SendTopicAffinityError, SingleStreamConnectionTask,
     SingleStreamHandshakeKind, established, peer_id,
 };
 use crate::libp2p::{connection::noise::NoiseKey, read_write::ReadWrite};
@@ -1707,4 +1707,131 @@ fn statement_reopening_skips_the_unavailable_versions() {
     assert_eq!(errors.len(), 1);
     assert_eq!(statement.asked, [V3, V2, V1, V1]);
     assert_eq!(statement.connected, [V1]);
+}
+
+/// Bytes and messages one side sent over a protocol, mirrored by what the other side received.
+fn assert_mirrored(sent: ProtocolTraffic, received: ProtocolTraffic) {
+    assert_eq!(sent.bytes_out, received.bytes_in);
+    assert_eq!(sent.messages_out, received.messages_in);
+}
+
+/// Block announces, with the substream handshakes, are counted on both sides and add up.
+#[test]
+fn traffic_counts_block_announces() {
+    let mut harness = Harness::connected(false, false);
+    harness.open_gossip_link();
+
+    let header = crate::header::Header {
+        parent_hash: [0; 32],
+        number: 1,
+        state_root: [0; 32],
+        extrinsics_root: [0; 32],
+        digest: crate::header::DigestRef::empty().into(),
+    }
+    .scale_encoding_vec(4);
+    let bob = harness.alice.remote.clone();
+    harness
+        .alice
+        .network
+        .gossip_send_block_announce(&bob, harness.alice.chain_id, &header, true)
+        .unwrap();
+    harness.pump();
+
+    let alice = harness.alice.network.chain_traffic(harness.alice.chain_id);
+    let bob = harness.bob.network.chain_traffic(harness.bob.chain_id);
+    assert_eq!(alice.block_announces.messages_out, 1);
+    assert!(alice.block_announces.bytes_out > header.len() as u64);
+    assert_mirrored(alice.block_announces, bob.block_announces);
+    assert_mirrored(bob.block_announces, alice.block_announces);
+    assert_mirrored(alice.transactions, bob.transactions);
+    assert_eq!(alice.transactions.messages_out, 0);
+    assert_eq!(
+        *alice,
+        ChainTraffic {
+            block_announces: alice.block_announces,
+            transactions: alice.transactions,
+            ..Default::default()
+        }
+    );
+}
+
+/// Statements sent over a statement link are counted on both sides and add up.
+#[test]
+fn traffic_counts_statements() {
+    let mut harness = Harness::connected(true, true);
+    let alice = harness.bob.remote.clone();
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
+
+    harness.bob.network.gossip_insert_desired(
+        harness.bob.chain_id,
+        alice.clone(),
+        GossipKind::Statement,
+    );
+    harness
+        .alice
+        .network
+        .gossip_open(chain_id, &bob, GossipKind::Statement)
+        .unwrap();
+    harness.pump();
+    harness
+        .bob
+        .network
+        .gossip_open(harness.bob.chain_id, &alice, GossipKind::Statement)
+        .unwrap();
+    harness.pump();
+
+    let statement = codec::encode_statement(&codec::Statement {
+        proof: None,
+        decryption_key: None,
+        expiry: 1 << 32,
+        channel: None,
+        topics: Vec::new(),
+        data: Some(vec![1, 2, 3]),
+    })
+    .unwrap();
+    for _ in 0..2 {
+        harness
+            .alice
+            .network
+            .gossip_send_statement(&bob, chain_id, statement.clone())
+            .unwrap();
+    }
+    harness.pump();
+
+    let alice = harness.alice.network.chain_traffic(chain_id);
+    let bob = harness.bob.network.chain_traffic(harness.bob.chain_id);
+    assert_eq!(alice.statements.messages_out, 2);
+    assert_eq!(bob.statements.messages_in, 2);
+    assert_mirrored(alice.statements, bob.statements);
+    assert_mirrored(bob.statements, alice.statements);
+}
+
+/// A request is counted when sent. A request the remote refuses gets no response, so nothing
+/// comes back in.
+#[test]
+fn traffic_counts_refused_request() {
+    let mut harness = Harness::connected(false, false);
+    let bob = harness.alice.remote.clone();
+    harness
+        .alice
+        .network
+        .start_storage_proof_request(
+            &bob,
+            harness.alice.chain_id,
+            codec::StorageProofRequestConfig {
+                block_hash: [0; 32],
+                keys: [[1u8; 4]].into_iter(),
+            },
+            Duration::from_secs(10),
+        )
+        .unwrap();
+    let events = harness.pump();
+    assert_count!(events, Alice, RequestResult, 1);
+
+    let alice = harness.alice.network.chain_traffic(harness.alice.chain_id);
+    assert_eq!(alice.storage_proof.messages_out, 1);
+    assert!(alice.storage_proof.bytes_out > 0);
+    assert_eq!(alice.storage_proof.messages_in, 0);
+    assert_eq!(alice.storage_proof.bytes_in, 0);
 }
