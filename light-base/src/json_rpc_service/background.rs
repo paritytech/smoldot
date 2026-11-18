@@ -212,8 +212,8 @@ struct Background<TPlat: PlatformRef> {
     /// Identical to [`Background::legacy_api_storage_subscriptions`] but indexed by requested key.
     legacy_api_storage_subscriptions_by_key: BTreeSet<(Vec<u8>, Arc<str>)>,
     /// List of storage subscriptions whose values haven't been checked against the current
-    /// best block. Emptied when the query for the current best block fails, in which case the
-    /// check is retried at the next best block.
+    /// best block. The subscriptions of a failed query for the current best block are removed,
+    /// and their check is retried at the next best block.
     legacy_api_stale_storage_subscriptions: hashbrown::HashSet<Arc<str>, fnv::FnvBuildHasher>,
     /// `true` if there exists a background task in [`Background::background_tasks`] currently
     /// fetching storage items for storage subscriptions.
@@ -554,6 +554,7 @@ enum Event<TPlat: PlatformRef> {
     },
     LegacyApiStorageSubscriptionsUpdate {
         block_hash: [u8; 32],
+        subscriptions: hashbrown::HashSet<Arc<str>, fnv::FnvBuildHasher>,
         result: Result<Vec<sync_service::StorageResultItem>, sync_service::StorageQueryError>,
     },
     BitswapGetResult {
@@ -1826,7 +1827,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         debug_assert!(_was_inserted);
                     }
 
-                    methods::MethodCall::state_subscribeStorage { list } => {
+                    methods::MethodCall::state_subscribeStorage { mut list } => {
                         // TODO: limit the size of `list` to avoid DoS attacks; this is out of scope of this module and should be done "externally"
                         if list.is_empty() {
                             // When the list of keys is empty, that means we want to subscribe
@@ -1851,6 +1852,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             me.randomness.fill_bytes(&mut subscription_id);
                             bs58::encode(subscription_id).into_string()
                         });
+
+                        list.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                        list.dedup_by(|a, b| a.0 == b.0);
 
                         for key in list {
                             let _was_inserted = me
@@ -6032,6 +6036,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.legacy_api_storage_query_in_progress = true;
                 me.background_tasks.push(Box::pin({
                     let block_hash = *current_best_block;
+                    let subscriptions = me.legacy_api_stale_storage_subscriptions.clone();
                     let sync_service = me.sync_service.clone();
                     async move {
                         let mut out = Vec::with_capacity(keys.len());
@@ -6064,12 +6069,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 sync_service::StorageQueryProgress::Finished => {
                                     break Event::LegacyApiStorageSubscriptionsUpdate {
                                         block_hash,
+                                        subscriptions,
                                         result: Ok(out),
                                     };
                                 }
                                 sync_service::StorageQueryProgress::Error(error) => {
                                     break Event::LegacyApiStorageSubscriptionsUpdate {
                                         block_hash,
+                                        subscriptions,
                                         result: Err(error),
                                     };
                                 }
@@ -6081,6 +6088,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
             WakeUpReason::Event(Event::LegacyApiStorageSubscriptionsUpdate {
                 block_hash,
+                subscriptions,
                 result: Ok(result),
             }) => {
                 // Background task dedicated to performing a storage query for the storage
@@ -6121,6 +6129,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         .range((key.clone(), Arc::from(String::new()))..)
                         .take_while(|(k, _)| *k == key)
                         .map(|(_, s_id)| s_id.clone())
+                        .filter(|s_id| subscriptions.contains(s_id))
                     {
                         // Like Substrate full nodes, only report the keys whose value has
                         // changed since the last notification sent to this subscription.
@@ -6152,15 +6161,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // Send the notifications and mark the subscriptions as no longer stale if
                 // relevant.
                 for (subscription_id, changes) in notifications_to_send {
-                    // A subscription created while the query was in progress might have keys
-                    // that weren't part of the query. It must stay stale until each of its keys
-                    // has been reported at least once.
-                    let all_keys_notified = me
-                        .legacy_api_storage_subscriptions
-                        .range((subscription_id.clone(), Vec::new())..)
-                        .take_while(|((s, _), _)| *s == subscription_id)
-                        .all(|(_, last_notified)| last_notified.is_some());
-                    if is_up_to_date && all_keys_notified {
+                    if is_up_to_date {
                         me.legacy_api_stale_storage_subscriptions
                             .remove(&subscription_id);
                     }
@@ -6187,6 +6188,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             // subscription has finished but was unsuccessful.
             WakeUpReason::Event(Event::LegacyApiStorageSubscriptionsUpdate {
                 block_hash,
+                subscriptions,
                 result: Err(_),
             }) => {
                 // Background task dedicated to performing a storage query for the storage
@@ -6194,8 +6196,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 debug_assert!(me.legacy_api_storage_query_in_progress);
                 me.legacy_api_storage_query_in_progress = false;
 
-                // If the query targeted the current best block, the subscriptions are marked as
-                // no longer stale, so that the query is retried when the next best block is
+                // If the query targeted the current best block, the subscriptions of the query are
+                // marked as no longer stale, so that the query is retried when the next best block is
                 // reported rather than immediately, which would loop if no peer can answer.
                 let is_up_to_date = match me.runtime_service_subscription {
                     RuntimeServiceSubscription::Active {
@@ -6205,7 +6207,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | RuntimeServiceSubscription::Pending(_) => true,
                 };
                 if is_up_to_date {
-                    me.legacy_api_stale_storage_subscriptions.clear();
+                    me.legacy_api_stale_storage_subscriptions
+                        .retain(|s_id| !subscriptions.contains(s_id));
                 }
             }
 

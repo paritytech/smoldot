@@ -15,9 +15,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // `state_subscribeStorage` must report only the keys whose value changed, like
-// a full node. Once the relay chain is synced, opens two subscriptions:
+// a full node. Once the relay chain is synced, opens three subscriptions:
 // - `changing`: `:code`, `System::Number` and a key that doesn't exist.
 // - `constant`: `:code` and the key that doesn't exist.
+// - `partial`: `System::Number` and another key that doesn't exist, so only
+//   one of its keys is shared with `changing`.
+// `constant` and `partial` are usually opened while the query started for
+// `changing` is running.
 // Checks that the first notification of each subscription has all its keys,
 // that the next ROUNDS notifications of `changing` only have `System::Number`,
 // and that `constant` gets no notification after its first one.
@@ -34,6 +38,7 @@ const CODE_KEY = "0x3a636f6465";
 const SYSTEM_NUMBER_KEY =
   "0x26aa394eea5630e07c48ae0c9558cef702a5c1b19ab7a04f536c519aca4983ac";
 const ABSENT_KEY = "0x0000e2e7e5";
+const OTHER_ABSENT_KEY = "0x0000e2e7e6";
 const NOTIFICATIONS_TIMEOUT_MS = 180_000;
 
 const keysOf = (notification) =>
@@ -60,15 +65,27 @@ export default async function legacyStorageSubscription(ctx) {
   // response stay in the queue.
   const changingKeys = [CODE_KEY, SYSTEM_NUMBER_KEY, ABSENT_KEY];
   const constantKeys = [CODE_KEY, ABSENT_KEY];
-  const [changingId, constantId] = await Promise.all([
+  const partialKeys = [SYSTEM_NUMBER_KEY, OTHER_ABSENT_KEY];
+  const [changingId, constantId, partialId] = await Promise.all([
     rpc.sendRpcOutOfBand(relay, "state_subscribeStorage", [changingKeys], 30_000),
     rpc.sendRpcOutOfBand(relay, "state_subscribeStorage", [constantKeys], 30_000),
+    rpc.sendRpcOutOfBand(relay, "state_subscribeStorage", [partialKeys], 30_000),
   ]);
-  report("state_subscribeStorage", true, `changing ${changingId}, constant ${constantId}`);
+  report(
+    "state_subscribeStorage",
+    true,
+    `changing ${changingId}, constant ${constantId}, partial ${partialId}`,
+  );
 
+  const names = new Map([
+    [changingId, "changing"],
+    [constantId, "constant"],
+    [partialId, "partial"],
+  ]);
   const received = new Map([
     [changingId, []],
     [constantId, []],
+    [partialId, []],
   ]);
   await rpc.readJsonRpcUntil(
     relay,
@@ -78,7 +95,7 @@ export default async function legacyStorageSubscription(ctx) {
       if (!list) return undefined;
       list.push(msg.params.result);
       log(
-        `${msg.params.subscription === changingId ? "changing" : "constant"}: ` +
+        `${names.get(msg.params.subscription)}: ` +
           `block ${msg.params.result.block} keys ${keysOf(msg.params.result).join(",")}`,
       );
       return received.get(changingId).length > rounds ? true : undefined;
@@ -88,6 +105,7 @@ export default async function legacyStorageSubscription(ctx) {
 
   const changing = received.get(changingId);
   const constant = received.get(constantId);
+  const partial = received.get(partialId);
 
   report(
     `changing: received ${rounds + 1} notifications`,
@@ -119,5 +137,11 @@ export default async function legacyStorageSubscription(ctx) {
     "constant: first notification has all keys",
     constant.length > 0 && sameKeys(keysOf(constant[0]), constantKeys),
     constant.length > 0 ? keysOf(constant[0]).join(",") : "none",
+  );
+
+  report(
+    "partial: first notification has all keys",
+    partial.length > 0 && sameKeys(keysOf(partial[0]), partialKeys),
+    partial.length > 0 ? keysOf(partial[0]).join(",") : "none",
   );
 }
