@@ -17,7 +17,9 @@ missing=false
 if [ "$SKIP" != "true" ] && [ -z "$HEAD_REPO" ]; then
     errors+=("The repository of this PR's branch was deleted, so its files can't be read. Push the branch again from an existing fork.")
 elif [ "$SKIP" != "true" ] && ! gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" \
-        --jq '.[] | select(.status != "removed") | "\(.status) \(.filename)"' > "$WORK/files"; then
+        --jq '.[] | "\(.status) \(.filename | gsub("[[:cntrl:]]"; "?"))",
+            (select(.status == "renamed") | "removed \(.previous_filename | gsub("[[:cntrl:]]"; "?"))")' \
+        > "$WORK/files"; then
     errors+=("Could not list the files of this PR through the GitHub API. Re-run the check.")
 elif [ "$SKIP" != "true" ]; then
     if grep -qx '[a-z]* wasm-node/CHANGELOG.md' "$WORK/files"; then
@@ -31,10 +33,19 @@ elif [ "$SKIP" != "true" ]; then
     fi
 
     mkdir "$WORK/prdoc"
-    while read -r _ file; do
+    while read -r status file; do
         name="${file#prdoc/}"
+        shown="$(printf '%s' "$file" | tr -c 'a-zA-Z0-9._/-' '?')"
+        if [ "$status" = removed ]; then
+            errors+=("\`$shown\` is deleted or renamed by this PR. It holds the changelog entry of another PR; restore it.")
+            continue
+        fi
         if [[ ! "$name" =~ ^[a-z0-9][a-z0-9._-]*\.prdoc$ ]]; then
-            errors+=("\`$file\`: file name must match \`[a-z0-9][a-z0-9._-]*.prdoc\`.")
+            errors+=("\`$shown\`: file name must match \`[a-z0-9][a-z0-9._-]*.prdoc\`.")
+            continue
+        fi
+        if [[ "$status" != modified && "$name" =~ ^pr_([0-9]+)\.prdoc$ ]] && [ "${BASH_REMATCH[1]}" != "$PR_NUMBER" ]; then
+            errors+=("\`$file\`: the name says PR #${BASH_REMATCH[1]}, but this is PR #$PR_NUMBER. Rename it to \`pr_$PR_NUMBER.prdoc\` or use a name without a number.")
             continue
         fi
         if ! gh api -H 'Accept: application/vnd.github.raw' \

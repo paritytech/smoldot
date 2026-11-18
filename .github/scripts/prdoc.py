@@ -39,6 +39,8 @@ SECTIONS = ["added", "changed", "fixed", "removed"]
 FILE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*\.prdoc$")
 PR_FILE_NAME = re.compile(r"^pr_(\d+)\.prdoc$")
 PR_SUBJECT = re.compile(r"\(#(\d+)\)\s*$|^Merge pull request #(\d+)")
+MULTI_PARAGRAPH = re.compile(r"\n[ \t]*\n|^[ \t]*(?:[-*+]|\d+[.)])[ \t]", re.M)
+MAX_SIZE = 64 * 1024
 
 
 class PrdocError(Exception):
@@ -60,6 +62,8 @@ def load(path):
         raise PrdocError("file name must match `[a-z0-9][a-z0-9._-]*.prdoc`")
 
     try:
+        if path.stat().st_size > MAX_SIZE:
+            raise PrdocError("larger than 64 KiB")
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
     except UnicodeDecodeError:
         raise PrdocError("not valid UTF-8")
@@ -67,12 +71,14 @@ def load(path):
         raise PrdocError(e.strerror or str(e))
     except yaml.YAMLError as e:
         raise PrdocError(f"invalid YAML: {e}")
+    except RecursionError:
+        raise PrdocError("invalid YAML: nested too deeply")
     if not isinstance(doc, dict):
         raise PrdocError("top level must be a mapping")
 
     unknown = set(doc) - {"changes", "fixes", "related"}
     if unknown:
-        raise PrdocError(f"unknown fields: {', '.join(sorted(unknown))}")
+        raise PrdocError(f"unknown fields: {', '.join(sorted(map(str, unknown)))}")
 
     changes = doc.get("changes")
     if not isinstance(changes, list) or not changes:
@@ -84,6 +90,10 @@ def load(path):
             raise PrdocError(f"changes[{i}].section must be one of: {', '.join(SECTIONS)}")
         if not isinstance(change["description"], str) or not change["description"].strip():
             raise PrdocError(f"changes[{i}].description must be a non-empty string")
+        if MULTI_PARAGRAPH.search(change["description"].strip()):
+            raise PrdocError(
+                f"changes[{i}].description must be one paragraph without lists, it becomes one CHANGELOG line"
+            )
 
     return {
         "path": path,
@@ -174,7 +184,10 @@ def cmd_release(version, date):
         lines += ["", "No user-visible changes."]
     new_section = "\n".join(lines) + "\n"
 
-    changelog = CHANGELOG.read_text()
+    changelog = CHANGELOG.read_text(encoding="utf-8")
+    if f"\n## {version} " in changelog:
+        print(f"error: {CHANGELOG} already has a `## {version}` section", file=sys.stderr)
+        return 1
     marker = "## Unreleased\n"
     if changelog.count(marker) != 1:
         print(f"error: expected exactly one `{marker.strip()}` in {CHANGELOG}", file=sys.stderr)
@@ -184,7 +197,7 @@ def cmd_release(version, date):
     if not rest.startswith("## "):
         print(f"error: `{marker.strip()}` is not empty, move its entries to prdoc files", file=sys.stderr)
         return 1
-    CHANGELOG.write_text(f"{head}{marker}\n{new_section}\n{rest}")
+    CHANGELOG.write_text(f"{head}{marker}\n{new_section}\n{rest}", encoding="utf-8")
 
     for f in files:
         f.unlink()

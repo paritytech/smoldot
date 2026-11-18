@@ -44,6 +44,12 @@ skipped automatically. Release PRs also carry the label.
 - The PR adds no `prdoc/<name>.prdoc` file, or one of its prdoc files is
   invalid, unless the PR has the `no-changelog` label.
 - The PR edits `wasm-node/CHANGELOG.md` without the `no-changelog` label.
+- The PR deletes or renames a prdoc file that is already on `main`, without
+  the `no-changelog` label.
+- The PR adds a `pr_<N>.prdoc` file where `N` is not this PR's number.
+
+A description must be one paragraph without lists, since it becomes one
+CHANGELOG line.
 
 On failure it posts a comment on the PR explaining the fix, with a link that
 creates the file from the template. The comment is updated on each run and
