@@ -2537,7 +2537,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     continue;
                 };
 
-                if matches!(&affinity, TopicAffinity::Topics(topics) if topics.is_empty()) {
+                if affinity == TopicAffinity::Topics(Vec::new()) {
                     peering.affinities.remove(&subscriber);
                 } else {
                     peering.affinities.insert(subscriber, affinity);
