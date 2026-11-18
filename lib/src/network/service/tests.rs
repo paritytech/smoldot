@@ -186,7 +186,7 @@ impl Harness {
         }
     }
 
-    /// Delivers all pending coordinator->connection messages for the given side.
+    /// Delivers all pending coordinator-to-connection messages for the given side.
     fn deliver_coord_to_conn(&mut self, side: Side) -> bool {
         let now = self.now;
         let node = self.node(side);
@@ -200,7 +200,7 @@ impl Harness {
         progress
     }
 
-    /// Pulls all connection->coordinator messages for the given side and injects them into its
+    /// Pulls all connection-to-coordinator messages for the given side and injects them into its
     /// coordinator. Does not call `next_event`.
     fn drain_conn_to_coord(&mut self, side: Side) -> bool {
         let node = self.node(side);

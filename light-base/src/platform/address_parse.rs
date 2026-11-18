@@ -172,7 +172,7 @@ pub enum Error {
 
     /// Multiaddress contains a domain name that isn't UTF-8.
     ///
-    /// > **Note**: According to RFC2181 section 11, a domain name is not necessarily an UTF-8
+    /// > **Note**: According to RFC 2181 section 11, a domain name is not necessarily an UTF-8
     /// >           string. Any binary data can be used as a domain name, provided it follows
     /// >           a few restrictions (notably its length). However, in this context, we
     /// >           automatically consider as non-supported a multiaddress that contains a

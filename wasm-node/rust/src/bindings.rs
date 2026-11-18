@@ -192,7 +192,7 @@ unsafe extern "C" {
     /// - (optional) The 32 bytes SHA-256 hash of the certificate of the remote.
     /// - An UTF-8-encoded IP address or domain name. Use the `addr_len` parameter to determine
     ///   its length. When using an IPv4, it is encoded as `a.b.c.d`. When using an IPv6, it is
-    ///   encoded according to RFC5952.
+    ///   encoded according to RFC 5952.
     ///
     /// The `type` byte defines the type of connection and whether the optional field is present:
     ///

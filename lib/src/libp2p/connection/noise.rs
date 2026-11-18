@@ -1333,7 +1333,7 @@ impl CipherState {
         }))
     }
 
-    /// Creates a ChaChaPoly1305 frame as a `Vec`.
+    /// Creates a ChaCha20-Poly1305 frame as a `Vec`.
     ///
     /// Does *not* include the libp2p-specific message length prefix.
     fn write_chachapoly_message_to_vec(

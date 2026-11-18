@@ -272,7 +272,7 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
     established_bitswap_desired: hashbrown::HashSet<PeerIndex, fnv::FnvBuildHasher>,
 
     /// All the Bitswap protocols, indexed by `PeerId`, direction, and state.
-    /// TODO: as with Notifications protocol, unclear whether PeerId should come before or after
+    /// TODO: as with Notifications protocol, unclear whether `PeerId` should come before or after
     /// the state, same for direction/state.
     bitswap_substreams_by_peer_id: BTreeSet<(
         PeerIndex,
@@ -3987,7 +3987,7 @@ where
     ///
     /// Identify is sent at most once per peer (on first established connection). Peers that
     /// connected before [`ChainNetwork::add_chain`] was called for this chain will not appear
-    /// in this set even if their Identify response advertised the chain's Kad protocol — only
+    /// in this set even if their Identify response advertised the chain's Kad protocol - only
     /// peers whose Identify response is processed *after* the chain was added are inserted.
     ///
     /// # Panic
