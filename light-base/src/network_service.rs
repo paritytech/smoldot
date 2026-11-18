@@ -213,6 +213,11 @@ pub struct NetworkService<TPlat: PlatformRef> {
     /// Channel connected to the background service.
     messages_tx: async_channel::Sender<ToBackground<TPlat>>,
 
+    /// Identifier that [`NetworkServiceChain::new_topic_affinity_subscriber`] returns next.
+    /// Shared by all the chains, as the background service merges the chains that have the
+    /// same genesis block and fork id.
+    next_topic_affinity_subscriber: Arc<AtomicUsize>,
+
     /// See [`Config::platform`].
     platform: TPlat,
 
@@ -315,6 +320,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
         Arc::new(NetworkService {
             messages_tx: main_messages_tx,
+            next_topic_affinity_subscriber: Arc::new(AtomicUsize::new(0)),
             platform: config.platform,
             metrics,
         })
@@ -396,7 +402,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         Arc::new(NetworkServiceChain {
             _keep_alive_messages_tx: self.messages_tx.clone(),
             messages_tx,
-            next_topic_affinity_subscriber: AtomicUsize::new(0),
+            next_topic_affinity_subscriber: self.next_topic_affinity_subscriber.clone(),
             metrics: chain_metrics,
             platform: self.platform.clone(),
         })
@@ -411,8 +417,8 @@ pub struct NetworkServiceChain<TPlat: PlatformRef> {
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackgroundChain>,
 
-    /// Identifier that [`NetworkServiceChain::new_topic_affinity_subscriber`] returns next.
-    next_topic_affinity_subscriber: AtomicUsize,
+    /// Copy of [`NetworkService::next_topic_affinity_subscriber`].
+    next_topic_affinity_subscriber: Arc<AtomicUsize>,
 
     /// Metrics of the chain.
     metrics: Arc<metrics::ChainMetrics>,
@@ -4503,7 +4509,7 @@ mod tests {
         assert!(filter.matches_statement(&[&t]));
     }
 
-    // Two handles of the same chain subscribe to one topic each. The filter must hold both
+    // Two handles of the same chain subscribe to overlapping topics. The filter must hold both
     // topics, and only the topic of the first handle once the second one unsubscribes.
     #[test]
     fn combined_topic_affinity_covers_every_subscriber() {
