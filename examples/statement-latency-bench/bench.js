@@ -7,8 +7,9 @@ import { start } from "smoldot";
 import { loadChainSpec } from "./chainspec.js";
 import { getKeypair } from "./keypair.js";
 import { SmoldotRpc } from "./smoldot-rpc.js";
-import { runClient } from "./client.js";
+import { emptyDelivery, prepareClient, runClient } from "./client.js";
 import { FailureKind, fail, reportResults } from "./stats.js";
+import { PAYLOAD_HEADER_LEN } from "./statement.js";
 
 const LEVEL = { ERROR: 1, WARN: 2, INFO: 3, DEBUG: 4, TRACE: 5 };
 const LEVEL_LABEL = { 1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE" };
@@ -40,6 +41,9 @@ function parseMessagesPattern(pattern) {
     if (!Number.isFinite(count) || !Number.isFinite(size)) {
       throw new Error(`Invalid count/size in pattern '${part}'`);
     }
+    if (size < PAYLOAD_HEADER_LEN) {
+      throw new Error(`Size in pattern '${part}' is below the ${PAYLOAD_HEADER_LEN} bytes of the payload header`);
+    }
     return [count, size];
   });
 }
@@ -52,6 +56,9 @@ function parseFlags(argv) {
       "relay-chain-spec": { type: "string" },
       "false-positive-rate": { type: "string", default: "0.01" },
       "num-clients": { type: "string", default: "100" },
+      "client-offset": { type: "string", default: "0" },
+      "offset-by-pod-index": { type: "boolean", default: false },
+      "topics-per-round": { type: "boolean", default: false },
       "num-rounds": { type: "string", default: "1" },
       "messages-pattern": { type: "string", default: "5:512" },
       "receive-timeout-ms": { type: "string", default: "5000" },
@@ -80,11 +87,21 @@ function parseFlags(argv) {
   if (!(workers > 0)) throw new Error(`--workers must be > 0`);
   if (workers > numClients) throw new Error(`--workers (${workers}) cannot exceed --num-clients (${numClients})`);
 
+  let clientOffset = Number.parseInt(values["client-offset"], 10);
+  if (!(clientOffset >= 0)) throw new Error(`--client-offset must be >= 0`);
+  if (values["offset-by-pod-index"]) {
+    const podIndex = Number.parseInt(process.env.JOB_COMPLETION_INDEX ?? "", 10);
+    if (!(podIndex >= 0)) throw new Error(`--offset-by-pod-index needs JOB_COMPLETION_INDEX`);
+    clientOffset += podIndex * numClients;
+  }
+
   return {
     parachainSpecSource: values["parachain-spec"],
     relayChainSpecSource: values["relay-chain-spec"],
     falsePositiveRate: Number.parseFloat(values["false-positive-rate"]),
     numClients,
+    clientOffset,
+    topicsPerRound: values["topics-per-round"],
     numRounds,
     workers,
     messagesPattern: parseMessagesPattern(values["messages-pattern"]),
@@ -103,7 +120,8 @@ function logConfiguration(log, args) {
     `Starting Statement Store Latency Benchmark: ` +
       `parachain_spec=${args.parachainSpecSource} ` +
       `relay_chain_spec=${args.relayChainSpecSource} ` +
-      `clients=${args.numClients} rounds=${args.numRounds} ` +
+      `clients=${args.numClients} client_offset=${args.clientOffset} ` +
+      `topics=${args.topicsPerRound ? "per-round" : "fixed"} rounds=${args.numRounds} ` +
       `workers=${args.workers} ` +
       `interval=${args.intervalMs}ms pattern=[${pattern}]`,
   );
@@ -204,7 +222,8 @@ async function spawnClient({ clientId, args, parachainSpec, relaySpec, log }) {
 
 // Run a contiguous range [clientStart, clientEnd) of clients in this process.
 // Used both by single-process mode (range = [0, numClients)) and by each
-// child worker.
+// child worker. The range counts clients inside this bench. The id of a client,
+// which names its account and its topics, is its index plus `args.clientOffset`.
 //
 // `barrier` synchronises the start of round 1 across all clients (and across
 // workers when multi-worker). After warmup each client calls `barrier.arrive()`
@@ -219,7 +238,29 @@ async function runWorker({ args, clientStart, clientEnd, testRunId, log, barrier
   const abortController = new AbortController();
   const handles = [];
 
-  for (let clientId = clientStart; clientId < clientEnd; clientId++) {
+  for (let index = clientStart; index < clientEnd; index++) {
+    const clientId = args.clientOffset + index;
+    const config = {
+      clientId,
+      neighbourId: args.clientOffset + ((index + 1) % args.numClients),
+      isLeader: index === 0,
+      numClients: args.numClients,
+      numRounds: args.numRounds,
+      testRunId,
+      topicsPerRound: args.topicsPerRound,
+      messagesPattern: args.messagesPattern,
+      receiveTimeoutMs: args.receiveTimeoutMs,
+      intervalMs: args.intervalMs,
+      statementExpiryMs: args.statementExpiryMs,
+      failFast: args.failFast,
+    };
+    // Result of a client that never reached round 1.
+    const neverRan = (detail) => ({
+      successes: [],
+      failures: [fail(log, clientId, null, FailureKind.TaskPanicked, detail)],
+      delivery: emptyDelivery(config, args.numRounds),
+    });
+
     handles.push((async () => {
       // Each client owns one barrier arrival. If the client fails before its
       // normal arrival point (e.g. smoldot start, addChain, getKeypair), it
@@ -237,29 +278,11 @@ async function runWorker({ args, clientStart, clientEnd, testRunId, log, barrier
         resources = await spawnClient({ clientId, args, parachainSpec, relaySpec, log });
       } catch (e) {
         arriveOnce();
-        return {
-          successes: [],
-          failures: [
-            fail(log, clientId, null, FailureKind.TaskPanicked, `failed to start smoldot: ${e.message}`),
-          ],
-        };
+        return neverRan(`failed to start smoldot: ${e.message}`);
       }
 
       try {
         const pair = await getKeypair(clientId);
-        const config = {
-          clientId,
-          neighbourId: (clientId + 1) % args.numClients,
-          numClients: args.numClients,
-          numRounds: args.numRounds,
-          testRunId,
-          messagesPattern: args.messagesPattern,
-          receiveTimeoutMs: args.receiveTimeoutMs,
-          intervalMs: args.intervalMs,
-          statementExpiryMs: args.statementExpiryMs,
-          failFast: args.failFast,
-        };
-
         // Warm-up: smoldot has no JSON-RPC signal for "I have a statement-store
         // peer", but addChain returns long before the chain has finalized its
         // first block, and statement_submitStatement just hangs silently on an
@@ -285,6 +308,8 @@ async function runWorker({ args, clientStart, clientEnd, testRunId, log, barrier
           );
         }
 
+        const prepared = await prepareClient({ config, rpc: resources.rpc, log });
+
         // Synchronise round 1 across all clients globally. Without this each
         // client enters round 1 as soon as its own warmup completes, drifts on
         // round-1 receive timeouts, and senders end up emitting statements for
@@ -298,6 +323,7 @@ async function runWorker({ args, clientStart, clientEnd, testRunId, log, barrier
           pair,
           abortSignal: abortController.signal,
           log,
+          prepared,
         });
 
         if (args.failFast && result.failures.length > 0) {
@@ -306,12 +332,7 @@ async function runWorker({ args, clientStart, clientEnd, testRunId, log, barrier
 
         return result;
       } catch (e) {
-        return {
-          successes: [],
-          failures: [
-            fail(log, clientId, null, FailureKind.TaskPanicked, e?.message ?? String(e)),
-          ],
-        };
+        return neverRan(e?.message ?? String(e));
       } finally {
         arriveOnce();
         await resources.cleanup();
@@ -322,11 +343,13 @@ async function runWorker({ args, clientStart, clientEnd, testRunId, log, barrier
   const results = await Promise.all(handles);
   const successes = [];
   const failures = [];
+  const deliveries = [];
   for (const r of results) {
     successes.push(...r.successes);
     failures.push(...r.failures);
+    deliveries.push(r.delivery);
   }
-  return { successes, failures };
+  return { successes, failures, deliveries };
 }
 
 // Compute [start, end) for worker `i` of `total`, splitting `n` clients
@@ -367,7 +390,7 @@ async function runAsParent(args, log) {
       log.info(`All ${args.numClients} clients ready; starting round 1`);
       barrier.release();
     });
-    const { successes, failures } = await runWorker({
+    const { successes, failures, deliveries } = await runWorker({
       args,
       clientStart: 0,
       clientEnd: args.numClients,
@@ -375,7 +398,7 @@ async function runAsParent(args, log) {
       log,
       barrier,
     });
-    reportResults(log, successes, failures, args.numClients, args.numRounds);
+    reportResults(log, successes, failures, deliveries, args.numClients, args.numRounds);
     process.exit(failures.length > 0 && successes.length === 0 ? 1 : 0);
   }
 
@@ -450,11 +473,13 @@ async function runAsParent(args, log) {
 
   const successes = [];
   const failures = [];
+  const deliveries = [];
   for (const r of childResults) {
     successes.push(...r.successes);
     failures.push(...r.failures);
+    deliveries.push(...r.deliveries);
   }
-  reportResults(log, successes, failures, args.numClients, args.numRounds);
+  reportResults(log, successes, failures, deliveries, args.numClients, args.numRounds);
   process.exit(failures.length > 0 && successes.length === 0 ? 1 : 0);
 }
 
@@ -477,7 +502,7 @@ async function runAsChild(args) {
     if (msg && msg.type === "start") barrier.release();
   });
 
-  const { successes, failures } = await runWorker({
+  const { successes, failures, deliveries } = await runWorker({
     args,
     clientStart,
     clientEnd,
@@ -488,7 +513,7 @@ async function runAsChild(args) {
 
   if (typeof process.send === "function") {
     await new Promise((resolve) =>
-      process.send({ type: "result", successes, failures }, undefined, undefined, resolve),
+      process.send({ type: "result", successes, failures, deliveries }, undefined, undefined, resolve),
     );
   }
   process.exit(0);

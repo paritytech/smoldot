@@ -51,15 +51,46 @@ as `--parachain-spec`.
 | `--relay-chain-spec` | required | Relay chain raw chain spec — file path or `http(s)://` URL. |
 | `--false-positive-rate` | `0.01` | Statement-store affinity bloom filter rate. |
 | `--num-clients` | `100` | Each spawns its own smoldot instance. |
+| `--client-offset` | `0` | Id of the first client. Client `i` uses the account `//StatementClient//<offset + i>`. |
+| `--offset-by-pod-index` | `false` | Adds `JOB_COMPLETION_INDEX * num-clients` to the offset, so that every pod of a Kubernetes Indexed job gets its own accounts. |
+| `--topics-per-round` | `false` | Use new topics and a new subscription every round. By default a client subscribes once before round 1 and keeps its topics for the whole run. |
 | `--workers` | `1` | If >1, fork that many child processes; clients distributed evenly. Use to scale past one event loop's capacity (~150 clients). |
 | `--num-rounds` | `1` | |
-| `--messages-pattern` | `5:512` | `count:size,count:size,…` |
-| `--receive-timeout-ms` | `5000` | |
+| `--messages-pattern` | `5:512` | `count:size,count:size,…`, sizes of at least 8 bytes. |
+| `--receive-timeout-ms` | `5000` | A statement that arrives later in a fixed-topic run still counts as arrived, and as late. |
 | `--interval-ms` | `10000` | Wall-clock pacing between rounds. |
 | `--statement-expiry-ms` | `600000` | |
 | `--warmup-ms` | `120000` | Max wait for `system_health` to report `peers > 0 && !isSyncing` before round 1; on timeout the client proceeds anyway. |
 | `--fail-fast` | `false` | First failure aborts all clients via AbortController. |
 | `--log-level` | `info` | error/warn/info/debug/trace |
+
+## Topics and accounts
+
+The clients form a ring, and client `i` listens to the topics of client
+`i + 1`. The ring stays inside one bench process tree, so a pod of an Indexed
+job is a ring of its own. With `--offset-by-pod-index` pod `p` uses the
+accounts `p * num-clients` to `(p + 1) * num-clients - 1`, and all of them
+need an allowance.
+
+By default a client has one topic per message of the pattern and keeps it
+for the whole run, as an app does. Every statement carries its round and its
+message index in the first 8 bytes of its data, so the receiver knows which
+round a statement belongs to. A statement of a later round replaces the
+statement of the earlier round on the same channel.
+
+## Delivery report
+
+The run ends with one line per client and one line of totals:
+
+```
+Client 3: expected=90 arrived=87 missing=3 late=0 silent_topics=1 gaps_by_round=[4:1,5:1,6:1]
+Client 3: silent topic 0x…
+Benchmark Delivery: expected=1440 arrived=1437 missing=3 late=0 silent_topics=1 clients_with_loss=1
+```
+
+A silent topic received no statement in the whole run, which points at the
+peer steering. A gap on a topic that received other statements points at
+propagation.
 
 ## Differences from `bench.rs`
 
@@ -83,5 +114,8 @@ as `--parachain-spec`.
   tokens keep working: `Spawning {N} client tasks... {testRunId}`, `Benchmark
   Results: send_min=…`, `Benchmark Failed: failed_clients=…`, `Benchmark
   Finished: rounds_with_any_success=…`. The smoldot port also adds a
-  `Starting Statement Store Latency Benchmark:` config line and an `errors=[…]`
-  segment to `Benchmark Failed`, neither of which exists in `bench.rs`.
+  `Starting Statement Store Latency Benchmark:` config line, an `errors=[…]`
+  segment to `Benchmark Failed` and the `Benchmark Delivery:` line, none of
+  which exists in `bench.rs`.
+- **Fixed topics and payload.** `bench.rs` uses new topics every round and
+  zero-filled data. `--topics-per-round` gives the same topics as `bench.rs`.

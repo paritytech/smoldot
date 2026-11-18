@@ -30,7 +30,36 @@ function f3(n) {
   return n.toFixed(3);
 }
 
-export function reportResults(log, successes, failures, numClients, numRounds) {
+// Logs one line per client with a loss, one line per silent topic, and the totals.
+function reportDelivery(log, deliveries) {
+  const total = { expected: 0, arrived: 0, late: 0, silentTopics: 0, clientsWithLoss: 0 };
+  for (const d of [...deliveries].sort((a, b) => a.clientId - b.clientId)) {
+    total.expected += d.expected;
+    total.arrived += d.arrived;
+    total.late += d.late;
+    total.silentTopics += d.silentTopics.length;
+    const line =
+      `Client ${d.clientId}: expected=${d.expected} arrived=${d.arrived} ` +
+      `missing=${d.expected - d.arrived} late=${d.late} silent_topics=${d.silentTopics.length}`;
+    if (d.arrived === d.expected) {
+      log.info(line);
+      continue;
+    }
+    total.clientsWithLoss += 1;
+    const gaps = d.gaps.map(([round, missing]) => `${round}:${missing}`).join(",");
+    log.warn(`${line} gaps_by_round=[${gaps}]`);
+    for (const topic of d.silentTopics) log.warn(`Client ${d.clientId}: silent topic ${topic}`);
+  }
+  log.info(
+    `Benchmark Delivery: expected=${total.expected} arrived=${total.arrived} ` +
+      `missing=${total.expected - total.arrived} late=${total.late} ` +
+      `silent_topics=${total.silentTopics} clients_with_loss=${total.clientsWithLoss}`,
+  );
+}
+
+export function reportResults(log, successes, failures, deliveries, numClients, numRounds) {
+  reportDelivery(log, deliveries);
+
   if (failures.length > 0) {
     const counts = new Map();
     for (const k of failures) counts.set(k, (counts.get(k) ?? 0) + 1);
