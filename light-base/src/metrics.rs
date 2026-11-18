@@ -28,7 +28,7 @@ use crate::{
 };
 use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap, vec::Vec};
 use core::{fmt, marker::PhantomData, sync::atomic::Ordering};
-use smoldot::json_rpc::methods;
+use smoldot::{json_rpc::methods, network::service::ChainTraffic};
 use strum::IntoEnumIterator;
 
 // 64-bit atomics where the target has them (every realistic deployment target: wasm32,
@@ -84,6 +84,11 @@ impl Counter {
 
     pub fn add(&self, n: u64) {
         saturating_add(&self.0, n);
+    }
+
+    /// Copies a total that only goes up and is counted elsewhere.
+    pub fn set(&self, value: u64) {
+        self.0.store(narrow(value), Ordering::Relaxed);
     }
 
     pub fn get(&self) -> u64 {
@@ -200,6 +205,10 @@ pub struct NetworkMetrics {
     pub connections_handshakes_finished: Counter,
     /// Connections closed, whether or not the handshake had finished.
     pub connections_shutdowns: Counter,
+    /// Bytes read from all connections, including the encryption and multiplexing framing.
+    pub bytes_received: Counter,
+    /// Bytes written to all connections, including the encryption and multiplexing framing.
+    pub bytes_sent: Counter,
     /// Addresses obtained through discovery and discarded instead of stored.
     pub(crate) discovery_addresses_dropped: LabeledCounter<DiscoveredAddressDropReason>,
 }
@@ -241,6 +250,74 @@ pub struct ChainMetrics {
 
     pub transactions_dropped: LabeledCounter<DropReasonKind>,
     pub json_rpc_requests: Counter,
+
+    /// Bytes and messages per network protocol, copied from the network service.
+    pub traffic: TrafficMetrics,
+}
+
+/// Label values of the `protocol` label of the traffic metrics, in the order of
+/// [`traffic_protocols`].
+const TRAFFIC_PROTOCOLS: [&str; 10] = [
+    "blocks",
+    "warp-sync",
+    "state",
+    "storage-proof",
+    "call-proof",
+    "kademlia",
+    "block-announces",
+    "transactions",
+    "grandpa",
+    "statements",
+];
+
+fn traffic_protocols(t: &ChainTraffic) -> [&smoldot::network::service::ProtocolTraffic; 10] {
+    [
+        &t.blocks,
+        &t.warp_sync,
+        &t.state,
+        &t.storage_proof,
+        &t.call_proof,
+        &t.kademlia,
+        &t.block_announces,
+        &t.transactions,
+        &t.grandpa,
+        &t.statements,
+    ]
+}
+
+/// Per-protocol traffic of one chain: bytes in, bytes out, messages in, messages out.
+#[derive(Debug, Default)]
+pub struct TrafficMetrics([[Counter; 4]; 10]);
+
+impl TrafficMetrics {
+    /// Copies the totals kept by the network service.
+    pub fn set(&self, traffic: &ChainTraffic) {
+        for (counters, t) in self.0.iter().zip(traffic_protocols(traffic)) {
+            counters[0].set(t.bytes_in);
+            counters[1].set(t.bytes_out);
+            counters[2].set(t.messages_in);
+            counters[3].set(t.messages_out);
+        }
+    }
+
+    fn entries(&self, offset: usize) -> Vec<methods::MetricEntry> {
+        TRAFFIC_PROTOCOLS
+            .iter()
+            .zip(self.0.iter())
+            .flat_map(|(protocol, counters)| {
+                [
+                    entry(
+                        &[("protocol", protocol), ("direction", "in")],
+                        counters[offset].get(),
+                    ),
+                    entry(
+                        &[("protocol", protocol), ("direction", "out")],
+                        counters[offset + 1].get(),
+                    ),
+                ]
+            })
+            .collect()
+    }
 }
 
 impl ChainMetrics {
@@ -356,6 +433,18 @@ pub fn snapshot(network: &NetworkMetrics, chain: &ChainMetrics) -> methods::Metr
             "networkConnectionsShutdownsTotal",
             network.connections_shutdowns.get()
         ),
+        counter("networkBytesReceivedTotal", network.bytes_received.get()),
+        counter("networkBytesSentTotal", network.bytes_sent.get()),
+        methods::Metric {
+            name: Cow::Borrowed("networkProtocolBytesTotal"),
+            ty: methods::MetricType::Counter,
+            entries: chain.traffic.entries(0),
+        },
+        methods::Metric {
+            name: Cow::Borrowed("networkProtocolMessagesTotal"),
+            ty: methods::MetricType::Counter,
+            entries: chain.traffic.entries(2),
+        },
         labeled_counter(
             "networkDiscoveryAddressesDroppedTotal",
             "reason",
@@ -494,6 +583,35 @@ mod tests {
             .map(<&'static str>::from)
             .collect::<Vec<_>>();
         assert_eq!(labels, ["peer-id-mismatch", "not-supported", "invalid"]);
+    }
+
+    #[test]
+    fn traffic_entries() {
+        let metrics = TrafficMetrics::default();
+        let mut traffic = ChainTraffic::default();
+        traffic.grandpa.bytes_in = 10;
+        traffic.grandpa.bytes_out = 20;
+        traffic.grandpa.messages_in = 1;
+        traffic.statements.messages_out = 2;
+        metrics.set(&traffic);
+
+        let value = |entries: &[methods::MetricEntry], protocol: &str, direction: &str| {
+            entries
+                .iter()
+                .find(|e| e.labels["protocol"] == protocol && e.labels["direction"] == direction)
+                .unwrap()
+                .value
+        };
+        let bytes = metrics.entries(0);
+        let messages = metrics.entries(2);
+        assert_eq!(bytes.len(), 20);
+        assert_eq!(messages.len(), 20);
+        assert_eq!(value(&bytes, "grandpa", "in"), 10.0);
+        assert_eq!(value(&bytes, "grandpa", "out"), 20.0);
+        assert_eq!(value(&messages, "grandpa", "in"), 1.0);
+        assert_eq!(value(&messages, "statements", "out"), 2.0);
+        assert_eq!(bytes.iter().map(|e| e.value).sum::<f64>(), 30.0);
+        assert_eq!(messages.iter().map(|e| e.value).sum::<f64>(), 3.0);
     }
 
     #[test]
