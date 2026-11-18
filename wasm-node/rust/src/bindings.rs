@@ -105,7 +105,7 @@ unsafe extern "C" {
     /// can be negative, and abort execution if that is the case.
     pub safe fn unix_timestamp_us() -> u64;
 
-    /// Returns the number of microseconds since an especified point in time. Must never decrease
+    /// Returns the number of microseconds since a specified point in time. Must never decrease
     /// over time.
     pub safe fn monotonic_clock_us() -> u64;
 
@@ -202,7 +202,7 @@ unsafe extern "C" {
     /// - `4`: WebSocket connection, with a port and an IPv4 address.
     /// - `5`: WebSocket connection, with a port and an IPv6 address.
     /// - `6`: WebSocket connection, with a port and a domain name.
-    /// - `14`: WebSocket secure connection, with a port and a domaine name.
+    /// - `14`: WebSocket secure connection, with a port and a domain name.
     /// - `16`: WebRTC connection, with a port, an IPv4 address, and a remote certificate hash.
     /// - `17`: WebRTC connection, with a port, an IPv6 address, and a remote certificate hash.
     /// - `18`: WebRTC connection, with a port, a domain name, and a remote certificate hash.

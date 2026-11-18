@@ -156,7 +156,7 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
     /// the entries `("block_hash", ...)` and `("sender", ...)`.
     ///
     /// At the time of writing of this comment, `message` can also be a message written in plain
-    /// english and destined to the user of the library. This might disappear in the future.
+    /// English and destined to the user of the library. This might disappear in the future.
     // TODO: act on this last sentence ^
     fn log<'a>(
         &self,

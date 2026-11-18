@@ -589,7 +589,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Requests ordered by timeout.
     requests_by_timeout: BTreeSet<(TPlat::Instant, RequestId)>,
     /// Requests ordered by CID. The request IDs in the `VecDeque` are ordered by their timeout if
-    /// the platform implementation of `now` is monothonic (true for
+    /// the platform implementation of `now` is monotonic (true for
     /// [`crate::platform::DefaultPlatform`]).
     requests_by_cid: hashbrown::HashMap<Cid, VecDeque<RequestId>, util::SipHasherBuild>,
     /// In-flight batches. Each entry corresponds to a `bitswap_stream` call.

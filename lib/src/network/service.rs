@@ -127,7 +127,7 @@ pub struct Config {
     /// This is a defensive measure against users passing a dummy seed instead of actual entropy.
     pub randomness_seed: [u8; 32],
 
-    /// Amount of time after which a connection hathat ndshake is considered to have taken too long
+    /// Amount of time after which a connection handshake is considered to have taken too long
     /// and must be aborted.
     pub handshake_timeout: Duration,
 }
@@ -5020,7 +5020,7 @@ where
     ///
     /// This can be used to close either a pending opening (after [`ChainNetwork::bitswap_open`]
     /// and before [`Event::BitswapConnected`], [`Event::BitswapOpenFailed`] was generated), or a
-    /// fully open Bitswap susbstream (before [`Event::BitswapDisconnected`] event is generated).
+    /// fully open Bitswap substream (before [`Event::BitswapDisconnected`] event is generated).
     ///
     /// Also closes any inbound Bitswap substreams with that peer, since inbound substreams are
     /// only allowed when an outbound substream is open.
