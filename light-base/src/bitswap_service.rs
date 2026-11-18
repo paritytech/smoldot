@@ -324,11 +324,11 @@ enum BitswapJsonRpcError {
     /// Transient failure. Can retry immediately.
     ///
     /// Even though the client can retry immediately, the clients are encouraged to rate-limit the
-    /// retry attempts and retry count, e.g. introducing a delay of 50 milliseconds between retries.
+    /// retry attempts and retry count, e.g. introducing a delay of 50ms between retries.
     FailRetry = -32811,
     /// Transient failure. Retry after a backoff delay.
     ///
-    /// The recommended backoff delay is 5 seconds.
+    /// The recommended backoff delay is 5s.
     FailRetryBackoff = -32812,
 }
 

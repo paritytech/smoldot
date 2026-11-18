@@ -45,7 +45,7 @@ use smoldot::{
 
 /// Maximum wait for the first `GrandpaNeighborPacket` before falling back to `AllForksOnly`.
 /// Sized for cold-start peer discovery (DNS + libp2p handshake + gossip-open), which can
-/// stretch to about 20 seconds on light clients.
+/// stretch to about 20s on light clients.
 // TODO follow-up: integration test that fires this timeout.
 // https://github.com/paritytech/smoldot/pull/3268#discussion_r3311751768
 const MODE_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
