@@ -162,7 +162,7 @@ jobs:
     - run: sudo apt-get update && sudo apt install -y libclang-dev  # Required by cargo-spellcheck
     - uses: baptiste0928/cargo-install@v3  # This action ensures that the compilation is cached.
       env:
-        CFLAGS: -std=gnu17
+        CFLAGS: -std=gnu17  # TODO: remove once cargo-spellcheck is bumped, see https://github.com/paritytech/smoldot/issues/3464
       with:
         crate: cargo-spellcheck
         version: 0.11.2
