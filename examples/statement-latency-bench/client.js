@@ -44,17 +44,16 @@ function sleep(ms, signal) {
 // Collects the statements of the neighbour that arrive on one subscription, by round and
 // message index. Without a subscription it stays empty, which stands for a failed subscribe.
 class Receiver {
-  constructor({ subscription, topics, clientId, log }) {
+  constructor({ subscription, topics, clientId, log, error = null }) {
     this.subscription = subscription;
     this.topics = topics;
     this.clientId = clientId;
     this.log = log;
     this.byRound = new Map(); // round -> Set of message indexes
     this.seenIdx = new Set();
-    this.arrived = 0;
     // Failure kind and detail once the subscription can deliver nothing more.
-    this.error = null;
-    this.wakers = new Set();
+    this.error = error;
+    this.wake = null;
     if (subscription) this.#pump();
   }
 
@@ -70,13 +69,11 @@ class Receiver {
       const left = deadline - performance.now();
       if (left <= 0) break;
       await new Promise((resolve) => {
-        const wake = () => {
+        const timer = setTimeout(resolve, left);
+        this.wake = () => {
           clearTimeout(timer);
-          this.wakers.delete(wake);
           resolve();
         };
-        const timer = setTimeout(wake, left);
-        this.wakers.add(wake);
       });
     }
   }
@@ -94,7 +91,7 @@ class Receiver {
           `unexpected payload: ${JSON.stringify(payload)}`,
         ];
       }
-      for (const wake of [...this.wakers]) wake();
+      this.wake?.();
       if (this.error) return;
     }
   }
@@ -117,7 +114,6 @@ class Receiver {
     if (indexes.has(msgIdx)) return;
     indexes.add(msgIdx);
     this.seenIdx.add(msgIdx);
-    this.arrived += 1;
   }
 }
 
@@ -133,9 +129,8 @@ async function openReceiver({ config, rpc, round, log }) {
     topics.push(u8aToHex(generateTopic(config, neighbourId, round, idx)));
   }
   const failed = (kind, detail) => {
-    const receiver = new Receiver({ subscription: null, topics, clientId, log });
-    receiver.error = [fail(log, clientId, roundInfo, kind, detail), detail];
-    return receiver;
+    const error = [fail(log, clientId, roundInfo, kind, detail), detail];
+    return new Receiver({ subscription: null, topics, clientId, log, error });
   };
 
   if (expectedCount > MAX_TOPICS) {
@@ -302,17 +297,15 @@ export async function runClient({ config, rpc, pair, abortSignal, log, prepared 
     const roundStart = performance.now();
     roundsRun.push(round);
     const receiver = prepared.receiver ?? (await openReceiver({ config, rpc, round, log }));
-    let result;
-    if (!receiver.subscription) {
-      result = receiver.error[0];
-    } else {
-      result = await executeRound({ round, config, rpc, pair, log, sequenceCounter, receiver });
-    }
-    if (config.topicsPerRound) {
-      await closeReceiver({ receiver, rpc, config, log });
-      addDelivery(delivery, receiver, [round]);
-    }
+    const result = receiver.subscription
+      ? await executeRound({ round, config, rpc, pair, log, sequenceCounter, receiver })
+      : receiver.error[0];
     arrivedInTime += receiver.countRound(round);
+    if (config.topicsPerRound) {
+      // Counted before the unsubscribe, which could let a statement in after the timeout.
+      addDelivery(delivery, receiver, [round]);
+      await closeReceiver({ receiver, rpc, config, log });
+    }
 
     if (typeof result === "string") {
       failures.push(result);
