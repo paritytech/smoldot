@@ -14,6 +14,8 @@ WORK="$(mktemp -d)"
 errors=()
 missing=false
 
+# The PR's files are listed as `<status> <path>`. A rename also lists its old path as
+# `removed`. Control characters in names become `?`, so one name can't span two lines.
 if [ "$SKIP" != "true" ] && [ -z "$HEAD_REPO" ]; then
     errors+=("The repository of this PR's branch was deleted, so its files can't be read. Push the branch again from an existing fork.")
 elif [ "$SKIP" != "true" ] && ! gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" \
@@ -22,11 +24,15 @@ elif [ "$SKIP" != "true" ] && ! gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/
         > "$WORK/files"; then
     errors+=("Could not list the files of this PR through the GitHub API. Re-run the check.")
 elif [ "$SKIP" != "true" ]; then
+    # Whole line `<any status> wasm-node/CHANGELOG.md`.
     if grep -qx '[a-z]* wasm-node/CHANGELOG.md' "$WORK/files"; then
         errors+=("This PR edits \`wasm-node/CHANGELOG.md\`. Revert that change and put the entry in a prdoc file instead.")
     fi
 
+    # `<status> prdoc/<name>.prdoc` directly in `prdoc/`. The name can't start with `.` or `/`,
+    # which skips `prdoc/.template.prdoc` and files in subdirectories.
     grep -E '^[a-z]+ prdoc/[^./][^/]*\.prdoc$' "$WORK/files" > "$WORK/prdocs" || true
+    # At least one prdoc is new in this PR. A `modified` one alone is an edit of an old entry.
     if ! grep -qE '^(added|renamed|copied) ' "$WORK/prdocs"; then
         missing=true
         errors+=("This PR adds no \`prdoc/<name>.prdoc\` file.")
@@ -35,15 +41,19 @@ elif [ "$SKIP" != "true" ]; then
     mkdir "$WORK/prdoc"
     while read -r status file; do
         name="${file#prdoc/}"
+        # `$file` comes from the PR and goes into the PR comment: keep only safe characters.
         shown="$(printf '%s' "$file" | tr -c 'a-zA-Z0-9._/-' '?')"
+        # Prdoc files on `main` belong to merged PRs. Release PRs delete them but skip this check.
         if [ "$status" = removed ]; then
             errors+=("\`$shown\` is deleted or renamed by this PR. It holds the changelog entry of another PR; restore it.")
             continue
         fi
+        # Same rule as FILE_NAME in prdoc.py.
         if [[ ! "$name" =~ ^[a-z0-9][a-z0-9._-]*\.prdoc$ ]]; then
             errors+=("\`$shown\`: file name must match \`[a-z0-9][a-z0-9._-]*.prdoc\`.")
             continue
         fi
+        # `pr_<N>.prdoc`, BASH_REMATCH[1] is N. At release, `pr_<N>.prdoc` is credited to PR N. Editing one already on `main` is allowed.
         if [[ "$status" != modified && "$name" =~ ^pr_([0-9]+)\.prdoc$ ]] && [ "${BASH_REMATCH[1]}" != "$PR_NUMBER" ]; then
             errors+=("\`$file\`: the name says PR #${BASH_REMATCH[1]}, but this is PR #$PR_NUMBER. Rename it to \`pr_$PR_NUMBER.prdoc\` or use a name without a number.")
             continue
@@ -53,6 +63,7 @@ elif [ "$SKIP" != "true" ]; then
             errors+=("Could not download \`$file\` from \`$HEAD_REPO\` through the GitHub API. Re-run the check.")
             continue
         fi
+        # The error is shown in a `~~~~` block: drop the temp dir from paths and any `~`.
         if ! python3 "$SCRIPTS/prdoc.py" check "$WORK/$file" 2> "$WORK/check.err" > /dev/null; then
             errors+=("\`$file\` is invalid:"$'\n\n~~~~\n'"$(sed "s|$WORK/||" "$WORK/check.err" | tr -d '~')"$'\n~~~~')
         fi

@@ -1,4 +1,6 @@
-# Generated from https://pypi.org/pypi/PyYAML/6.0.2/json (all wheels).
+# Installed with `pip install --require-hashes --only-binary :all:` by check-prdoc.yml. The job
+# has a token that can write PR comments, so pip must only install these exact files.
+# Hashes are the sha256 of every PyYAML 6.0.2 wheel, from https://pypi.org/pypi/PyYAML/6.0.2/json.
 pyyaml==6.0.2 \
     --hash=sha256:01179a4a8559ab5de078078f37e5c1a30d76bb88519906844fd7bdea1b7729ff \
     --hash=sha256:0833f8694549e586547b576dcfaba4a6b55b9e96098b36cdc7ebefe667dfed48 \

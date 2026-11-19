@@ -36,9 +36,13 @@ PRDOC_DIR = ROOT / "prdoc"
 CHANGELOG = ROOT / "wasm-node" / "CHANGELOG.md"
 REPO_URL = "https://github.com/paritytech/smoldot"
 SECTIONS = ["added", "changed", "fixed", "removed"]
+# Starts with a lowercase letter or digit, then lowercase letters, digits, `.`, `_` or `-`.
 FILE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*\.prdoc$")
+# `pr_1234.prdoc`, group 1 is the PR number.
 PR_FILE_NAME = re.compile(r"^pr_(\d+)\.prdoc$")
+# Squash merge subject ending in `(#1234)`, or merge commit `Merge pull request #1234 ...`.
 PR_SUBJECT = re.compile(r"\(#(\d+)\)\s*$|^Merge pull request #(\d+)")
+# A blank line, or a line starting a `-`, `*`, `+` or `1.` / `1)` list item.
 MULTI_PARAGRAPH = re.compile(r"\n[ \t]*\n|^[ \t]*(?:[-*+]|\d+[.)])[ \t]", re.M)
 MAX_SIZE = 64 * 1024
 
@@ -62,6 +66,8 @@ def load(path):
         raise PrdocError("file name must match `[a-z0-9][a-z0-9._-]*.prdoc`")
 
     try:
+        # Files come from PRs. Limit the size, and catch the RecursionError that PyYAML
+        # raises on deep nesting (about 500 levels of `[`).
         if path.stat().st_size > MAX_SIZE:
             raise PrdocError("larger than 64 KiB")
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -76,6 +82,7 @@ def load(path):
     if not isinstance(doc, dict):
         raise PrdocError("top level must be a mapping")
 
+    # Keys can be any YAML scalar, such as `1:`, so convert them to text before sorting.
     unknown = set(doc) - {"changes", "fixes", "related"}
     if unknown:
         raise PrdocError(f"unknown fields: {', '.join(sorted(map(str, unknown)))}")
@@ -104,6 +111,7 @@ def load(path):
 
 
 def bullet(prdoc, change):
+    # Join the wrapped lines of a `|` block into one CHANGELOG line.
     text = " ".join(change["description"].split())
     refs = f"[#{prdoc['pr']}]({REPO_URL}/pull/{prdoc['pr']})"
     for key, label in (("fixes", "fixes"), ("related", "related to")):
@@ -132,6 +140,7 @@ def pr_number(path):
         return int(m.group(1))
     if git("rev-parse", "--is-shallow-repository") == "true":
         raise PrdocError("the clone is shallow, so the commit that added it can't be found; run `git fetch --unshallow`")
+    # The commit on main that added the file: a squash merge `... (#N)` or a merge commit.
     subject = git(
         "log", "-1", "--first-parent", "--diff-filter=A",
         "--format=%s", "--", str(path.relative_to(ROOT)),
@@ -160,6 +169,7 @@ def cmd_check(files):
 
 
 def cmd_release(version, date):
+    # `X.Y.Z` with numbers only, no `v` prefix or suffix.
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         print(f"error: bad version `{version}`", file=sys.stderr)
         return 1
@@ -185,6 +195,7 @@ def cmd_release(version, date):
     new_section = "\n".join(lines) + "\n"
 
     changelog = CHANGELOG.read_text(encoding="utf-8")
+    # Running release twice would add the same version again, since the prdoc files are gone.
     if f"\n## {version} " in changelog:
         print(f"error: {CHANGELOG} already has a `## {version}` section", file=sys.stderr)
         return 1
