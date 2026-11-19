@@ -75,8 +75,12 @@ need an allowance.
 By default a client has one topic per message of the pattern and keeps it
 for the whole run, as an app does. Every statement carries its round and its
 message index in the first 8 bytes of its data, so the receiver knows which
-round a statement belongs to. A statement of a later round replaces the
-statement of the earlier round on the same channel.
+round a statement belongs to. These statements carry no channel, so a later
+round does not replace an earlier one. Every statement stays in the stores
+until `--statement-expiry-ms` passes, and a statement that arrives after the
+receive timeout of its round still counts as arrived and as late. An account
+holds `statement-expiry-ms / interval-ms` rounds of statements at once, and
+its allowance must cover them.
 
 ## Delivery report
 

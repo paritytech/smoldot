@@ -188,7 +188,9 @@ async function executeRound({ round, config, rpc, pair, log, sequenceCounter, re
   for (const [count, size] of messagesPattern) {
     for (let i = 0; i < count; i++) {
       const topic = generateTopic(config, clientId, round, sentCount);
-      const channel = blake2AsU8a(u32LeBytes(sentCount), 256);
+      // With fixed topics a statement has no channel, so that the statement of a later round
+      // does not replace it. It stays in the stores until its expiry and can still arrive late.
+      const channel = config.topicsPerRound ? blake2AsU8a(u32LeBytes(sentCount), 256) : undefined;
       const expiryTs = Math.floor((Date.now() + statementExpiryMs) / 1000);
       // Monotonic per-client sequence across rounds; combined with the
       // expiry timestamp this makes the (timestamp, sequence) priority key
