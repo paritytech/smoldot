@@ -92,6 +92,18 @@ export default async function statementStoreReception(ctx) {
   report("initial batch: empty newStatements with remaining 0", initialOk, initialDetail);
   if (!initialOk) throw new Error(`unexpected initial batch: ${initialDetail}`);
 
+  // A second handle of the same parachain subscribes to an unrelated topic. Both handles share
+  // one topic filter, which must keep the topic of the first handle.
+  const paraAgain = await rpc.addChain({
+    chainSpec: files.PARA_CHAIN_SPEC,
+    statementStore: {},
+    potentialRelayChains: [relay],
+  });
+  await rpc.sendRpcAndWait(paraAgain, "statement_subscribeStatement", [
+    { matchAny: [`0x${"ee".repeat(32)}`] },
+  ]);
+  report("second handle of the parachain subscribed to another topic", true);
+
   // Block until Rust signals that smoldot is peered with both collators at
   // the statement-store level. The listen window below only makes sense
   // after that point: both peers push stmt_A during their initial sync.
