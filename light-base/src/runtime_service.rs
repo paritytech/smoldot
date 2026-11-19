@@ -3489,6 +3489,7 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
         storage_main_trie_changes: Default::default(),
         max_log_level: 0,
         calculate_trie_changes: false,
+        calculate_child_tries_roots_on_finish: false,
     }) {
         Ok(call) => call,
         Err((error, _)) => {
@@ -3749,6 +3750,7 @@ async fn handle_storage_on_demand_progress<TPlat: PlatformRef>(
             storage_main_trie_changes: Default::default(),
             max_log_level: 0,
             calculate_trie_changes: false,
+            calculate_child_tries_roots_on_finish: false,
         }) {
             Ok(call) => call,
             Err((error, _)) => {

@@ -162,6 +162,7 @@ fn run_call(
         storage_proof_size_behavior: StorageProofSizeBehavior::Unimplemented,
         max_log_level: 0,
         calculate_trie_changes: false,
+        calculate_child_tries_roots_on_finish: true,
     })
     .unwrap();
 
