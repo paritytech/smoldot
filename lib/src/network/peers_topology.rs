@@ -116,7 +116,7 @@ where
         }
     }
 
-    /// Record that a FindNode response listed `peers`, each with its multiaddresses.
+    /// Record that a `FindNode` response listed `peers`, each with its multiaddresses.
     pub fn on_peers_discovered<TAddrs>(
         &mut self,
         peers: impl IntoIterator<Item = (PeerId, TAddrs)>,

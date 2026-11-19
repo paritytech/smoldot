@@ -198,7 +198,7 @@ struct Background<TPlat: PlatformRef> {
     transactions_subscriptions: hashbrown::HashMap<String, TransactionWatch, fnv::FnvBuildHasher>,
 
     /// Active `bitswap_unstable_stream` subscriptions, keyed by subscription ID. Holds the
-    /// [`bitswap_service::BitswapStreamHandle`] alive — dropping the entry (via
+    /// [`bitswap_service::BitswapStreamHandle`] alive - dropping the entry (via
     /// `bitswap_unstable_unstream` or task shutdown) drops the embedded cancel guard, which sends a
     /// Bitswap Cancel wantlist to peers we contacted on this subscription's behalf.
     bitswap_subscriptions: hashbrown::HashMap<String, BitswapSubscription, fnv::FnvBuildHasher>,

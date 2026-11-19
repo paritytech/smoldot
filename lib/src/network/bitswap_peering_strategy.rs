@@ -23,9 +23,9 @@
 //! a candidate for a Bitswap connection.
 //!
 //! The strategy user must update its state when:
-//!  1) A connection is established with a peer — by calling
+//!  1) A connection is established with a peer - by calling
 //!     [`BitswapPeeringStrategy::increase_peer_connections`]
-//!  2) A connection is terminated with a peer — by calling
+//!  2) A connection is terminated with a peer - by calling
 //!     [`BitswapPeeringStrategy::decrease_peer_connections`]
 //!
 //! [`BitswapPeeringStrategy`] contains all currently connected peers, identified by [`PeerId`].

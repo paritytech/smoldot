@@ -43,15 +43,15 @@ use smoldot::{
     sync::all,
 };
 
-/// Maximum wait for the first GrandpaNeighborPacket before falling back to AllForksOnly.
+/// Maximum wait for the first `GrandpaNeighborPacket` before falling back to `AllForksOnly`.
 /// Sized for cold-start peer discovery (DNS + libp2p handshake + gossip-open), which can
 /// stretch to ~20s on light clients.
 // TODO follow-up: integration test that fires this timeout.
 // https://github.com/paritytech/smoldot/pull/3268#discussion_r3311751768
 const MODE_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Below warp sync minimum gap packets to observe before committing AllForksOnly. Avoids one lagging
-/// first peer locking us into the slow path when our local finalized is a stale checkpoint.
+/// Below warp sync minimum gap packets to observe before committing `AllForksOnly`. Avoids one
+/// lagging first peer locking us into the slow path when our local finalized is a stale checkpoint.
 const MODE_DECISION_MIN_PACKETS: usize = 2;
 
 /// Starts a sync service background task to synchronize a chain (relay chain or not) that is
@@ -1660,10 +1660,10 @@ pub(super) async fn start_substrate_compatible_chain<TPlat: PlatformRef>(
 /// Bootstrap mode decision.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum ModeState {
-    /// No GrandpaNeighborPacket received yet and the deadline has not fired.
+    /// No `GrandpaNeighborPacket` received yet and the deadline has not fired.
     /// `SubscribeAll` requests are queued.
     Deciding,
-    /// Committed to WarpAhead; awaiting `WarpSyncFinished` or finality catching up to
+    /// Committed to `WarpAhead`; awaiting `WarpSyncFinished` or finality catching up to
     /// `target_finalized` (the peer-claimed height that triggered the decision).
     AwaitingWarp { target_finalized: u64 },
     /// First finalized block is authoritative; queued subscribers are drained.
@@ -1713,7 +1713,7 @@ struct Task<TPlat: PlatformRef> {
     /// Last value sent to [`Task::sync_status_subscribers`], to avoid repeating it.
     last_sent_sync_status: Option<SyncStatus>,
 
-    /// Below-gap packets observed while [`ModeState::Deciding`]; gates AllForksOnly commit.
+    /// Below-gap packets observed while [`ModeState::Deciding`]; gates `AllForksOnly` commit.
     deciding_packets_seen: usize,
 
     /// Replaced with `pending` on mode commit so it never fires again.
@@ -1917,7 +1917,7 @@ fn drain_pending_subscriptions<TPlat: PlatformRef>(task: &mut Task<TPlat>) {
     }
 }
 
-/// Commits to AllForksOnly mode: aborts any in-flight warp request, flips network-state
+/// Commits to `AllForksOnly` mode: aborts any in-flight warp request, flips network-state
 /// flags to trigger the first GrandPa announce (without it peers won't gossip commits to
 /// us), drains queued subscribers, and lifts warp-completion suppression so warp may
 /// re-engage if the node ever falls back behind by `warp_sync_minimum_gap`.
