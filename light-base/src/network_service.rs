@@ -48,13 +48,19 @@ use crate::{
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     format,
     string::{String, ToString as _},
     sync::Arc,
     vec::{self, Vec},
 };
-use core::{cmp, mem, num::NonZero, pin::Pin, time::Duration};
+use core::{
+    cmp, mem,
+    num::NonZero,
+    pin::Pin,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{StreamExt as _, future, stream};
@@ -146,16 +152,71 @@ pub struct ConfigChain {
     /// number of the finalized block at the time of the initialization.
     pub grandpa_protocol_finalized_block_height: Option<u64>,
 
-    /// If `true`, enables the statement store protocol.
-    pub enable_statement_protocol: bool,
+    /// If `Some`, enables the statement store protocol.
+    pub statement_protocol: Option<TopicAffinityConfig>,
 
     /// Metrics of the chain.
     pub metrics: Arc<metrics::ChainMetrics>,
 }
 
+/// Parameters of the topic affinity filter of a chain. The peers hold one filter per chain, so
+/// all the subscribers of the chain share them.
+#[derive(Debug, Clone)]
+pub struct TopicAffinityConfig {
+    /// Seed of the bloom filter.
+    pub bloom_seed: u128,
+    /// Target false positive rate of the bloom filter.
+    pub false_positive_rate: f64,
+}
+
+/// Topics that a subscriber wants to receive statements about. See
+/// [`NetworkServiceChain::update_topic_affinity`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TopicAffinity {
+    /// Every topic.
+    All,
+    /// The given topics only.
+    Topics(Vec<[u8; 32]>),
+}
+
+/// Builds the affinity filter of all the subscribers, and returns the topics it holds, so
+/// that the network service can pick peers close to them. A subscriber to every topic
+/// yields a filter matching everything and no topic.
+fn combined_topic_affinity<'a>(
+    affinities: impl Iterator<Item = &'a TopicAffinity>,
+    config: &TopicAffinityConfig,
+) -> (AffinityFilter, Vec<[u8; 32]>) {
+    let mut all_topics: Vec<[u8; 32]> = Vec::new();
+
+    for affinity in affinities {
+        match affinity {
+            TopicAffinity::All => {
+                return (AffinityFilter::match_all(config.bloom_seed), Vec::new());
+            }
+            TopicAffinity::Topics(topics) => {
+                all_topics.extend(topics.iter().copied());
+            }
+        }
+    }
+
+    all_topics.sort_unstable();
+    all_topics.dedup();
+    let filter = AffinityFilter::from_topics(
+        all_topics.iter(),
+        config.bloom_seed,
+        config.false_positive_rate,
+    );
+    (filter, all_topics)
+}
+
 pub struct NetworkService<TPlat: PlatformRef> {
     /// Channel connected to the background service.
     messages_tx: async_channel::Sender<ToBackground<TPlat>>,
+
+    /// Identifier that [`NetworkServiceChain::new_topic_affinity_subscriber`] returns next.
+    /// Shared by all the chains, as the background service merges the chains that have the
+    /// same genesis block and fork id.
+    next_topic_affinity_subscriber: Arc<AtomicUsize>,
 
     /// See [`Config::platform`].
     platform: TPlat,
@@ -259,6 +320,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
         Arc::new(NetworkService {
             messages_tx: main_messages_tx,
+            next_topic_affinity_subscriber: Arc::new(AtomicUsize::new(0)),
             platform: config.platform,
             metrics,
         })
@@ -288,7 +350,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                         set_id: 0,
                     },
                 ),
-                enable_statement_protocol: config.enable_statement_protocol,
+                enable_statement_protocol: config.statement_protocol.is_some(),
                 fork_id: config.fork_id.clone(),
                 block_number_bytes: config.block_number_bytes,
                 best_hash: config.best_block.1,
@@ -304,7 +366,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     next_discovery_period: Duration::from_secs(2),
                     next_discovery_when: self.platform.now(),
                     metrics: config.metrics,
-                    statement_peering: config.enable_statement_protocol.then(|| {
+                    statement_peering: config.statement_protocol.map(|affinity_config| {
                         let seed = || {
                             let mut seed = [0; 32];
                             self.platform.fill_random_bytes(&mut seed);
@@ -318,6 +380,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                             steering: peer_steering::PeerSteering::new(peer_steering::Config {
                                 randomness_seed: seed(),
                             }),
+                            affinity_config,
+                            affinities: HashMap::with_capacity_and_hasher(1, Default::default()),
                             topics: Vec::new(),
                         }
                     }),
@@ -338,6 +402,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         Arc::new(NetworkServiceChain {
             _keep_alive_messages_tx: self.messages_tx.clone(),
             messages_tx,
+            next_topic_affinity_subscriber: self.next_topic_affinity_subscriber.clone(),
             metrics: chain_metrics,
             platform: self.platform.clone(),
         })
@@ -351,6 +416,9 @@ pub struct NetworkServiceChain<TPlat: PlatformRef> {
 
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackgroundChain>,
+
+    /// Copy of [`NetworkService::next_topic_affinity_subscriber`].
+    next_topic_affinity_subscriber: Arc<AtomicUsize>,
 
     /// Metrics of the chain.
     metrics: Arc<metrics::ChainMetrics>,
@@ -764,7 +832,8 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
-    /// Broadcast a statement notification to all gossip-connected peers.
+    /// Broadcast a statement notification to the connected peers close to its topics, or to all
+    /// the connected statement peers when none of them takes it.
     pub async fn broadcast_statement(
         self: Arc<Self>,
         statement: Vec<u8>,
@@ -782,14 +851,27 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
+    /// Returns an identifier to pass to [`NetworkServiceChain::update_topic_affinity`], unique
+    /// among the users of this chain.
+    pub fn new_topic_affinity_subscriber(&self) -> usize {
+        self.next_topic_affinity_subscriber
+            .fetch_add(1, Ordering::Relaxed)
+    }
+
     /// Updates the topic affinity filter sent to the statement peers, and the topics that the
     /// statement links must cover.
     ///
+    /// The filter and the links cover the topics of all the subscribers. The call replaces the
+    /// topics of the given subscriber only, and an empty list of topics removes the subscriber.
+    ///
     /// The topics stay in the node: the peers close to them are picked among the known peers,
     /// and only the filter goes on the wire.
-    pub async fn update_topic_affinity(&self, filter: AffinityFilter, topics: Vec<[u8; 32]>) {
+    pub async fn update_topic_affinity(&self, subscriber: usize, affinity: TopicAffinity) {
         self.messages_tx
-            .send(ToBackgroundChain::UpdateTopicAffinity { filter, topics })
+            .send(ToBackgroundChain::UpdateTopicAffinity {
+                subscriber,
+                affinity,
+            })
             .await
             .unwrap();
     }
@@ -1102,8 +1184,8 @@ enum ToBackgroundChain {
         result: oneshot::Sender<BroadcastStatementResult>,
     },
     UpdateTopicAffinity {
-        filter: AffinityFilter,
-        topics: Vec<[u8; 32]>,
+        subscriber: usize,
+        affinity: TopicAffinity,
     },
     Discover {
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
@@ -1317,6 +1399,10 @@ struct StatementPeering<TInstant> {
     topology: peers_topology::PeersTopology<TInstant>,
     /// Statement links held besides the gossip links.
     steering: peer_steering::PeerSteering<TInstant>,
+    /// See [`ConfigChain::statement_protocol`].
+    affinity_config: TopicAffinityConfig,
+    /// Topics of each subscriber, by the identifier of the subscriber.
+    affinities: HashMap<usize, TopicAffinity, fnv::FnvBuildHasher>,
     /// Topics of the subscriptions, the ones the links must cover. See
     /// [`NetworkServiceChain::update_topic_affinity`].
     topics: Vec<[u8; 32]>,
@@ -2417,23 +2503,40 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 ToBackgroundChain::BroadcastStatement { statement, result },
             ) => {
-                let peers_to_send = task
+                let close_peers = if let Some(peering) = &task.network[chain_id].statement_peering
+                    && let Ok(decoded) = codec::decode_statement(&statement)
+                {
+                    peering.topology.routing_targets(&decoded.topics)
+                } else {
+                    BTreeSet::new()
+                };
+                let all_peers = task
                     .network
                     .gossip_connected_peers(chain_id, service::GossipKind::Statement)
                     .cloned()
-                    .collect::<Vec<_>>();
+                    .collect::<BTreeSet<_>>();
 
-                let total = peers_to_send.len();
-                let mut sent = 0;
-                for peer in &peers_to_send {
-                    if task
-                        .network
-                        .gossip_send_statement(peer, chain_id, statement.clone())
-                        .is_ok()
-                    {
-                        sent += 1;
+                let mut send_to = |peers: &BTreeSet<PeerId>| {
+                    let sent = peers
+                        .iter()
+                        .map(|peer| {
+                            task.network
+                                .gossip_send_statement(peer, chain_id, statement.clone())
+                        })
+                        .filter(Result::is_ok)
+                        .count();
+                    BroadcastStatementResult {
+                        sent,
+                        total: peers.len(),
                     }
-                }
+                };
+
+                // Any connected peer works when no close peer takes the statement: a full node
+                // routes a statement with topics onwards to the peers that store them.
+                let (broadcast, to_close_peers) = match send_to(&close_peers) {
+                    BroadcastStatementResult { sent: 0, .. } => (send_to(&all_peers), false),
+                    broadcast => (broadcast, true),
+                };
 
                 log!(
                     &task.platform,
@@ -2441,22 +2544,35 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "network",
                     "statement-broadcast",
                     chain = task.network[chain_id].log_name,
-                    sent,
-                    total,
+                    sent = broadcast.sent,
+                    total = broadcast.total,
+                    to_close_peers,
                 );
 
-                let _ = result.send(BroadcastStatementResult { sent, total });
+                let _ = result.send(broadcast);
             }
             WakeUpReason::MessageForChain(
                 chain_id,
-                ToBackgroundChain::UpdateTopicAffinity { filter, topics },
+                ToBackgroundChain::UpdateTopicAffinity {
+                    subscriber,
+                    affinity,
+                },
             ) => {
-                if let Some(peering) = &mut task.network[chain_id].statement_peering {
-                    peering.topics = topics;
-                    if task.next_peer_steering.is_none() {
-                        task.next_peer_steering =
-                            Some(Box::pin(task.platform.sleep(Duration::ZERO)));
-                    }
+                let Some(peering) = &mut task.network[chain_id].statement_peering else {
+                    continue;
+                };
+
+                if affinity == TopicAffinity::Topics(Vec::new()) {
+                    peering.affinities.remove(&subscriber);
+                } else {
+                    peering.affinities.insert(subscriber, affinity);
+                }
+
+                let (filter, topics) =
+                    combined_topic_affinity(peering.affinities.values(), &peering.affinity_config);
+                peering.topics = topics;
+                if task.next_peer_steering.is_none() {
+                    task.next_peer_steering = Some(Box::pin(task.platform.sleep(Duration::ZERO)));
                 }
 
                 task.current_affinity_filter
@@ -3009,7 +3125,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     chain_id,
                     &peer_id,
                     service::GossipKind::Statement,
-                ) {
+                ) && !task
+                    .network
+                    .gossip_desired_iter(chain_id, service::GossipKind::Statement)
+                    .any(|p| *p == peer_id)
+                {
                     if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
                         peers.remove(&peer_id);
                     }
@@ -3039,6 +3159,30 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     ?error,
                 );
+
+                // The event doesn't say which substream closed. If it was the statement one,
+                // the peer stays unreachable for statements until a reopen succeeds. A peer
+                // desired under the statement kind has a statement link of its own, which has
+                // its own events and might still be opening.
+                if !task.network.gossip_is_connected(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::Statement,
+                ) && !task
+                    .network
+                    .gossip_desired_iter(chain_id, service::GossipKind::Statement)
+                    .any(|p| *p == peer_id)
+                {
+                    if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+                        peers.remove(&peer_id);
+                    }
+                    if let Some(peering) = &mut task.network[chain_id].statement_peering {
+                        peering
+                            .topology
+                            .on_substream_closed(peer_id.clone(), &task.platform.now());
+                        peering.steering.on_substream_closed(&peer_id);
+                    }
+                }
 
                 // Reopen at once the first time, as polkadot-sdk reserves the peer for these
                 // protocols slightly after block announces open. Afterwards, retry at a short
@@ -4373,10 +4517,67 @@ fn pop_p2p_if_matches(
 
 #[cfg(test)]
 mod tests {
-    use super::{Role, dispatch_find_node_requests, pop_p2p_if_matches, service};
+    use super::{
+        Role, TopicAffinity, TopicAffinityConfig, combined_topic_affinity,
+        dispatch_find_node_requests, pop_p2p_if_matches, service,
+    };
     use core::time::Duration;
     use rand_chacha::rand_core::SeedableRng as _;
     use smoldot::libp2p::{multiaddr::Multiaddr, peer_id::PeerId};
+
+    const AFFINITY_CONFIG: TopicAffinityConfig = TopicAffinityConfig {
+        bloom_seed: 0x5EED_5EED_5EED_5EED_5EED_5EED_5EED_5EED,
+        false_positive_rate: 0.01,
+    };
+
+    #[test]
+    fn combined_topic_affinity_no_subscriber() {
+        let (filter, topics) = combined_topic_affinity([].iter(), &AFFINITY_CONFIG);
+
+        // Empty subscription set: no topics are ever in the filter.
+        assert!(!filter.contains(&[1u8; 32]));
+        assert!(topics.is_empty());
+        // A statement with no topics (broadcast) still matches.
+        let broadcast: &[&[u8; 32]] = &[];
+        assert!(filter.matches_statement(broadcast));
+    }
+
+    #[test]
+    fn combined_topic_affinity_all_matches_everything() {
+        let affinities = [TopicAffinity::Topics(vec![[1u8; 32]]), TopicAffinity::All];
+        let (filter, topics) = combined_topic_affinity(affinities.iter(), &AFFINITY_CONFIG);
+
+        // `TopicAffinity::All` returns the broadcast `match_all` filter: every topic matches,
+        // and there is no topic to pick peers for.
+        assert!(topics.is_empty());
+        assert!(filter.contains(&[1u8; 32]));
+        assert!(filter.contains(&[99u8; 32]));
+        let t = [7u8; 32];
+        assert!(filter.matches_statement(&[&t]));
+    }
+
+    // Two handles of the same chain subscribe to overlapping topics. The filter must hold both
+    // topics, and only the topic of the first handle once the second one unsubscribes.
+    #[test]
+    fn combined_topic_affinity_covers_every_subscriber() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let mut affinities = vec![
+            TopicAffinity::Topics(vec![t2]),
+            TopicAffinity::Topics(vec![t1, t2]),
+        ];
+
+        let (filter, topics) = combined_topic_affinity(affinities.iter(), &AFFINITY_CONFIG);
+        assert!(filter.contains(&t1));
+        assert!(filter.contains(&t2));
+        assert_eq!(topics, vec![t1, t2]);
+
+        affinities.pop();
+        let (filter, topics) = combined_topic_affinity(affinities.iter(), &AFFINITY_CONFIG);
+        assert!(!filter.contains(&t1));
+        assert!(filter.contains(&t2));
+        assert_eq!(topics, vec![t2]);
+    }
 
     // Two distinct, valid PeerIds. The first is reused from existing smoldot tests in
     // `lib/src/libp2p/multiaddr.rs:629`; the second is the bootnode peer-id observed in the
