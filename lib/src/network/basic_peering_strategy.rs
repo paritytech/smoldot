@@ -79,7 +79,7 @@ pub struct BasicPeeringStrategy<TChainId, TInstant> {
     /// > **Note**: In principle this field is completely unnecessary. In practice, however, we
     /// >           can't use `BTreeMap::range` with `TChainId`s because we don't know the minimum
     /// >           and maximum values of a `TChainId`. In order to bypass this problem,
-    /// >           `TChainId`s are instead refered to as a `usize`.
+    /// >           `TChainId`s are instead referred to as a `usize`.
     chains: slab::Slab<TChainId>,
 
     /// Contains all the keys of [`BasicPeeringStrategy::chains`] indexed differently.
@@ -831,7 +831,7 @@ pub enum DecreaseAddressConnectionsError {
 
 /// See [`BasicPeeringStrategy::pick_assignable_peer`].
 pub enum AssignablePeer<'a, TInstant> {
-    /// An assignal peer was found. Note that the peer wasn't assigned yet.
+    /// An assignable peer was found. Note that the peer wasn't assigned yet.
     Assignable(&'a PeerId),
     /// No peer was found as all known un-assigned peers are currently in the "banned" state.
     AllPeersBanned {

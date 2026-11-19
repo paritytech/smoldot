@@ -105,7 +105,7 @@ unsafe extern "C" {
     /// can be negative, and abort execution if that is the case.
     pub safe fn unix_timestamp_us() -> u64;
 
-    /// Returns the number of microseconds since an especified point in time. Must never decrease
+    /// Returns the number of microseconds since a specified point in time. Must never decrease
     /// over time.
     pub safe fn monotonic_clock_us() -> u64;
 
@@ -192,7 +192,7 @@ unsafe extern "C" {
     /// - (optional) The 32 bytes SHA-256 hash of the certificate of the remote.
     /// - An UTF-8-encoded IP address or domain name. Use the `addr_len` parameter to determine
     ///   its length. When using an IPv4, it is encoded as `a.b.c.d`. When using an IPv6, it is
-    ///   encoded according to RFC5952.
+    ///   encoded according to RFC 5952.
     ///
     /// The `type` byte defines the type of connection and whether the optional field is present:
     ///
@@ -202,7 +202,7 @@ unsafe extern "C" {
     /// - `4`: WebSocket connection, with a port and an IPv4 address.
     /// - `5`: WebSocket connection, with a port and an IPv6 address.
     /// - `6`: WebSocket connection, with a port and a domain name.
-    /// - `14`: WebSocket secure connection, with a port and a domaine name.
+    /// - `14`: WebSocket secure connection, with a port and a domain name.
     /// - `16`: WebRTC connection, with a port, an IPv4 address, and a remote certificate hash.
     /// - `17`: WebRTC connection, with a port, an IPv6 address, and a remote certificate hash.
     /// - `18`: WebRTC connection, with a port, a domain name, and a remote certificate hash.
