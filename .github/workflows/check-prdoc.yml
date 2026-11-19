@@ -1,0 +1,59 @@
+# Smoldot
+# Copyright (C) 2026  Parity Technologies (UK) Ltd.
+# SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+name: check-prdoc
+
+# `pull_request_target` runs this file from `main` with a token that can comment on PRs
+# from forks. The PR's code is never checked out or run: the PR's files are read through the
+# API and validated by the scripts from `main`.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  check-prdoc:
+    if: ${{ github.event_name == 'pull_request_target' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # Hashes pinned in requirements.txt, see the comment there.
+      - run: "pip install --require-hashes --only-binary :all: -r .github/scripts/requirements.txt"
+      - run: .github/scripts/check-prdoc.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'no-changelog') || github.event.pull_request.user.login == 'dependabot[bot]' }}
