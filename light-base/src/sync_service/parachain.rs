@@ -40,7 +40,7 @@ use smoldot::{
 
 /// Starts a sync service background task to synchronize a parachain.
 ///
-/// This implementation uses AllSync for block sync with Aura consensus verification,
+/// This implementation uses `AllSync` for block sync with Aura consensus verification,
 /// and the paraheads service for relay-chain-based finalization.
 pub(super) async fn start_parachain<TPlat: PlatformRef>(
     log_target: String,
