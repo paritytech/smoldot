@@ -1,4 +1,4 @@
-228
+229
 ABI
 ACK
 API
@@ -6,6 +6,7 @@ APIs
 Bandersnatch
 BIP39
 BLAKE2
+Blake2
 Base58
 CID
 CIDs
