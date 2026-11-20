@@ -1806,4 +1806,34 @@ mod tests {
         let result = verify_commit_with(&commit, &authorities, |_| unreachable!());
         assert!(matches!(result, CommitOutcome::Ok), "{result:?}");
     }
+
+    /// Signing the same vote twice is an equivocation, which makes `keys[2]` count towards the
+    /// threshold and lets the verification reach the second signature. Ed25519 signing being
+    /// deterministic, that signature is forged.
+    #[test]
+    fn same_vote_with_another_signature_is_an_equivocation() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let unknown_hash = [0xbb; 32];
+
+        let commit = encode_commit(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[2], unknown_hash, 11),
+                Precommit {
+                    declared_public_key: Some(public_key(&keys[2])),
+                    ..precommit(&keys[3], unknown_hash, 11)
+                },
+            ],
+        );
+
+        let result = verify_commit_with(&commit, &authorities, |_| unreachable!());
+        assert!(
+            matches!(result, CommitOutcome::Err(CommitVerifyError::BadSignature)),
+            "{result:?}"
+        );
+    }
 }
