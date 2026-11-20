@@ -105,7 +105,7 @@ pub(super) fn ed_on_bls12_381_bandersnatch_mul(
 
 /// `ext_host_calls_ed_on_bls12_381_bandersnatch_msm_version_1`.
 ///
-/// Multi scalar multiplication over encoded `Vec<EdwardsAffine>` and
+/// Multi-scalar multiplication over encoded `Vec<EdwardsAffine>` and
 /// `Vec<ScalarField>` of equal lengths.
 pub(super) fn ed_on_bls12_381_bandersnatch_msm(
     bases: &[u8],

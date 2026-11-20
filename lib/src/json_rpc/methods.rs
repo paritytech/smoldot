@@ -1160,20 +1160,20 @@ pub enum SystemPeerRole {
 /// JSON format is compatible with polkadot-sdk's `SubmitResult`, of which this carries the subset
 /// a light client can answer with. A client written against a full node never sees the rest:
 ///
-/// - `rejected` for `channelPriorityTooLow`, `accountFull`, `storeFull` — each weighs the
+/// - `rejected` for `channelPriorityTooLow`, `accountFull`, `storeFull` - each weighs the
 ///   submission against a store's contents, which a light client keeps none of and cannot fetch.
-/// - `rejected` for `noAllowance`, `dataTooLarge` — the account's allowance is on chain, but
+/// - `rejected` for `noAllowance`, `dataTooLarge` - the account's allowance is on chain, but
 ///   reading chain state means a network round-trip in front of every submission.
-/// - `invalid` for `badProof` — telling a bad signature from a good one costs more CPU than a
+/// - `invalid` for `badProof` - telling a bad signature from a good one costs more CPU than a
 ///   submission should. Only the presence of a proof is checked, so a badly-signed statement is
 ///   answered `new` and left for its peers to reject.
-/// - `internalError` — reports a failing database, which a client without one cannot have.
-/// - `known`, `knownExpired` — a full node answers these when its store already holds the
+/// - `internalError` - reports a failing database, which a client without one cannot have.
+/// - `known`, `knownExpired` - a full node answers these when its store already holds the
 ///   statement, or held it until it expired. A light client keeps no store to find it in, so a
 ///   resubmission is broadcast again and answered `new`.
 ///
-/// A failure leaving no outcome to report — a payload that doesn't decode, or a statement that
-/// reached no peer — is answered with a JSON-RPC error carrying polkadot-sdk's statement-store
+/// A failure leaving no outcome to report - a payload that doesn't decode, or a statement that
+/// reached no peer - is answered with a JSON-RPC error carrying polkadot-sdk's statement-store
 /// error code.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]

@@ -376,7 +376,7 @@ impl BitswapGetError {
     /// top-level error of `bitswap_unstable_get`, so callers can reuse retry logic.
     ///
     /// The top-level batch-validation variants (`TooManyCids`, `EmptyCids`, `DuplicateCids`)
-    /// never appear per-event — they reject the subscription before any event is emitted.
+    /// never appear per-event - they reject the subscription before any event is emitted.
     pub fn to_block_result_err(&self) -> (i32, String) {
         const INVALID_PARAMS: i32 = -32602;
         let code = match self {
@@ -469,7 +469,7 @@ enum ToBackground {
     /// top-level JSON-RPC errors (`-32812 FailRetryBackoff` for `NoPeers` / `QueueFull`).
     BitswapBatch {
         /// Validated and de-duplicated entries from [`parse_and_dedup`]. Per-slot `Err` carries
-        /// an `InvalidCid` ParseError that gets surfaced as a per-CID error event.
+        /// an `InvalidCid` `ParseError` that gets surfaced as a per-CID error event.
         entries: Vec<(String, Result<Cid, cid::ParseError>)>,
         /// Per-CID outcomes are pushed here as they become available, in arrival order.
         events_tx: async_channel::Sender<(String, BlockResult)>,
@@ -542,7 +542,7 @@ enum HaveContext {
     },
     Batch {
         batch_id: BatchId,
-        /// Valid (slot_idx, cid) pairs. Invalid-CID slots are pre-resolved before the broadcast
+        /// Valid `(slot_idx, cid)` pairs. Invalid-CID slots are pre-resolved before the broadcast
         /// is queued and don't appear here.
         cids: Vec<(usize, Cid)>,
         /// Channel for signalling subscription readiness back to the caller of
@@ -589,7 +589,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Requests ordered by timeout.
     requests_by_timeout: BTreeSet<(TPlat::Instant, RequestId)>,
     /// Requests ordered by CID. The request IDs in the `VecDeque` are ordered by their timeout if
-    /// the platform implementation of `now` is monothonic (true for
+    /// the platform implementation of `now` is monotonic (true for
     /// [`crate::platform::DefaultPlatform`]).
     requests_by_cid: hashbrown::HashMap<Cid, VecDeque<RequestId>, util::SipHasherBuild>,
     /// In-flight batches. Each entry corresponds to a `bitswap_stream` call.
@@ -708,7 +708,7 @@ impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
     /// Cancel a batch: tear down its still-pending slots, then send a wire-level `Cancel(cid)`
     /// for each CID this batch was the *last* local requester of. Idempotent.
     ///
-    /// Only the last-reference case emits a Cancel — `requests_by_cid` is a multi-map and peers
+    /// Only the last-reference case emits a Cancel - `requests_by_cid` is a multi-map and peers
     /// track want-state per-CID, not per-requester, so an unconditional Cancel would starve any
     /// concurrent batch or `bitswap_get` waiting on the same CID.
     fn cancel_batch(&mut self, batch_id: BatchId) {

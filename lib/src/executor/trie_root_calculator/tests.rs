@@ -218,9 +218,9 @@ fn remove_event_generated_when_branch_root_destroyed() {
 /// Unlike `fuzzing`, this test tries every case instead of random ones.
 ///
 /// The world is seven short keys: the empty key, two one-byte keys and four two-byte keys.
-/// Every subset of these keys is used as a base trie (2^7 = 128 tries), and every assignment
-/// of nothing/insert/erase to these keys is used as a diff (3^7 = 2187 diffs). Each pair is run
-/// through the calculator and its root hash and insert/remove events are checked. About 560k
+/// Every subset of these keys is used as a base trie (`2^7 = 128` tries), and every assignment
+/// of nothing/insert/erase to these keys is used as a diff (`3^7 = 2187` diffs). Each pair is run
+/// through the calculator and its root hash and insert/remove events are checked. About 560,000
 /// cases in total. If a remove-event bug fits in a trie this small, this test finds it.
 #[test]
 fn exhaustive_small_scope() {
