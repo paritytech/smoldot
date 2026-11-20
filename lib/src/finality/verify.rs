@@ -1450,6 +1450,206 @@ mod tests {
         );
     }
 
+    /// Substrate builds its justifications from commits, which contain both pre-commits of an
+    /// equivocating authority.
+    #[test]
+    fn justification_with_equivocation_is_accepted() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let fork1 = header_with_state_root(target_hash, 11, [0x11; 32]);
+        let fork1_hash = fork1.hash(BLOCK_NUMBER_BYTES);
+        let fork2 = header_with_state_root(target_hash, 11, [0x22; 32]);
+        let fork2_hash = fork2.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], fork1_hash, 11),
+                precommit(&keys[2], target_hash, 10),
+                precommit(&keys[1], fork2_hash, 11),
+            ],
+            &[fork1, fork2],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(matches!(result, Ok(())), "{result:?}");
+    }
+
+    /// The equivocator counts as a vote for `fork1`, which then reaches the threshold and is
+    /// finalized instead of the block below it.
+    #[test]
+    fn equivocator_counts_for_every_block() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let fork1 = header_with_state_root(target_hash, 11, [0x11; 32]);
+        let fork1_hash = fork1.hash(BLOCK_NUMBER_BYTES);
+        let fork2 = header_with_state_root(target_hash, 11, [0x22; 32]);
+        let fork2_hash = fork2.hash(BLOCK_NUMBER_BYTES);
+        let precommits = [
+            precommit(&keys[0], fork1_hash, 11),
+            precommit(&keys[1], fork1_hash, 11),
+            precommit(&keys[2], target_hash, 10),
+            precommit(&keys[2], fork2_hash, 11),
+        ];
+        let votes_ancestries = [fork1, fork2];
+
+        let justification = encode_justification(fork1_hash, 11, &precommits, &votes_ancestries);
+        let result = verify(&justification, &authorities);
+        assert!(matches!(result, Ok(())), "{result:?}");
+
+        let justification = encode_justification(target_hash, 10, &precommits, &votes_ancestries);
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::TargetMismatch)),
+            "{result:?}"
+        );
+    }
+
+    /// `keys[1]` votes for `fork1` but has equivocated, and must only count once for it.
+    #[test]
+    fn equivocator_counts_once() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let fork1 = header_with_state_root(target_hash, 11, [0x11; 32]);
+        let fork1_hash = fork1.hash(BLOCK_NUMBER_BYTES);
+        let fork2 = header_with_state_root(target_hash, 11, [0x22; 32]);
+        let fork2_hash = fork2.hash(BLOCK_NUMBER_BYTES);
+        let precommits = [
+            precommit(&keys[0], fork1_hash, 11),
+            precommit(&keys[1], fork1_hash, 11),
+            precommit(&keys[1], fork2_hash, 11),
+            precommit(&keys[2], target_hash, 10),
+        ];
+        let votes_ancestries = [fork1, fork2];
+
+        let justification = encode_justification(fork1_hash, 11, &precommits, &votes_ancestries);
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::TargetMismatch)),
+            "{result:?}"
+        );
+
+        let justification = encode_justification(target_hash, 10, &precommits, &votes_ancestries);
+        let result = verify(&justification, &authorities);
+        assert!(matches!(result, Ok(())), "{result:?}");
+    }
+
+    #[test]
+    fn equivocations_dont_count_towards_the_threshold() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let child = header(target_hash, 11);
+        let child_hash = child.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[1], child_hash, 11),
+            ],
+            &[child],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::NotEnoughSignatures)),
+            "{result:?}"
+        );
+    }
+
+    /// Like in Substrate, both pre-commits of an equivocator must be linked to the base.
+    #[test]
+    fn equivocation_without_ancestry_is_rejected() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let child = header(target_hash, 11);
+        let child_hash = child.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[2], target_hash, 10),
+                precommit(&keys[0], child_hash, 11),
+            ],
+            &[],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::BadAncestry)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn equivocation_in_justification_with_bad_signature_detected() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let child = header(target_hash, 11);
+        let child_hash = child.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[2], target_hash, 10),
+                Precommit {
+                    declared_public_key: Some(public_key(&keys[2])),
+                    ..precommit(&keys[3], child_hash, 11)
+                },
+            ],
+            &[child],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::BadSignature)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn three_precommits_from_one_authority_in_justification_are_rejected() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let fork1 = header_with_state_root(target_hash, 11, [0x11; 32]);
+        let fork1_hash = fork1.hash(BLOCK_NUMBER_BYTES);
+        let fork2 = header_with_state_root(target_hash, 11, [0x22; 32]);
+        let fork2_hash = fork2.hash(BLOCK_NUMBER_BYTES);
+
+        let justification = encode_justification(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[2], target_hash, 10),
+                precommit(&keys[0], fork1_hash, 11),
+                precommit(&keys[0], fork2_hash, 11),
+            ],
+            &[fork1, fork2],
+        );
+
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(
+                result,
+                Err(JustificationVerifyError::DuplicateSignature { authority_key })
+                    if authority_key == public_key(&keys[0])
+            ),
+            "{result:?}"
+        );
+    }
+
     /// The set id is part of the signed message, so a justification can't be re-used against a
     /// different set of authorities.
     #[test]
