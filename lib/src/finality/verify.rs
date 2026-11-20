@@ -488,7 +488,7 @@ pub fn verify_justification<'a>(
             }
         }
 
-        let mut msg = Vec::with_capacity(1 + 32 + 4 + 8 + 8);
+        let mut msg = Vec::with_capacity(1 + 32 + config.block_number_bytes + 8 + 8);
         msg.push(1u8); // This `1` indicates which kind of message is being signed.
         msg.extend_from_slice(&precommit.target_hash[..]);
         // The message contains the little endian block number. While simple in concept,
