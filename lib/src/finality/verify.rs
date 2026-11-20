@@ -434,8 +434,8 @@ pub fn verify_justification<'a>(
 
     // Collect the authorities in a set in order to be able to determine with a low complexity
     // whether a public key is an authority.
-    // For each authority, contains a boolean indicating whether the authority has been seen
-    // before in the list of pre-commits.
+    // For each authority, contains the block targeted by its first pre-commit, if any, and whether
+    // the authority has equivocated.
     let mut authorities_list = {
         let mut list = hashbrown::HashMap::<&[u8], _, _>::with_capacity_and_hasher(
             0,
@@ -446,7 +446,7 @@ pub fn verify_justification<'a>(
             }),
         );
         for authority in config.authorities_list {
-            list.insert(authority, false);
+            list.insert(authority, None::<(&[u8; 32], u64, bool)>);
         }
         list
     };
@@ -467,15 +467,31 @@ pub fn verify_justification<'a>(
     // https://github.com/zcash/zips/blob/master/zip-0215.rst
     let mut batch = ed25519_zebra::batch::Verifier::new();
 
+    // An authority can appear at most twice, and only with two different votes. Like in
+    // Substrate, an authority that has voted for two different blocks (an equivocation) counts as
+    // voting for every block, the target included.
+    let mut num_equivocators = 0;
+
     for precommit in decoded_justification.precommits.iter() {
         match authorities_list.entry(precommit.authority_public_key) {
-            hashbrown::hash_map::Entry::Occupied(mut entry) => {
-                if entry.insert(true) {
+            hashbrown::hash_map::Entry::Occupied(mut entry) => match entry.get_mut() {
+                first_vote @ None => {
+                    *first_vote = Some((precommit.target_hash, precommit.target_number, false));
+                }
+                Some((target_hash, target_number, equivocated))
+                    if !*equivocated
+                        && (*target_hash, *target_number)
+                            != (precommit.target_hash, precommit.target_number) =>
+                {
+                    *equivocated = true;
+                    num_equivocators += 1;
+                }
+                Some(_) => {
                     return Err(JustificationVerifyError::DuplicateSignature {
                         authority_key: *precommit.authority_public_key,
                     });
                 }
-            }
+            },
             hashbrown::hash_map::Entry::Vacant(_) => {
                 return Err(JustificationVerifyError::NotAuthority {
                     authority_key: *precommit.authority_public_key,
@@ -512,6 +528,10 @@ pub fn verify_justification<'a>(
             ed25519_zebra::Signature::from(*precommit.signature),
             &msg,
         )));
+    }
+
+    if num_precommits - num_equivocators < threshold {
+        return Err(JustificationVerifyError::NotEnoughSignatures);
     }
 
     // Actual signatures verification performed here
@@ -600,8 +620,10 @@ pub fn verify_justification<'a>(
                 .ok_or(JustificationVerifyError::BadAncestry)?;
         }
 
-        // Votes for the base itself aren't tracked.
-        if let Some((_, _, num)) = walked_blocks.get_mut(precommit.target_hash) {
+        // Votes for the base itself aren't tracked, and equivocators are counted separately.
+        if let Some(Some((_, _, false))) = authorities_list.get(&precommit.authority_public_key[..])
+            && let Some((_, _, num)) = walked_blocks.get_mut(precommit.target_hash)
+        {
             *num += 1;
         }
     }
@@ -625,7 +647,7 @@ pub fn verify_justification<'a>(
     // pre-commits on it or its descendants.
     let ghost = walked_blocks
         .iter()
-        .filter(|(_, (_, _, num))| *num >= threshold)
+        .filter(|(_, (_, _, num))| *num + num_equivocators >= threshold)
         .map(|(hash, (_, height, _))| (*hash, *height))
         .max_by_key(|(_, height)| *height)
         .unwrap_or((base_hash, base_height));
@@ -654,8 +676,8 @@ pub enum JustificationVerifyError {
     BadPublicKey,
     /// One of the signatures can't be verified.
     BadSignature,
-    /// One authority has produced two signatures.
-    #[display("One authority has produced two signatures")]
+    /// One authority appears more than twice, or twice with the same vote.
+    #[display("One authority has produced too many signatures")]
     DuplicateSignature { authority_key: [u8; 32] },
     /// One of the public keys isn't in the list of authorities.
     #[display("One of the public keys isn't in the list of authorities")]
@@ -1398,14 +1420,12 @@ mod tests {
         );
     }
 
-    /// An authority appearing twice is rejected, even if the other pre-commits would be enough on
-    /// their own.
+    /// An authority appearing twice with the same vote is rejected, even if the other pre-commits
+    /// would be enough on their own.
     #[test]
     fn duplicate_authority_detected() {
         let (keys, authorities) = authorities();
         let target_hash = [0xaa; 32];
-        let child = header(target_hash, 11);
-        let child_hash = child.hash(BLOCK_NUMBER_BYTES);
 
         let justification = encode_justification(
             target_hash,
@@ -1414,10 +1434,9 @@ mod tests {
                 precommit(&keys[0], target_hash, 10),
                 precommit(&keys[1], target_hash, 10),
                 precommit(&keys[2], target_hash, 10),
-                // Second pre-commit from `keys[0]`, this time for a child of the target.
-                precommit(&keys[0], child_hash, 11),
+                precommit(&keys[0], target_hash, 10),
             ],
-            &[child],
+            &[],
         );
 
         let result = verify(&justification, &authorities);
