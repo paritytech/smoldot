@@ -18,7 +18,7 @@
 use crate::finality::decode;
 
 use alloc::vec::Vec;
-use core::{cmp, iter, mem};
+use core::{cmp, iter, marker::PhantomData, mem};
 use rand_chacha::{
     ChaCha20Rng,
     rand_core::{RngCore as _, SeedableRng as _},
@@ -124,7 +124,21 @@ pub fn verify_commit<C: AsRef<[u8]>>(config: CommitVerifyConfig<C>) -> CommitVer
     }
 
     CommitVerification {
-        commit: config.commit,
+        round_number: decoded_commit.round_number,
+        set_id: decoded_commit.set_id,
+        target_hash: *decoded_commit.target_hash,
+        target_number: decoded_commit.target_number,
+        precommits: decoded_commit
+            .precommits
+            .iter()
+            .zip(&decoded_commit.auth_data)
+            .map(|(precommit, (signature, authority_public_key))| Precommit {
+                target_hash: *precommit.target_hash,
+                target_number: precommit.target_number,
+                signature: **signature,
+                authority_public_key: **authority_public_key,
+            })
+            .collect(),
         block_number_bytes: config.block_number_bytes,
         next_precommit_index: 0,
         next_precommit_author_verified: false,
@@ -134,6 +148,7 @@ pub fn verify_commit<C: AsRef<[u8]>>(config: CommitVerifyConfig<C>) -> CommitVer
         num_authorities: config.num_authorities,
         signatures_batch: ed25519_zebra::batch::Verifier::new(),
         randomness,
+        marker: PhantomData,
     }
     .resume()
 }
@@ -149,12 +164,7 @@ impl<C: AsRef<[u8]>> CommitVerifyIsAuthority<C> {
     /// Public key to verify.
     pub fn authority_public_key(&self) -> &[u8; 32] {
         debug_assert!(!self.inner.next_precommit_author_verified);
-        let decoded_commit = decode::decode_grandpa_commit(
-            self.inner.commit.as_ref(),
-            self.inner.block_number_bytes,
-        )
-        .unwrap();
-        decoded_commit.auth_data[self.inner.next_precommit_index].1
+        &self.inner.precommits[self.inner.next_precommit_index].authority_public_key
     }
 
     /// Resumes the verification process.
@@ -178,46 +188,28 @@ impl<C: AsRef<[u8]>> CommitVerifyIsAuthority<C> {
 #[must_use]
 pub struct CommitVerifyIsParent<C> {
     inner: CommitVerification<C>,
-    /// For performance reasons, the block number is copied here, but not the block hash. This
-    /// hasn't actually been benchmarked, so feel free to do so.
-    block_number: u64,
 }
 
 impl<C: AsRef<[u8]>> CommitVerifyIsParent<C> {
     /// Height of the block to check.
     pub fn block_number(&self) -> u64 {
-        self.block_number
+        self.inner.precommits[self.inner.next_precommit_index].target_number
     }
 
     /// Hash of the block to check.
     pub fn block_hash(&self) -> &[u8; 32] {
         debug_assert!(!self.inner.next_precommit_block_verified);
-        let decoded_commit = decode::decode_grandpa_commit(
-            self.inner.commit.as_ref(),
-            self.inner.block_number_bytes,
-        )
-        .unwrap();
-        decoded_commit.precommits[self.inner.next_precommit_index].target_hash
+        &self.inner.precommits[self.inner.next_precommit_index].target_hash
     }
 
     /// Height of the block that must be the ancestor of the block to check.
     pub fn target_block_number(&self) -> u64 {
-        let decoded_commit = decode::decode_grandpa_commit(
-            self.inner.commit.as_ref(),
-            self.inner.block_number_bytes,
-        )
-        .unwrap();
-        decoded_commit.target_number
+        self.inner.target_number
     }
 
     /// Hash of the block that must be the ancestor of the block to check.
     pub fn target_block_hash(&self) -> &[u8; 32] {
-        let decoded_commit = decode::decode_grandpa_commit(
-            self.inner.commit.as_ref(),
-            self.inner.block_number_bytes,
-        )
-        .unwrap();
-        decoded_commit.target_hash
+        &self.inner.target_hash
     }
 
     /// Resumes the verification process.
@@ -241,8 +233,14 @@ impl<C: AsRef<[u8]>> CommitVerifyIsParent<C> {
 }
 
 struct CommitVerification<C> {
-    /// Encoded commit message. Guaranteed to decode successfully.
-    commit: C,
+    round_number: u64,
+    set_id: u64,
+    target_hash: [u8; 32],
+    target_number: u64,
+
+    /// Pre-commits of the commit message, decoded once in order to not decode the commit again
+    /// at each step of the verification.
+    precommits: Vec<Precommit>,
 
     /// See [`CommitVerifyConfig::block_number_bytes`].
     block_number_bytes: usize,
@@ -282,17 +280,21 @@ struct CommitVerification<C> {
 
     /// Randomness generator used during the batch verification.
     randomness: ChaCha20Rng,
+
+    marker: PhantomData<C>,
+}
+
+struct Precommit {
+    target_hash: [u8; 32],
+    target_number: u64,
+    signature: [u8; 64],
+    authority_public_key: [u8; 32],
 }
 
 impl<C: AsRef<[u8]>> CommitVerification<C> {
     fn resume(mut self) -> CommitVerify<C> {
-        // The `verify` function that starts the verification performs the preliminary check that
-        // the commit has the correct format.
-        let decoded_commit =
-            decode::decode_grandpa_commit(self.commit.as_ref(), self.block_number_bytes).unwrap();
-
         loop {
-            if let Some(precommit) = decoded_commit.precommits.get(self.next_precommit_index) {
+            if let Some(precommit) = self.precommits.get(self.next_precommit_index) {
                 if !self.next_precommit_author_verified {
                     return CommitVerify::IsAuthority(CommitVerifyIsAuthority { inner: self });
                 }
@@ -300,21 +302,15 @@ impl<C: AsRef<[u8]>> CommitVerification<C> {
                 if !self.next_precommit_block_verified {
                     if self.skip_ancestry_check[self.next_precommit_index] {
                         self.next_precommit_block_verified = true;
-                    } else if precommit.target_hash == decoded_commit.target_hash
-                        && precommit.target_number == decoded_commit.target_number
+                    } else if precommit.target_hash == self.target_hash
+                        && precommit.target_number == self.target_number
                     {
                         self.next_precommit_block_verified = true;
                         self.num_verified_signatures += 1;
                     } else {
-                        return CommitVerify::IsParent(CommitVerifyIsParent {
-                            block_number: precommit.target_number,
-                            inner: self,
-                        });
+                        return CommitVerify::IsParent(CommitVerifyIsParent { inner: self });
                     }
                 }
-
-                let authority_public_key = decoded_commit.auth_data[self.next_precommit_index].1;
-                let signature = decoded_commit.auth_data[self.next_precommit_index].0;
 
                 let mut msg = Vec::with_capacity(1 + 32 + self.block_number_bytes + 8 + 8);
                 msg.push(1u8); // This `1` indicates which kind of message is being signed.
@@ -335,14 +331,14 @@ impl<C: AsRef<[u8]>> CommitVerification<C> {
                             .saturating_sub(mem::size_of_val(&precommit.target_number)),
                     ),
                 );
-                msg.extend_from_slice(&u64::to_le_bytes(decoded_commit.round_number)[..]);
-                msg.extend_from_slice(&u64::to_le_bytes(decoded_commit.set_id)[..]);
+                msg.extend_from_slice(&u64::to_le_bytes(self.round_number)[..]);
+                msg.extend_from_slice(&u64::to_le_bytes(self.set_id)[..]);
                 debug_assert_eq!(msg.len(), msg.capacity());
 
                 self.signatures_batch
                     .queue(ed25519_zebra::batch::Item::from((
-                        ed25519_zebra::VerificationKeyBytes::from(*authority_public_key),
-                        ed25519_zebra::Signature::from(*signature),
+                        ed25519_zebra::VerificationKeyBytes::from(precommit.authority_public_key),
+                        ed25519_zebra::Signature::from(precommit.signature),
                         &msg,
                     )));
 
