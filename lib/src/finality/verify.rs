@@ -87,13 +87,13 @@ pub fn verify_commit<C: AsRef<[u8]>>(config: CommitVerifyConfig<C>) -> CommitVer
 
     let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
 
-    // An authority can appear at most twice, and only with two different votes. Like in
-    // Substrate, an authority that has voted for two different blocks (an equivocation) counts as
-    // voting for every block, the target included.
-    let mut from_equivocator = alloc::vec![false; decoded_commit.precommits.len()];
+    // Like in Substrate, an authority that has signed two different pre-commits (an equivocation)
+    // counts as voting for every block, the target included. Any other pre-commit from an
+    // authority that has already been seen doesn't count.
+    let mut skip_ancestry_check = alloc::vec![false; decoded_commit.precommits.len()];
     let mut num_equivocators = 0;
     {
-        let mut first_precommit_of = hashbrown::HashMap::with_capacity_and_hasher(
+        let mut seen_authorities = hashbrown::HashMap::with_capacity_and_hasher(
             decoded_commit.auth_data.len(),
             crate::util::SipHasherBuild::new({
                 let mut seed = [0; 16];
@@ -101,28 +101,25 @@ pub fn verify_commit<C: AsRef<[u8]>>(config: CommitVerifyConfig<C>) -> CommitVer
                 seed
             }),
         );
-        for (index, (_, pubkey)) in decoded_commit.auth_data.iter().enumerate() {
-            let Some(&first) = first_precommit_of.get(pubkey) else {
-                first_precommit_of.insert(pubkey, index);
-                continue;
+        for (index, (signature, pubkey)) in decoded_commit.auth_data.iter().enumerate() {
+            let (first, equivocated) = match seen_authorities.entry(pubkey) {
+                hashbrown::hash_map::Entry::Vacant(entry) => {
+                    entry.insert((index, false));
+                    continue;
+                }
+                hashbrown::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             };
 
-            let (first_vote, vote) = (
-                &decoded_commit.precommits[first],
-                &decoded_commit.precommits[index],
-            );
-            if from_equivocator[first]
-                || (first_vote.target_hash == vote.target_hash
-                    && first_vote.target_number == vote.target_number)
-            {
-                return CommitVerify::Finished(Err(CommitVerifyError::DuplicateSignature {
-                    authority_key: **pubkey,
-                }));
-            }
+            skip_ancestry_check[index] = true;
 
-            from_equivocator[first] = true;
-            from_equivocator[index] = true;
-            num_equivocators += 1;
+            if !*equivocated
+                && (decoded_commit.precommits[*first] != decoded_commit.precommits[index]
+                    || decoded_commit.auth_data[*first].0 != *signature)
+            {
+                *equivocated = true;
+                skip_ancestry_check[*first] = true;
+                num_equivocators += 1;
+            }
         }
     }
 
@@ -132,7 +129,7 @@ pub fn verify_commit<C: AsRef<[u8]>>(config: CommitVerifyConfig<C>) -> CommitVer
         next_precommit_index: 0,
         next_precommit_author_verified: false,
         next_precommit_block_verified: false,
-        from_equivocator,
+        skip_ancestry_check,
         num_verified_signatures: num_equivocators,
         num_authorities: config.num_authorities,
         signatures_batch: ed25519_zebra::batch::Verifier::new(),
@@ -261,13 +258,13 @@ struct CommitVerification<C> {
     /// verified to be about a block that is a descendant of the target block.
     next_precommit_block_verified: bool,
 
-    /// For each pre-commit, whether its author has pre-committed two different blocks. The
-    /// targets of these pre-commits don't need to be checked, as they count as votes for
-    /// everything.
-    from_equivocator: Vec<bool>,
+    /// For each pre-commit, whether it is from an authority that has equivocated, or repeats an
+    /// authority that has already been seen. Their target doesn't matter, as their vote is
+    /// already accounted for.
+    skip_ancestry_check: Vec<bool>,
 
-    /// Number of authorities that have equivocated, plus number of other pre-commits known to
-    /// target either the target block or one of its descendants. Needs to be above a certain
+    /// Number of authorities that have equivocated, plus number of other authorities whose
+    /// pre-commit is known to target either the target block or one of its descendants. Needs to be above a certain
     /// threshold for the commit to be valid.
     num_verified_signatures: usize,
 
@@ -301,7 +298,7 @@ impl<C: AsRef<[u8]>> CommitVerification<C> {
                 }
 
                 if !self.next_precommit_block_verified {
-                    if self.from_equivocator[self.next_precommit_index] {
+                    if self.skip_ancestry_check[self.next_precommit_index] {
                         self.next_precommit_block_verified = true;
                     } else if precommit.target_hash == decoded_commit.target_hash
                         && precommit.target_number == decoded_commit.target_number
@@ -388,9 +385,6 @@ pub enum CommitVerifyError {
     BadPublicKey,
     /// One of the signatures can't be verified.
     BadSignature,
-    /// One authority appears more than twice, or twice with the same vote.
-    #[display("One authority has produced too many signatures")]
-    DuplicateSignature { authority_key: [u8; 32] },
     /// One of the public keys isn't in the list of authorities.
     #[display("One of the public keys isn't in the list of authorities")]
     NotAuthority { authority_key: [u8; 32] },
@@ -1762,11 +1756,23 @@ mod tests {
     }
 
     #[test]
-    fn same_precommit_twice_in_commit_is_rejected() {
+    fn repeated_precommit_counts_once() {
         let (keys, authorities) = authorities();
         let target_hash = [0xaa; 32];
 
-        let commit = encode_commit(
+        let below_threshold = encode_commit(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[0], target_hash, 10),
+            ],
+        );
+        let result = verify_commit_with(&below_threshold, &authorities, |_| unreachable!());
+        assert!(matches!(result, CommitOutcome::Unknown), "{result:?}");
+
+        let above_threshold = encode_commit(
             target_hash,
             10,
             &[
@@ -1776,20 +1782,12 @@ mod tests {
                 precommit(&keys[0], target_hash, 10),
             ],
         );
-
-        let result = verify_commit_with(&commit, &authorities, |_| unreachable!());
-        assert!(
-            matches!(
-                result,
-                CommitOutcome::Err(CommitVerifyError::DuplicateSignature { authority_key })
-                    if authority_key == public_key(&keys[0])
-            ),
-            "{result:?}"
-        );
+        let result = verify_commit_with(&above_threshold, &authorities, |_| unreachable!());
+        assert!(matches!(result, CommitOutcome::Ok), "{result:?}");
     }
 
     #[test]
-    fn three_precommits_from_one_authority_are_rejected() {
+    fn further_precommits_from_equivocator_are_ignored() {
         let (keys, authorities) = authorities();
         let target_hash = [0xaa; 32];
 
@@ -1806,13 +1804,6 @@ mod tests {
         );
 
         let result = verify_commit_with(&commit, &authorities, |_| unreachable!());
-        assert!(
-            matches!(
-                result,
-                CommitOutcome::Err(CommitVerifyError::DuplicateSignature { authority_key })
-                    if authority_key == public_key(&keys[0])
-            ),
-            "{result:?}"
-        );
+        assert!(matches!(result, CommitOutcome::Ok), "{result:?}");
     }
 }
