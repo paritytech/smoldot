@@ -1693,4 +1693,126 @@ mod tests {
             "{result:?}"
         );
     }
+
+    /// Substrate puts both pre-commits of an equivocating authority in its commits, whatever
+    /// blocks they target.
+    #[test]
+    fn commit_with_equivocation_is_accepted() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let commit = encode_commit(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], [0xbb; 32], 11),
+                precommit(&keys[2], target_hash, 10),
+                precommit(&keys[1], [0xcc; 32], 11),
+            ],
+        );
+
+        let result = verify_commit_with(&commit, &authorities, |_| unreachable!());
+        assert!(matches!(result, CommitOutcome::Ok), "{result:?}");
+    }
+
+    #[test]
+    fn equivocating_authority_counts_once() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let commit = encode_commit(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[1], [0xbb; 32], 11),
+            ],
+        );
+
+        let result = verify_commit_with(&commit, &authorities, |_| unreachable!());
+        assert!(matches!(result, CommitOutcome::Unknown), "{result:?}");
+    }
+
+    #[test]
+    fn equivocation_with_bad_signature_detected() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let commit = encode_commit(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[2], target_hash, 10),
+                Precommit {
+                    declared_public_key: Some(public_key(&keys[2])),
+                    ..precommit(&keys[3], [0xbb; 32], 11)
+                },
+            ],
+        );
+
+        let result = verify_commit_with(&commit, &authorities, |_| unreachable!());
+        assert!(
+            matches!(result, CommitOutcome::Err(CommitVerifyError::BadSignature)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn same_precommit_twice_in_commit_is_rejected() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let commit = encode_commit(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[2], target_hash, 10),
+                precommit(&keys[0], target_hash, 10),
+            ],
+        );
+
+        let result = verify_commit_with(&commit, &authorities, |_| unreachable!());
+        assert!(
+            matches!(
+                result,
+                CommitOutcome::Err(CommitVerifyError::DuplicateSignature { authority_key })
+                    if authority_key == public_key(&keys[0])
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn three_precommits_from_one_authority_are_rejected() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let commit = encode_commit(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], target_hash, 10),
+                precommit(&keys[2], target_hash, 10),
+                precommit(&keys[0], [0xbb; 32], 11),
+                precommit(&keys[0], [0xcc; 32], 11),
+            ],
+        );
+
+        let result = verify_commit_with(&commit, &authorities, |_| unreachable!());
+        assert!(
+            matches!(
+                result,
+                CommitOutcome::Err(CommitVerifyError::DuplicateSignature { authority_key })
+                    if authority_key == public_key(&keys[0])
+            ),
+            "{result:?}"
+        );
+    }
 }
