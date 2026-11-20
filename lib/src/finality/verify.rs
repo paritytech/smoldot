@@ -1657,6 +1657,32 @@ mod tests {
         assert!(matches!(result, Ok(())), "{result:?}");
     }
 
+    /// Every authority having equivocated is the largest justification that an honest node can
+    /// produce.
+    #[test]
+    fn justification_with_more_than_two_precommits_per_authority_is_rejected() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let votes_ancestries = [header(target_hash, 11)];
+        let child_hash = votes_ancestries[0].hash(BLOCK_NUMBER_BYTES);
+        let mut precommits = keys
+            .iter()
+            .flat_map(|k| [precommit(k, target_hash, 10), precommit(k, child_hash, 11)])
+            .collect::<Vec<_>>();
+
+        let justification = encode_justification(child_hash, 11, &precommits, &votes_ancestries);
+        let result = verify(&justification, &authorities);
+        assert!(matches!(result, Ok(())), "{result:?}");
+
+        precommits.push(precommit(&keys[0], child_hash, 11));
+        let justification = encode_justification(child_hash, 11, &precommits, &votes_ancestries);
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::TooManySignatures)),
+            "{result:?}"
+        );
+    }
+
     /// The set id is part of the signed message, so a justification can't be re-used against a
     /// different set of authorities.
     #[test]
@@ -2059,6 +2085,31 @@ mod tests {
         let result = verify_commit_with(&commit, &authorities, |_| unreachable!());
         assert!(
             matches!(result, CommitOutcome::Err(CommitVerifyError::BadSignature)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn commit_with_more_than_two_precommits_per_authority_is_rejected() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let mut precommits = keys
+            .iter()
+            .flat_map(|k| [precommit(k, target_hash, 10), precommit(k, [0xbb; 32], 11)])
+            .collect::<Vec<_>>();
+
+        let commit = encode_commit(target_hash, 10, &precommits);
+        let result = verify_commit_with(&commit, &authorities, |_| unreachable!());
+        assert!(matches!(result, CommitOutcome::Ok), "{result:?}");
+
+        precommits.push(precommit(&keys[0], target_hash, 10));
+        let commit = encode_commit(target_hash, 10, &precommits);
+        let result = verify_commit_with(&commit, &authorities, |_| unreachable!());
+        assert!(
+            matches!(
+                result,
+                CommitOutcome::Err(CommitVerifyError::TooManySignatures)
+            ),
             "{result:?}"
         );
     }
