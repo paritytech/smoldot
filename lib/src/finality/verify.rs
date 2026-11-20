@@ -79,6 +79,12 @@ pub fn verify_commit<C: AsRef<[u8]>>(config: CommitVerifyConfig<C>) -> CommitVer
         return CommitVerify::Finished(Err(CommitVerifyError::InvalidFormat));
     }
 
+    if decoded_commit.precommits.len()
+        < (usize::try_from(config.num_authorities).unwrap() * 2 / 3) + 1
+    {
+        return CommitVerify::Finished(Err(CommitVerifyError::NotEnoughSignatures));
+    }
+
     let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
 
     // Make sure that there is no duplicate authority public key.
@@ -361,6 +367,8 @@ pub enum CommitVerifyError {
     /// One of the public keys isn't in the list of authorities.
     #[display("One of the public keys isn't in the list of authorities")]
     NotAuthority { authority_key: [u8; 32] },
+    /// Commit doesn't contain enough authorities signatures to be valid.
+    NotEnoughSignatures,
     /// Commit contains a vote for a block that isn't a descendant of the target block.
     BadAncestry,
 }
