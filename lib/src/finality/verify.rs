@@ -85,6 +85,16 @@ pub fn verify_commit<C: AsRef<[u8]>>(config: CommitVerifyConfig<C>) -> CommitVer
         return CommitVerify::Finished(Err(CommitVerifyError::NotEnoughSignatures));
     }
 
+    // An honest commit contains at most two pre-commits per authority, the second one being an
+    // equivocation.
+    if decoded_commit.precommits.len()
+        > usize::try_from(config.num_authorities)
+            .unwrap()
+            .saturating_mul(2)
+    {
+        return CommitVerify::Finished(Err(CommitVerifyError::TooManySignatures));
+    }
+
     let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
 
     // Like in Substrate, an authority that has signed two different pre-commits (an equivocation)
@@ -386,6 +396,8 @@ pub enum CommitVerifyError {
     NotAuthority { authority_key: [u8; 32] },
     /// Commit doesn't contain enough authorities signatures to be valid.
     NotEnoughSignatures,
+    /// Commit contains more than two pre-commits per authority.
+    TooManySignatures,
     /// Commit contains a vote for a block that isn't a descendant of the target block.
     BadAncestry,
 }
@@ -453,6 +465,12 @@ pub fn verify_justification<'a>(
     // Duplicate signatures are checked below.
     if num_precommits < threshold {
         return Err(JustificationVerifyError::NotEnoughSignatures);
+    }
+
+    // An honest justification contains at most two pre-commits per authority, the second one
+    // being an equivocation.
+    if num_precommits > authorities_list.len().saturating_mul(2) {
+        return Err(JustificationVerifyError::TooManySignatures);
     }
 
     // Verifying all the signatures together brings better performances than verifying them one
@@ -672,6 +690,8 @@ pub enum JustificationVerifyError {
     NotAuthority { authority_key: [u8; 32] },
     /// Justification doesn't contain enough authorities signatures to be valid.
     NotEnoughSignatures,
+    /// Justification contains more than two pre-commits per authority.
+    TooManySignatures,
     /// One of the pre-commits can't be linked to the block targeted by the lowest pre-commit, or
     /// the heights in the justification are inconsistent with each other.
     BadAncestry,
