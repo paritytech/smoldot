@@ -17,6 +17,10 @@ required-features = ["std"]
 name = "lifecycle"
 required-features = ["std"]
 
+[[example]]
+name = "warp_proof"
+required-features = ["std"]
+
 [dependencies]
 async-channel = { version = "2.5.0", default-features = false }
 async-lock = { version = "3.0.0", default-features = false }

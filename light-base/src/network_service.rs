@@ -78,7 +78,8 @@ use smoldot::{
 pub use codec::{AffinityFilter, CallProofRequestConfig, Role};
 use service::SendTopicAffinityError;
 pub use service::{
-    ChainId, EncodedMerkleProof, PeerId, QueueNotificationError, SendBitswapMessageError,
+    ChainId, EncodedGrandpaWarpSyncResponse, EncodedMerkleProof, PeerId, QueueNotificationError,
+    SendBitswapMessageError,
 };
 
 mod tasks;
