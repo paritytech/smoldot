@@ -1642,4 +1642,28 @@ mod tests {
         let result = verify_commit_with(&commit, &authorities, |_| Some(true));
         assert!(matches!(result, CommitOutcome::Ok), "{result:?}");
     }
+
+    #[test]
+    fn commit_with_not_enough_precommits() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let commit = encode_commit(
+            target_hash,
+            10,
+            &keys[..2]
+                .iter()
+                .map(|k| precommit(k, target_hash, 10))
+                .collect::<Vec<_>>(),
+        );
+
+        let result = verify_commit_with(&commit, &authorities, |_| None);
+        assert!(
+            matches!(
+                result,
+                CommitOutcome::Err(CommitVerifyError::NotEnoughSignatures)
+            ),
+            "{result:?}"
+        );
+    }
 }
