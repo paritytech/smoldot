@@ -2113,4 +2113,87 @@ mod tests {
             "{result:?}"
         );
     }
+
+    /// `keys[1]` equivocates with three different pre-commits. Counting it more than once would
+    /// reach the threshold.
+    #[test]
+    fn third_precommit_from_equivocator_counts_once() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+
+        let commit = encode_commit(
+            target_hash,
+            10,
+            &[
+                precommit(&keys[0], target_hash, 10),
+                precommit(&keys[1], [0xbb; 32], 11),
+                precommit(&keys[1], [0xcc; 32], 11),
+                precommit(&keys[1], [0xdd; 32], 11),
+            ],
+        );
+
+        let result = verify_commit_with(&commit, &authorities, |_| unreachable!());
+        assert!(matches!(result, CommitOutcome::Unknown), "{result:?}");
+    }
+
+    /// `keys[2]` equivocates with three different pre-commits. Counting it more than once would
+    /// make `fork1` reach the threshold.
+    #[test]
+    fn third_precommit_from_equivocator_in_justification_counts_once() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let fork1 = header_with_state_root(target_hash, 11, [0x11; 32]);
+        let fork1_hash = fork1.hash(BLOCK_NUMBER_BYTES);
+        let fork2 = header_with_state_root(target_hash, 11, [0x22; 32]);
+        let fork2_hash = fork2.hash(BLOCK_NUMBER_BYTES);
+        let fork3 = header_with_state_root(target_hash, 11, [0x33; 32]);
+        let fork3_hash = fork3.hash(BLOCK_NUMBER_BYTES);
+        let precommits = [
+            precommit(&keys[0], fork1_hash, 11),
+            precommit(&keys[1], target_hash, 10),
+            precommit(&keys[2], fork1_hash, 11),
+            precommit(&keys[2], fork2_hash, 11),
+            precommit(&keys[2], fork3_hash, 11),
+        ];
+        let votes_ancestries = [fork1, fork2, fork3];
+
+        let justification = encode_justification(fork1_hash, 11, &precommits, &votes_ancestries);
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::TargetMismatch)),
+            "{result:?}"
+        );
+
+        let justification = encode_justification(target_hash, 10, &precommits, &votes_ancestries);
+        let result = verify(&justification, &authorities);
+        assert!(matches!(result, Ok(())), "{result:?}");
+    }
+
+    /// `keys[1]` repeats its pre-commit on `child`. Counting it twice would make `child` reach
+    /// the threshold.
+    #[test]
+    fn repeated_precommit_above_base_counts_once() {
+        let (keys, authorities) = authorities();
+        let target_hash = [0xaa; 32];
+        let child = header(target_hash, 11);
+        let child_hash = child.hash(BLOCK_NUMBER_BYTES);
+        let precommits = [
+            precommit(&keys[0], target_hash, 10),
+            precommit(&keys[1], child_hash, 11),
+            precommit(&keys[1], child_hash, 11),
+            precommit(&keys[2], child_hash, 11),
+        ];
+        let votes_ancestries = [child];
+
+        let justification = encode_justification(child_hash, 11, &precommits, &votes_ancestries);
+        let result = verify(&justification, &authorities);
+        assert!(
+            matches!(result, Err(JustificationVerifyError::TargetMismatch)),
+            "{result:?}"
+        );
+
+        let justification = encode_justification(target_hash, 10, &precommits, &votes_ancestries);
+        let result = verify(&justification, &authorities);
+        assert!(matches!(result, Ok(())), "{result:?}");
+    }
 }
