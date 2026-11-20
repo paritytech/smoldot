@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PAYMENT_FEES_FUNCTION_NAME"],"enum":["DecodeError"],"fn":["decode_payment_info","payment_info_parameters"]};

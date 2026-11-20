@@ -1,0 +1,571 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `lib/src/libp2p/connection/webrtc_framing.rs`."><title>webrtc_framing.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="smoldot" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../../static.files/storage-e2aeef58.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">smoldot/libp2p/connection/</div>webrtc_framing.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Smoldot
+<a href=#2 id=2 data-nosnippet>2</a>// Copyright (C) 2023  Pierre Krieger
+<a href=#3 id=3 data-nosnippet>3</a>// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+<a href=#4 id=4 data-nosnippet>4</a>
+<a href=#5 id=5 data-nosnippet>5</a>// This program is free software: you can redistribute it and/or modify
+<a href=#6 id=6 data-nosnippet>6</a>// it under the terms of the GNU General Public License as published by
+<a href=#7 id=7 data-nosnippet>7</a>// the Free Software Foundation, either version 3 of the License, or
+<a href=#8 id=8 data-nosnippet>8</a>// (at your option) any later version.
+<a href=#9 id=9 data-nosnippet>9</a>
+<a href=#10 id=10 data-nosnippet>10</a>// This program is distributed in the hope that it will be useful,
+<a href=#11 id=11 data-nosnippet>11</a>// but WITHOUT ANY WARRANTY; without even the implied warranty of
+<a href=#12 id=12 data-nosnippet>12</a>// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+<a href=#13 id=13 data-nosnippet>13</a>// GNU General Public License for more details.
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a>// You should have received a copy of the GNU General Public License
+<a href=#16 id=16 data-nosnippet>16</a>// along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+<a href=#17 id=17 data-nosnippet>17</a>
+<a href=#18 id=18 data-nosnippet>18</a></span><span class="doccomment">//!
+<a href=#19 id=19 data-nosnippet>19</a>//! See &lt;https://github.com/libp2p/specs/blob/master/webrtc/README.md#multiplexing&gt;.
+<a href=#20 id=20 data-nosnippet>20</a>
+<a href=#21 id=21 data-nosnippet>21</a></span><span class="kw">use crate</span>::{
+<a href=#22 id=22 data-nosnippet>22</a>    libp2p::read_write::ReadWrite,
+<a href=#23 id=23 data-nosnippet>23</a>    util::{leb128, protobuf},
+<a href=#24 id=24 data-nosnippet>24</a>};
+<a href=#25 id=25 data-nosnippet>25</a>
+<a href=#26 id=26 data-nosnippet>26</a><span class="kw">use </span>alloc::{borrow::ToOwned <span class="kw">as _</span>, vec::Vec};
+<a href=#27 id=27 data-nosnippet>27</a><span class="kw">use </span>core::{cmp, fmt, mem, ops};
+<a href=#28 id=28 data-nosnippet>28</a>
+<a href=#29 id=29 data-nosnippet>29</a><span class="doccomment">/// State of the framing.
+<a href=#30 id=30 data-nosnippet>30</a></span><span class="kw">pub struct </span>WebRtcFraming {
+<a href=#31 id=31 data-nosnippet>31</a>    <span class="doccomment">/// Value of [`ReadWrite::expected_incoming_bytes`] of the inner stream the last time that
+<a href=#32 id=32 data-nosnippet>32</a>    /// [`WebRtcFraming::read_write`] was called. `None` if unknown.
+<a href=#33 id=33 data-nosnippet>33</a>    </span>inner_stream_expected_incoming_bytes: <span class="prelude-ty">Option</span>&lt;usize&gt;,
+<a href=#34 id=34 data-nosnippet>34</a>
+<a href=#35 id=35 data-nosnippet>35</a>    <span class="doccomment">/// Buffer containing data from a previous frame, but that doesn't contain enough data for
+<a href=#36 id=36 data-nosnippet>36</a>    /// the underlying substream to accept it.
+<a href=#37 id=37 data-nosnippet>37</a>    ///
+<a href=#38 id=38 data-nosnippet>38</a>    /// In other words, `receive_buffer.len() &lt; inner_stream_expected_incoming_bytes`.
+<a href=#39 id=39 data-nosnippet>39</a>    </span><span class="comment">// TODO: shrink_to_fit?
+<a href=#40 id=40 data-nosnippet>40</a>    </span>receive_buffer: Vec&lt;u8&gt;,
+<a href=#41 id=41 data-nosnippet>41</a>
+<a href=#42 id=42 data-nosnippet>42</a>    <span class="doccomment">/// State of the writing side of the remote.
+<a href=#43 id=43 data-nosnippet>43</a>    </span>remote_write_state: RemoteWriteState,
+<a href=#44 id=44 data-nosnippet>44</a>
+<a href=#45 id=45 data-nosnippet>45</a>    <span class="doccomment">/// State of the local writing side.
+<a href=#46 id=46 data-nosnippet>46</a>    </span>local_write_state: LocalWriteState,
+<a href=#47 id=47 data-nosnippet>47</a>}
+<a href=#48 id=48 data-nosnippet>48</a>
+<a href=#49 id=49 data-nosnippet>49</a><span class="kw">enum </span>LocalWriteState {
+<a href=#50 id=50 data-nosnippet>50</a>    Open,
+<a href=#51 id=51 data-nosnippet>51</a>    FinBuffered,
+<a href=#52 id=52 data-nosnippet>52</a>    FinAcked,
+<a href=#53 id=53 data-nosnippet>53</a>}
+<a href=#54 id=54 data-nosnippet>54</a>
+<a href=#55 id=55 data-nosnippet>55</a><span class="kw">enum </span>RemoteWriteState {
+<a href=#56 id=56 data-nosnippet>56</a>    Open,
+<a href=#57 id=57 data-nosnippet>57</a>    <span class="doccomment">/// The remote has sent a `FIN` in the past. Any data in [`WebRtcFraming::receive_buffer`]
+<a href=#58 id=58 data-nosnippet>58</a>    /// is still valid and was received before the remote writing side was closed.
+<a href=#59 id=59 data-nosnippet>59</a>    </span>Closed,
+<a href=#60 id=60 data-nosnippet>60</a>    ClosedAckBuffered,
+<a href=#61 id=61 data-nosnippet>61</a>}
+<a href=#62 id=62 data-nosnippet>62</a>
+<a href=#63 id=63 data-nosnippet>63</a><span class="kw">const </span>RECEIVE_BUFFER_CAPACITY: usize = <span class="number">2048</span>;
+<a href=#64 id=64 data-nosnippet>64</a><span class="doccomment">/// Maximum size in bytes of the protobuf frame surrounding the message.
+<a href=#65 id=65 data-nosnippet>65</a></span><span class="kw">const </span>PROTOBUF_FRAME_MAX_LEN: usize = <span class="number">8</span>; <span class="comment">// TODO: calculate better?
+<a href=#66 id=66 data-nosnippet>66</a></span><span class="doccomment">/// Size in bytes of a frame carrying a flag and no data: length prefix, flag, empty data.
+<a href=#67 id=67 data-nosnippet>67</a></span><span class="kw">const </span>FLAG_ONLY_FRAME_LEN: usize = <span class="number">5</span>;
+<a href=#68 id=68 data-nosnippet>68</a><span class="kw">const </span>MAX_PROTOBUF_MESSAGE_LEN: usize = <span class="number">16384</span>;
+<a href=#69 id=69 data-nosnippet>69</a>
+<a href=#70 id=70 data-nosnippet>70</a><span class="kw">impl </span>WebRtcFraming {
+<a href=#71 id=71 data-nosnippet>71</a>    <span class="doccomment">/// Initializes a new [`WebRtcFraming`].
+<a href=#72 id=72 data-nosnippet>72</a>    </span><span class="kw">pub fn </span>new() -&gt; <span class="self">Self </span>{
+<a href=#73 id=73 data-nosnippet>73</a>        WebRtcFraming {
+<a href=#74 id=74 data-nosnippet>74</a>            inner_stream_expected_incoming_bytes: <span class="prelude-val">None</span>,
+<a href=#75 id=75 data-nosnippet>75</a>            receive_buffer: Vec::with_capacity(RECEIVE_BUFFER_CAPACITY),
+<a href=#76 id=76 data-nosnippet>76</a>            remote_write_state: RemoteWriteState::Open,
+<a href=#77 id=77 data-nosnippet>77</a>            local_write_state: LocalWriteState::Open,
+<a href=#78 id=78 data-nosnippet>78</a>        }
+<a href=#79 id=79 data-nosnippet>79</a>    }
+<a href=#80 id=80 data-nosnippet>80</a>
+<a href=#81 id=81 data-nosnippet>81</a>    <span class="doccomment">/// Feeds data coming from a socket and outputs data to write to the socket.
+<a href=#82 id=82 data-nosnippet>82</a>    ///
+<a href=#83 id=83 data-nosnippet>83</a>    /// Returns an object that implements `Deref&lt;Target = ReadWrite&gt;`. This object represents the
+<a href=#84 id=84 data-nosnippet>84</a>    /// decrypted stream of data.
+<a href=#85 id=85 data-nosnippet>85</a>    ///
+<a href=#86 id=86 data-nosnippet>86</a>    /// An error is returned if the protocol is being violated by the remote, if the remote wants
+<a href=#87 id=87 data-nosnippet>87</a>    /// to reset the substream.
+<a href=#88 id=88 data-nosnippet>88</a>    </span><span class="kw">pub fn </span>read_write&lt;<span class="lifetime">'a</span>, TNow: Clone&gt;(
+<a href=#89 id=89 data-nosnippet>89</a>        <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span><span class="self">self</span>,
+<a href=#90 id=90 data-nosnippet>90</a>        outer_read_write: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>ReadWrite&lt;TNow&gt;,
+<a href=#91 id=91 data-nosnippet>91</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;InnerReadWrite&lt;<span class="lifetime">'a</span>, TNow&gt;, Error&gt; {
+<a href=#92 id=92 data-nosnippet>92</a>        <span class="comment">// A flag-only frame is parsed whatever the underlying substream expects: a `FIN` or
+<a href=#93 id=93 data-nosnippet>93</a>        // `RESET_STREAM` arriving in a state that reads nothing (an outbound notifications
+<a href=#94 id=94 data-nosnippet>94</a>        // substream, a refused inbound one, ...) must still be processed, or no `FIN_ACK` is
+<a href=#95 id=95 data-nosnippet>95</a>        // sent and the closing goes unreported. A data frame is parsed only while the substream
+<a href=#96 id=96 data-nosnippet>96</a>        // has room for it, so that the rest stays in the outer buffer and back-pressures the
+<a href=#97 id=97 data-nosnippet>97</a>        // remote. A substream that asks for nothing still gets one frame at a time: states that
+<a href=#98 id=98 data-nosnippet>98</a>        // discard what they receive must drain the remote's in-flight data to reach the `FIN`
+<a href=#99 id=99 data-nosnippet>99</a>        // behind it. Consuming it requests the next call.
+<a href=#100 id=100 data-nosnippet>100</a>        </span><span class="kw">loop </span>{
+<a href=#101 id=101 data-nosnippet>101</a>            <span class="comment">// Try to parse a frame from the incoming buffer.
+<a href=#102 id=102 data-nosnippet>102</a>            </span><span class="kw">let </span>bytes_to_discard = {
+<a href=#103 id=103 data-nosnippet>103</a>                <span class="comment">// TODO: we could in theory demand from the outside just the protobuf header, and then later the data, which would save some copying but might considerably complexifies the code
+<a href=#104 id=104 data-nosnippet>104</a>                </span><span class="kw">let </span><span class="kw-2">mut </span>parser = nom::combinator::map_parser::&lt;<span class="kw">_</span>, <span class="kw">_</span>, nom::error::Error&lt;<span class="kw-2">&amp;</span>[u8]&gt;, <span class="kw">_</span>, <span class="kw">_</span>&gt;(
+<a href=#105 id=105 data-nosnippet>105</a>                    nom::multi::length_data(<span class="kw">crate</span>::util::leb128::nom_leb128_usize),
+<a href=#106 id=106 data-nosnippet>106</a>                    <span class="macro">protobuf::message_decode!</span> {
+<a href=#107 id=107 data-nosnippet>107</a>                        <span class="attr">#[optional] </span>flags = <span class="number">1 </span>=&gt; protobuf::enum_tag_decode,
+<a href=#108 id=108 data-nosnippet>108</a>                        <span class="attr">#[optional] </span>message = <span class="number">2 </span>=&gt; protobuf::bytes_tag_decode,
+<a href=#109 id=109 data-nosnippet>109</a>                    },
+<a href=#110 id=110 data-nosnippet>110</a>                );
+<a href=#111 id=111 data-nosnippet>111</a>                <span class="kw">match </span>nom::Parser::parse(<span class="kw-2">&amp;mut </span>parser, <span class="kw-2">&amp;</span>outer_read_write.incoming_buffer) {
+<a href=#112 id=112 data-nosnippet>112</a>                    <span class="prelude-val">Ok</span>((rest, framed_message)) =&gt; {
+<a href=#113 id=113 data-nosnippet>113</a>                        <span class="comment">// The remote has sent a `RESET_STREAM` flag, immediately stop with an error.
+<a href=#114 id=114 data-nosnippet>114</a>                        // The specification mentions that the receiver may discard any data already
+<a href=#115 id=115 data-nosnippet>115</a>                        // received, which we do.
+<a href=#116 id=116 data-nosnippet>116</a>                        </span><span class="kw">if </span>framed_message.flags.map_or(<span class="bool-val">false</span>, |f| f == <span class="number">2</span>) {
+<a href=#117 id=117 data-nosnippet>117</a>                            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::RemoteResetDesired);
+<a href=#118 id=118 data-nosnippet>118</a>                        }
+<a href=#119 id=119 data-nosnippet>119</a>
+<a href=#120 id=120 data-nosnippet>120</a>                        <span class="comment">// Leave a data frame the substream has no room for in the outer buffer.
+<a href=#121 id=121 data-nosnippet>121</a>                        </span><span class="kw">let </span>has_data = framed_message.message.is_some_and(|msg| !msg.is_empty());
+<a href=#122 id=122 data-nosnippet>122</a>                        <span class="kw">if </span>has_data
+<a href=#123 id=123 data-nosnippet>123</a>                            &amp;&amp; <span class="self">self</span>.receive_buffer.len()
+<a href=#124 id=124 data-nosnippet>124</a>                                &gt;= cmp::max(
+<a href=#125 id=125 data-nosnippet>125</a>                                    <span class="self">self</span>.inner_stream_expected_incoming_bytes.unwrap_or(<span class="number">0</span>),
+<a href=#126 id=126 data-nosnippet>126</a>                                    <span class="number">1</span>,
+<a href=#127 id=127 data-nosnippet>127</a>                                )
+<a href=#128 id=128 data-nosnippet>128</a>                        {
+<a href=#129 id=129 data-nosnippet>129</a>                            <span class="kw">break</span>;
+<a href=#130 id=130 data-nosnippet>130</a>                        }
+<a href=#131 id=131 data-nosnippet>131</a>
+<a href=#132 id=132 data-nosnippet>132</a>                        <span class="comment">// Some protocol check.
+<a href=#133 id=133 data-nosnippet>133</a>                        </span><span class="kw">if </span>has_data &amp;&amp; !<span class="macro">matches!</span>(<span class="self">self</span>.remote_write_state, RemoteWriteState::Open) {
+<a href=#134 id=134 data-nosnippet>134</a>                            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::DataAfterFin);
+<a href=#135 id=135 data-nosnippet>135</a>                        }
+<a href=#136 id=136 data-nosnippet>136</a>
+<a href=#137 id=137 data-nosnippet>137</a>                        <span class="comment">// Process the `FIN_ACK` flag sent by the remote.
+<a href=#138 id=138 data-nosnippet>138</a>                        // Note that we don't treat it as an error if the remote sends the
+<a href=#139 id=139 data-nosnippet>139</a>                        // `FIN_ACK` flag multiple times, although this is opinionated.
+<a href=#140 id=140 data-nosnippet>140</a>                        </span><span class="kw">if </span>framed_message.flags.map_or(<span class="bool-val">false</span>, |f| f == <span class="number">3</span>) {
+<a href=#141 id=141 data-nosnippet>141</a>                            <span class="kw">if </span><span class="macro">matches!</span>(<span class="self">self</span>.local_write_state, LocalWriteState::Open) {
+<a href=#142 id=142 data-nosnippet>142</a>                                <span class="kw">return </span><span class="prelude-val">Err</span>(Error::FinAckWithoutFin);
+<a href=#143 id=143 data-nosnippet>143</a>                            }
+<a href=#144 id=144 data-nosnippet>144</a>                            <span class="self">self</span>.local_write_state = LocalWriteState::FinAcked;
+<a href=#145 id=145 data-nosnippet>145</a>                        }
+<a href=#146 id=146 data-nosnippet>146</a>
+<a href=#147 id=147 data-nosnippet>147</a>                        <span class="comment">// Process the `FIN` flag sent by the remote.
+<a href=#148 id=148 data-nosnippet>148</a>                        </span><span class="kw">if </span><span class="macro">matches!</span>(<span class="self">self</span>.remote_write_state, RemoteWriteState::Open)
+<a href=#149 id=149 data-nosnippet>149</a>                            &amp;&amp; framed_message.flags.map_or(<span class="bool-val">false</span>, |f| f == <span class="number">0</span>)
+<a href=#150 id=150 data-nosnippet>150</a>                        {
+<a href=#151 id=151 data-nosnippet>151</a>                            <span class="self">self</span>.remote_write_state = RemoteWriteState::Closed;
+<a href=#152 id=152 data-nosnippet>152</a>                        }
+<a href=#153 id=153 data-nosnippet>153</a>
+<a href=#154 id=154 data-nosnippet>154</a>                        <span class="comment">// Note that any `STOP_SENDING` flag sent by the remote is ignored.
+<a href=#155 id=155 data-nosnippet>155</a>
+<a href=#156 id=156 data-nosnippet>156</a>                        // Copy the message of the remote out from the incoming buffer.
+<a href=#157 id=157 data-nosnippet>157</a>                        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(message) = framed_message.message {
+<a href=#158 id=158 data-nosnippet>158</a>                            <span class="self">self</span>.receive_buffer.extend_from_slice(message);
+<a href=#159 id=159 data-nosnippet>159</a>                        }
+<a href=#160 id=160 data-nosnippet>160</a>
+<a href=#161 id=161 data-nosnippet>161</a>                        <span class="comment">// Number of bytes to discard is the size of the protobuf frame.
+<a href=#162 id=162 data-nosnippet>162</a>                        </span>outer_read_write.incoming_buffer.len() - rest.len()
+<a href=#163 id=163 data-nosnippet>163</a>                    }
+<a href=#164 id=164 data-nosnippet>164</a>                    <span class="prelude-val">Err</span>(nom::Err::Incomplete(needed)) =&gt; {
+<a href=#165 id=165 data-nosnippet>165</a>                        <span class="comment">// Not enough data in the incoming buffer for a full frame. Requesting
+<a href=#166 id=166 data-nosnippet>166</a>                        // more.
+<a href=#167 id=167 data-nosnippet>167</a>                        </span><span class="kw">let </span><span class="prelude-val">Some</span>(expected_incoming_bytes) =
+<a href=#168 id=168 data-nosnippet>168</a>                            <span class="kw-2">&amp;mut </span>outer_read_write.expected_incoming_bytes
+<a href=#169 id=169 data-nosnippet>169</a>                        <span class="kw">else </span>{
+<a href=#170 id=170 data-nosnippet>170</a>                            <span class="comment">// TODO: is this correct anyway? substreams are never supposed to close?
+<a href=#171 id=171 data-nosnippet>171</a>                            </span><span class="kw">return </span><span class="prelude-val">Err</span>(Error::EofIncompleteFrame);
+<a href=#172 id=172 data-nosnippet>172</a>                        };
+<a href=#173 id=173 data-nosnippet>173</a>                        <span class="kw-2">*</span>expected_incoming_bytes = outer_read_write.incoming_buffer.len()
+<a href=#174 id=174 data-nosnippet>174</a>                            + <span class="kw">match </span>needed {
+<a href=#175 id=175 data-nosnippet>175</a>                                nom::Needed::Size(s) =&gt; s.get(),
+<a href=#176 id=176 data-nosnippet>176</a>                                nom::Needed::Unknown =&gt; <span class="number">1</span>,
+<a href=#177 id=177 data-nosnippet>177</a>                            };
+<a href=#178 id=178 data-nosnippet>178</a>                        <span class="kw">break</span>;
+<a href=#179 id=179 data-nosnippet>179</a>                    }
+<a href=#180 id=180 data-nosnippet>180</a>                    <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
+<a href=#181 id=181 data-nosnippet>181</a>                        <span class="comment">// Frame decoding error.
+<a href=#182 id=182 data-nosnippet>182</a>                        </span><span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFrame);
+<a href=#183 id=183 data-nosnippet>183</a>                    }
+<a href=#184 id=184 data-nosnippet>184</a>                }
+<a href=#185 id=185 data-nosnippet>185</a>            };
+<a href=#186 id=186 data-nosnippet>186</a>
+<a href=#187 id=187 data-nosnippet>187</a>            <span class="comment">// Discard the frame data.
+<a href=#188 id=188 data-nosnippet>188</a>            </span><span class="kw">let </span>_extract_result = outer_read_write.incoming_bytes_take(bytes_to_discard);
+<a href=#189 id=189 data-nosnippet>189</a>            <span class="macro">debug_assert!</span>(<span class="macro">matches!</span>(_extract_result, <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(<span class="kw">_</span>))));
+<a href=#190 id=190 data-nosnippet>190</a>        }
+<a href=#191 id=191 data-nosnippet>191</a>
+<a href=#192 id=192 data-nosnippet>192</a>        <span class="prelude-val">Ok</span>(InnerReadWrite {
+<a href=#193 id=193 data-nosnippet>193</a>            inner_read_write: ReadWrite {
+<a href=#194 id=194 data-nosnippet>194</a>                now: outer_read_write.now.clone(),
+<a href=#195 id=195 data-nosnippet>195</a>                incoming_buffer: mem::take(<span class="kw-2">&amp;mut </span><span class="self">self</span>.receive_buffer),
+<a href=#196 id=196 data-nosnippet>196</a>                read_bytes: <span class="number">0</span>,
+<a href=#197 id=197 data-nosnippet>197</a>                expected_incoming_bytes: <span class="kw">if </span><span class="macro">matches!</span>(
+<a href=#198 id=198 data-nosnippet>198</a>                    <span class="self">self</span>.remote_write_state,
+<a href=#199 id=199 data-nosnippet>199</a>                    RemoteWriteState::Open
+<a href=#200 id=200 data-nosnippet>200</a>                ) {
+<a href=#201 id=201 data-nosnippet>201</a>                    <span class="prelude-val">Some</span>(<span class="number">0</span>)
+<a href=#202 id=202 data-nosnippet>202</a>                } <span class="kw">else </span>{
+<a href=#203 id=203 data-nosnippet>203</a>                    <span class="prelude-val">None
+<a href=#204 id=204 data-nosnippet>204</a>                </span>},
+<a href=#205 id=205 data-nosnippet>205</a>                write_buffers: Vec::new(),
+<a href=#206 id=206 data-nosnippet>206</a>                write_bytes_queued: <span class="number">0</span>,
+<a href=#207 id=207 data-nosnippet>207</a>                write_bytes_queueable: <span class="kw">if </span><span class="macro">matches!</span>(<span class="self">self</span>.local_write_state, LocalWriteState::Open) {
+<a href=#208 id=208 data-nosnippet>208</a>                    outer_read_write
+<a href=#209 id=209 data-nosnippet>209</a>                        .write_bytes_queueable
+<a href=#210 id=210 data-nosnippet>210</a>                        .map(|outer_writable| {
+<a href=#211 id=211 data-nosnippet>211</a>                            cmp::min(
+<a href=#212 id=212 data-nosnippet>212</a>                                <span class="comment">// TODO: what if the outer maximum queueable is &lt;= PROTOBUF_FRAME_MAX_LEN? this will never happen in practice, but in theory it could
+<a href=#213 id=213 data-nosnippet>213</a>                                </span>outer_writable.saturating_sub(PROTOBUF_FRAME_MAX_LEN),
+<a href=#214 id=214 data-nosnippet>214</a>                                MAX_PROTOBUF_MESSAGE_LEN - PROTOBUF_FRAME_MAX_LEN,
+<a href=#215 id=215 data-nosnippet>215</a>                            )
+<a href=#216 id=216 data-nosnippet>216</a>                        })
+<a href=#217 id=217 data-nosnippet>217</a>                } <span class="kw">else </span>{
+<a href=#218 id=218 data-nosnippet>218</a>                    <span class="prelude-val">None
+<a href=#219 id=219 data-nosnippet>219</a>                </span>},
+<a href=#220 id=220 data-nosnippet>220</a>                wake_up_after: outer_read_write.wake_up_after.clone(),
+<a href=#221 id=221 data-nosnippet>221</a>            },
+<a href=#222 id=222 data-nosnippet>222</a>            framing: <span class="self">self</span>,
+<a href=#223 id=223 data-nosnippet>223</a>            outer_read_write,
+<a href=#224 id=224 data-nosnippet>224</a>        })
+<a href=#225 id=225 data-nosnippet>225</a>    }
+<a href=#226 id=226 data-nosnippet>226</a>}
+<a href=#227 id=227 data-nosnippet>227</a>
+<a href=#228 id=228 data-nosnippet>228</a><span class="kw">impl </span>fmt::Debug <span class="kw">for </span>WebRtcFraming {
+<a href=#229 id=229 data-nosnippet>229</a>    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>fmt::Formatter) -&gt; fmt::Result {
+<a href=#230 id=230 data-nosnippet>230</a>        f.debug_struct(<span class="string">"WebRtcFraming"</span>).finish()
+<a href=#231 id=231 data-nosnippet>231</a>    }
+<a href=#232 id=232 data-nosnippet>232</a>}
+<a href=#233 id=233 data-nosnippet>233</a>
+<a href=#234 id=234 data-nosnippet>234</a><span class="doccomment">/// Stream of data without the frames. See [`WebRtcFraming::read_write`].
+<a href=#235 id=235 data-nosnippet>235</a></span><span class="kw">pub struct </span>InnerReadWrite&lt;<span class="lifetime">'a</span>, TNow: Clone&gt; {
+<a href=#236 id=236 data-nosnippet>236</a>    framing: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>WebRtcFraming,
+<a href=#237 id=237 data-nosnippet>237</a>    outer_read_write: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>ReadWrite&lt;TNow&gt;,
+<a href=#238 id=238 data-nosnippet>238</a>    inner_read_write: ReadWrite&lt;TNow&gt;,
+<a href=#239 id=239 data-nosnippet>239</a>}
+<a href=#240 id=240 data-nosnippet>240</a>
+<a href=#241 id=241 data-nosnippet>241</a><span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, TNow: Clone&gt; ops::Deref <span class="kw">for </span>InnerReadWrite&lt;<span class="lifetime">'a</span>, TNow&gt; {
+<a href=#242 id=242 data-nosnippet>242</a>    <span class="kw">type </span>Target = ReadWrite&lt;TNow&gt;;
+<a href=#243 id=243 data-nosnippet>243</a>
+<a href=#244 id=244 data-nosnippet>244</a>    <span class="kw">fn </span>deref(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="self">Self</span>::Target {
+<a href=#245 id=245 data-nosnippet>245</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.inner_read_write
+<a href=#246 id=246 data-nosnippet>246</a>    }
+<a href=#247 id=247 data-nosnippet>247</a>}
+<a href=#248 id=248 data-nosnippet>248</a>
+<a href=#249 id=249 data-nosnippet>249</a><span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, TNow: Clone&gt; ops::DerefMut <span class="kw">for </span>InnerReadWrite&lt;<span class="lifetime">'a</span>, TNow&gt; {
+<a href=#250 id=250 data-nosnippet>250</a>    <span class="kw">fn </span>deref_mut(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;mut </span><span class="self">Self</span>::Target {
+<a href=#251 id=251 data-nosnippet>251</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>.inner_read_write
+<a href=#252 id=252 data-nosnippet>252</a>    }
+<a href=#253 id=253 data-nosnippet>253</a>}
+<a href=#254 id=254 data-nosnippet>254</a>
+<a href=#255 id=255 data-nosnippet>255</a><span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, TNow: Clone&gt; Drop <span class="kw">for </span>InnerReadWrite&lt;<span class="lifetime">'a</span>, TNow&gt; {
+<a href=#256 id=256 data-nosnippet>256</a>    <span class="kw">fn </span>drop(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#257 id=257 data-nosnippet>257</a>        <span class="comment">// The timer is copied back before the wake-up below, so that it can't overwrite it.
+<a href=#258 id=258 data-nosnippet>258</a>        //
+<a href=#259 id=259 data-nosnippet>259</a>        // The inner stream expects a call before something new arrives in two cases: it
+<a href=#260 id=260 data-nosnippet>260</a>        // consumed bytes of `receive_buffer`, or a complete frame was withheld and it now asks
+<a href=#261 id=261 data-nosnippet>261</a>        // for more than it holds. The second happens on every substream that reads a length
+<a href=#262 id=262 data-nosnippet>262</a>        // prefix in one call and the body in the next. Both get an immediate wake-up. A frame
+<a href=#263 id=263 data-nosnippet>263</a>        // was withheld if the outer demand is already met: the platform starts each call at
+<a href=#264 id=264 data-nosnippet>264</a>        // zero, and the parsing loop raises the demand above the buffer only when the next
+<a href=#265 id=265 data-nosnippet>265</a>        // frame is incomplete.
+<a href=#266 id=266 data-nosnippet>266</a>        //
+<a href=#267 id=267 data-nosnippet>267</a>        // The outer demand is left at the size of the next frame rather than raised to what the
+<a href=#268 id=268 data-nosnippet>268</a>        // inner stream expects: a small `FIN` or `RESET_STREAM` frame must not wait until that
+<a href=#269 id=269 data-nosnippet>269</a>        // many bytes have arrived.
+<a href=#270 id=270 data-nosnippet>270</a>        </span><span class="self">self</span>.outer_read_write.wake_up_after = <span class="self">self</span>.inner_read_write.wake_up_after.clone();
+<a href=#271 id=271 data-nosnippet>271</a>        <span class="kw">let </span>frame_withheld = <span class="self">self
+<a href=#272 id=272 data-nosnippet>272</a>            </span>.outer_read_write
+<a href=#273 id=273 data-nosnippet>273</a>            .expected_incoming_bytes
+<a href=#274 id=274 data-nosnippet>274</a>            .is_some_and(|expected| expected &lt;= <span class="self">self</span>.outer_read_write.incoming_buffer.len());
+<a href=#275 id=275 data-nosnippet>275</a>        <span class="kw">let </span>inner_asks_for_more = <span class="self">self
+<a href=#276 id=276 data-nosnippet>276</a>            </span>.inner_read_write
+<a href=#277 id=277 data-nosnippet>277</a>            .expected_incoming_bytes
+<a href=#278 id=278 data-nosnippet>278</a>            .is_some_and(|expected| expected &gt; <span class="self">self</span>.inner_read_write.incoming_buffer.len());
+<a href=#279 id=279 data-nosnippet>279</a>        <span class="kw">if </span><span class="self">self</span>.inner_read_write.read_bytes != <span class="number">0 </span>|| (frame_withheld &amp;&amp; inner_asks_for_more) {
+<a href=#280 id=280 data-nosnippet>280</a>            <span class="self">self</span>.outer_read_write.wake_up_asap();
+<a href=#281 id=281 data-nosnippet>281</a>        }
+<a href=#282 id=282 data-nosnippet>282</a>        <span class="self">self</span>.framing.receive_buffer = mem::take(<span class="kw-2">&amp;mut </span><span class="self">self</span>.inner_read_write.incoming_buffer);
+<a href=#283 id=283 data-nosnippet>283</a>        <span class="self">self</span>.framing.inner_stream_expected_incoming_bytes =
+<a href=#284 id=284 data-nosnippet>284</a>            <span class="prelude-val">Some</span>(<span class="self">self</span>.inner_read_write.expected_incoming_bytes.unwrap_or(<span class="number">0</span>));
+<a href=#285 id=285 data-nosnippet>285</a>
+<a href=#286 id=286 data-nosnippet>286</a>        <span class="comment">// Flag to send out, if any: `FIN` once the inner stream closes its writing side,
+<a href=#287 id=287 data-nosnippet>287</a>        // `FIN_ACK` once the remote's `FIN` has been processed. `RESET_STREAM` is never sent, as
+<a href=#288 id=288 data-nosnippet>288</a>        // closing the substream serves the same purpose, nor is `STOP_SENDING`, which doesn't
+<a href=#289 id=289 data-nosnippet>289</a>        // fit in our API.
+<a href=#290 id=290 data-nosnippet>290</a>        //
+<a href=#291 id=291 data-nosnippet>291</a>        // A frame carrying data always fits in the outer credit, as the inner stream was given
+<a href=#292 id=292 data-nosnippet>292</a>        // that credit minus `PROTOBUF_FRAME_MAX_LEN`. A frame carrying only a flag might not,
+<a href=#293 id=293 data-nosnippet>293</a>        // right after a frame that used the credit up. It is then sent on a later call: the
+<a href=#294 id=294 data-nosnippet>294</a>        // inner stream asks for the close again, and `remote_write_state` stays `Closed`. The
+<a href=#295 id=295 data-nosnippet>295</a>        // platform re-polls the stream when it reports flushed bytes, so a wake-up here would
+<a href=#296 id=296 data-nosnippet>296</a>        // only spin until then.
+<a href=#297 id=297 data-nosnippet>297</a>        </span><span class="kw">let </span>flag_fits = <span class="self">self</span>.inner_read_write.write_bytes_queued != <span class="number">0
+<a href=#298 id=298 data-nosnippet>298</a>            </span>|| <span class="self">self
+<a href=#299 id=299 data-nosnippet>299</a>                </span>.outer_read_write
+<a href=#300 id=300 data-nosnippet>300</a>                .write_bytes_queueable
+<a href=#301 id=301 data-nosnippet>301</a>                .is_some_and(|queueable| queueable &gt;= FLAG_ONLY_FRAME_LEN);
+<a href=#302 id=302 data-nosnippet>302</a>        <span class="kw">let </span>flag_to_send_out: <span class="prelude-ty">Option</span>&lt;u32&gt; = <span class="kw">if </span>!flag_fits {
+<a href=#303 id=303 data-nosnippet>303</a>            <span class="prelude-val">None
+<a href=#304 id=304 data-nosnippet>304</a>        </span>} <span class="kw">else if </span><span class="macro">matches!</span>(<span class="self">self</span>.framing.local_write_state, LocalWriteState::Open)
+<a href=#305 id=305 data-nosnippet>305</a>            &amp;&amp; <span class="self">self</span>.inner_read_write.write_bytes_queueable.is_none()
+<a href=#306 id=306 data-nosnippet>306</a>        {
+<a href=#307 id=307 data-nosnippet>307</a>            <span class="self">self</span>.framing.local_write_state = LocalWriteState::FinBuffered;
+<a href=#308 id=308 data-nosnippet>308</a>            <span class="prelude-val">Some</span>(<span class="number">0</span>)
+<a href=#309 id=309 data-nosnippet>309</a>        } <span class="kw">else if </span><span class="macro">matches!</span>(<span class="self">self</span>.framing.remote_write_state, RemoteWriteState::Closed) {
+<a href=#310 id=310 data-nosnippet>310</a>            <span class="self">self</span>.framing.remote_write_state = RemoteWriteState::ClosedAckBuffered;
+<a href=#311 id=311 data-nosnippet>311</a>            <span class="prelude-val">Some</span>(<span class="number">3</span>)
+<a href=#312 id=312 data-nosnippet>312</a>        } <span class="kw">else </span>{
+<a href=#313 id=313 data-nosnippet>313</a>            <span class="prelude-val">None
+<a href=#314 id=314 data-nosnippet>314</a>        </span>};
+<a href=#315 id=315 data-nosnippet>315</a>
+<a href=#316 id=316 data-nosnippet>316</a>        <span class="comment">// Write out a message only if there is anything to write.
+<a href=#317 id=317 data-nosnippet>317</a>        // TODO: consider buffering data more before flushing, to reduce the overhead of the protobuf frame?
+<a href=#318 id=318 data-nosnippet>318</a>        </span><span class="kw">if </span>flag_to_send_out.is_some() || <span class="self">self</span>.inner_read_write.write_bytes_queued != <span class="number">0 </span>{
+<a href=#319 id=319 data-nosnippet>319</a>            <span class="comment">// Reserve some space in `write_buffers` to later write the message length prefix.
+<a href=#320 id=320 data-nosnippet>320</a>            </span><span class="kw">let </span>message_length_prefix_index = <span class="self">self</span>.outer_read_write.write_buffers.len();
+<a href=#321 id=321 data-nosnippet>321</a>            <span class="self">self</span>.outer_read_write
+<a href=#322 id=322 data-nosnippet>322</a>                .write_buffers
+<a href=#323 id=323 data-nosnippet>323</a>                .push(Vec::with_capacity(<span class="number">4</span>));
+<a href=#324 id=324 data-nosnippet>324</a>
+<a href=#325 id=325 data-nosnippet>325</a>            <span class="comment">// Total number of bytes written below, excluding the length prefix.
+<a href=#326 id=326 data-nosnippet>326</a>            </span><span class="kw">let </span><span class="kw-2">mut </span>length_prefix_value = <span class="number">0</span>;
+<a href=#327 id=327 data-nosnippet>327</a>
+<a href=#328 id=328 data-nosnippet>328</a>            <span class="comment">// Write the flags, if any.
+<a href=#329 id=329 data-nosnippet>329</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(flag_to_send_out) = flag_to_send_out {
+<a href=#330 id=330 data-nosnippet>330</a>                <span class="kw">for </span>buffer <span class="kw">in </span>protobuf::uint32_tag_encode(<span class="number">1</span>, flag_to_send_out) {
+<a href=#331 id=331 data-nosnippet>331</a>                    <span class="kw">let </span>buffer = buffer.as_ref();
+<a href=#332 id=332 data-nosnippet>332</a>                    length_prefix_value += buffer.len();
+<a href=#333 id=333 data-nosnippet>333</a>                    <span class="self">self</span>.outer_read_write.write_buffers.push(buffer.to_owned());
+<a href=#334 id=334 data-nosnippet>334</a>                }
+<a href=#335 id=335 data-nosnippet>335</a>            }
+<a href=#336 id=336 data-nosnippet>336</a>
+<a href=#337 id=337 data-nosnippet>337</a>            <span class="comment">// Write the data. This consists in a protobuf tag, a length, and the data itself.
+<a href=#338 id=338 data-nosnippet>338</a>            </span><span class="kw">let </span>data_protobuf_tag = protobuf::tag_encode(<span class="number">2</span>, <span class="number">2</span>).collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+<a href=#339 id=339 data-nosnippet>339</a>            length_prefix_value += data_protobuf_tag.len();
+<a href=#340 id=340 data-nosnippet>340</a>            <span class="self">self</span>.outer_read_write.write_buffers.push(data_protobuf_tag);
+<a href=#341 id=341 data-nosnippet>341</a>            <span class="kw">let </span>data_len =
+<a href=#342 id=342 data-nosnippet>342</a>                leb128::encode_usize(<span class="self">self</span>.inner_read_write.write_bytes_queued).collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+<a href=#343 id=343 data-nosnippet>343</a>            length_prefix_value += data_len.len();
+<a href=#344 id=344 data-nosnippet>344</a>            <span class="self">self</span>.outer_read_write.write_buffers.push(data_len);
+<a href=#345 id=345 data-nosnippet>345</a>            length_prefix_value += <span class="self">self</span>.inner_read_write.write_bytes_queued;
+<a href=#346 id=346 data-nosnippet>346</a>            <span class="self">self</span>.outer_read_write
+<a href=#347 id=347 data-nosnippet>347</a>                .write_buffers
+<a href=#348 id=348 data-nosnippet>348</a>                .extend(mem::take(<span class="kw-2">&amp;mut </span><span class="self">self</span>.inner_read_write.write_buffers));
+<a href=#349 id=349 data-nosnippet>349</a>
+<a href=#350 id=350 data-nosnippet>350</a>            <span class="comment">// Now write the length prefix.
+<a href=#351 id=351 data-nosnippet>351</a>            </span><span class="kw">let </span>length_prefix = leb128::encode_usize(length_prefix_value).collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+<a href=#352 id=352 data-nosnippet>352</a>            <span class="kw">let </span>total_length = length_prefix_value + length_prefix.len();
+<a href=#353 id=353 data-nosnippet>353</a>            <span class="macro">debug_assert!</span>(
+<a href=#354 id=354 data-nosnippet>354</a>                <span class="self">self</span>.inner_read_write.write_bytes_queued != <span class="number">0
+<a href=#355 id=355 data-nosnippet>355</a>                    </span>|| total_length == FLAG_ONLY_FRAME_LEN
+<a href=#356 id=356 data-nosnippet>356</a>            );
+<a href=#357 id=357 data-nosnippet>357</a>            <span class="self">self</span>.outer_read_write.write_buffers[message_length_prefix_index] = length_prefix;
+<a href=#358 id=358 data-nosnippet>358</a>
+<a href=#359 id=359 data-nosnippet>359</a>            <span class="comment">// Properly update the outer `ReadWrite`.
+<a href=#360 id=360 data-nosnippet>360</a>            </span><span class="self">self</span>.outer_read_write.write_bytes_queued += total_length;
+<a href=#361 id=361 data-nosnippet>361</a>            <span class="kw-2">*</span><span class="self">self
+<a href=#362 id=362 data-nosnippet>362</a>                </span>.outer_read_write
+<a href=#363 id=363 data-nosnippet>363</a>                .write_bytes_queueable
+<a href=#364 id=364 data-nosnippet>364</a>                .as_mut()
+<a href=#365 id=365 data-nosnippet>365</a>                .unwrap() -= total_length;
+<a href=#366 id=366 data-nosnippet>366</a>        }
+<a href=#367 id=367 data-nosnippet>367</a>    }
+<a href=#368 id=368 data-nosnippet>368</a>}
+<a href=#369 id=369 data-nosnippet>369</a>
+<a href=#370 id=370 data-nosnippet>370</a><span class="doccomment">/// Error while decoding data.
+<a href=#371 id=371 data-nosnippet>371</a></span><span class="attr">#[derive(Debug, derive_more::Display, derive_more::Error)]
+<a href=#372 id=372 data-nosnippet>372</a></span><span class="kw">pub enum </span>Error {
+<a href=#373 id=373 data-nosnippet>373</a>    <span class="doccomment">/// The remote wants to reset the substream. This is a normal situation.
+<a href=#374 id=374 data-nosnippet>374</a>    </span>RemoteResetDesired,
+<a href=#375 id=375 data-nosnippet>375</a>    <span class="doccomment">/// Failed to decode the protobuf header.
+<a href=#376 id=376 data-nosnippet>376</a>    </span>InvalidFrame,
+<a href=#377 id=377 data-nosnippet>377</a>    <span class="doccomment">/// Remote has sent data after having sent a `FIN` flag in the past.
+<a href=#378 id=378 data-nosnippet>378</a>    </span>DataAfterFin,
+<a href=#379 id=379 data-nosnippet>379</a>    <span class="doccomment">/// Outer substream has closed in the middle of a frame.
+<a href=#380 id=380 data-nosnippet>380</a>    </span>EofIncompleteFrame,
+<a href=#381 id=381 data-nosnippet>381</a>    <span class="doccomment">/// Received a `FIN_ACK` flag without having sent a `FIN` flag.
+<a href=#382 id=382 data-nosnippet>382</a>    </span>FinAckWithoutFin,
+<a href=#383 id=383 data-nosnippet>383</a>}
+<a href=#384 id=384 data-nosnippet>384</a>
+<a href=#385 id=385 data-nosnippet>385</a><span class="attr">#[cfg(test)]
+<a href=#386 id=386 data-nosnippet>386</a></span><span class="kw">mod </span>tests {
+<a href=#387 id=387 data-nosnippet>387</a>    <span class="kw">use </span><span class="kw">super</span>::WebRtcFraming;
+<a href=#388 id=388 data-nosnippet>388</a>    <span class="kw">use </span><span class="kw">crate</span>::libp2p::read_write::ReadWrite;
+<a href=#389 id=389 data-nosnippet>389</a>
+<a href=#390 id=390 data-nosnippet>390</a>    <span class="doccomment">/// Builds the outer `ReadWrite`, as the platform would: `incoming` has arrived from the data
+<a href=#391 id=391 data-nosnippet>391</a>    /// channel, and `queueable` bytes can be written to it.
+<a href=#392 id=392 data-nosnippet>392</a>    </span><span class="kw">fn </span>outer(incoming: <span class="kw-2">&amp;</span>[u8], queueable: usize) -&gt; ReadWrite&lt;u64&gt; {
+<a href=#393 id=393 data-nosnippet>393</a>        ReadWrite {
+<a href=#394 id=394 data-nosnippet>394</a>            now: <span class="number">5</span>,
+<a href=#395 id=395 data-nosnippet>395</a>            incoming_buffer: incoming.to_vec(),
+<a href=#396 id=396 data-nosnippet>396</a>            expected_incoming_bytes: <span class="prelude-val">Some</span>(<span class="number">0</span>),
+<a href=#397 id=397 data-nosnippet>397</a>            read_bytes: <span class="number">0</span>,
+<a href=#398 id=398 data-nosnippet>398</a>            write_buffers: Vec::new(),
+<a href=#399 id=399 data-nosnippet>399</a>            write_bytes_queued: <span class="number">0</span>,
+<a href=#400 id=400 data-nosnippet>400</a>            write_bytes_queueable: <span class="prelude-val">Some</span>(queueable),
+<a href=#401 id=401 data-nosnippet>401</a>            wake_up_after: <span class="prelude-val">None</span>,
+<a href=#402 id=402 data-nosnippet>402</a>        }
+<a href=#403 id=403 data-nosnippet>403</a>    }
+<a href=#404 id=404 data-nosnippet>404</a>
+<a href=#405 id=405 data-nosnippet>405</a>    <span class="doccomment">/// The inner substream does not ask for bytes (`NotificationsOut`, `NotificationsOutClosed`,
+<a href=#406 id=406 data-nosnippet>406</a>    /// `NotificationsInRefused`, ...). A remote `FIN` must still be parsed, the inner stream told
+<a href=#407 id=407 data-nosnippet>407</a>    /// that the remote closed its side, and a `FIN_ACK` written.
+<a href=#408 id=408 data-nosnippet>408</a>    </span><span class="attr">#[test]
+<a href=#409 id=409 data-nosnippet>409</a>    </span><span class="kw">fn </span>fin_parsed_while_inner_expects_no_bytes() {
+<a href=#410 id=410 data-nosnippet>410</a>        <span class="kw">let </span><span class="kw-2">mut </span>framing = WebRtcFraming::new();
+<a href=#411 id=411 data-nosnippet>411</a>        <span class="kw">let </span><span class="kw-2">mut </span>rw = outer(<span class="kw-2">&amp;</span>[], <span class="number">100</span>);
+<a href=#412 id=412 data-nosnippet>412</a>        <span class="comment">// The inner substream leaves `expected_incoming_bytes` at `Some(0)`.
+<a href=#413 id=413 data-nosnippet>413</a>        </span>drop(framing.read_write(<span class="kw-2">&amp;mut </span>rw).unwrap());
+<a href=#414 id=414 data-nosnippet>414</a>
+<a href=#415 id=415 data-nosnippet>415</a>        <span class="comment">// Length-prefixed protobuf `Message { flag: FIN }`.
+<a href=#416 id=416 data-nosnippet>416</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>rw = outer(<span class="kw-2">&amp;</span>[<span class="number">0x02</span>, <span class="number">0x08</span>, <span class="number">0x00</span>], <span class="number">100</span>);
+<a href=#417 id=417 data-nosnippet>417</a>        <span class="kw">let </span>inner = framing.read_write(<span class="kw-2">&amp;mut </span>rw).unwrap();
+<a href=#418 id=418 data-nosnippet>418</a>        <span class="kw">let </span>inner_expected = inner.expected_incoming_bytes;
+<a href=#419 id=419 data-nosnippet>419</a>        drop(inner);
+<a href=#420 id=420 data-nosnippet>420</a>        <span class="macro">assert_eq!</span>(rw.read_bytes, <span class="number">3</span>, <span class="string">"FIN frame left unparsed"</span>);
+<a href=#421 id=421 data-nosnippet>421</a>        <span class="macro">assert_eq!</span>(
+<a href=#422 id=422 data-nosnippet>422</a>            inner_expected, <span class="prelude-val">None</span>,
+<a href=#423 id=423 data-nosnippet>423</a>            <span class="string">"inner stream not told that the remote closed"
+<a href=#424 id=424 data-nosnippet>424</a>        </span>);
+<a href=#425 id=425 data-nosnippet>425</a>        <span class="comment">// `Message { flag: FIN_ACK, message: "" }`.
+<a href=#426 id=426 data-nosnippet>426</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#427 id=427 data-nosnippet>427</a>            rw.write_buffers.concat(),
+<a href=#428 id=428 data-nosnippet>428</a>            [<span class="number">0x04</span>, <span class="number">0x08</span>, <span class="number">0x03</span>, <span class="number">0x12</span>, <span class="number">0x00</span>],
+<a href=#429 id=429 data-nosnippet>429</a>            <span class="string">"no FIN_ACK written"
+<a href=#430 id=430 data-nosnippet>430</a>        </span>);
+<a href=#431 id=431 data-nosnippet>431</a>    }
+<a href=#432 id=432 data-nosnippet>432</a>
+<a href=#433 id=433 data-nosnippet>433</a>    <span class="doccomment">/// When the inner substream consumes bytes of `receive_buffer`, `InnerReadWrite::drop`
+<a href=#434 id=434 data-nosnippet>434</a>    /// requests an immediate wake-up of the outer `ReadWrite`. Copying the inner stream's timer
+<a href=#435 id=435 data-nosnippet>435</a>    /// back to the outer `ReadWrite` must not overwrite that wake-up.
+<a href=#436 id=436 data-nosnippet>436</a>    </span><span class="attr">#[test]
+<a href=#437 id=437 data-nosnippet>437</a>    </span><span class="kw">fn </span>wake_up_asap_survives_drop() {
+<a href=#438 id=438 data-nosnippet>438</a>        <span class="kw">let </span><span class="kw-2">mut </span>framing = WebRtcFraming::new();
+<a href=#439 id=439 data-nosnippet>439</a>        <span class="comment">// A data frame carrying "abc" already arrived before the first processing.
+<a href=#440 id=440 data-nosnippet>440</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>rw = outer(<span class="kw-2">&amp;</span>[<span class="number">0x05</span>, <span class="number">0x12</span>, <span class="number">0x03</span>, <span class="string">b'a'</span>, <span class="string">b'b'</span>, <span class="string">b'c'</span>], <span class="number">100</span>);
+<a href=#441 id=441 data-nosnippet>441</a>        {
+<a href=#442 id=442 data-nosnippet>442</a>            <span class="kw">let </span><span class="kw-2">mut </span>inner = framing.read_write(<span class="kw-2">&amp;mut </span>rw).unwrap();
+<a href=#443 id=443 data-nosnippet>443</a>            <span class="comment">// The inner substream reads part of the data and expects to be called again.
+<a href=#444 id=444 data-nosnippet>444</a>            </span><span class="kw">let _ </span>= inner.incoming_bytes_take(<span class="number">3</span>);
+<a href=#445 id=445 data-nosnippet>445</a>        }
+<a href=#446 id=446 data-nosnippet>446</a>        <span class="macro">assert_eq!</span>(rw.wake_up_after, <span class="prelude-val">Some</span>(<span class="number">5</span>), <span class="string">"wake-up lost"</span>);
+<a href=#447 id=447 data-nosnippet>447</a>    }
+<a href=#448 id=448 data-nosnippet>448</a>
+<a href=#449 id=449 data-nosnippet>449</a>    <span class="doccomment">/// While the inner substream waits for a large amount of data (e.g. a notification body),
+<a href=#450 id=450 data-nosnippet>450</a>    /// the outer stream must still be asked for what the *next frame* needs, so that a small
+<a href=#451 id=451 data-nosnippet>451</a>    /// `FIN` frame reaches the framing. Asking for the whole inner need makes the platform hold
+<a href=#452 id=452 data-nosnippet>452</a>    /// the `FIN` until that many bytes are buffered.
+<a href=#453 id=453 data-nosnippet>453</a>    </span><span class="attr">#[test]
+<a href=#454 id=454 data-nosnippet>454</a>    </span><span class="kw">fn </span>outer_demand_is_next_frame_not_whole_inner_need() {
+<a href=#455 id=455 data-nosnippet>455</a>        <span class="kw">let </span><span class="kw-2">mut </span>framing = WebRtcFraming::new();
+<a href=#456 id=456 data-nosnippet>456</a>        <span class="kw">let </span><span class="kw-2">mut </span>rw = outer(<span class="kw-2">&amp;</span>[], <span class="number">100</span>);
+<a href=#457 id=457 data-nosnippet>457</a>        {
+<a href=#458 id=458 data-nosnippet>458</a>            <span class="kw">let </span><span class="kw-2">mut </span>inner = framing.read_write(<span class="kw-2">&amp;mut </span>rw).unwrap();
+<a href=#459 id=459 data-nosnippet>459</a>            <span class="kw">let _ </span>= inner.incoming_bytes_take(<span class="number">1000</span>);
+<a href=#460 id=460 data-nosnippet>460</a>        }
+<a href=#461 id=461 data-nosnippet>461</a>        <span class="macro">assert!</span>(
+<a href=#462 id=462 data-nosnippet>462</a>            rw.expected_incoming_bytes.unwrap() &lt;= <span class="number">8</span>,
+<a href=#463 id=463 data-nosnippet>463</a>            <span class="string">"outer stream asked for {:?} bytes"</span>,
+<a href=#464 id=464 data-nosnippet>464</a>            rw.expected_incoming_bytes
+<a href=#465 id=465 data-nosnippet>465</a>        );
+<a href=#466 id=466 data-nosnippet>466</a>    }
+<a href=#467 id=467 data-nosnippet>467</a>
+<a href=#468 id=468 data-nosnippet>468</a>    <span class="doccomment">/// A frame carrying only a flag is not written while the outer credit can't hold it, as
+<a href=#469 id=469 data-nosnippet>469</a>    /// happens right after a data frame used the credit up, and is written once it can.
+<a href=#470 id=470 data-nosnippet>470</a>    </span><span class="attr">#[test]
+<a href=#471 id=471 data-nosnippet>471</a>    </span><span class="kw">fn </span>flag_frame_waits_for_outer_credit() {
+<a href=#472 id=472 data-nosnippet>472</a>        <span class="kw">let </span><span class="kw-2">mut </span>framing = WebRtcFraming::new();
+<a href=#473 id=473 data-nosnippet>473</a>        <span class="comment">// `Message { flag: FIN }` arrives while only 3 bytes can be written.
+<a href=#474 id=474 data-nosnippet>474</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>rw = outer(<span class="kw-2">&amp;</span>[<span class="number">0x02</span>, <span class="number">0x08</span>, <span class="number">0x00</span>], <span class="number">3</span>);
+<a href=#475 id=475 data-nosnippet>475</a>        drop(framing.read_write(<span class="kw-2">&amp;mut </span>rw).unwrap());
+<a href=#476 id=476 data-nosnippet>476</a>        <span class="macro">assert!</span>(
+<a href=#477 id=477 data-nosnippet>477</a>            rw.write_buffers.is_empty(),
+<a href=#478 id=478 data-nosnippet>478</a>            <span class="string">"FIN_ACK written without credit"
+<a href=#479 id=479 data-nosnippet>479</a>        </span>);
+<a href=#480 id=480 data-nosnippet>480</a>        <span class="macro">assert_eq!</span>(rw.write_bytes_queueable, <span class="prelude-val">Some</span>(<span class="number">3</span>));
+<a href=#481 id=481 data-nosnippet>481</a>
+<a href=#482 id=482 data-nosnippet>482</a>        <span class="kw">let </span><span class="kw-2">mut </span>rw = outer(<span class="kw-2">&amp;</span>[], <span class="number">100</span>);
+<a href=#483 id=483 data-nosnippet>483</a>        drop(framing.read_write(<span class="kw-2">&amp;mut </span>rw).unwrap());
+<a href=#484 id=484 data-nosnippet>484</a>        <span class="macro">assert_eq!</span>(
+<a href=#485 id=485 data-nosnippet>485</a>            rw.write_buffers.concat(),
+<a href=#486 id=486 data-nosnippet>486</a>            [<span class="number">0x04</span>, <span class="number">0x08</span>, <span class="number">0x03</span>, <span class="number">0x12</span>, <span class="number">0x00</span>],
+<a href=#487 id=487 data-nosnippet>487</a>            <span class="string">"no FIN_ACK written once there is credit"
+<a href=#488 id=488 data-nosnippet>488</a>        </span>);
+<a href=#489 id=489 data-nosnippet>489</a>    }
+<a href=#490 id=490 data-nosnippet>490</a>
+<a href=#491 id=491 data-nosnippet>491</a>    <span class="doccomment">/// A data frame the substream didn't ask for stays in the outer buffer: `receive_buffer`
+<a href=#492 id=492 data-nosnippet>492</a>    /// holds at most one such frame. Substreams read a length prefix in one call and ask for the
+<a href=#493 id=493 data-nosnippet>493</a>    /// body in the next, without consuming anything: the framing must then request an immediate
+<a href=#494 id=494 data-nosnippet>494</a>    /// wake-up, as the outer demand (the next frame's size) is already met, and the next call
+<a href=#495 id=495 data-nosnippet>495</a>    /// parses the waiting frame.
+<a href=#496 id=496 data-nosnippet>496</a>    </span><span class="attr">#[test]
+<a href=#497 id=497 data-nosnippet>497</a>    </span><span class="kw">fn </span>unrequested_data_frame_waits_in_outer_buffer() {
+<a href=#498 id=498 data-nosnippet>498</a>        <span class="kw">let </span><span class="kw-2">mut </span>framing = WebRtcFraming::new();
+<a href=#499 id=499 data-nosnippet>499</a>        <span class="comment">// Data frames "abc" and "def" arrive while the substream expects no bytes.
+<a href=#500 id=500 data-nosnippet>500</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>rw = outer(
+<a href=#501 id=501 data-nosnippet>501</a>            <span class="kw-2">&amp;</span>[
+<a href=#502 id=502 data-nosnippet>502</a>                <span class="number">0x05</span>, <span class="number">0x12</span>, <span class="number">0x03</span>, <span class="string">b'a'</span>, <span class="string">b'b'</span>, <span class="string">b'c'</span>, <span class="number">0x05</span>, <span class="number">0x12</span>, <span class="number">0x03</span>, <span class="string">b'd'</span>, <span class="string">b'e'</span>, <span class="string">b'f'</span>,
+<a href=#503 id=503 data-nosnippet>503</a>            ],
+<a href=#504 id=504 data-nosnippet>504</a>            <span class="number">100</span>,
+<a href=#505 id=505 data-nosnippet>505</a>        );
+<a href=#506 id=506 data-nosnippet>506</a>        <span class="kw">let </span>inner = framing.read_write(<span class="kw-2">&amp;mut </span>rw).unwrap();
+<a href=#507 id=507 data-nosnippet>507</a>        <span class="macro">assert_eq!</span>(
+<a href=#508 id=508 data-nosnippet>508</a>            inner.incoming_buffer, <span class="string">b"abc"</span>,
+<a href=#509 id=509 data-nosnippet>509</a>            <span class="string">"more than one unrequested frame parsed"
+<a href=#510 id=510 data-nosnippet>510</a>        </span>);
+<a href=#511 id=511 data-nosnippet>511</a>        drop(inner);
+<a href=#512 id=512 data-nosnippet>512</a>        <span class="macro">assert_eq!</span>(
+<a href=#513 id=513 data-nosnippet>513</a>            rw.read_bytes, <span class="number">6</span>,
+<a href=#514 id=514 data-nosnippet>514</a>            <span class="string">"second frame not left in the outer buffer"
+<a href=#515 id=515 data-nosnippet>515</a>        </span>);
+<a href=#516 id=516 data-nosnippet>516</a>        <span class="macro">assert_eq!</span>(rw.wake_up_after, <span class="prelude-val">None</span>);
+<a href=#517 id=517 data-nosnippet>517</a>
+<a href=#518 id=518 data-nosnippet>518</a>        <span class="comment">// The substream now asks for 6 bytes.
+<a href=#519 id=519 data-nosnippet>519</a>        </span>{
+<a href=#520 id=520 data-nosnippet>520</a>            <span class="kw">let </span><span class="kw-2">mut </span>inner = framing.read_write(<span class="kw-2">&amp;mut </span>rw).unwrap();
+<a href=#521 id=521 data-nosnippet>521</a>            <span class="macro">assert!</span>(<span class="macro">matches!</span>(inner.incoming_bytes_take(<span class="number">6</span>), <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>)));
+<a href=#522 id=522 data-nosnippet>522</a>        }
+<a href=#523 id=523 data-nosnippet>523</a>        <span class="macro">assert_eq!</span>(
+<a href=#524 id=524 data-nosnippet>524</a>            rw.wake_up_after,
+<a href=#525 id=525 data-nosnippet>525</a>            <span class="prelude-val">Some</span>(<span class="number">5</span>),
+<a href=#526 id=526 data-nosnippet>526</a>            <span class="string">"no wake-up for the waiting frame"
+<a href=#527 id=527 data-nosnippet>527</a>        </span>);
+<a href=#528 id=528 data-nosnippet>528</a>
+<a href=#529 id=529 data-nosnippet>529</a>        <span class="kw">let </span>inner = framing.read_write(<span class="kw-2">&amp;mut </span>rw).unwrap();
+<a href=#530 id=530 data-nosnippet>530</a>        <span class="macro">assert_eq!</span>(
+<a href=#531 id=531 data-nosnippet>531</a>            inner.incoming_buffer, <span class="string">b"abcdef"</span>,
+<a href=#532 id=532 data-nosnippet>532</a>            <span class="string">"waiting frame not parsed once asked for"
+<a href=#533 id=533 data-nosnippet>533</a>        </span>);
+<a href=#534 id=534 data-nosnippet>534</a>    }
+<a href=#535 id=535 data-nosnippet>535</a>
+<a href=#536 id=536 data-nosnippet>536</a>    <span class="doccomment">/// A substream that discards what it receives asks for nothing, yet must reach the `FIN`
+<a href=#537 id=537 data-nosnippet>537</a>    /// behind the remote's in-flight data: it gets one frame per call, and parsing resumes once
+<a href=#538 id=538 data-nosnippet>538</a>    /// it drained it.
+<a href=#539 id=539 data-nosnippet>539</a>    </span><span class="attr">#[test]
+<a href=#540 id=540 data-nosnippet>540</a>    </span><span class="kw">fn </span>discarding_inner_reaches_fin_behind_data() {
+<a href=#541 id=541 data-nosnippet>541</a>        <span class="kw">let </span><span class="kw-2">mut </span>framing = WebRtcFraming::new();
+<a href=#542 id=542 data-nosnippet>542</a>        <span class="comment">// Data frames "abc" and "def", then `Message { flag: FIN }`.
+<a href=#543 id=543 data-nosnippet>543</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>rw = outer(
+<a href=#544 id=544 data-nosnippet>544</a>            <span class="kw-2">&amp;</span>[
+<a href=#545 id=545 data-nosnippet>545</a>                <span class="number">0x05</span>, <span class="number">0x12</span>, <span class="number">0x03</span>, <span class="string">b'a'</span>, <span class="string">b'b'</span>, <span class="string">b'c'</span>, <span class="number">0x05</span>, <span class="number">0x12</span>, <span class="number">0x03</span>, <span class="string">b'd'</span>, <span class="string">b'e'</span>, <span class="string">b'f'</span>, <span class="number">0x02</span>, <span class="number">0x08</span>,
+<a href=#546 id=546 data-nosnippet>546</a>                <span class="number">0x00</span>,
+<a href=#547 id=547 data-nosnippet>547</a>            ],
+<a href=#548 id=548 data-nosnippet>548</a>            <span class="number">100</span>,
+<a href=#549 id=549 data-nosnippet>549</a>        );
+<a href=#550 id=550 data-nosnippet>550</a>        {
+<a href=#551 id=551 data-nosnippet>551</a>            <span class="kw">let </span><span class="kw-2">mut </span>inner = framing.read_write(<span class="kw-2">&amp;mut </span>rw).unwrap();
+<a href=#552 id=552 data-nosnippet>552</a>            <span class="macro">assert_eq!</span>(inner.incoming_buffer, <span class="string">b"abc"</span>);
+<a href=#553 id=553 data-nosnippet>553</a>            inner.discard_all_incoming();
+<a href=#554 id=554 data-nosnippet>554</a>        }
+<a href=#555 id=555 data-nosnippet>555</a>        <span class="macro">assert_eq!</span>(rw.wake_up_after, <span class="prelude-val">Some</span>(<span class="number">5</span>), <span class="string">"no wake-up after draining"</span>);
+<a href=#556 id=556 data-nosnippet>556</a>
+<a href=#557 id=557 data-nosnippet>557</a>        <span class="kw">let </span><span class="kw-2">mut </span>inner = framing.read_write(<span class="kw-2">&amp;mut </span>rw).unwrap();
+<a href=#558 id=558 data-nosnippet>558</a>        <span class="macro">assert_eq!</span>(inner.incoming_buffer, <span class="string">b"def"</span>);
+<a href=#559 id=559 data-nosnippet>559</a>        <span class="macro">assert_eq!</span>(
+<a href=#560 id=560 data-nosnippet>560</a>            inner.expected_incoming_bytes, <span class="prelude-val">None</span>,
+<a href=#561 id=561 data-nosnippet>561</a>            <span class="string">"FIN behind the data not reached"
+<a href=#562 id=562 data-nosnippet>562</a>        </span>);
+<a href=#563 id=563 data-nosnippet>563</a>        inner.discard_all_incoming();
+<a href=#564 id=564 data-nosnippet>564</a>        drop(inner);
+<a href=#565 id=565 data-nosnippet>565</a>        <span class="macro">assert_eq!</span>(
+<a href=#566 id=566 data-nosnippet>566</a>            rw.write_buffers.concat(),
+<a href=#567 id=567 data-nosnippet>567</a>            [<span class="number">0x04</span>, <span class="number">0x08</span>, <span class="number">0x03</span>, <span class="number">0x12</span>, <span class="number">0x00</span>],
+<a href=#568 id=568 data-nosnippet>568</a>            <span class="string">"no FIN_ACK written"
+<a href=#569 id=569 data-nosnippet>569</a>        </span>);
+<a href=#570 id=570 data-nosnippet>570</a>    }
+<a href=#571 id=571 data-nosnippet>571</a>}</code></pre></div></section></main></body></html>
