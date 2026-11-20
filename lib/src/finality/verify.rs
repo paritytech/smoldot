@@ -236,8 +236,8 @@ struct CommitVerification<C> {
     /// verified to be about a block that is a descendant of the target block.
     next_precommit_block_verified: bool,
 
-    /// Number of signatures that have been pushed for verification. Needs to be above a certain
-    /// threshold for the commit to be valid.
+    /// Number of pre-commits known to be on the target block or one of its descendants. Needs to
+    /// be above a certain threshold for the commit to be valid.
     num_verified_signatures: usize,
 
     /// Number of authorities in the list. Used to calculate the threshold of the number of
@@ -274,6 +274,7 @@ impl<C: AsRef<[u8]>> CommitVerification<C> {
                         && precommit.target_number == decoded_commit.target_number
                     {
                         self.next_precommit_block_verified = true;
+                        self.num_verified_signatures += 1;
                     } else {
                         return CommitVerify::IsParent(CommitVerifyIsParent {
                             block_number: precommit.target_number,
@@ -322,11 +323,10 @@ impl<C: AsRef<[u8]>> CommitVerification<C> {
                 debug_assert!(!self.next_precommit_author_verified);
                 debug_assert!(!self.next_precommit_block_verified);
 
-                // Check that commit contains a number of signatures equal to at least 2/3rd of the
-                // number of authorities.
-                // Duplicate signatures are checked below.
+                // Check that the number of pre-commits known to be on the target or one of its
+                // descendants is equal to at least 2/3rd of the number of authorities.
                 // The logic of the check is `actual >= (expected * 2 / 3) + 1`.
-                if decoded_commit.precommits.len()
+                if self.num_verified_signatures
                     < (usize::try_from(self.num_authorities).unwrap() * 2 / 3) + 1
                 {
                     return CommitVerify::FinishedUnknown;
@@ -645,7 +645,10 @@ pub enum JustificationVerifyError {
 
 #[cfg(test)]
 mod tests {
-    use super::{JustificationVerifyConfig, JustificationVerifyError, verify_justification};
+    use super::{
+        CommitVerify, CommitVerifyConfig, CommitVerifyError, JustificationVerifyConfig,
+        JustificationVerifyError, verify_commit, verify_justification,
+    };
     use crate::header;
 
     use alloc::vec::Vec;
@@ -1475,5 +1478,160 @@ mod tests {
             matches!(result, Err(JustificationVerifyError::NotEnoughSignatures)),
             "{result:?}"
         );
+    }
+
+    fn encode_commit(
+        target_hash: [u8; 32],
+        target_number: u64,
+        precommits: &[Precommit],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&ROUND.to_le_bytes());
+        out.extend_from_slice(&SET_ID.to_le_bytes());
+        out.extend_from_slice(&target_hash);
+        out.extend_from_slice(&u32::try_from(target_number).unwrap().to_le_bytes());
+
+        out.extend_from_slice(crate::util::encode_scale_compact_usize(precommits.len()).as_ref());
+        for precommit in precommits {
+            out.extend_from_slice(&precommit.target_hash);
+            out.extend_from_slice(
+                &u32::try_from(precommit.target_number)
+                    .unwrap()
+                    .to_le_bytes(),
+            );
+        }
+
+        out.extend_from_slice(crate::util::encode_scale_compact_usize(precommits.len()).as_ref());
+        for precommit in precommits {
+            let mut msg = Vec::new();
+            msg.push(1u8);
+            msg.extend_from_slice(&precommit.target_hash);
+            msg.extend_from_slice(
+                &u32::try_from(precommit.target_number)
+                    .unwrap()
+                    .to_le_bytes(),
+            );
+            msg.extend_from_slice(&ROUND.to_le_bytes());
+            msg.extend_from_slice(&SET_ID.to_le_bytes());
+
+            out.extend_from_slice(&precommit.signer.sign(&msg).to_bytes());
+            out.extend_from_slice(
+                &precommit
+                    .declared_public_key
+                    .unwrap_or_else(|| public_key(precommit.signer)),
+            );
+        }
+
+        out
+    }
+
+    #[derive(Debug)]
+    enum CommitOutcome {
+        Ok,
+        Err(CommitVerifyError),
+        Unknown,
+    }
+
+    fn verify_commit_with(
+        commit: &[u8],
+        authorities_list: &[[u8; 32]],
+        is_descendant: impl Fn(&[u8; 32]) -> Option<bool>,
+    ) -> CommitOutcome {
+        let mut verification = verify_commit(CommitVerifyConfig {
+            commit,
+            block_number_bytes: BLOCK_NUMBER_BYTES,
+            expected_authorities_set_id: SET_ID,
+            num_authorities: u32::try_from(authorities_list.len()).unwrap(),
+            randomness_seed: [0; 32],
+        });
+
+        loop {
+            match verification {
+                CommitVerify::Finished(Ok(())) => return CommitOutcome::Ok,
+                CommitVerify::Finished(Err(err)) => return CommitOutcome::Err(err),
+                CommitVerify::FinishedUnknown => return CommitOutcome::Unknown,
+                CommitVerify::IsAuthority(is_authority) => {
+                    let result = authorities_list.contains(is_authority.authority_public_key());
+                    verification = is_authority.resume(result);
+                }
+                CommitVerify::IsParent(is_parent) => {
+                    let result = is_descendant(is_parent.block_hash());
+                    verification = is_parent.resume(result);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn commit_with_precommits_on_target() {
+        let (keys, authorities) = authorities();
+        let precommits = keys[..3]
+            .iter()
+            .map(|k| precommit(k, [0xaa; 32], 10))
+            .collect::<Vec<_>>();
+        let commit = encode_commit([0xaa; 32], 10, &precommits);
+
+        let result = verify_commit_with(&commit, &authorities, |_| panic!());
+        assert!(matches!(result, CommitOutcome::Ok), "{result:?}");
+    }
+
+    #[test]
+    fn commit_with_precommits_on_known_descendants() {
+        let (keys, authorities) = authorities();
+        let precommits = keys[..3]
+            .iter()
+            .map(|k| precommit(k, [0xbb; 32], 11))
+            .collect::<Vec<_>>();
+        let commit = encode_commit([0xaa; 32], 10, &precommits);
+
+        let result = verify_commit_with(&commit, &authorities, |_| Some(true));
+        assert!(matches!(result, CommitOutcome::Ok), "{result:?}");
+    }
+
+    #[test]
+    fn commit_with_precommits_not_descendants_is_rejected() {
+        let (keys, authorities) = authorities();
+        let precommits = keys[..3]
+            .iter()
+            .map(|k| precommit(k, [0xbb; 32], 11))
+            .collect::<Vec<_>>();
+        let commit = encode_commit([0xaa; 32], 10, &precommits);
+
+        let result = verify_commit_with(&commit, &authorities, |_| Some(false));
+        assert!(
+            matches!(result, CommitOutcome::Err(CommitVerifyError::BadAncestry)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn commit_with_replaced_target_and_unknown_precommits_is_not_accepted() {
+        let (keys, authorities) = authorities();
+        let precommits = keys
+            .iter()
+            .map(|k| precommit(k, [0xaa; 32], 10))
+            .collect::<Vec<_>>();
+        let commit = encode_commit([0xcc; 32], 12, &precommits);
+
+        let result = verify_commit_with(&commit, &authorities, |_| None);
+        assert!(matches!(result, CommitOutcome::Unknown), "{result:?}");
+    }
+
+    #[test]
+    fn commit_unknown_precommits_do_not_count_towards_threshold() {
+        let (keys, authorities) = authorities();
+        let precommits = vec![
+            precommit(&keys[0], [0xaa; 32], 10),
+            precommit(&keys[1], [0xaa; 32], 10),
+            precommit(&keys[2], [0xbb; 32], 11),
+            precommit(&keys[3], [0xbb; 32], 11),
+        ];
+        let commit = encode_commit([0xaa; 32], 10, &precommits);
+
+        let result = verify_commit_with(&commit, &authorities, |_| None);
+        assert!(matches!(result, CommitOutcome::Unknown), "{result:?}");
+
+        let result = verify_commit_with(&commit, &authorities, |_| Some(true));
+        assert!(matches!(result, CommitOutcome::Ok), "{result:?}");
     }
 }
