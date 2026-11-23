@@ -1175,10 +1175,10 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// out slots only until the chain first connects.
     chains_ever_gossip_connected: HashSet<ChainId, fnv::FnvBuildHasher>,
 
-    /// Connected peers using statement protocol V2, per chain.
+    /// Connected peers using statement protocol V2 or V3, per chain.
     v2_statement_peers: HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
 
-    /// Current topic affinity filter per chain, sent to V2 peers on connect.
+    /// Current topic affinity filter per chain, sent to V2 and V3 peers on connect.
     current_affinity_filter: HashMap<ChainId, AffinityFilter, fnv::FnvBuildHasher>,
 
     /// Important nodes per chain (in practice the bootnodes; see [`NetworkServiceChain::discover`]).
@@ -2421,7 +2421,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 ToBackgroundChain::BroadcastStatement { statement, result },
             ) => {
-                let close_peers = if let Some(peering) = &task.network[chain_id].statement_peering
+                let targets = if let Some(peering) = &task.network[chain_id].statement_peering
                     && let Ok(decoded) = codec::decode_statement(&statement)
                 {
                     peering.topology.routing_targets(&decoded.topics)
@@ -2439,12 +2439,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .gossip_send_statement(peer, chain_id, statement.clone())
                         .is_ok()
                 };
-                let close_sent = close_peers.iter().filter(&mut send).count();
+                let close_sent = targets.iter().filter(&mut send).count();
 
                 // Any peer works as an extra recipient, since a full node routes the statement
-                // onwards. The close peers that refused would refuse again, so they are skipped.
+                // onwards. The targets that refused would refuse again, so they are skipped.
                 let others_sent = all_peers
-                    .difference(&close_peers)
+                    .difference(&targets)
                     .filter(send)
                     .take(STATEMENT_MIN_RECIPIENTS.saturating_sub(close_sent))
                     .count();
@@ -3796,13 +3796,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 if let Some(peering) = &mut task.network[chain_id].statement_peering {
-                    peering
-                        .topology
-                        .on_substream_opened(peer_id.clone(), &task.platform.now());
+                    peering.topology.on_substream_opened(
+                        peer_id.clone(),
+                        matches!(version, codec::StatementProtocolVersion::V3),
+                        &task.platform.now(),
+                    );
                     peering.steering.on_substream_opened(peer_id.clone());
                 }
 
-                if matches!(version, codec::StatementProtocolVersion::V2) {
+                if !matches!(version, codec::StatementProtocolVersion::V1) {
                     task.v2_statement_peers
                         .entry(chain_id)
                         .or_insert_with(|| {

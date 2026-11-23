@@ -289,7 +289,7 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
     /// Used by [`ChainNetwork::kademlia_capable_peers`].
     kademlia_capable_peers: BTreeSet<(usize, PeerIndex)>,
 
-    /// Peers known to support a chain's statement/2 protocol, as determined by Identify
+    /// Peers known to support a chain's statement/3 protocol, as determined by Identify
     /// responses. Used by [`ChainNetwork::statement_capable_peers`].
     statement_capable_peers: BTreeSet<(usize, PeerIndex)>,
 }
@@ -641,6 +641,10 @@ where
             NotificationsProtocol::Statement {
                 chain_index: chain_id.0,
                 version: codec::StatementProtocolVersion::V2,
+            },
+            NotificationsProtocol::Statement {
+                chain_index: chain_id.0,
+                version: codec::StatementProtocolVersion::V3,
             },
         ] {
             for (protocol, peer_index, direction, state, substream_id) in self
@@ -1789,7 +1793,7 @@ where
                             // chain's Kad protocol name. The response is consumed internally
                             // (no `Event::RequestResult` is emitted for Identify).
                             // `statement_capable_peers` is populated the same way from the
-                            // statement/2 protocol name, for chains that use statements.
+                            // statement/3 protocol name, for chains that use statements.
                             if let Ok(payload) = response {
                                 if let Ok(decoded) = codec::decode_identify_response(&payload) {
                                     let advertised: Vec<&str> = decoded.protocols.collect();
@@ -1810,7 +1814,7 @@ where
                                                 codec::ProtocolName::Statement {
                                                     genesis_hash: chain.genesis_hash,
                                                     fork_id: chain.fork_id.as_deref(),
-                                                    version: codec::StatementProtocolVersion::V2,
+                                                    version: codec::StatementProtocolVersion::V3,
                                                 },
                                             );
                                             if advertised.iter().any(|p| *p == statement_name) {
@@ -2188,6 +2192,10 @@ where
                                             chain_index,
                                             version: codec::StatementProtocolVersion::V2,
                                         },
+                                        NotificationsProtocol::Statement {
+                                            chain_index,
+                                            version: codec::StatementProtocolVersion::V3,
+                                        },
                                     ] {
                                         if keep_statement
                                             && matches!(
@@ -2341,8 +2349,8 @@ where
                             );
 
                             // A statement substream anchoring a `GossipKind::Statement` link
-                            // has its own event. Only the V2 to V1 fallback comes first, and
-                            // not on a connection that is shutting down.
+                            // has its own event. Only the fallback to an older version comes
+                            // first, and not on a connection that is shutting down.
                             if let Err(error) = &result {
                                 let is_wanted_statement_link = matches!(
                                     substream_protocol,
@@ -2350,23 +2358,21 @@ where
                                 ) && self
                                     .statement_link_wanted(chain_index, peer_index);
 
-                                let is_v2_fallback = matches!(
-                                    (error, substream_protocol),
+                                let fallback = match (error, substream_protocol) {
                                     (
                                         collection::NotificationsOutErr::Substream(
                                             established::NotificationsOutErr::ProtocolNotAvailable,
                                         ),
-                                        NotificationsProtocol::Statement {
-                                            version: codec::StatementProtocolVersion::V2,
-                                            ..
-                                        },
-                                    )
-                                );
+                                        NotificationsProtocol::Statement { version, .. },
+                                    ) => statement_fallback_version(version),
+                                    _ => None,
+                                };
 
                                 let shutting_down =
                                     self.inner.connection_state(connection_id).shutting_down;
 
-                                if is_wanted_statement_link && (shutting_down || !is_v2_fallback) {
+                                if is_wanted_statement_link && (shutting_down || fallback.is_none())
+                                {
                                     let error = error.clone();
                                     self.close_notification_substreams(
                                         peer_index,
@@ -2396,8 +2402,8 @@ where
                                     true,
                                 );
 
-                                // Statement V2 unavailable: fall back to V1.
-                                if is_v2_fallback {
+                                // Statement version unavailable: fall back to the older one.
+                                if let Some(version) = fallback {
                                     if link_open {
                                         self.secondary_protocols_unavailable
                                             .insert((peer_index, substream_protocol));
@@ -2407,7 +2413,7 @@ where
                                         peer_index,
                                         NotificationsProtocol::Statement {
                                             chain_index,
-                                            version: codec::StatementProtocolVersion::V1,
+                                            version,
                                         },
                                     );
                                     continue;
@@ -2616,6 +2622,10 @@ where
                                 NotificationsProtocol::Statement {
                                     chain_index,
                                     version: codec::StatementProtocolVersion::V2,
+                                },
+                                NotificationsProtocol::Statement {
+                                    chain_index,
+                                    version: codec::StatementProtocolVersion::V3,
                                 },
                             ] {
                                 if keep_statement
@@ -3090,7 +3100,8 @@ where
                                     statements,
                                 });
                             }
-                            codec::StatementProtocolVersion::V2 => {
+                            codec::StatementProtocolVersion::V2
+                            | codec::StatementProtocolVersion::V3 => {
                                 match codec::decode_statement_message(&notification) {
                                     Ok(codec::StatementMessage::Statements(statements)) => {
                                         if statements.is_empty() {
@@ -3896,6 +3907,11 @@ where
                                 codec::ProtocolName::Statement {
                                     genesis_hash: chain.genesis_hash,
                                     fork_id: chain.fork_id.as_deref(),
+                                    version: codec::StatementProtocolVersion::V3,
+                                },
+                                codec::ProtocolName::Statement {
+                                    genesis_hash: chain.genesis_hash,
+                                    fork_id: chain.fork_id.as_deref(),
                                     version: codec::StatementProtocolVersion::V2,
                                 },
                                 codec::ProtocolName::Statement {
@@ -4001,8 +4017,9 @@ where
             .map(|(_, peer_index)| &self.peers[peer_index.0])
     }
 
-    /// Returns the list of peers known to support the statement/2 protocol of the given chain,
-    /// as determined by their Identify protocol response.
+    /// Returns the list of peers known to support the statement/3 protocol of the given chain,
+    /// as determined by their Identify protocol response. Only a full node that routes
+    /// statements over the DHT speaks statement/3.
     ///
     /// Always empty if [`ChainConfig::enable_statement_protocol`] is `false` for this chain.
     /// The same limits as [`ChainNetwork::kademlia_capable_peers`] apply: Identify is sent at
@@ -4223,8 +4240,8 @@ where
             )
         }
 
-        // Open the substream the link is anchored on. A statement link starts with V2 and
-        // falls back to V1 if the peer doesn't support it.
+        // Open the substream the link is anchored on. A statement link starts with V3 and
+        // falls back to V2, then to V1, if the peer doesn't support it.
         let (anchor_protocol, anchor_protocol_name) = match kind {
             GossipKind::ConsensusTransactions => (
                 NotificationsProtocol::BlockAnnounces {
@@ -4238,12 +4255,12 @@ where
             GossipKind::Statement => (
                 NotificationsProtocol::Statement {
                     chain_index: chain_id.0,
-                    version: codec::StatementProtocolVersion::V2,
+                    version: codec::StatementProtocolVersion::V3,
                 },
                 codec::ProtocolName::Statement {
                     genesis_hash: chain_info.genesis_hash,
                     fork_id: chain_info.fork_id.as_deref(),
-                    version: codec::StatementProtocolVersion::V2,
+                    version: codec::StatementProtocolVersion::V3,
                 },
             ),
         };
@@ -4680,7 +4697,7 @@ where
                         notification.extend_from_slice(&statement);
                         notification
                     }
-                    codec::StatementProtocolVersion::V2 => {
+                    codec::StatementProtocolVersion::V2 | codec::StatementProtocolVersion::V3 => {
                         codec::encode_statements_message(&[&statement])
                     }
                 };
@@ -4708,20 +4725,20 @@ where
         };
         let chain_index = chain_id.0;
 
-        match self.find_statement_protocol_for_peer(peer_index, chain_index) {
-            Some(codec::StatementProtocolVersion::V2) => {}
+        let version = match self.find_statement_protocol_for_peer(peer_index, chain_index) {
             Some(codec::StatementProtocolVersion::V1) => {
                 return Err(SendTopicAffinityError::ProtocolV1);
             }
+            Some(version) => version,
             None => return Err(SendTopicAffinityError::NoConnection),
-        }
+        };
 
         let notification = codec::encode_topic_affinity_message(filter);
         self.queue_notification(
             target,
             NotificationsProtocol::Statement {
                 chain_index,
-                version: codec::StatementProtocolVersion::V2,
+                version,
             },
             notification,
         )
@@ -4737,6 +4754,7 @@ where
         chain_index: usize,
     ) -> Option<codec::StatementProtocolVersion> {
         for version in [
+            codec::StatementProtocolVersion::V3,
             codec::StatementProtocolVersion::V2,
             codec::StatementProtocolVersion::V1,
         ] {
@@ -5441,12 +5459,12 @@ where
                     .enable_statement_protocol
                     .then_some(NotificationsProtocol::Statement {
                         chain_index,
-                        version: codec::StatementProtocolVersion::V2,
+                        version: codec::StatementProtocolVersion::V3,
                     }),
             )
         {
-            // A statement substream of either version counts, as a `GossipKind::Statement` link
-            // may have fallen back to V1 already.
+            // A statement substream of any version counts, as a `GossipKind::Statement` link
+            // may have fallen back to an older one already.
             let already_exists = match protocol {
                 NotificationsProtocol::Statement { .. } => {
                     self.gossip_link_exists(chain_index, peer_index, GossipKind::Statement)
@@ -5459,22 +5477,19 @@ where
                 continue;
             }
 
-            // Statement V2 unavailable: V1 may do.
-            let protocol = match protocol {
-                NotificationsProtocol::Statement {
-                    version: codec::StatementProtocolVersion::V2,
-                    ..
-                } if self
+            // Statement version unavailable: an older one may do.
+            let mut protocol = protocol;
+            while let NotificationsProtocol::Statement { version, .. } = protocol
+                && let Some(version) = statement_fallback_version(version)
+                && self
                     .secondary_protocols_unavailable
-                    .contains(&(peer_index, protocol)) =>
-                {
-                    NotificationsProtocol::Statement {
-                        chain_index,
-                        version: codec::StatementProtocolVersion::V1,
-                    }
-                }
-                protocol => protocol,
-            };
+                    .contains(&(peer_index, protocol))
+            {
+                protocol = NotificationsProtocol::Statement {
+                    chain_index,
+                    version,
+                };
+            }
             if self
                 .secondary_protocols_unavailable
                 .contains(&(peer_index, protocol))
@@ -5699,7 +5714,7 @@ impl<TChain, TConn, TNow> ops::IndexMut<ConnectionId> for ChainNetwork<TChain, T
     }
 }
 
-/// Kind of gossip link. Each kind is anchored on one notifications protocol, either version of
+/// Kind of gossip link. Each kind is anchored on one notifications protocol, any version of
 /// it for statements: the link exists as long as an outbound substream of that protocol exists,
 /// and closes with it.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, strum::VariantArray)]
@@ -5729,8 +5744,8 @@ fn consensus_transactions_protocols(chain_index: usize) -> [NotificationsProtoco
     ]
 }
 
-/// Both versions of the statement protocol of the given chain.
-fn statement_protocols(chain_index: usize) -> [NotificationsProtocol; 2] {
+/// Every version of the statement protocol of the given chain.
+fn statement_protocols(chain_index: usize) -> [NotificationsProtocol; 3] {
     [
         NotificationsProtocol::Statement {
             chain_index,
@@ -5740,7 +5755,22 @@ fn statement_protocols(chain_index: usize) -> [NotificationsProtocol; 2] {
             chain_index,
             version: codec::StatementProtocolVersion::V2,
         },
+        NotificationsProtocol::Statement {
+            chain_index,
+            version: codec::StatementProtocolVersion::V3,
+        },
     ]
+}
+
+/// Version to ask for once a peer answers that it doesn't speak `version`.
+fn statement_fallback_version(
+    version: codec::StatementProtocolVersion,
+) -> Option<codec::StatementProtocolVersion> {
+    match version {
+        codec::StatementProtocolVersion::V3 => Some(codec::StatementProtocolVersion::V2),
+        codec::StatementProtocolVersion::V2 => Some(codec::StatementProtocolVersion::V1),
+        codec::StatementProtocolVersion::V1 => None,
+    }
 }
 
 /// Notifications protocols a gossip link of the given kind is anchored on. The link exists as
@@ -5752,6 +5782,7 @@ fn gossip_kind_anchor_protocols(
     match kind {
         GossipKind::ConsensusTransactions => [
             Some(NotificationsProtocol::BlockAnnounces { chain_index }),
+            None,
             None,
         ],
         GossipKind::Statement => statement_protocols(chain_index).map(Some),
@@ -5997,7 +6028,7 @@ pub enum Event<TConn> {
 
     /// A statement protocol substream has been successfully negotiated with a peer.
     ///
-    /// Indicates which protocol version (V1 or V2) was agreed upon.
+    /// Indicates which protocol version was agreed upon.
     ///
     /// Happens as a result of a call to [`ChainNetwork::gossip_open`] with
     /// [`GossipKind::Statement`], and also after a [`Event::GossipConnected`] with the same peer,
@@ -6020,8 +6051,8 @@ pub enum Event<TConn> {
     /// the peer lacks the protocol.
     ///
     /// The error is the one of the last version tried. When the connection is shutting down,
-    /// no V1 fallback is attempted and the error can be the V2 refusal, which then says nothing
-    /// about the peer's support for the protocol.
+    /// no fallback is attempted and the error can be the refusal of a newer version, which then
+    /// says nothing about the peer's support for the protocol.
     ///
     /// A peer still desired under [`GossipKind::Statement`] is put back in
     /// [`ChainNetwork::connected_unopened_gossip_desired`]. The API user must remove it from
@@ -6051,7 +6082,7 @@ pub enum Event<TConn> {
         chain_id: ChainId,
     },
 
-    /// Received a topic affinity bloom filter from a V2 peer.
+    /// Received a topic affinity bloom filter from a V2 or V3 peer.
     ///
     /// The filter indicates which statement topics the peer is interested in.
     /// Only statements matching the filter need to be sent to this peer.

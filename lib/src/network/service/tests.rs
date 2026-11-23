@@ -440,7 +440,7 @@ fn statement_link_opens_without_block_announces() {
         events,
         Side::Alice,
         Event::StatementProtocolConnected {
-            version: codec::StatementProtocolVersion::V2,
+            version: codec::StatementProtocolVersion::V3,
             ..
         },
         1
