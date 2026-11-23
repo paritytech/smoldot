@@ -119,8 +119,9 @@ impl StatementSubmitError {
 /// Validates a SCALE-encoded statement and broadcasts it to the network.
 ///
 /// The checks run in the order polkadot-sdk's `Store::submit` applies them - expiry, then size,
-/// then topics, then proof - so that a client submitting a statement failing several of them is told the same
-/// reason a full node would give. Checks needing a local store or chain state are skipped.
+/// then topics, then proof - so that a client submitting a statement failing several of them is
+/// told the same reason a full node would give. Checks needing a local store or chain state are
+/// skipped.
 ///
 /// The `broadcast` closure is only called if the statement is valid.
 pub async fn validate_and_broadcast_statement<F, Fut>(
