@@ -26,7 +26,6 @@ use core::{fmt, iter};
 pub enum StatementProtocolVersion {
     V1,
     V2,
-    /// The V2 messages, between a peer and a full node that routes statements over the DHT.
     V3,
 }
 

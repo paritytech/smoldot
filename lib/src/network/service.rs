@@ -4024,8 +4024,7 @@ where
     }
 
     /// Returns the list of peers known to support the statement/3 protocol of the given chain,
-    /// as determined by their Identify protocol response. Only a full node that routes
-    /// statements over the DHT speaks statement/3.
+    /// as determined by their Identify protocol response.
     ///
     /// Always empty if [`ChainConfig::enable_statement_protocol`] is `false` for this chain.
     /// The same limits as [`ChainNetwork::kademlia_capable_peers`] apply: Identify is sent at

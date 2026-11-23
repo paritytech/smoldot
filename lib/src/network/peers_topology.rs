@@ -35,11 +35,8 @@
 //! discovered peer counts as a statement peer until Identify or a refused statement substream
 //! says otherwise.
 //!
-//! Only a full node that routes statements over the DHT speaks `statement/3`, and only such
-//! nodes are replicas of a topic. A peer that settles for an older version runs without the DHT
-//! path: it wants every statement and is no candidate for a topic. A network where no peer is
-//! known to speak `statement/3` runs without the DHT path altogether, and there every statement
-//! peer stays a candidate.
+//! Only a full node on the DHT path speaks `statement/3`. A peer on an older version wants
+//! every statement and is no candidate for a topic, unless no known peer speaks `statement/3`.
 //!
 //! A light client is never a replica of a topic, so the affinity oracle and the routing of
 //! statements between replicas of the full node have no counterpart here.
@@ -83,8 +80,7 @@ pub struct Config {
 struct PeerInfo<TNow> {
     /// `false` once the peer is known to lack the statement protocol.
     supports_protocol: bool,
-    /// Whether the peer routes statements over the DHT. `None` until Identify or a statement
-    /// substream tells.
+    /// Whether the peer speaks `statement/3`. `None` until Identify or a substream tells.
     dht_path: Option<bool>,
     /// The statement substream to the peer is open.
     connected: bool,
@@ -154,8 +150,8 @@ where
     /// protocol from a statement substream refused for an unknown protocol.
     ///
     /// Peers that do not support the statement protocol remain known but are excluded from
-    /// the candidates for a topic. An open statement substream proves support, tells whether
-    /// the peer runs the DHT path, and outweighs either answer.
+    /// the candidates for a topic. An open statement substream proves support and outweighs
+    /// either answer.
     pub fn on_peer_identified(
         &mut self,
         peer: PeerId,
@@ -184,9 +180,7 @@ where
 
     /// Record that the statement substream to `peer` closed.
     ///
-    /// The full node forgets here that a peer runs without the DHT path and waits for Identify.
-    /// A light client counts a peer as a candidate before Identify, so the mark stays, or the
-    /// peer would be connected again at once.
+    /// A peer on an older version keeps its mark, or it would be connected again at once.
     pub fn on_substream_closed(&mut self, peer: PeerId, now: &TNow) {
         if let Some(info) = self.discovered.get_mut(&peer) {
             info.connected = false;
@@ -201,9 +195,7 @@ where
         self.discovered.len()
     }
 
-    /// Known candidates for a topic, in no specific order: the peers not known to lack the
-    /// statement protocol, without the ones that run without the DHT path once a peer is known
-    /// to run it.
+    /// Known candidates for a topic, in no specific order.
     pub fn statement_peers(&self) -> impl Iterator<Item = &PeerId> {
         self.candidates().map(|(peer, _)| peer)
     }
@@ -255,7 +247,7 @@ where
 
     /// Connected peers to send a statement on `topics` to: every connected peer among the
     /// `replication_factor` closest known statement peers of one of the topics, and every
-    /// connected peer without the DHT path, which wants every statement.
+    /// connected peer on an older version.
     ///
     /// The full node also routes to connected peers closer to a topic than itself. A light
     /// client is no replica and has no position in the key space, so it keeps only the replicas.
@@ -347,7 +339,7 @@ where
             .collect()
     }
 
-    /// Peers that may hold a topic. See [`PeersTopology::statement_peers`].
+    /// Peers that may hold a topic. See the [module documentation](self).
     fn candidates(&self) -> impl Iterator<Item = (&PeerId, &PeerInfo<TNow>)> {
         let dht_path_known = self
             .discovered

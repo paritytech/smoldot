@@ -3853,8 +3853,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // links keep serving statements in the meantime.
                 if let Some(peering) = &mut task.network[chain_id].statement_peering {
                     // The topology counts a discovered peer as a statement peer until it
-                    // answers that it lacks the protocol. The refusal of a newer version on a
-                    // connection that shuts down leaves the older ones untried.
+                    // answers that it lacks the oldest version of the protocol.
                     if matches!(version, codec::StatementProtocolVersion::V1)
                         && matches!(
                             error,
