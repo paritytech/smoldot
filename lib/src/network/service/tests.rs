@@ -651,6 +651,7 @@ fn statement_link_refused_by_unsupported_protocol() {
         events,
         Side::Alice,
         Event::StatementProtocolOpenFailed {
+            version: codec::StatementProtocolVersion::V1,
             error: NotificationsOutErr::Substream(
                 established::NotificationsOutErr::ProtocolNotAvailable
             ),

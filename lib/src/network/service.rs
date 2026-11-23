@@ -2374,6 +2374,11 @@ where
                                 if is_wanted_statement_link && (shutting_down || fallback.is_none())
                                 {
                                     let error = error.clone();
+                                    let NotificationsProtocol::Statement { version, .. } =
+                                        substream_protocol
+                                    else {
+                                        unreachable!()
+                                    };
                                     self.close_notification_substreams(
                                         peer_index,
                                         statement_protocols(chain_index),
@@ -2382,6 +2387,7 @@ where
                                     return Some(Event::StatementProtocolOpenFailed {
                                         peer_id: self.peers[peer_index.0].clone(),
                                         chain_id: ChainId(chain_index),
+                                        version,
                                         error,
                                     });
                                 }
@@ -6052,7 +6058,7 @@ pub enum Event<TConn> {
     ///
     /// The error is the one of the last version tried. When the connection is shutting down,
     /// no fallback is attempted and the error can be the refusal of a newer version, which then
-    /// says nothing about the peer's support for the protocol.
+    /// says nothing about the peer's support for the older ones.
     ///
     /// A peer still desired under [`GossipKind::Statement`] is put back in
     /// [`ChainNetwork::connected_unopened_gossip_desired`]. The API user must remove it from
@@ -6063,6 +6069,8 @@ pub enum Event<TConn> {
         peer_id: PeerId,
         /// Chain of the gossip connection.
         chain_id: ChainId,
+        /// Last statement protocol version tried.
+        version: codec::StatementProtocolVersion,
         /// Problem that happened.
         error: NotificationsOutErr,
     },

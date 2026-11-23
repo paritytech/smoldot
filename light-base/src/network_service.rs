@@ -3828,6 +3828,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             WakeUpReason::NetworkEvent(service::Event::StatementProtocolOpenFailed {
                 peer_id,
                 chain_id,
+                version,
                 error,
             }) => {
                 log!(
@@ -3852,13 +3853,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // links keep serving statements in the meantime.
                 if let Some(peering) = &mut task.network[chain_id].statement_peering {
                     // The topology counts a discovered peer as a statement peer until it
-                    // answers that it lacks the protocol.
-                    if matches!(
-                        error,
-                        service::NotificationsOutErr::Substream(
-                            connection::established::NotificationsOutErr::ProtocolNotAvailable
+                    // answers that it lacks the protocol. The refusal of a newer version on a
+                    // connection that shuts down leaves the older ones untried.
+                    if matches!(version, codec::StatementProtocolVersion::V1)
+                        && matches!(
+                            error,
+                            service::NotificationsOutErr::Substream(
+                                connection::established::NotificationsOutErr::ProtocolNotAvailable
+                            )
                         )
-                    ) {
+                    {
                         peering.topology.on_peer_identified(
                             peer_id.clone(),
                             false,
