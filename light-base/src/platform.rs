@@ -156,7 +156,7 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
     /// the entries `("block_hash", ...)` and `("sender", ...)`.
     ///
     /// At the time of writing of this comment, `message` can also be a message written in plain
-    /// english and destined to the user of the library. This might disappear in the future.
+    /// English and destined to the user of the library. This might disappear in the future.
     // TODO: act on this last sentence ^
     fn log<'a>(
         &self,
@@ -406,7 +406,7 @@ pub enum Address<'a> {
     TcpDns {
         /// DNS hostname to connect to.
         ///
-        /// > **Note**: According to RFC2181 section 11, a domain name is not necessarily an UTF-8
+        /// > **Note**: According to RFC 2181 section 11, a domain name is not necessarily an UTF-8
         /// >           string. Any binary data can be used as a domain name, provided it follows
         /// >           a few restrictions (notably its length). However, in the context of the
         /// >           [`PlatformRef`] trait, we automatically consider as non-supported a
@@ -437,7 +437,7 @@ pub enum Address<'a> {
     WebSocketDns {
         /// DNS hostname to connect to.
         ///
-        /// > **Note**: According to RFC2181 section 11, a domain name is not necessarily an UTF-8
+        /// > **Note**: According to RFC 2181 section 11, a domain name is not necessarily an UTF-8
         /// >           string. Any binary data can be used as a domain name, provided it follows
         /// >           a few restrictions (notably its length). However, in the context of the
         /// >           [`PlatformRef`] trait, we automatically consider as non-supported a

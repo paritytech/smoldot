@@ -1,0 +1,9 @@
+[advisories]
+ignore = [
+    # wasmtime: fixed only in >= 48.0.9; 36.x not affected (>= 39.0.0 affected):
+    # https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-2674-w29h-wqvj
+    "RUSTSEC-2026-0567",
+    # wasmtime: fixed only in >= 48.0.9; 36.x not affected (>= 47.0.0 affected):
+    # https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-wvgq-g5hf-6gm6
+    "RUSTSEC-2026-0573",
+]

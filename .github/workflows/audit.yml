@@ -7,6 +7,7 @@ on:
     paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - '.cargo/audit.toml'
 
 permissions: write-all  # TODO: https://github.com/actions-rs/audit-check/issues/218
 

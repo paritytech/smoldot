@@ -862,7 +862,7 @@ pub enum ExecHint {
     /// The WebAssembly code will be instantiated once and run many times.
     /// Contrary to [`ExecHint::ValidateAndCompile`], the WebAssembly code isn't fully validated
     /// ahead of time, meaning that invalid WebAssembly modules might successfully be compiled,
-    /// which is an indesirable property in some contexts.
+    /// which is an undesirable property in some contexts.
     CompileWithNonDeterministicValidation,
 
     /// The WebAssembly code is expected to be only run once.
@@ -873,7 +873,7 @@ pub enum ExecHint {
     /// The WebAssembly code will be instantiated once and run many times.
     /// Contrary to [`ExecHint::ValidateAndExecuteOnce`], the WebAssembly code isn't fully
     /// validated ahead of time, meaning that invalid WebAssembly modules might successfully be
-    /// compiled, which is an indesirable property in some contexts.
+    /// compiled, which is an undesirable property in some contexts.
     ExecuteOnceWithNonDeterministicValidation,
 
     /// The WebAssembly code running through this VM is untrusted.
@@ -884,7 +884,7 @@ pub enum ExecHint {
     /// This variant is useful for testing purposes.
     ForceWasmi {
         /// If `true`, lazy validation is enabled. This leads to a faster initialization time,
-        /// but can also successfully validate invalid modules, which is an indesirable property
+        /// but can also successfully validate invalid modules, which is an undesirable property
         /// in some contexts.
         lazy_validation: bool,
     },

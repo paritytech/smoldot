@@ -559,7 +559,7 @@ where
     /// but multistream-select negotiation can still fail, most commonly meaning the remote
     /// does not support the Bitswap protocol.
     ///
-    /// This method only inserts the multistream-select negotioation into the connection object.
+    /// This method only inserts the multistream-select negotiation into the connection object.
     /// The negotiation will later be carried out through [`SingleStream::read_write`].
     ///
     /// Assuming that the remote is using the same implementation, an [`Event::BitswapInOpen`]
@@ -665,7 +665,7 @@ where
         self.inner.yamux.mark_substream_write_ready(substream_id);
     }
 
-    /// Closes (strictly speaking, resets) an inbound Bitswap susbstream reported by
+    /// Closes (strictly speaking, resets) an inbound Bitswap substream reported by
     /// [`Event::BitswapInOpen`].
     ///
     /// This is used to limit the number of inbound Bitswap substreams per peer by discarding old
