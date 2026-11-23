@@ -1197,6 +1197,8 @@ pub enum InvalidReason {
     },
     /// The statement's expiry is not in the future.
     AlreadyExpired,
+    /// The statement has no topic, so topic-based routing cannot deliver it.
+    NoTopics,
 }
 
 /// Notification event for statement subscriptions.
@@ -1719,6 +1721,12 @@ mod tests {
             r#"{"status":"invalid","reason":"alreadyExpired"}"#
         );
 
+        let no_topics = StatementSubmitResult::Invalid(InvalidReason::NoTopics);
+        assert_eq!(
+            serde_json::to_string(&no_topics).unwrap(),
+            r#"{"status":"invalid","reason":"noTopics"}"#
+        );
+
         let too_large = StatementSubmitResult::Invalid(InvalidReason::EncodingTooLarge {
             submitted_size: 2_000_000,
             max_size: 1_048_575,
@@ -1729,7 +1737,7 @@ mod tests {
         );
 
         // Round-trips: the typed fields deserialize back from their wire strings.
-        for value in [new, no_proof, expired, too_large] {
+        for value in [new, no_proof, expired, no_topics, too_large] {
             let json = serde_json::to_string(&value).unwrap();
             assert_eq!(
                 serde_json::from_str::<StatementSubmitResult>(&json).unwrap(),

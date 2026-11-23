@@ -119,7 +119,7 @@ impl StatementSubmitError {
 /// Validates a SCALE-encoded statement and broadcasts it to the network.
 ///
 /// The checks run in the order polkadot-sdk's `Store::submit` applies them - expiry, then size,
-/// then proof - so that a client submitting a statement failing several of them is told the same
+/// then topics, then proof - so that a client submitting a statement failing several of them is told the same
 /// reason a full node would give. Checks needing a local store or chain state are skipped.
 ///
 /// The `broadcast` closure is only called if the statement is valid.
@@ -151,6 +151,10 @@ where
         ));
     }
 
+    if statement.topics.is_empty() {
+        return Ok(StatementSubmitResult::Invalid(InvalidReason::NoTopics));
+    }
+
     if statement.proof.is_none() {
         return Ok(StatementSubmitResult::Invalid(InvalidReason::NoProof));
     }
@@ -166,9 +170,11 @@ where
 }
 
 /// Whether a statement received from a peer may be delivered to subscriptions: the checks of
-/// `statement_submit` that need no store, expiry and presence of a proof.
+/// `statement_submit` that need no store, expiry and presence of a topic and of a proof.
 pub(super) fn is_deliverable(statement: &codec::Statement, now_from_unix_epoch: Duration) -> bool {
-    !is_expired(statement, now_from_unix_epoch) && statement.proof.is_some()
+    !is_expired(statement, now_from_unix_epoch)
+        && !statement.topics.is_empty()
+        && statement.proof.is_some()
 }
 
 /// The most significant 32 bits of `expiry` hold a UNIX timestamp in seconds. A statement expiring
@@ -452,7 +458,7 @@ mod tests {
             decryption_key: None,
             expiry,
             channel: None,
-            topics: Vec::new(),
+            topics: vec![[0; 32]],
             data,
         })
         .unwrap()
@@ -533,8 +539,26 @@ mod tests {
     }
 
     #[test]
+    fn validate_and_broadcast_no_topics() {
+        // The statement also has no proof: the topics check runs before the proof check.
+        let mut statement = decoded_statement(false, FUTURE_EXPIRY);
+        statement.topics.clear();
+        let encoded = codec::encode_statement(&statement).unwrap();
+        let result = block_on(validate_and_broadcast_statement(&encoded, NOW, |_| async {
+            unreachable!()
+        }));
+        assert_eq!(
+            result,
+            Ok(StatementSubmitResult::Invalid(InvalidReason::NoTopics))
+        );
+    }
+
+    #[test]
     fn is_deliverable_requires_proof_and_future_expiry() {
         assert!(is_deliverable(&decoded_statement(true, FUTURE_EXPIRY), NOW));
+        let mut no_topics = decoded_statement(true, FUTURE_EXPIRY);
+        no_topics.topics.clear();
+        assert!(!is_deliverable(&no_topics, NOW));
         assert!(!is_deliverable(
             &decoded_statement(false, FUTURE_EXPIRY),
             NOW
@@ -604,9 +628,6 @@ mod tests {
         // Empty subscription set: no topics are ever in the filter.
         assert!(!filter.contains(&[1u8; 32]));
         assert!(topics.is_empty());
-        // A statement with no topics (broadcast) still matches.
-        let broadcast: &[&[u8; 32]] = &[];
-        assert!(filter.matches_statement(broadcast));
     }
 
     #[test]
