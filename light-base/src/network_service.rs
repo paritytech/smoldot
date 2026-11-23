@@ -48,7 +48,7 @@ use crate::{
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     format,
     string::{String, ToString as _},
     sync::Arc,
@@ -764,7 +764,8 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
-    /// Broadcast a statement notification to all gossip-connected peers.
+    /// Broadcast a statement notification to the connected peers close to its topics, topped up
+    /// with other statement peers to `STATEMENT_MIN_RECIPIENTS`.
     pub async fn broadcast_statement(
         self: Arc<Self>,
         statement: Vec<u8>,
@@ -1309,6 +1310,9 @@ const PEER_STEERING_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 /// Number of full nodes storing a topic, the replication factor of the statement store.
 const STATEMENT_REPLICATION_FACTOR: NonZero<usize> = NonZero::new(20).unwrap();
+
+/// Fewest peers for a submitted statement, since the light client keeps no copy to resend.
+const STATEMENT_MIN_RECIPIENTS: usize = 5;
 
 /// Peer choice for the statement protocol of a chain. See the `peers_topology` and
 /// `peer_steering` modules.
@@ -2417,23 +2421,38 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 ToBackgroundChain::BroadcastStatement { statement, result },
             ) => {
-                let peers_to_send = task
+                let close_peers = if let Some(peering) = &task.network[chain_id].statement_peering
+                    && let Ok(decoded) = codec::decode_statement(&statement)
+                {
+                    peering.topology.routing_targets(&decoded.topics)
+                } else {
+                    BTreeSet::new()
+                };
+                let all_peers = task
                     .network
                     .gossip_connected_peers(chain_id, service::GossipKind::Statement)
                     .cloned()
-                    .collect::<Vec<_>>();
+                    .collect::<BTreeSet<_>>();
 
-                let total = peers_to_send.len();
-                let mut sent = 0;
-                for peer in &peers_to_send {
-                    if task
-                        .network
+                let mut send = |peer: &&PeerId| {
+                    task.network
                         .gossip_send_statement(peer, chain_id, statement.clone())
                         .is_ok()
-                    {
-                        sent += 1;
-                    }
-                }
+                };
+                let close_sent = close_peers.iter().filter(&mut send).count();
+
+                // Any peer works as an extra recipient, since a full node routes the statement
+                // onwards. The close peers that refused would refuse again, so they are skipped.
+                let others_sent = all_peers
+                    .difference(&close_peers)
+                    .filter(send)
+                    .take(STATEMENT_MIN_RECIPIENTS.saturating_sub(close_sent))
+                    .count();
+
+                let broadcast = BroadcastStatementResult {
+                    sent: close_sent + others_sent,
+                    total: all_peers.len(),
+                };
 
                 log!(
                     &task.platform,
@@ -2441,11 +2460,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "network",
                     "statement-broadcast",
                     chain = task.network[chain_id].log_name,
-                    sent,
-                    total,
+                    sent = broadcast.sent,
+                    total = broadcast.total,
+                    close_sent,
                 );
 
-                let _ = result.send(BroadcastStatementResult { sent, total });
+                let _ = result.send(broadcast);
             }
             WakeUpReason::MessageForChain(
                 chain_id,
