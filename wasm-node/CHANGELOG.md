@@ -4,9 +4,23 @@
 
 ### Fixed
 
-- `ext_storage_clear_prefix`, `ext_default_child_storage_clear_prefix` and `ext_default_child_storage_storage_kill` now also remove the keys that were written earlier in the same runtime call, or by a previous call whose changes are passed in. Before, only keys of the stored state were removed, so a later read in the same call still returned them, and the storage changes of the call were wrong. As in Substrate, these keys are not counted in the returned number of removed keys and do not count towards the limit. This affects runtime calls executed locally, such as `chainHead_v1_call` and transaction validation. ([#3402](https://github.com/paritytech/smoldot/pull/3402); fixes [#3374](https://github.com/paritytech/smoldot/issues/3374))
-- Runtime calls that write to a child trie, such as a `ContractsApi_call` dry run, no longer fail with an inaccessible storage error, and no longer get the peers that served the call proof banned. ([#3395](https://github.com/paritytech/smoldot/pull/3395))
 - When the same chain is added several times, the statement subscriptions of one chain handle no longer erase the topics of the other handles from the topic filter sent to the peers. The filter now covers the subscriptions of all the handles, and uses the bloom seed and the false positive rate of the handle that added the chain first. ([#3462](https://github.com/paritytech/smoldot/pull/3462); fixes [#3447](https://github.com/paritytech/smoldot/issues/3447))
+
+## 3.9.0 - 2026-11-19
+
+### Added
+
+- Keep track of the known peers closest to each statement topic. ([#3400](https://github.com/paritytech/smoldot/pull/3400); fixes [#3377](https://github.com/paritytech/smoldot/issues/3377))
+- Statement subscriptions connect to the peers closest to the subscribed topics. ([#3404](https://github.com/paritytech/smoldot/pull/3404); fixes [#3379](https://github.com/paritytech/smoldot/issues/3379))
+
+### Changed
+
+- `state_subscribeStorage` notifies only keys whose value changed. ([#3442](https://github.com/paritytech/smoldot/pull/3442); fixes [#3413](https://github.com/paritytech/smoldot/issues/3413))
+
+### Fixed
+
+- `clear_prefix` / `storage_kill` host functions also remove keys written earlier in the same call. ([#3402](https://github.com/paritytech/smoldot/pull/3402); fixes [#3374](https://github.com/paritytech/smoldot/issues/3374))
+- Runtime calls that write to a child trie no longer fail or get peers banned. ([#3395](https://github.com/paritytech/smoldot/pull/3395))
 
 ## 3.8.0 - 2026-11-05
 

@@ -152,7 +152,7 @@ pub enum DecodeError {
     TooShort,
     /// Invalid SS58 prefix encoding.
     InvalidPrefix,
-    /// Invalid BS58 format.
+    /// Invalid Base58 format.
     #[display("{_0}")]
     InvalidBs58(Bs58DecodeError),
     /// Calculated checksum doesn't match the one provided.
