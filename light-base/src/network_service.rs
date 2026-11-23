@@ -2447,9 +2447,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 };
 
                 // Any connected peer works when no close peer takes the statement: a full node
-                // routes a statement with topics onwards to the peers that store them.
+                // routes a statement with topics onwards to the peers that store them. The close
+                // peers that refused would refuse again in the same tick, so they are skipped.
                 let (broadcast, to_close_peers) = match send_to(&close_peers) {
-                    BroadcastStatementResult { sent: 0, .. } => (send_to(&all_peers), false),
+                    BroadcastStatementResult { sent: 0, .. } => {
+                        let broadcast = BroadcastStatementResult {
+                            total: all_peers.len(),
+                            ..send_to(&(&all_peers - &close_peers))
+                        };
+                        (broadcast, false)
+                    }
                     broadcast => (broadcast, true),
                 };
 
