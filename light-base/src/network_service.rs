@@ -764,8 +764,8 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
-    /// Broadcast a statement notification to the connected peers close to its topics, or to all
-    /// the connected statement peers when none of them takes it.
+    /// Broadcast a statement notification to the connected peers close to its topics, topped up
+    /// with other statement peers to `STATEMENT_MIN_RECIPIENTS`.
     pub async fn broadcast_statement(
         self: Arc<Self>,
         statement: Vec<u8>,
@@ -1310,6 +1310,9 @@ const PEER_STEERING_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 /// Number of full nodes storing a topic, the replication factor of the statement store.
 const STATEMENT_REPLICATION_FACTOR: NonZero<usize> = NonZero::new(20).unwrap();
+
+/// Fewest peers for a submitted statement, since the light client keeps no copy to resend.
+const STATEMENT_MIN_RECIPIENTS: usize = 5;
 
 /// Peer choice for the statement protocol of a chain. See the `peers_topology` and
 /// `peer_steering` modules.
@@ -2431,33 +2434,24 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .cloned()
                     .collect::<BTreeSet<_>>();
 
-                let mut send_to = |peers: &BTreeSet<PeerId>| {
-                    let sent = peers
-                        .iter()
-                        .map(|peer| {
-                            task.network
-                                .gossip_send_statement(peer, chain_id, statement.clone())
-                        })
-                        .filter(Result::is_ok)
-                        .count();
-                    BroadcastStatementResult {
-                        sent,
-                        total: peers.len(),
-                    }
+                let mut send = |peer: &&PeerId| {
+                    task.network
+                        .gossip_send_statement(peer, chain_id, statement.clone())
+                        .is_ok()
                 };
+                let close_sent = close_peers.iter().filter(&mut send).count();
 
-                // Any connected peer works when no close peer takes the statement: a full node
-                // routes a statement with topics onwards to the peers that store them. The close
-                // peers that refused would refuse again in the same tick, so they are skipped.
-                let (broadcast, to_close_peers) = match send_to(&close_peers) {
-                    BroadcastStatementResult { sent: 0, .. } => {
-                        let broadcast = BroadcastStatementResult {
-                            total: all_peers.len(),
-                            ..send_to(&(&all_peers - &close_peers))
-                        };
-                        (broadcast, false)
-                    }
-                    broadcast => (broadcast, true),
+                // Any peer works as an extra recipient, since a full node routes the statement
+                // onwards. The close peers that refused would refuse again, so they are skipped.
+                let others_sent = all_peers
+                    .difference(&close_peers)
+                    .filter(send)
+                    .take(STATEMENT_MIN_RECIPIENTS.saturating_sub(close_sent))
+                    .count();
+
+                let broadcast = BroadcastStatementResult {
+                    sent: close_sent + others_sent,
+                    total: all_peers.len(),
                 };
 
                 log!(
@@ -2468,7 +2462,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     chain = task.network[chain_id].log_name,
                     sent = broadcast.sent,
                     total = broadcast.total,
-                    to_close_peers,
+                    close_sent,
                 );
 
                 let _ = result.send(broadcast);
