@@ -752,7 +752,12 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_spec.fork_id().map(|f| f.to_owned()),
                         config,
                         network_identify_agent_version,
-                        statement_protocol_config.is_some(),
+                        statement_protocol_config.as_ref().map(|config| {
+                            network_service::TopicAffinityConfig {
+                                bloom_seed: config.bloom_seed(),
+                                false_positive_rate: config.false_positive_rate(),
+                            }
+                        }),
                         max_pending_transactions,
                     )
                 };
@@ -1175,7 +1180,7 @@ fn start_services<TPlat: platform::PlatformRef>(
     fork_id: Option<String>,
     config: StartServicesChainTy<'_, TPlat>,
     network_identify_agent_version: String,
-    enable_statement_protocol: bool,
+    statement_protocol: Option<network_service::TopicAffinityConfig>,
     max_pending_transactions: NonZero<u32>,
 ) -> ChainServices<TPlat> {
     let chain_metrics = Arc::new(metrics::ChainMetrics::default());
@@ -1224,7 +1229,7 @@ fn start_services<TPlat: platform::PlatformRef>(
         },
         fork_id,
         block_number_bytes,
-        enable_statement_protocol,
+        statement_protocol,
         metrics: chain_metrics.clone(),
     });
 
