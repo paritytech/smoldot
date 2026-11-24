@@ -440,7 +440,7 @@ fn statement_link_opens_without_block_announces() {
         events,
         Side::Alice,
         Event::StatementProtocolConnected {
-            version: codec::StatementProtocolVersion::V2,
+            version: codec::StatementProtocolVersion::V3,
             ..
         },
         1
@@ -651,6 +651,7 @@ fn statement_link_refused_by_unsupported_protocol() {
         events,
         Side::Alice,
         Event::StatementProtocolOpenFailed {
+            version: codec::StatementProtocolVersion::V1,
             error: NotificationsOutErr::Substream(
                 established::NotificationsOutErr::ProtocolNotAvailable
             ),
@@ -1254,13 +1255,47 @@ fn secondary_substream_exchange(
     replies: &[SecondaryReply],
     reopen_on_event: bool,
     bob_opens_after_refusal: bool,
-) -> (usize, usize, Vec<Option<NotificationsOutErr>>, Node) {
+) -> SecondaryExchange {
+    let (exchange, _) = secondary_substream_exchange_with_statement(
+        replies,
+        None,
+        reopen_on_event,
+        bob_opens_after_refusal,
+    );
+    exchange
+}
+
+type SecondaryExchange = (usize, usize, Vec<Option<NotificationsOutErr>>, Node);
+
+/// The statement versions that Alice asked for, in order, and the version of each
+/// [`Event::StatementProtocolConnected`] she got.
+struct StatementExchange {
+    asked: Vec<codec::StatementProtocolVersion>,
+    connected: Vec<codec::StatementProtocolVersion>,
+}
+
+/// [`secondary_substream_exchange`] where Alice speaks the statement protocol if
+/// `bob_statement` is set. Bob then has that one version of it and accepts its substreams
+/// where the replies, in order, say so, refusing the others.
+fn secondary_substream_exchange_with_statement(
+    replies: &[SecondaryReply],
+    bob_statement: Option<(codec::StatementProtocolVersion, &[SecondaryReply])>,
+    reopen_on_event: bool,
+    bob_opens_after_refusal: bool,
+) -> (SecondaryExchange, StatementExchange) {
     use crate::libp2p::collection;
     use alloc::collections::BTreeMap;
 
     let alice_key = NoiseKey::new(&[1; 32], &[2; 32]);
     let bob_key = NoiseKey::new(&[3; 32], &[4; 32]);
-    let mut alice = make_node(true, &alice_key, &bob_key, [7; 32], false, true);
+    let mut alice = make_node(
+        true,
+        &alice_key,
+        &bob_key,
+        [7; 32],
+        bob_statement.is_some(),
+        true,
+    );
     let bob_peer_id = alice.remote.clone();
 
     let mut bob_network = collection::Network::<(), Duration>::new(collection::Config {
@@ -1295,6 +1330,10 @@ fn secondary_substream_exchange(
         genesis_hash: [1; 32],
         fork_id: None,
     });
+    let statement_version = |protocol_name: &str| match codec::decode_protocol_name(protocol_name) {
+        Ok(codec::ProtocolName::Statement { version, .. }) => Some(version),
+        _ => None,
+    };
     let bob_handshake = codec::encode_block_announces_handshake(
         codec::BlockAnnouncesHandshakeRef {
             role: Role::Full,
@@ -1350,6 +1389,9 @@ fn secondary_substream_exchange(
     let mut grandpa_asked = 0usize;
     let mut bob_opened = false;
     let mut errors = Vec::new();
+    let mut statement_asked = Vec::new();
+    let mut statement_opens = 0usize;
+    let mut statement_connected = Vec::new();
 
     loop {
         let mut progress = false;
@@ -1425,6 +1467,9 @@ fn secondary_substream_exchange(
                             .unwrap();
                     }
                 }
+                Event::StatementProtocolConnected { version, .. } => {
+                    statement_connected.push(version)
+                }
                 _ => {}
             }
         }
@@ -1436,10 +1481,14 @@ fn secondary_substream_exchange(
                     protocol_name,
                     ..
                 } => {
+                    let statement_version = statement_version(&protocol_name);
+                    statement_asked.extend(statement_version);
                     if protocol_name == "/ipfs/ping/1.0.0" {
                         bob_network.accept_inbound(substream_id, collection::InboundTy::Ping);
                     } else if protocol_name == block_announces_name
                         || protocol_name == transactions_name
+                        || (statement_version.is_some()
+                            && statement_version == bob_statement.map(|(version, _)| version))
                     {
                         bob_protocols.insert(substream_id, protocol_name);
                         bob_network.accept_inbound(
@@ -1462,6 +1511,18 @@ fn secondary_substream_exchange(
                             bob_handshake.clone(),
                             1024 * 1024,
                         );
+                        continue;
+                    }
+                    if let Some((_, statement_replies)) = bob_statement
+                        && statement_version(&bob_protocols[&substream_id]).is_some()
+                    {
+                        statement_opens += 1;
+                        match statement_replies.get(statement_opens - 1) {
+                            Some(SecondaryReply::Accept) => {
+                                bob_network.accept_in_notifications(substream_id, Vec::new(), 1024)
+                            }
+                            _ => bob_network.reject_in_notifications(substream_id),
+                        }
                         continue;
                     }
                     opens += 1;
@@ -1519,7 +1580,13 @@ fn secondary_substream_exchange(
         }
     }
 
-    (opens, grandpa_asked, errors, alice)
+    (
+        (opens, grandpa_asked, errors, alice),
+        StatementExchange {
+            asked: statement_asked,
+            connected: statement_connected,
+        },
+    )
 }
 
 /// Issue #3412: a peer that refuses the transactions substream, as a full node without a slot
@@ -1606,4 +1673,38 @@ fn secondary_handshake_too_large_is_final() {
         &alice.remote,
         GossipKind::ConsensusTransactions
     ));
+}
+
+/// A peer that lacks `statement/3` and accepts `statement/2` gets the statement substream on
+/// `statement/2`, and the event reports that version.
+#[test]
+fn statement_substream_falls_back_to_the_version_of_the_peer() {
+    use codec::StatementProtocolVersion::{V2, V3};
+
+    let ((_, _, errors, _), statement) = secondary_substream_exchange_with_statement(
+        &[SecondaryReply::Accept],
+        Some((V2, &[SecondaryReply::Accept])),
+        false,
+        false,
+    );
+    assert!(errors.is_empty());
+    assert_eq!(statement.asked, [V3, V2]);
+    assert_eq!(statement.connected, [V2]);
+}
+
+/// A reopening steps over every statement version that the peer answered it doesn't have, here
+/// two of them, and asks for the one it refused.
+#[test]
+fn statement_reopening_skips_the_unavailable_versions() {
+    use codec::StatementProtocolVersion::{V1, V2, V3};
+
+    let ((_, _, errors, _), statement) = secondary_substream_exchange_with_statement(
+        &[SecondaryReply::Accept],
+        Some((V1, &[SecondaryReply::Refuse, SecondaryReply::Accept])),
+        true,
+        false,
+    );
+    assert_eq!(errors.len(), 1);
+    assert_eq!(statement.asked, [V3, V2, V1, V1]);
+    assert_eq!(statement.connected, [V1]);
 }
