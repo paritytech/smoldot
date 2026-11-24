@@ -188,7 +188,7 @@ fn execute_blocks() {
 }
 
 /// Calls `ext_storage_clear_prefix_version_2` on `prefix` in the main trie, without limit. The
-/// storage contains the root of the child trie `xyz` and the key `:child_storagXyz`.
+/// storage contains the root of the child trie `xyz` and the key `:child_storageXyz`.
 ///
 /// Returns the SCALE-encoded result of the clearing and the erased keys.
 fn clear_main_trie_prefix(prefix: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
@@ -234,7 +234,7 @@ fn clear_main_trie_prefix(prefix: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
     .unwrap();
 
     let root_key = trie::default_child_trie_root_key(b"xyz");
-    let keys = [&root_key[..], b":child_storagXyz"];
+    let keys = [&root_key[..], b":child_storageXyz"];
 
     let success = loop {
         match execution {
@@ -287,13 +287,13 @@ fn clear_prefix_ignored_on_beginning_of_child_storage() {
     assert!(erased.is_empty());
 }
 
-/// A main trie prefix that differs from `:child_storage:` is cleared.
+/// A main trie prefix that differs from `:child_storage:`, even only by its last byte, is cleared.
 #[test]
 fn clear_prefix_not_ignored_outside_child_storage() {
-    let (result, erased) = clear_main_trie_prefix(b":child_storagX");
+    let (result, erased) = clear_main_trie_prefix(b":child_storageX");
     // `AllRemoved(1)`
     assert_eq!(result, [0, 1, 0, 0, 0]);
-    assert_eq!(erased, [b":child_storagXyz"]);
+    assert_eq!(erased, [b":child_storageXyz"]);
 }
 
 // Serde structs used to decode the test fixtures.
