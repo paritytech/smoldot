@@ -1704,7 +1704,8 @@ impl Inner {
 
                 host::HostVm::ExternalStorageClearPrefix(req) => {
                     // Any attempt at clear a prefix that "intersects" (see code) with
-                    // `CHILD_STORAGE_SPECIAL_PREFIX` is silently ignored, as per spec.
+                    // `CHILD_STORAGE_SPECIAL_PREFIX` is silently ignored, as per spec. Same rule
+                    // as Substrate's `starts_with_child_storage_key`.
                     if req.child_trie().is_none()
                         && iter::zip(req.prefix().as_ref(), CHILD_STORAGE_SPECIAL_PREFIX)
                             .all(|(a, b)| a == b)
