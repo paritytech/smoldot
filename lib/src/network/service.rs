@@ -2352,11 +2352,14 @@ where
                             // has its own event. Only the fallback to an older version comes
                             // first, and not on a connection that is shutting down.
                             if let Err(error) = &result {
-                                let is_wanted_statement_link = matches!(
-                                    substream_protocol,
-                                    NotificationsProtocol::Statement { .. }
-                                ) && self
-                                    .statement_link_wanted(chain_index, peer_index);
+                                let wanted_statement_link_version = match substream_protocol {
+                                    NotificationsProtocol::Statement { version, .. }
+                                        if self.statement_link_wanted(chain_index, peer_index) =>
+                                    {
+                                        Some(version)
+                                    }
+                                    _ => None,
+                                };
 
                                 let fallback = match (error, substream_protocol) {
                                     (
@@ -2371,14 +2374,10 @@ where
                                 let shutting_down =
                                     self.inner.connection_state(connection_id).shutting_down;
 
-                                if is_wanted_statement_link && (shutting_down || fallback.is_none())
+                                if let Some(version) = wanted_statement_link_version
+                                    && (shutting_down || fallback.is_none())
                                 {
                                     let error = error.clone();
-                                    let NotificationsProtocol::Statement { version, .. } =
-                                        substream_protocol
-                                    else {
-                                        unreachable!()
-                                    };
                                     self.close_notification_substreams(
                                         peer_index,
                                         statement_protocols(chain_index),

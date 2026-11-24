@@ -269,10 +269,13 @@ where
     /// over `MAX_KNOWN_PEERS`, least recently seen first.
     /// Returns whether the candidates for a topic changed.
     pub fn evict(&mut self, now: &TNow) -> bool {
+        // The candidates change only when a candidate goes, and `dht_path_known` holds until
+        // the first of them does.
+        let dht_path_known = self.dht_path_known();
         let mut changed = false;
         self.discovered.retain(|_, info| {
             let keep = info.connected || info.last_seen.clone() + PEER_STALENESS_TTL > *now;
-            changed |= !keep && info.supports_protocol;
+            changed |= !keep && info.is_candidate(dht_path_known);
             keep
         });
 
@@ -293,7 +296,7 @@ where
         }
         for (_, peer) in victims.into_iter().take(excess) {
             if let Some(info) = self.discovered.remove(&peer) {
-                changed |= info.supports_protocol;
+                changed |= info.is_candidate(dht_path_known);
             }
         }
         changed
@@ -341,13 +344,24 @@ where
 
     /// Peers that may hold a topic. See the [module documentation](self).
     fn candidates(&self) -> impl Iterator<Item = (&PeerId, &PeerInfo<TNow>)> {
-        let dht_path_known = self
-            .discovered
+        let dht_path_known = self.dht_path_known();
+        self.discovered
+            .iter()
+            .filter(move |(_, info)| info.is_candidate(dht_path_known))
+    }
+
+    /// Whether a known statement peer speaks `statement/3`.
+    fn dht_path_known(&self) -> bool {
+        self.discovered
             .values()
-            .any(|info| info.supports_protocol && info.dht_path == Some(true));
-        self.discovered.iter().filter(move |(_, info)| {
-            info.supports_protocol && !(dht_path_known && info.dht_path == Some(false))
-        })
+            .any(|info| info.supports_protocol && info.dht_path == Some(true))
+    }
+}
+
+impl<TNow> PeerInfo<TNow> {
+    /// Whether the peer may hold a topic, given [`PeersTopology::dht_path_known`].
+    fn is_candidate(&self, dht_path_known: bool) -> bool {
+        self.supports_protocol && !(dht_path_known && self.dht_path == Some(false))
     }
 }
 
@@ -677,5 +691,29 @@ mod tests {
         assert_eq!(topology.closest_known(&topic(1), 2), [peer(15), peer(12)]);
         topology.on_substream_opened(peer(7), true, &now);
         assert_eq!(topology.closest_known(&topic(1), 2), [peer(15), peer(7)]);
+    }
+
+    #[test]
+    fn eviction_reports_only_a_change_of_the_candidates() {
+        let mut topology = topology(2);
+        let start = Duration::ZERO;
+        let stale = start + PEER_STALENESS_TTL;
+
+        // Peer 2 is on an older version and peer 3 runs the DHT path, so only peer 3 is a
+        // candidate and the eviction of peer 2 changes nothing.
+        topology.on_substream_opened(peer(2), false, &start);
+        topology.on_substream_closed(peer(2), &start);
+        topology.on_substream_opened(peer(3), true, &start);
+        assert!(!topology.evict(&stale));
+        assert_eq!(topology.known_peers_count(), 1);
+
+        // The eviction of the last peer on the DHT path makes peer 2 a candidate again.
+        topology.on_substream_opened(peer(2), false, &stale);
+        topology.on_substream_closed(peer(3), &start);
+        assert!(topology.evict(&stale));
+        assert_eq!(
+            topology.statement_peers().collect::<Vec<_>>(),
+            vec![&peer(2)]
+        );
     }
 }
