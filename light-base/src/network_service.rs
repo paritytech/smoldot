@@ -4046,6 +4046,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peering.steering.update_peers_needing_connections(
                         cover,
                         peering.topology.statement_peers(),
+                        !peering.topics.is_empty(),
                         &now,
                     );
                     let release = peering.steering.peers_to_release();
