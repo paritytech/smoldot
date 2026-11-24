@@ -214,20 +214,31 @@ where
     /// closest known peers.
     ///
     /// Only the locally learned topology is used, avoiding network lookups that would reveal
-    /// the topics. The result does not depend on which peers are connected.
-    pub fn peers_for_topics(&self, topics: &[Key]) -> Vec<PeerId> {
+    /// the topics.
+    ///
+    /// A peer that `is_unreachable` is passed over, so another replica of its topic takes its
+    /// place. A connected peer goes first, so the replacement keeps the topic when the
+    /// unreachable peer is tried again.
+    pub fn peers_for_topics(
+        &self,
+        topics: &[Key],
+        is_unreachable: impl Fn(&PeerId) -> bool,
+    ) -> Vec<PeerId> {
         let mut uncovered = topics
             .iter()
             .map(|topic| {
-                let pool = self.closest_known_keyed(topic, self.replication_factor.get());
+                let mut pool = self.closest_known_keyed(topic, self.replication_factor.get());
+                pool.retain(|(peer, _)| !is_unreachable(peer));
                 (topic, pool)
             })
             .collect::<Vec<_>>();
+        let is_connected =
+            |peer: &PeerId| self.discovered.get(peer).is_some_and(|info| info.connected);
 
         // A selected peer covers every topic whose pool holds it, so it never comes up again and
         // each round covers at least one more topic.
         let mut selected = Vec::new();
-        while let Some(best_peer) = best_candidate(&uncovered) {
+        while let Some(best_peer) = best_candidate(&uncovered, is_connected) {
             uncovered.retain(|(_, pool)| !pool_contains(pool, &best_peer));
             selected.push(best_peer);
         }
@@ -323,9 +334,12 @@ where
     }
 }
 
-/// The peer covering the most uncovered topics, breaking ties by the smallest distance to any
-/// topic it covers, then by the smallest peer id.
-fn best_candidate(uncovered: &[(&Key, Vec<(PeerId, Key)>)]) -> Option<PeerId> {
+/// A connected peer before any other, then the peer covering the most uncovered topics, breaking
+/// ties by the smallest distance to any topic it covers, then by the smallest peer id.
+fn best_candidate(
+    uncovered: &[(&Key, Vec<(PeerId, Key)>)],
+    is_connected: impl Fn(&PeerId) -> bool,
+) -> Option<PeerId> {
     // Per peer, the number of uncovered topics it covers and its distance to the closest one.
     let mut scores = BTreeMap::<&PeerId, (usize, Key)>::new();
     for (topic, pool) in uncovered {
@@ -337,7 +351,9 @@ fn best_candidate(uncovered: &[(&Key, Vec<(PeerId, Key)>)]) -> Option<PeerId> {
     }
     scores
         .into_iter()
-        .min_by_key(|(peer, (count, best))| (Reverse(*count), *best, *peer))
+        .min_by_key(|(peer, (count, best))| {
+            (Reverse(is_connected(peer)), Reverse(*count), *best, *peer)
+        })
         .map(|(peer, _)| peer.clone())
 }
 
@@ -405,7 +421,10 @@ mod tests {
 
         assert_eq!(topology.known_peers_count(), 2);
         assert_eq!(topology.closest_known(&topic(9), 10), vec![peer(2)]);
-        assert_eq!(topology.peers_for_topics(&[topic(9)]), vec![peer(2)]);
+        assert_eq!(
+            topology.peers_for_topics(&[topic(9)], |_| false),
+            vec![peer(2)]
+        );
         assert_eq!(
             topology.statement_peers().collect::<Vec<_>>(),
             vec![&peer(2)]
@@ -425,7 +444,7 @@ mod tests {
 
         topology.on_peer_identified(peer(2), false, &now);
         assert!(topology.closest_known(&topic(9), 10).is_empty());
-        assert!(topology.peers_for_topics(&[topic(9)]).is_empty());
+        assert!(topology.peers_for_topics(&[topic(9)], |_| false).is_empty());
         assert_eq!(topology.known_peers_count(), 2);
 
         // An open substream implies support, even against a later negative answer, and closing
@@ -571,9 +590,50 @@ mod tests {
             }
 
             let topics = topics.iter().map(|t| topic(*t)).collect::<Vec<_>>();
-            let actual = topology.peers_for_topics(&topics);
+            let actual = topology.peers_for_topics(&topics, |_| false);
             assert_eq!(actual.into_iter().map(seed_of).collect::<Vec<_>>(), cover);
         }
+    }
+
+    #[test]
+    fn peers_for_topics_replaces_an_unreachable_coverage_peer() {
+        let mut topology = topology(2);
+        let topic = topic(9);
+        for seed in 2..=10 {
+            dht_peer(&mut topology, peer(seed), Duration::ZERO);
+        }
+        let pool = topology.closest_known(&topic, 2);
+        let (unreachable, replacement) = (pool[0].clone(), pool[1].clone());
+        assert_eq!(
+            topology.peers_for_topics(&[topic], |_| false),
+            vec![unreachable.clone()]
+        );
+
+        let skipped = topology.peers_for_topics(&[topic], |peer| *peer == unreachable);
+        assert_eq!(skipped, vec![replacement.clone()]);
+
+        // The mark of the unreachable peer ends, and the connected replacement keeps the topic.
+        topology.on_substream_opened(replacement.clone(), &Duration::ZERO);
+        assert_eq!(
+            topology.peers_for_topics(&[topic], |_| false),
+            vec![replacement]
+        );
+    }
+
+    #[test]
+    fn peers_for_topics_leaves_a_topic_uncovered_when_every_replica_is_unreachable() {
+        let mut topology = topology(2);
+        let topic = topic(9);
+        for seed in 2..=10 {
+            dht_peer(&mut topology, peer(seed), Duration::ZERO);
+        }
+        let pool = topology.closest_known(&topic, 2);
+
+        assert!(
+            topology
+                .peers_for_topics(&[topic], |peer| pool.contains(peer))
+                .is_empty()
+        );
     }
 
     #[test]

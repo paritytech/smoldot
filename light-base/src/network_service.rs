@@ -4040,7 +4040,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                     peering.topology.evict(&now);
 
-                    let cover = peering.topology.peers_for_topics(&peering.topics);
+                    let cover = peering.topology.peers_for_topics(&peering.topics, |peer| {
+                        peering.steering.is_banned(peer, &now)
+                    });
                     peering.steering.update_peers_needing_connections(
                         cover,
                         peering.topology.statement_peers(),

@@ -151,6 +151,11 @@ where
         self.banned.insert(peer, until);
     }
 
+    /// Whether `peer` has a ban that lasts past `now`.
+    pub fn is_banned(&self, peer: &PeerId, now: &TNow) -> bool {
+        self.banned.get(peer).is_some_and(|until| *until > *now)
+    }
+
     // === Reserved set ===
 
     /// Replace the set of peers that the caller holds desired under the statement gossip kind.
@@ -372,6 +377,8 @@ mod tests {
         steering.on_substream_opened(peer(1));
         steering.ban(peer(1), until);
         assert!(steering.connected.is_empty());
+        assert!(steering.is_banned(&peer(1), &Duration::ZERO));
+        assert!(!steering.is_banned(&peer(1), &until));
 
         steering.update_peers_needing_connections([peer(1)], iter::empty(), &Duration::ZERO);
         assert!(steering.peers_to_reserve().is_empty());
