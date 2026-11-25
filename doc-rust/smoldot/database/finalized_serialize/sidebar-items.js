@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["decode_chain","encode_chain","encode_chain_storage"],"struct":["CorruptedError","Decoded"]};

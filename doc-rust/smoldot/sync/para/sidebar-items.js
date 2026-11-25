@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PERSISTED_VALIDATION_FUNCTION_NAME"],"enum":["OccupiedCoreAssumption"],"fn":["decode_persisted_validation_data_return_value","persisted_validation_data_parameters"],"struct":["Error","PersistedValidationDataRef"]};
