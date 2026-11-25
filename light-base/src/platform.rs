@@ -90,7 +90,7 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
     /// `Future` returned by [`PlatformRef::connect_stream`].
     type StreamConnectFuture: Future<Output = Self::Stream> + Send + 'static;
     /// `Future` returned by [`PlatformRef::connect_multistream`].
-    type MultiStreamConnectFuture: Future<Output = MultiStreamWebRtcConnection<Self::MultiStream>>
+    type MultiStreamConnectFuture: Future<Output = MultiStreamConnection<Self::MultiStream>>
         + Send
         + 'static;
     /// `Future` returned by [`PlatformRef::wait_read_write_again`].
@@ -205,16 +205,16 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
     /// [`PlatformRef::supports_connection_type`] returned `true` in the past.
     ///
     /// > **Note**: A so-called "multistream connection" is a connection made of multiple
-    /// >           substreams, and for which the opening and closing or substreams is handled by
+    /// >           substreams, and for which the opening and closing of substreams is handled by
     /// >           the environment rather than by smoldot itself. Most platforms do not need to
     /// >           support multistream connections. This function is in practice used in order
-    /// >           to support WebRTC connections when embedding smoldot-light within a web
-    /// >           browser.
+    /// >           to support WebRTC and WebTransport connections in a web browser.
     ///
     /// This function returns a `Future`. This `Future` **must** return as soon as possible, and
     /// must **not** wait for the connection to be established.
     /// In most scenarios, the `Future` returned by this function should immediately produce
     /// an output.
+    /// The returned [`MultiStreamConnection::handshake_info`] must match the requested transport.
     ///
     /// # Panic
     ///
@@ -265,6 +265,17 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
         stream: Pin<&'a mut Self::Stream>,
     ) -> Result<Self::ReadWriteAccess<'a>, Self::StreamErrorRef<'a>>;
 
+    /// Returns the application error code with which the remote reset the stream, given an
+    /// error returned by [`PlatformRef::read_write_access`].
+    ///
+    /// Returns `None` if the stream failed for another reason, if the transport has no such
+    /// codes, or if the platform doesn't know the code.
+    ///
+    /// The default implementation always returns `None`.
+    fn stream_reset_code(&self, _error: &Self::StreamErrorRef<'_>) -> Option<u32> {
+        None
+    }
+
     /// Returns a future that becomes ready when [`PlatformRef::read_write_access`] should be
     /// called again on this stream.
     ///
@@ -293,13 +304,26 @@ pub enum LogLevel {
     Trace = 5,
 }
 
-/// Established multistream connection information. See [`PlatformRef::connect_multistream`].
+/// Multistream connection and its handshake information. See [`PlatformRef::connect_multistream`].
 #[derive(Debug)]
-pub struct MultiStreamWebRtcConnection<TConnection> {
-    /// Object representing the WebRTC connection.
+pub struct MultiStreamConnection<TConnection> {
+    /// Object representing the connection.
     pub connection: TConnection,
-    /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
-    pub local_tls_certificate_sha256: [u8; 32],
+    /// Transport-specific information needed to use the connection.
+    pub handshake_info: MultiStreamHandshakeInfo,
+}
+
+/// Transport-specific handshake information for a multistream connection.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum MultiStreamHandshakeInfo {
+    /// Libp2p-specific WebRTC connection.
+    WebRtc {
+        /// SHA-256 hash of the local DTLS certificate, used in the Noise handshake.
+        /// May be zero if the connection was reset before the certificate was available.
+        local_tls_certificate_sha256: [u8; 32],
+    },
+    /// Raw WebTransport connection, with no additional handshake information.
+    WebTransport,
 }
 
 /// Direction in which a substream has been opened. See [`PlatformRef::next_substream`].
@@ -352,6 +376,10 @@ pub enum ConnectionType {
     WebRtcIpv6,
     /// Libp2p-specific WebRTC flavour, with a domain name.
     WebRtcDns,
+    /// Raw WebTransport over HTTP/3, without a libp2p handshake or framing.
+    WebTransportIpv4,
+    /// Raw WebTransport over HTTP/3, without a libp2p handshake or framing.
+    WebTransportIpv6,
 }
 
 impl<'a> From<&'a Address<'a>> for ConnectionType {
@@ -394,6 +422,12 @@ impl<'a> From<&'a MultiStreamAddress<'a>> for ConnectionType {
                 ip: IpAddr::V6(_), ..
             } => ConnectionType::WebRtcIpv6,
             MultiStreamAddress::WebRtcDns { .. } => ConnectionType::WebRtcDns,
+            MultiStreamAddress::WebTransport {
+                ip: IpAddr::V4(_), ..
+            } => ConnectionType::WebTransportIpv4,
+            MultiStreamAddress::WebTransport {
+                ip: IpAddr::V6(_), ..
+            } => ConnectionType::WebTransportIpv6,
         }
     }
 }
@@ -465,6 +499,15 @@ pub enum DnsFamily {
 /// Address passed to [`PlatformRef::connect_multistream`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MultiStreamAddress<'a> {
+    /// Raw bidirectional WebTransport streams, without a libp2p handshake or framing.
+    WebTransport {
+        /// IP address to connect to.
+        ip: IpAddr,
+        /// UDP port to connect to.
+        port: u16,
+        /// Non-empty list of SHA-256 hashes of acceptable DER server certificates.
+        cert_hashes: &'a [[u8; 32]],
+    },
     /// Libp2p-specific WebRTC flavour.
     ///
     /// The implementation the [`PlatformRef`] trait is responsible for opening the SCTP

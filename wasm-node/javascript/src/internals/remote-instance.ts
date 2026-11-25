@@ -35,6 +35,7 @@ export interface ConnectConfig {
     forbidNonLocalWs: boolean,
     forbidWss: boolean,
     forbidWebRtc: boolean,
+    forbidWebTransport: boolean,
     maxLogLevel: number,
     cpuRateLimit: number,
     portToServer: MessagePort,
@@ -69,7 +70,8 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
         forbidWss: config.forbidWss,
         forbidNonLocalWs: config.forbidNonLocalWs,
         forbidTcp: config.forbidTcp,
-        forbidWebRtc: config.forbidWebRtc
+        forbidWebRtc: config.forbidWebRtc,
+        forbidWebTransport: config.forbidWebTransport
     };
     initialPort.postMessage(initialMessage, [serverToClient]);
     // Note that closing `initialPort` here will lead to the message not being delivered on Firefox
@@ -79,14 +81,53 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
         jsonRpcResponses: new Map<number, string[]>(),
         connections: new Map<number, { ty: "single-stream" } | { ty: "multi-stream", liveStreams: Set<number> }>(),
     };
+    const webTransportConnections = new Set<number>();
+    let nextDeliveryId = 0;
+    let pendingDeliveryBytes = 0;
+    const pendingDeliveries = new Map<number, { bytes: number, resolve: () => void }>();
+    const capacityWaiters = new Set<() => void>();
+    const wakeCapacityWaiters = () => {
+        for (const wake of capacityWaiters) wake();
+        capacityWaiters.clear();
+    };
+    const deliver = async (message: ClientToServer & { connectionId: number }, bytes = 0) => {
+        if (bytes > 65536) throw new Error('WebTransport delivery chunk exceeds limit');
+        // Acknowledgement means delivered (or discarded) by the worker, not consumed
+        // by the Rust protocol. Rust independently bounds retained receive data.
+        while (webTransportConnections.has(message.connectionId) &&
+            (pendingDeliveries.size >= 256 || pendingDeliveryBytes + bytes > 4 * 1024 * 1024))
+            await new Promise<void>(resolve => capacityWaiters.add(resolve));
+        if (!webTransportConnections.has(message.connectionId)) return;
+        const deliveryId = nextDeliveryId++;
+        await new Promise<void>(resolve => {
+            pendingDeliveries.set(deliveryId, { bytes, resolve });
+            pendingDeliveryBytes += bytes;
+            portToServer.postMessage({ ...message, deliveryId });
+        });
+    };
 
     portToServer.onmessage = (messageEvent) => {
         const message = messageEvent.data as ServerToClient;
 
         // Update some local state.
         switch (message.ty) {
+            case 'transport-delivered': {
+                const delivery = pendingDeliveries.get(message.deliveryId);
+                if (delivery) {
+                    pendingDeliveries.delete(message.deliveryId);
+                    pendingDeliveryBytes -= delivery.bytes;
+                    delivery.resolve();
+                    wakeCapacityWaiters();
+                }
+                return;
+            }
             case "wasm-panic":
             case "executor-shutdown": {
+                webTransportConnections.clear();
+                for (const delivery of pendingDeliveries.values()) delivery.resolve();
+                pendingDeliveries.clear();
+                pendingDeliveryBytes = 0;
+                wakeCapacityWaiters();
                 portToServer.close();
                 initialPort.close();
                 break;
@@ -101,12 +142,15 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
                 break;
             }
             case "new-connection": {
-                state.connections.set(message.connectionId, message.address.ty === "webrtc"
+                if (message.address.ty === 'webtransport') webTransportConnections.add(message.connectionId);
+                state.connections.set(message.connectionId, message.address.ty === "webrtc" || message.address.ty === "webtransport"
                     ? { ty: "multi-stream", liveStreams: new Set() }
                     : { ty: "single-stream" });
                 break;
             }
             case "connection-reset": {
+                webTransportConnections.delete(message.connectionId);
+                wakeCapacityWaiters();
                 // The connection might have been reset locally in the past.
                 if (!state.connections.has(message.connectionId))
                     return;
@@ -128,6 +172,7 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
                 // ever sent for multi-stream connections.
                 if (connection.ty !== "multi-stream" || !connection.liveStreams.has(message.streamId))
                     return;
+                connection.liveStreams.delete(message.streamId);
                 break;
             }
             case "stream-send": {
@@ -199,6 +244,8 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
         },
 
         connectionReset(connectionId, message) {
+            webTransportConnections.delete(connectionId);
+            wakeCapacityWaiters();
             state.connections.delete(connectionId);
             const msg: ClientToServer = { ty: "connection-reset", connectionId, message };
             portToServer.postMessage(msg);
@@ -211,7 +258,8 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
 
         streamMessage(connectionId, message, streamId) {
             const msg: ClientToServer = { ty: "stream-message", connectionId, message, streamId };
-            portToServer.postMessage(msg);
+            if (webTransportConnections.has(connectionId)) return deliver(msg, message.length);
+            return portToServer.postMessage(msg);
         },
 
         streamOpened(connectionId, streamId, direction) {
@@ -220,7 +268,8 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
             if (connection.ty === "multi-stream")
                 connection.liveStreams.add(streamId);
             const msg: ClientToServer = { ty: "stream-opened", connectionId, streamId, direction };
-            portToServer.postMessage(msg);
+            if (webTransportConnections.has(connectionId)) return deliver(msg);
+            return portToServer.postMessage(msg);
         },
 
         streamWritableBytes(connectionId, numExtra, streamId) {
@@ -228,12 +277,13 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
             portToServer.postMessage(msg);
         },
 
-        streamReset(connectionId, streamId, message) {
+        streamReset(connectionId, streamId, message, code) {
             const connection = state.connections.get(connectionId)!;
             if (connection.ty === "multi-stream")
                 connection.liveStreams.delete(streamId);
-            const msg: ClientToServer = { ty: "stream-reset", connectionId, streamId, message };
-            portToServer.postMessage(msg);
+            const msg: ClientToServer = { ty: "stream-reset", connectionId, streamId, message, code };
+            if (webTransportConnections.has(connectionId)) return deliver(msg);
+            return portToServer.postMessage(msg);
         },
     };
 }
@@ -265,7 +315,7 @@ export interface ServerConfig {
  * instance shuts down.
  */
 export async function startInstanceServer(config: ServerConfig, initPortToClient: MessagePort): Promise<Promise<void>> {
-    const { serverToClient: portToClient, wasmModule, maxLogLevel, cpuRateLimit, forbidTcp, forbidWs, forbidWss, forbidNonLocalWs, forbidWebRtc } =
+    const { serverToClient: portToClient, wasmModule, maxLogLevel, cpuRateLimit, forbidTcp, forbidWs, forbidWss, forbidNonLocalWs, forbidWebRtc, forbidWebTransport } =
         await new Promise<InitialMessage>((resolve) => {
             initPortToClient.onmessage = (event) => resolve(event.data);
         });
@@ -318,7 +368,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 return;
             }
             case "new-connection": {
-                state.connections.set(event.connectionId, event.address.ty === "webrtc"
+                state.connections.set(event.connectionId, event.address.ty === "webrtc" || event.address.ty === "webtransport"
                     ? { ty: "multi-stream", liveStreams: new Set() }
                     : { ty: "single-stream" });
                 break;
@@ -349,14 +399,13 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
         forbidNonLocalWs,
         forbidWss,
         forbidWebRtc,
+        forbidWebTransport,
         cpuRateLimit,
         maxLogLevel,
         ...config
     }, wasmModule, eventsCallback);
 
-    portToClient.onmessage = (messageEvent) => {
-        const message = messageEvent.data as ClientToServer;
-
+    const handleMessage = (message: ClientToServer) => {
         switch (message.ty) {
             case "add-chain": {
                 state.instance!.addChain(message.chainSpec, message.databaseContent, message.potentialRelayChains, message.disableJsonRpc, message.jsonRpcMaxPendingRequests, message.jsonRpcMaxSubscriptions, message.statementStoreMaxSeenStatements, message.statementStoreFalsePositiveRate, message.statementStoreAffinityUpdateIntervalMs, message.maxPendingTransactions);
@@ -390,6 +439,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 // The connection might have been reset locally in the past.
                 if (!state.connections.has(message.connectionId))
                     return;
+                state.connections.delete(message.connectionId);
                 state.instance!.connectionReset(message.connectionId, message.message);
                 break;
             }
@@ -445,8 +495,20 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 if (connection.ty !== "multi-stream" || !connection.liveStreams.has(message.streamId))
                     return;
                 connection.liveStreams.delete(message.streamId);
-                state.instance!.streamReset(message.connectionId, message.streamId, message.message);
+                state.instance!.streamReset(message.connectionId, message.streamId, message.message, message.code);
                 break;
+            }
+        }
+    };
+
+    portToClient.onmessage = (messageEvent) => {
+        const message = messageEvent.data as ClientToServer;
+        try {
+            handleMessage(message);
+        } finally {
+            if (message.deliveryId !== undefined) {
+                const ack: ServerToClient = { ty: 'transport-delivered', deliveryId: message.deliveryId };
+                portToClient.postMessage(ack);
             }
         }
     };
@@ -462,22 +524,24 @@ type InitialMessage = {
     forbidNonLocalWs: boolean,
     forbidWss: boolean,
     forbidWebRtc: boolean,
+    forbidWebTransport: boolean,
     maxLogLevel: number,
     cpuRateLimit: number,
 };
 
 type ServerToClient = Exclude<instance.Event, { ty: "json-rpc-responses-non-empty", chainId: number }> |
+{ ty: 'transport-delivered', deliveryId: number } |
 { ty: "json-rpc-response", chainId: number, response: string };
 
-type ClientToServer =
+type ClientToServer = { deliveryId?: number } & (
     { ty: "add-chain", chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number, statementStoreMaxSeenStatements: number, statementStoreFalsePositiveRate: number, statementStoreAffinityUpdateIntervalMs: number, maxPendingTransactions: number } |
     { ty: "remove-chain", chainId: number } |
     { ty: "request", chainId: number, request: string } |
     { ty: "accept-more-json-rpc-answers", chainId: number } |
     { ty: "shutdown" } |
     { ty: "connection-reset", connectionId: number, message: string } |
-    { ty: "connection-multistream-set-info", connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array } } |
+    { ty: "connection-multistream-set-info", connectionId: number, info: instance.MultistreamHandshakeInfo } |
     { ty: "stream-message", connectionId: number, streamId?: number, message: Uint8Array } |
     { ty: "stream-opened", connectionId: number, streamId: number, direction: "inbound" | "outbound" } |
     { ty: "stream-writable-bytes", connectionId: number, streamId?: number, numExtra: number } |
-    { ty: "stream-reset", connectionId: number, streamId: number, message: string };
+    { ty: "stream-reset", connectionId: number, streamId: number, message: string, code?: number });

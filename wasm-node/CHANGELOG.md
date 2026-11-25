@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- Add raw WebTransport connections to the browser platform, with pinned server certificates and independently closable stream directions. These connections have no libp2p handshake or framing. The light client does not dial them automatically, and Node.js and Deno do not support them.
+- Add `PlatformRef::stream_reset_code` to expose remote application error codes when the platform reports them. The default implementation returns `None`.
+
+### Changed
+
+- `PlatformRef::connect_multistream` returns `MultiStreamConnection` with `MultiStreamHandshakeInfo`, replacing `MultiStreamWebRtcConnection`. Only the WebRTC variant carries a local certificate hash. Platform implementations must also handle the new WebTransport variants of `MultiStreamAddress` and `ConnectionType`.
+- `address_parse::multiaddr_to_address` returns multistream addresses as `address_parse::WebRtcAddress`, which converts into `MultiStreamAddress` and exposes the remote certificate hash, because a multiaddress never describes a WebTransport address.
+
 ### Fixed
 
 - When a chain is added several times, the statement topic filter covers the subscriptions of all its handles. ([#3462](https://github.com/paritytech/smoldot/pull/3462); fixes [#3447](https://github.com/paritytech/smoldot/issues/3447))

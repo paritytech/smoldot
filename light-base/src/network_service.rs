@@ -4357,27 +4357,24 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         );
                     }
                     address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(address) => {
-                        let remote_certificate_sha256 = match &address {
-                            platform::MultiStreamAddress::WebRtc {
-                                remote_certificate_sha256,
-                                ..
-                            }
-                            | platform::MultiStreamAddress::WebRtcDns {
-                                remote_certificate_sha256,
-                                ..
-                            } => *remote_certificate_sha256,
-                        };
+                        let remote_certificate_sha256 = address.remote_certificate_sha256();
 
                         // We need to know the local TLS certificate in order to insert the
                         // connection, and as such we need to call `connect_multistream` here.
                         // As documented in the `PlatformRef` trait, `connect_multistream` must
                         // return as soon as possible.
-                        let connection = task.platform.connect_multistream(address).await;
+                        let connection = task.platform.connect_multistream(address.into()).await;
+                        let platform::MultiStreamHandshakeInfo::WebRtc {
+                            local_tls_certificate_sha256,
+                        } = connection.handshake_info
+                        else {
+                            unreachable!("expected WebRTC handshake information");
+                        };
 
                         // Convert the SHA256 hashes into multihashes.
                         let local_tls_certificate_multihash = [18u8, 32]
                             .into_iter()
-                            .chain(connection.local_tls_certificate_sha256.into_iter())
+                            .chain(local_tls_certificate_sha256.into_iter())
                             .collect();
                         let remote_tls_certificate_multihash = [18u8, 32]
                             .into_iter()

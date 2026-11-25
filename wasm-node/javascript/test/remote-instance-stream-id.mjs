@@ -48,6 +48,39 @@ const WEBRTC_DNS_ADDRESS = {
 };
 const PAYLOAD = [new Uint8Array([1, 2, 3])];
 
+test("WebTransport worker bridge preserves half-close and filters reset stream zero", async (t) => {
+  const ctx = await setup();
+  t.teardown(ctx.close);
+  await withConnection(ctx, { ty: 'webtransport', ip: '127.0.0.1', port: 40000, certHashes: [new Uint8Array(32)] }, [0]);
+  ctx.instance.connectionMultiStreamSetHandshakeInfo(1, { handshake: 'webtransport' });
+  await ctx.instance.streamMessage(1, new Uint8Array(0), 0);
+  ctx.serverPort.postMessage({ ty: 'stream-send', connectionId: 1, streamId: 0, data: PAYLOAD });
+  ctx.serverPort.postMessage({ ty: 'stream-send-close', connectionId: 1, streamId: 0 });
+  await ctx.flush();
+  t.true(reached(ctx, 'stream-send', 0));
+  t.true(reached(ctx, 'stream-send-close', 0));
+  ctx.events.length = 0;
+  await ctx.instance.streamReset(1, 0, 'reset');
+  ctx.serverPort.postMessage({ ty: 'stream-send', connectionId: 1, streamId: 0, data: PAYLOAD });
+  ctx.serverPort.postMessage({ ty: 'stream-send-close', connectionId: 1, streamId: 0 });
+  await ctx.flush();
+  t.false(reached(ctx, 'stream-send', 0));
+  t.false(reached(ctx, 'stream-send-close', 0));
+});
+
+test("WebTransport worker bridge forwards optional reset codes", async (t) => {
+  const ctx = await setup();
+  t.teardown(ctx.close);
+  await withConnection(ctx, { ty: 'webtransport', ip: '127.0.0.1', port: 40000, certHashes: [new Uint8Array(32)] }, [0, 1]);
+  await ctx.instance.streamReset(1, 0, 'Received RESET_STREAM.', 6);
+  await ctx.instance.streamReset(1, 1, 'Error in input stream');
+  const resets = ctx.received.filter((message) => message.ty === 'stream-reset');
+  t.deepEqual(resets.map(({ streamId, message, code }) => ({ streamId, message, code })), [
+    { streamId: 0, message: 'Received RESET_STREAM.', code: 6 },
+    { streamId: 1, message: 'Error in input stream', code: undefined },
+  ]);
+});
+
 /**
  * Connects a client to a hand-driven fake server.
  *
@@ -66,6 +99,7 @@ async function setup() {
     forbidNonLocalWs: false,
     forbidWss: false,
     forbidWebRtc: false,
+    forbidWebTransport: false,
     maxLogLevel: 3,
     cpuRateLimit: 1,
     portToServer: port1,
@@ -76,6 +110,12 @@ async function setup() {
     port2.onmessage = (msg) => resolve(msg.data.serverToClient);
   });
   const instance = await instancePromise;
+  const received = [];
+  serverPort.onmessage = ({ data }) => {
+    received.push(data);
+    if (data.deliveryId !== undefined)
+      serverPort.postMessage({ ty: 'transport-delivered', deliveryId: data.deliveryId });
+  };
 
   // Unknown message types fall through the switch and reach `eventCallback`
   // untouched, which makes a posted sentinel a reliable "all previous messages
@@ -96,7 +136,7 @@ async function setup() {
     serverPort.close();
   };
 
-  return { events, instance, serverPort, flush, close };
+  return { events, received, instance, serverPort, flush, close };
 }
 
 /**
@@ -107,8 +147,8 @@ async function setup() {
 async function withConnection({ instance, serverPort, flush }, address, openIds = [], resetIds = []) {
   serverPort.postMessage({ ty: "new-connection", connectionId: 1, address });
   await flush();
-  for (const id of openIds) instance.streamOpened(1, id, "outbound");
-  for (const id of resetIds) instance.streamReset(1, id, "test reset");
+  for (const id of openIds) await instance.streamOpened(1, id, "outbound");
+  for (const id of resetIds) await instance.streamReset(1, id, "test reset");
 }
 
 const reached = (ctx, ty, streamId) =>

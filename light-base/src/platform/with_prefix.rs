@@ -127,6 +127,10 @@ impl<T: PlatformRef> PlatformRef for WithPrefix<T> {
         self.inner.read_write_access(stream)
     }
 
+    fn stream_reset_code(&self, error: &Self::StreamErrorRef<'_>) -> Option<u32> {
+        self.inner.stream_reset_code(error)
+    }
+
     fn wait_read_write_again<'a>(
         &self,
         stream: Pin<&'a mut Self::Stream>,
