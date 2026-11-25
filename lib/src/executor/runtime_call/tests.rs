@@ -29,7 +29,10 @@
 use core::{iter, ops};
 
 use super::{Config, RuntimeCall, StorageProofSizeBehavior, run};
-use crate::{executor::host, trie};
+use crate::{
+    executor::{host, storage_diff},
+    trie,
+};
 use alloc::collections::BTreeMap;
 
 mod clear_prefix;
@@ -409,7 +412,8 @@ fn with_runtime_version_custom_section(mut wasm: Vec<u8>) -> Vec<u8> {
 }
 
 /// Calls `ext_storage_clear_prefix_version_2` on `prefix` in the main trie, without limit. The
-/// storage contains the root of the child trie `xyz` and the key `:child_storageXyz`.
+/// storage contains the root of the child trie `xyz` and the key `:child_storageXyz`. The
+/// pending changes contain the root of the child trie `new`.
 ///
 /// Returns the SCALE-encoded result of the clearing and the erased keys.
 fn clear_main_trie_prefix(prefix: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
@@ -443,12 +447,19 @@ fn clear_main_trie_prefix(prefix: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
     })
     .unwrap();
 
+    let mut storage_main_trie_changes = storage_diff::TrieDiff::empty();
+    storage_main_trie_changes.diff_insert(
+        trie::default_child_trie_root_key(b"new"),
+        vec![0; 32],
+        (),
+    );
+
     let mut execution = run(Config {
         virtual_machine,
         function_to_call: "clear_prefix",
         max_log_level: 0,
         storage_proof_size_behavior: StorageProofSizeBehavior::Unimplemented,
-        storage_main_trie_changes: Default::default(),
+        storage_main_trie_changes,
         calculate_trie_changes: false,
         calculate_child_tries_roots_on_finish: true,
         parameter: iter::once(prefix),
@@ -486,6 +497,7 @@ fn clear_main_trie_prefix(prefix: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
     let erased = success
         .storage_changes
         .main_trie_storage_changes_iter_unordered()
+        .filter(|(_, value)| value.is_none())
         .map(|(key, _)| key.to_vec())
         .collect();
     (success.virtual_machine.value().as_ref().to_vec(), erased)
@@ -504,6 +516,15 @@ fn clear_prefix_ignored_under_child_storage() {
 #[test]
 fn clear_prefix_ignored_on_beginning_of_child_storage() {
     let (result, erased) = clear_main_trie_prefix(b":child_st");
+    // `AllRemoved(0)`
+    assert_eq!(result, [0, 0, 0, 0, 0]);
+    assert!(erased.is_empty());
+}
+
+/// As in Substrate, a child trie root in the pending changes survives the clearing of its prefix.
+#[test]
+fn clear_prefix_keeps_pending_child_trie_root() {
+    let (result, erased) = clear_main_trie_prefix(b":child_storage:default:new");
     // `AllRemoved(0)`
     assert_eq!(result, [0, 0, 0, 0, 0]);
     assert!(erased.is_empty());
