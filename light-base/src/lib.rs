@@ -86,7 +86,7 @@
 extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
-use core::{num::NonZero, ops, time::Duration};
+use core::{future::Future, num::NonZero, ops, time::Duration};
 use hashbrown::{HashMap, hash_map::Entry};
 use itertools::Itertools as _;
 use platform::PlatformRef;
@@ -314,6 +314,7 @@ struct ChainServices<TPlat: platform::PlatformRef> {
     chain_metrics: Arc<metrics::ChainMetrics>,
     network_metrics: Arc<metrics::NetworkMetrics>,
     lifecycle_service: Arc<lifecycle_service::LifecycleService>,
+    has_grandpa_finality: bool,
 }
 
 impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
@@ -327,6 +328,7 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
             chain_metrics: self.chain_metrics.clone(),
             network_metrics: self.network_metrics.clone(),
             lifecycle_service: self.lifecycle_service.clone(),
+            has_grandpa_finality: self.has_grandpa_finality,
         }
     }
 }
@@ -1113,6 +1115,84 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         let running = self.chains_by_key.as_ref().unwrap().get(key).unwrap();
         running.services.lifecycle_service.subscribe()
     }
+
+    /// Sends a GrandPa warp sync request to the peers of the given chain, starting at
+    /// `begin_hash`, and returns the first response obtained.
+    ///
+    /// The response contains a list of fragments, each made of the SCALE-encoded header of a
+    /// block that changes the GrandPa authorities set and of the GrandPa justification that
+    /// finalizes it, possibly followed by a justification of a more recent block. If the
+    /// response is marked as not finished, call this function again starting at the last
+    /// fragment.
+    ///
+    /// `begin_hash` must be the hash of a block finalized by the peers.
+    ///
+    /// The response is **not verified**. It is the responsibility of the caller to check the
+    /// justifications against a trusted authorities set.
+    ///
+    /// Up to `total_attempts` peers are queried one after the other, each with a timeout of
+    /// `timeout_per_request`. Peers that fail to answer are banned for a short time.
+    ///
+    /// The returned future doesn't borrow the [`Client`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    pub fn grandpa_warp_sync_proof(
+        &self,
+        chain_id: ChainId,
+        begin_hash: [u8; 32],
+        total_attempts: u32,
+        timeout_per_request: Duration,
+    ) -> impl Future<
+        Output = Result<network_service::EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncProofError>,
+    > + Send
+    + 'static {
+        let key = &self.public_api_chains.get(chain_id.0).unwrap().key;
+        let services = &self
+            .chains_by_key
+            .as_ref()
+            .unwrap()
+            .get(key)
+            .unwrap()
+            .services;
+        let network_service = services
+            .has_grandpa_finality
+            .then(|| services.network_service.clone());
+
+        async move {
+            let Some(network_service) = network_service else {
+                return Err(GrandpaWarpSyncProofError::NotGrandpaChain);
+            };
+
+            for target in network_service
+                .peers_list()
+                .await
+                .take(usize::try_from(total_attempts).unwrap_or(usize::MAX))
+            {
+                match network_service
+                    .clone()
+                    .grandpa_warp_sync_request(target.clone(), begin_hash, timeout_per_request)
+                    .await
+                {
+                    Ok(response) => return Ok(response),
+                    Err(_) => {
+                        network_service
+                            .ban_and_disconnect(
+                                target,
+                                network_service::BanSeverity::Low,
+                                network_service::BanReason::WarpSyncRequestFailed,
+                            )
+                            .await;
+                    }
+                }
+            }
+
+            Err(GrandpaWarpSyncProofError::NoResponse {
+                attempts: total_attempts,
+            })
+        }
+    }
 }
 
 impl<TPlat: platform::PlatformRef, TChain> ops::Index<ChainId> for Client<TPlat, TChain> {
@@ -1127,6 +1207,20 @@ impl<TPlat: platform::PlatformRef, TChain> ops::IndexMut<ChainId> for Client<TPl
     fn index_mut(&mut self, index: ChainId) -> &mut Self::Output {
         &mut self.public_api_chains.get_mut(index.0).unwrap().user_data
     }
+}
+
+/// Error returned by [`Client::grandpa_warp_sync_proof`].
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+pub enum GrandpaWarpSyncProofError {
+    /// The chain doesn't use GrandPa finality (for example, it is a parachain).
+    #[display("The chain doesn't use GrandPa finality")]
+    NotGrandpaChain,
+    /// None of the peers queried returned a response.
+    #[display("No peer returned a warp sync response after {attempts} attempt(s)")]
+    NoResponse {
+        /// Number of peers that were queried.
+        attempts: u32,
+    },
 }
 
 /// Error potentially returned by [`Client::add_chain`].
@@ -1197,20 +1291,23 @@ fn start_services<TPlat: platform::PlatformRef>(
 
     let network_metrics = network_service.metrics();
 
+    let grandpa_protocol_finalized_block_height = match &config {
+        StartServicesChainTy::SubstrateCompatible { chain_information }
+            if matches!(
+                chain_information.as_ref().finality,
+                chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
+            ) =>
+        {
+            Some(chain_information.as_ref().finalized_block_header.number)
+        }
+        _ => None,
+    };
+    let has_grandpa_finality = grandpa_protocol_finalized_block_height.is_some();
+
     let network_service_chain = network_service.add_chain(network_service::ConfigChain {
         log_name: log_name.clone(),
         num_out_slots: 4,
-        grandpa_protocol_finalized_block_height: match &config {
-            StartServicesChainTy::SubstrateCompatible { chain_information }
-                if matches!(
-                    chain_information.as_ref().finality,
-                    chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-                ) =>
-            {
-                Some(chain_information.as_ref().finalized_block_header.number)
-            }
-            _ => None,
-        },
+        grandpa_protocol_finalized_block_height,
         genesis_block_hash: header::hash_from_scale_encoded_header(
             &genesis_block_scale_encoded_header,
         ),
@@ -1366,5 +1463,84 @@ fn start_services<TPlat: platform::PlatformRef>(
         chain_metrics,
         network_metrics,
         lifecycle_service,
+        has_grandpa_finality,
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+
+    fn add_chain(
+        client: &mut Client<Arc<platform::default::DefaultPlatform>>,
+        specification: &str,
+        potential_relay_chains: Vec<ChainId>,
+    ) -> ChainId {
+        client
+            .add_chain(AddChainConfig {
+                specification,
+                json_rpc: AddChainConfigJsonRpc::Disabled,
+                max_pending_transactions: NonZero::<u32>::new(64).unwrap(),
+                potential_relay_chains: potential_relay_chains.into_iter(),
+                database_content: "",
+                user_data: (),
+                statement_protocol_config: None,
+            })
+            .unwrap()
+            .chain_id
+    }
+
+    fn new_client() -> Client<Arc<platform::default::DefaultPlatform>> {
+        Client::new(platform::default::DefaultPlatform::new(
+            env!("CARGO_PKG_NAME").into(),
+            env!("CARGO_PKG_VERSION").into(),
+        ))
+    }
+
+    #[test]
+    fn grandpa_warp_sync_proof_rejects_parachain() {
+        let mut client = new_client();
+        let relay = add_chain(
+            &mut client,
+            include_str!("../../demo-chain-specs/polkadot.json"),
+            Vec::new(),
+        );
+        let para = add_chain(
+            &mut client,
+            include_str!("../../demo-chain-specs/polkadot_asset_hub.json"),
+            vec![relay],
+        );
+
+        let result = smol::block_on(client.grandpa_warp_sync_proof(
+            para,
+            [0; 32],
+            3,
+            Duration::from_secs(1),
+        ));
+        assert!(matches!(
+            result,
+            Err(GrandpaWarpSyncProofError::NotGrandpaChain)
+        ));
+    }
+
+    #[test]
+    fn grandpa_warp_sync_proof_zero_attempts() {
+        let mut client = new_client();
+        let relay = add_chain(
+            &mut client,
+            include_str!("../../demo-chain-specs/polkadot.json"),
+            Vec::new(),
+        );
+
+        let result = smol::block_on(client.grandpa_warp_sync_proof(
+            relay,
+            [0; 32],
+            0,
+            Duration::from_secs(1),
+        ));
+        assert!(matches!(
+            result,
+            Err(GrandpaWarpSyncProofError::NoResponse { attempts: 0 })
+        ));
     }
 }
