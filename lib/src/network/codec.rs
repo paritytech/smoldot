@@ -26,6 +26,7 @@ use core::{fmt, iter};
 pub enum StatementProtocolVersion {
     V1,
     V2,
+    V3,
 }
 
 // Implementation note: each protocol goes into a different sub-module whose content is
@@ -166,6 +167,11 @@ pub fn encode_protocol_name(protocol: ProtocolName) -> impl Iterator<Item = impl
             fork_id,
             version: StatementProtocolVersion::V2,
         } => (genesis_hash, fork_id, "statement/2"),
+        ProtocolName::Statement {
+            genesis_hash,
+            fork_id,
+            version: StatementProtocolVersion::V3,
+        } => (genesis_hash, fork_id, "statement/3"),
     };
 
     let genesis_hash = hex::encode(genesis_hash);
@@ -271,6 +277,7 @@ enum ProtocolTy {
     State,
     StatementV1,
     StatementV2,
+    StatementV3,
 }
 
 fn protocol_ty(name: &str) -> nom::IResult<&str, ProtocolTy> {
@@ -292,6 +299,9 @@ fn protocol_ty(name: &str) -> nom::IResult<&str, ProtocolTy> {
                 ProtocolTy::SyncWarp
             }),
             nom::combinator::map(nom::bytes::complete::tag("state/2"), |_| ProtocolTy::State),
+            nom::combinator::map(nom::bytes::complete::tag("statement/3"), |_| {
+                ProtocolTy::StatementV3
+            }),
             nom::combinator::map(nom::bytes::complete::tag("statement/2"), |_| {
                 ProtocolTy::StatementV2
             }),
@@ -351,6 +361,11 @@ fn protocol_ty_to_real_protocol(
             fork_id,
             version: StatementProtocolVersion::V2,
         },
+        ProtocolTy::StatementV3 => ProtocolName::Statement {
+            genesis_hash,
+            fork_id,
+            version: StatementProtocolVersion::V3,
+        },
     }
 }
 
@@ -386,6 +401,7 @@ mod tests {
         for (version, suffix) in [
             (StatementProtocolVersion::V1, "/statement/1"),
             (StatementProtocolVersion::V2, "/statement/2"),
+            (StatementProtocolVersion::V3, "/statement/3"),
         ] {
             let protocol = ProtocolName::Statement {
                 genesis_hash,
