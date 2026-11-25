@@ -4543,9 +4543,6 @@ mod tests {
         // Empty subscription set: no topics are ever in the filter.
         assert!(!filter.contains(&[1u8; 32]));
         assert!(topics.is_empty());
-        // A statement with no topics (broadcast) still matches.
-        let broadcast: &[&[u8; 32]] = &[];
-        assert!(filter.matches_statement(broadcast));
     }
 
     #[test]

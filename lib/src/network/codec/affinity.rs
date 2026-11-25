@@ -200,11 +200,7 @@ impl AffinityFilter {
     /// Check if topics match this affinity filter.
     ///
     /// Topics match if any of them is present in the bloom filter.
-    /// No topics always match (from broadcast statements).
     pub fn matches_statement(&self, topics: &[&Topic]) -> bool {
-        if topics.is_empty() {
-            return true;
-        }
         topics.iter().any(|t| self.bloom.contains(t))
     }
 
@@ -389,12 +385,6 @@ mod tests {
     }
 
     #[test]
-    fn matches_empty_topics_is_broadcast() {
-        let filter = AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, 1);
-        assert!(filter.matches_statement(&[]));
-    }
-
-    #[test]
     fn matches_inserted_topic() {
         let topic: Topic = [0xAA; 32];
         let mut filter = AffinityFilter::new(TEST_SEED, BLOOM_FALSE_POS_RATE, 1);
@@ -479,6 +469,5 @@ mod tests {
             BLOOM_FALSE_POS_RATE,
         );
         assert!(!filter.matches_statement(&[&[0x01; 32]]));
-        assert!(filter.matches_statement(&[]));
     }
 }
