@@ -1,4 +1,4 @@
-229
+231
 ABI
 ACK
 API
@@ -16,6 +16,7 @@ CLI
 ChaCha20
 Deno
 Deserialize/S
+DHT
 DNS
 DoS
 DTLS
@@ -219,6 +220,7 @@ unpulled
 unregister
 untrusted
 v2
+v3
 validator/S
 varint
 verifications
