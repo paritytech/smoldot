@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>smoldot browser runner</title>
+    <style>
+        body { font-family: monospace; margin: 0; background: #111; color: #ddd; display: flex; flex-direction: column; height: 100vh; }
+        #header { padding: 8px 12px; background: #222; border-bottom: 1px solid #444; }
+        #status { font-weight: bold; }
+        #banner { color: #f66; font-weight: bold; white-space: pre-wrap; }
+        #log { flex: 1; overflow-y: scroll; margin: 0; padding: 8px 12px; font-size: 12px; white-space: pre-wrap; }
+        .warn { color: #fc6; }
+        .err { color: #f66; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <div id="status">loading…</div>
+        <div id="banner"></div>
+    </div>
+    <pre id="log"></pre>
+    <script type="module" src="/browser/main.js"></script>
+</body>
+</html>
