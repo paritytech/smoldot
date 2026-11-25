@@ -18,7 +18,9 @@
 // Statement-store reception test body — runs on either host via the ctx
 // abstraction. Subscribes with a topic filter and asserts that during the
 // listen window smoldot receives the matching statement exactly once, the
-// non-matching one never, and nothing stray.
+// non-matching one never, and nothing stray. Then unsubscribes, subscribes
+// again with the same filter, and asserts that the matching statement arrives
+// once more.
 
 import { createRpc } from "./rpc.js";
 
@@ -90,6 +92,18 @@ export default async function statementStoreReception(ctx) {
   report("initial batch: empty newStatements with remaining 0", initialOk, initialDetail);
   if (!initialOk) throw new Error(`unexpected initial batch: ${initialDetail}`);
 
+  // A second handle of the same parachain subscribes to an unrelated topic. Both handles share
+  // one topic filter, which must keep the topic of the first handle.
+  const paraAgain = await rpc.addChain({
+    chainSpec: files.PARA_CHAIN_SPEC,
+    statementStore: {},
+    potentialRelayChains: [relay],
+  });
+  await rpc.sendRpcAndWait(paraAgain, "statement_subscribeStatement", [
+    { matchAny: [`0x${"ee".repeat(32)}`] },
+  ]);
+  report("second handle of the parachain subscribed to another topic", true);
+
   // Block until Rust signals that smoldot is peered with both collators at
   // the statement-store level. The listen window below only makes sense
   // after that point: both peers push stmt_A during their initial sync.
@@ -156,4 +170,34 @@ export default async function statementStoreReception(ctx) {
 
   if (!ok) throw new Error(`reception assertion failed: ${detail}`);
   if (!unsubOk) throw new Error(`unsubscribe assertion failed: ${unsubDetail}`);
+
+  // A second subscription with the same filter must receive stmt_A again. The collators sent it
+  // to the first subscription already, so only a replay on their side can deliver it.
+  const resubId = await rpc.sendRpcAndWait(para, "statement_subscribeStatement", [
+    { matchAny: [topicAHex] },
+  ]);
+  report("statement_subscribeStatement accepted again", true, `subId=${resubId}`);
+
+  let recountA = 0;
+  let recountUnexpected = 0;
+  await rpc.readJsonRpcUntil(
+    para,
+    (msg) => {
+      if (msg.method !== "statement_statement") return undefined;
+      if (msg.params?.subscription !== resubId) return undefined;
+      const result = msg.params.result;
+      if (result?.event !== "newStatements") return undefined;
+      for (const s of result.data?.statements ?? []) {
+        if (s === stmtAHex) recountA += 1;
+        else recountUnexpected += 1;
+      }
+      return undefined;
+    },
+    Date.now() + listenMs,
+  );
+
+  const resubOk = recountA === 1 && recountUnexpected === 0;
+  const resubDetail = `stmt_A count=${recountA} | unexpected count=${recountUnexpected}`;
+  report("resubscription: stmt_A received exactly once again, nothing else", resubOk, resubDetail);
+  if (!resubOk) throw new Error(`resubscription assertion failed: ${resubDetail}`);
 }

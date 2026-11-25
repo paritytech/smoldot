@@ -186,7 +186,7 @@ impl Harness {
         }
     }
 
-    /// Delivers all pending coordinator->connection messages for the given side.
+    /// Delivers all pending coordinator-to-connection messages for the given side.
     fn deliver_coord_to_conn(&mut self, side: Side) -> bool {
         let now = self.now;
         let node = self.node(side);
@@ -200,7 +200,7 @@ impl Harness {
         progress
     }
 
-    /// Pulls all connection->coordinator messages for the given side and injects them into its
+    /// Pulls all connection-to-coordinator messages for the given side and injects them into its
     /// coordinator. Does not call `next_event`.
     fn drain_conn_to_coord(&mut self, side: Side) -> bool {
         let node = self.node(side);
@@ -985,6 +985,52 @@ fn removing_desire_from_all_chains_keeps_statement_link() {
     assert_count!(events, Alice, StatementProtocolDisconnected, 1);
     assert_count!(events, Alice, StatementProtocolConnected, 0);
     assert_eq!(harness.alice.network.opened_gossip_undesired().count(), 0);
+}
+
+/// Removing the desire for a statement link on a peer with a block announces link keeps the
+/// statement substream open, and it closes with the block announces link from then on.
+#[test]
+fn removing_desire_hands_statement_substream_back_to_block_announces() {
+    let mut harness = Harness::connected(true, true);
+    let bob = harness.alice.remote.clone();
+    let chain_id = harness.alice.chain_id;
+
+    harness.open_gossip_link();
+    harness
+        .alice
+        .network
+        .gossip_insert_desired(chain_id, bob.clone(), GossipKind::Statement);
+    harness
+        .alice
+        .network
+        .gossip_remove_desired(chain_id, &bob, GossipKind::Statement);
+    assert!(
+        !harness
+            .alice
+            .network
+            .opened_gossip_undesired()
+            .any(|(_, _, k)| k == GossipKind::Statement)
+    );
+    assert!(
+        harness
+            .alice
+            .network
+            .gossip_is_connected(chain_id, &bob, GossipKind::Statement)
+    );
+
+    harness
+        .alice
+        .network
+        .gossip_close(chain_id, &bob, GossipKind::ConsensusTransactions)
+        .unwrap();
+    assert!(
+        !harness
+            .alice
+            .network
+            .gossip_is_connected(chain_id, &bob, GossipKind::Statement)
+    );
+    let events = harness.pump();
+    assert_count!(events, Alice, StatementProtocolDisconnected, 0);
 }
 
 /// Removing a chain refuses while a statement link is open, and forgets a pending one. Closing

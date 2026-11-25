@@ -4,7 +4,24 @@
 
 ### Fixed
 
+- When a chain is added several times, the statement topic filter covers the subscriptions of all its handles. ([#3462](https://github.com/paritytech/smoldot/pull/3462); fixes [#3447](https://github.com/paritytech/smoldot/issues/3447))
 - `ext_storage_clear_prefix` now ignores a prefix that starts with `:child_storage:`, as Substrate does. Before, such a call deleted the root entry of a child trie from the main trie while the child trie kept its content. ([#3456](https://github.com/paritytech/smoldot/pull/3456))
+
+## 3.9.0 - 2026-11-19
+
+### Added
+
+- Keep track of the known peers closest to each statement topic. ([#3400](https://github.com/paritytech/smoldot/pull/3400); fixes [#3377](https://github.com/paritytech/smoldot/issues/3377))
+- Statement subscriptions connect to the peers closest to the subscribed topics. ([#3404](https://github.com/paritytech/smoldot/pull/3404); fixes [#3379](https://github.com/paritytech/smoldot/issues/3379))
+
+### Changed
+
+- `state_subscribeStorage` notifies only keys whose value changed. ([#3442](https://github.com/paritytech/smoldot/pull/3442); fixes [#3413](https://github.com/paritytech/smoldot/issues/3413))
+
+### Fixed
+
+- `clear_prefix` / `storage_kill` host functions also remove keys written earlier in the same call. ([#3402](https://github.com/paritytech/smoldot/pull/3402); fixes [#3374](https://github.com/paritytech/smoldot/issues/3374))
+- Runtime calls that write to a child trie no longer fail or get peers banned. ([#3395](https://github.com/paritytech/smoldot/pull/3395))
 
 ## 3.8.0 - 2026-11-05
 
