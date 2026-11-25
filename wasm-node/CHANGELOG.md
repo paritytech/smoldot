@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- When a chain is added several times, the statement topic filter covers the subscriptions of all its handles. ([#3462](https://github.com/paritytech/smoldot/pull/3462); fixes [#3447](https://github.com/paritytech/smoldot/issues/3447))
+- `ext_storage_clear_prefix` now ignores a prefix that starts with `:child_storage:`, as Substrate does. Before, such a call deleted the root entry of a child trie from the main trie while the child trie kept its content. ([#3456](https://github.com/paritytech/smoldot/pull/3456))
+
 ## 3.9.0 - 2026-11-19
 
 ### Added
