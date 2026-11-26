@@ -241,16 +241,14 @@ enum Incoming {
     Header,
 
     /// Expect the data of a previously-received data frame header.
-    ///
-    /// Note that the state of the reading side of the substream might already be closed. The
-    /// implementation verifies that the remote is allowed to send data when processing the header,
-    /// the immediately sets the reading side to "closed" if the FIN flag is set, even if there
-    /// is still data to be received.
     DataFrame {
         /// Identifier of the substream the data belongs to.
         substream_id: NonZero<u32>,
         /// Number of bytes of data remaining before the frame ends.
         remaining_bytes: u32,
+        /// True if the frame has the FIN flag. The reading side of the substream is closed only
+        /// once all the data of the frame has been copied to its read buffer.
+        fin: bool,
     },
 
     /// A header referring to a new substream has been received. The reception of any further data
@@ -708,10 +706,15 @@ where
                 Incoming::PendingIncomingSubstream { .. } => break,
 
                 Incoming::DataFrame {
-                    remaining_bytes: 0, ..
+                    substream_id,
+                    remaining_bytes: 0,
+                    fin,
                 } => {
-                    // Nothing more to do.
                     self.inner.incoming = Incoming::Header;
+                    if fin {
+                        self.inner
+                            .close_remote_write(substream_id, &outer_read_write.now);
+                    }
                 }
 
                 Incoming::DataFrame {
@@ -945,6 +948,11 @@ where
                             // which we have sent a RST frame earlier. Considering that we don't
                             // always keep traces of old substreams, we have no way to know whether
                             // this is the case or not.
+                            // Similarly, the substream might have been closed by both sides and
+                            // be waiting to be removed with `remove_dead_substream`.
+                            if self.inner.dead_substreams.contains(&stream_id) {
+                                continue;
+                            }
                             let Some(substream) = self.inner.substreams.get_mut(&stream_id) else {
                                 continue;
                             };
@@ -1090,6 +1098,7 @@ where
                                     Incoming::DataFrame {
                                         substream_id: stream_id,
                                         remaining_bytes: length,
+                                        fin: false,
                                     }
                                 };
 
@@ -1131,7 +1140,6 @@ where
                                         remote_write_closed,
                                         remote_allowed_window,
                                         remote_syn_acked,
-                                        substreams_wake_up_key,
                                         ..
                                     },
                                 ..
@@ -1148,33 +1156,6 @@ where
                                     return Err(Error::WriteAfterFin);
                                 }
 
-                                if fin {
-                                    *remote_write_closed = true;
-
-                                    // No need to send window frames anymore if the remote has
-                                    // sent a FIN.
-                                    self.inner.window_frames_to_send.remove(&stream_id);
-
-                                    // Wake up the substream.
-                                    match substreams_wake_up_key {
-                                        Some(Some(when)) if *when <= outer_read_write.now => {}
-                                        Some(None) => {}
-                                        Some(Some(when)) => {
-                                            let _was_removed = self
-                                                .inner
-                                                .substreams_wake_up
-                                                .remove(&(Some(when.clone()), stream_id));
-                                            debug_assert!(_was_removed);
-                                            self.inner.substreams_wake_up.insert((None, stream_id));
-                                            *substreams_wake_up_key = Some(None);
-                                        }
-                                        _ => {
-                                            self.inner.substreams_wake_up.insert((None, stream_id));
-                                            *substreams_wake_up_key = Some(None);
-                                        }
-                                    }
-                                }
-
                                 // Check whether the remote has the right to send that much data.
                                 // Note that the credits aren't checked in the case of an unknown
                                 // substream.
@@ -1188,6 +1169,7 @@ where
                             self.inner.incoming = Incoming::DataFrame {
                                 substream_id: stream_id,
                                 remaining_bytes: length,
+                                fin,
                             };
                         }
 
@@ -1551,6 +1533,7 @@ where
             self.inner.incoming = Incoming::DataFrame {
                 substream_id,
                 remaining_bytes: data_frame_size,
+                fin: false,
             };
         }
 
@@ -1659,7 +1642,7 @@ where
                     remote_allowed_window: NEW_SUBSTREAMS_FRAME_SIZE - u64::from(data_frame_size),
                     allowed_window: NEW_SUBSTREAMS_FRAME_SIZE + u64::from(extra_window),
                     local_write_close: SubstreamStateLocalWrite::Open,
-                    remote_write_closed: fin,
+                    remote_write_closed: false,
                     expected_incoming_bytes: None,
                     read_buffer: Vec::new(), // TODO: capacity?
                     // There is no need to insert the substream in `substreams_wake_up`, as we
@@ -1678,6 +1661,7 @@ where
         self.inner.incoming = Incoming::DataFrame {
             substream_id,
             remaining_bytes: data_frame_size,
+            fin,
         };
 
         Ok(SubstreamId(substream_id))
@@ -1709,8 +1693,53 @@ where
         self.inner.incoming = Incoming::DataFrame {
             substream_id,
             remaining_bytes: data_frame_size,
+            fin: false,
         };
         Ok(())
+    }
+}
+
+impl<TNow, TSub> YamuxInner<TNow, TSub>
+where
+    TNow: Clone + cmp::Ord,
+{
+    /// Closes the reading side of the given substream after the remote has sent a FIN, and
+    /// wakes it up. Does nothing if the substream doesn't exist or has been reset.
+    fn close_remote_write(&mut self, substream_id: NonZero<u32>, now: &TNow) {
+        let Some(Substream {
+            state:
+                SubstreamState::Healthy {
+                    remote_write_closed,
+                    substreams_wake_up_key,
+                    ..
+                },
+            ..
+        }) = self.substreams.get_mut(&substream_id)
+        else {
+            return;
+        };
+
+        *remote_write_closed = true;
+
+        // No need to send window frames anymore if the remote has sent a FIN.
+        self.window_frames_to_send.remove(&substream_id);
+
+        match substreams_wake_up_key {
+            Some(Some(when)) if *when <= *now => {}
+            Some(None) => {}
+            Some(Some(when)) => {
+                let _was_removed = self
+                    .substreams_wake_up
+                    .remove(&(Some(when.clone()), substream_id));
+                debug_assert!(_was_removed);
+                self.substreams_wake_up.insert((None, substream_id));
+                *substreams_wake_up_key = Some(None);
+            }
+            _ => {
+                self.substreams_wake_up.insert((None, substream_id));
+                *substreams_wake_up_key = Some(None);
+            }
+        }
     }
 }
 
