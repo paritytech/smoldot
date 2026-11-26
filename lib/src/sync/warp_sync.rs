@@ -2290,9 +2290,9 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                 chain_information::build::InProgress::StorageGet(get) => {
                     // TODO: child tries not supported
                     let (proof, downloaded_source) = calls.get(&get.call_in_progress()).unwrap();
-                    let answer =
-                        match get.answer_from_proof(proof, &self.inner.warped_header_state_root) {
-                            Ok(a) => a,
+                    let value =
+                        match get.value_from_proof(proof, &self.inner.warped_header_state_root) {
+                            Ok(v) => v,
                             Err(proof_decode::IncompleteProofError { .. }) => {
                                 return (
                                     self.inner,
@@ -2306,7 +2306,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                             }
                         };
 
-                    get.inject_answer(answer)
+                    get.inject_value(value.map(|(val, ver)| (iter::once(val), ver)))
                 }
                 chain_information::build::InProgress::NextKey(nk) => {
                     // TODO: child tries not supported

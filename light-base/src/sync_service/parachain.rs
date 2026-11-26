@@ -1750,15 +1750,15 @@ fn run_single_runtime_call(
                     Some(*state_root)
                 };
 
-                let answer = if let Some(trie_root) = &trie_root {
-                    get.answer_from_proof(proof, trie_root)
+                let storage_value = if let Some(trie_root) = &trie_root {
+                    get.value_from_proof(proof, trie_root)
                 } else {
-                    Ok(executor::runtime_call::StorageGetAnswer::Value(None))
+                    Ok(None)
                 };
-                let Ok(answer) = answer else {
+                let Ok(storage_value) = storage_value else {
                     return Err(format!("{function_name}: proof missing entry for key"));
                 };
-                call = get.inject_answer(answer);
+                call = get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
             }
             executor::runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv) => {
                 let merkle_value = proof.closest_descendant_merkle_value(state_root, mv.key());

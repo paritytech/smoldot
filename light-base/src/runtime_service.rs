@@ -3614,12 +3614,12 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
 
         match call {
             executor::runtime_call::RuntimeCall::StorageGet(get) => {
-                let answer = if let Some(trie_root) = trie_root {
-                    get.answer_from_proof(call_proof, trie_root)
+                let storage_value = if let Some(trie_root) = trie_root {
+                    get.value_from_proof(call_proof, trie_root)
                 } else {
-                    Ok(executor::runtime_call::StorageGetAnswer::Value(None))
+                    Ok(None)
                 };
-                let Ok(answer) = answer else {
+                let Ok(storage_value) = storage_value else {
                     return (
                         timing,
                         Err(SingleRuntimeCallAttemptError::Inaccessible(
@@ -3630,7 +3630,7 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
                 timing.proof_access_duration += platform.now() - proof_access_duration_before;
 
                 let runtime_call_duration_before = platform.now();
-                call = get.inject_answer(answer);
+                call = get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
                 timing.virtual_machine_call_duration +=
                     platform.now() - runtime_call_duration_before;
             }
@@ -3956,8 +3956,8 @@ fn inject_proof_into_call(
                 &state.block_state_trie_root_hash,
                 child_trie.as_deref(),
             ) {
-                Ok(Some(trie_root)) => match get.answer_from_proof(decoded_proof, trie_root) {
-                    Ok(answer) => get.inject_answer(answer),
+                Ok(Some(trie_root)) => match get.value_from_proof(decoded_proof, trie_root) {
+                    Ok(value) => get.inject_value(value.map(|(val, vers)| (iter::once(val), vers))),
                     Err(_) => {
                         state.failed_attempts += 1;
                         state

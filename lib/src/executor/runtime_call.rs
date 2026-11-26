@@ -604,9 +604,7 @@ pub struct StorageGet {
 }
 
 impl StorageGet {
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`], or whose
-    /// existence must be passed to [`StorageGet::inject_existence`] if
-    /// [`StorageGet::is_existence_check`] returns `true`.
+    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     pub fn key(&self) -> impl AsRef<[u8]> {
         enum Three<A, B, C> {
             A(A),
@@ -674,67 +672,43 @@ impl StorageGet {
         }
     }
 
-    /// Returns `true` if only the existence of the storage value is needed, in which case
-    /// [`StorageGet::inject_existence`] can be used instead of [`StorageGet::inject_value`].
-    pub fn is_existence_check(&self) -> bool {
+    /// Returns `true` if only the existence of the storage value is needed.
+    fn is_existence_check(&self) -> bool {
         match (&self.inner.vm, self.inner.root_calculation.as_ref()) {
             (host::HostVm::ExternalStorageGet(req), None) => req.is_existence_check(),
             _ => false,
         }
     }
 
-    /// Injects whether the storage value exists.
-    ///
-    /// # Panic
-    ///
-    /// Panics if [`StorageGet::is_existence_check`] returns `false`.
-    ///
-    pub fn inject_existence(mut self, exists: bool) -> RuntimeCall {
-        match (self.inner.vm, self.inner.root_calculation.as_ref()) {
-            (host::HostVm::ExternalStorageGet(req), None) if req.is_existence_check() => {
-                self.inner.vm = req.resume(if exists { Some((&[], 0)) } else { None });
-            }
-            _ => panic!("inject_existence called on a request that needs the storage value"),
-        }
-        self.inner.run()
-    }
-
-    /// Finds in the given proof the answer to this request, to then pass to
-    /// [`StorageGet::inject_answer`].
+    /// Finds in the given proof the value to pass to [`StorageGet::inject_value`].
     ///
     /// `trie_root` must be the root of the trie the request reads from, as indicated by
     /// [`StorageGet::child_trie`].
     ///
-    /// Existence checks are answered even if the proof only contains the hash of the value,
-    /// which is what full nodes put in proofs for `ext_storage_exists_version_1`.
-    pub fn answer_from_proof<'a>(
+    /// If the runtime only needs to know whether the value exists, an empty value is returned
+    /// in place of the actual value. This works even if the proof only contains the hash of the
+    /// value, which is what full nodes put in proofs for `ext_storage_exists_version_1`.
+    pub fn value_from_proof<'a>(
         &self,
         proof: &'a trie::proof_decode::DecodedTrieProof<impl AsRef<[u8]>>,
         trie_root: &[u8; 32],
-    ) -> Result<StorageGetAnswer<'a>, trie::proof_decode::IncompleteProofError> {
-        StorageGetAnswer::from_proof(
-            proof,
-            trie_root,
-            self.key().as_ref(),
-            self.is_existence_check(),
-        )
-    }
-
-    /// Injects an answer found with [`StorageGet::answer_from_proof`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if `answer` is [`StorageGetAnswer::Exists`] and
-    /// [`StorageGet::is_existence_check`] returns `false`, which can happen if `answer` was
-    /// found for a different request.
-    ///
-    pub fn inject_answer(self, answer: StorageGetAnswer) -> RuntimeCall {
-        match answer {
-            StorageGetAnswer::Exists(exists) => self.inject_existence(exists),
-            StorageGetAnswer::Value(value) => {
-                self.inject_value(value.map(|(val, vers)| (iter::once(val), vers)))
-            }
+    ) -> Result<Option<(&'a [u8], TrieEntryVersion)>, trie::proof_decode::IncompleteProofError>
+    {
+        if !self.is_existence_check() {
+            return proof.storage_value(trie_root, self.key().as_ref());
         }
+
+        let info = proof.trie_node_info(
+            trie_root,
+            trie::bytes_to_nibbles(self.key().as_ref().iter().copied()),
+        )?;
+        Ok(match info.storage_value {
+            trie::proof_decode::StorageValue::None => None,
+            trie::proof_decode::StorageValue::Known { inline: true, .. } => {
+                Some((&[], TrieEntryVersion::V0))
+            }
+            _ => Some((&[], TrieEntryVersion::V1)),
+        })
     }
 
     /// Injects the corresponding storage value.
@@ -785,41 +759,6 @@ impl StorageGet {
         };
 
         self.inner.run()
-    }
-}
-
-/// Answer to a [`StorageGet`], found in a proof. See [`StorageGet::answer_from_proof`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StorageGetAnswer<'a> {
-    /// The request is an existence check, and this is whether the value exists.
-    Exists(bool),
-    /// The storage value, or `None` if there is none.
-    Value(Option<(&'a [u8], TrieEntryVersion)>),
-}
-
-impl<'a> StorageGetAnswer<'a> {
-    /// Finds in the given proof the answer to a request for `key`.
-    ///
-    /// If `is_existence_check` is `true`, only the existence of the value is looked up, which
-    /// succeeds even if the proof only contains the hash of the value.
-    fn from_proof(
-        proof: &'a trie::proof_decode::DecodedTrieProof<impl AsRef<[u8]>>,
-        trie_root: &[u8; 32],
-        key: &[u8],
-        is_existence_check: bool,
-    ) -> Result<Self, trie::proof_decode::IncompleteProofError> {
-        if is_existence_check {
-            let info =
-                proof.trie_node_info(trie_root, trie::bytes_to_nibbles(key.iter().copied()))?;
-            Ok(StorageGetAnswer::Exists(!matches!(
-                info.storage_value,
-                trie::proof_decode::StorageValue::None
-            )))
-        } else {
-            Ok(StorageGetAnswer::Value(
-                proof.storage_value(trie_root, key)?,
-            ))
-        }
     }
 }
 

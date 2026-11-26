@@ -16,8 +16,9 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //! Tests for `ext_storage_exists_version_1` and `ext_default_child_storage_exists_version_1`.
 //!
-//! These host functions only need to know whether a value exists, which is reported by
-//! [`StorageGet::is_existence_check`] and answered with [`StorageGet::inject_existence`].
+//! These host functions only need to know whether a value exists, which makes it possible to
+//! answer them with [`StorageGet::value_from_proof`] even if the proof only contains the hash of
+//! the value.
 
 use core::iter;
 
@@ -95,8 +96,7 @@ fn start(function_to_call: &str) -> RuntimeCall {
 }
 
 /// Calls `function_to_call` of [`RUNTIME`]. Storage requests are answered as if `abc` had the
-/// value `value` in the main trie and in the child trie `xyz`, using
-/// [`StorageGet::inject_existence`] when possible.
+/// value `value` in the main trie and in the child trie `xyz`.
 ///
 /// Returns the output of the call and, for each storage request, the value of
 /// [`StorageGet::is_existence_check`].
@@ -123,11 +123,7 @@ fn run_call(function_to_call: &str, value: Option<&[u8]>) -> (Vec<u8>, Vec<bool>
 fn answer(req: StorageGet, value: Option<&[u8]>, existence_checks: &mut Vec<bool>) -> RuntimeCall {
     assert_eq!(req.key().as_ref(), b"abc");
     existence_checks.push(req.is_existence_check());
-    if req.is_existence_check() {
-        req.inject_existence(value.is_some())
-    } else {
-        req.inject_value(value.map(|v| (iter::once(v), host::TrieEntryVersion::V1)))
-    }
+    req.inject_value(value.map(|v| (iter::once(v), host::TrieEntryVersion::V1)))
 }
 
 #[test]
@@ -168,15 +164,6 @@ fn get_isnt_existence_check() {
     );
 }
 
-#[test]
-#[should_panic]
-fn inject_existence_panics_if_value_needed() {
-    let RuntimeCall::StorageGet(req) = start("get") else {
-        panic!()
-    };
-    let _ = req.inject_existence(true);
-}
-
 /// Builds a proof made of a single root node of key `key`, whose storage value is the hash
 /// `value_hash`. The value itself isn't in the proof. Returns the proof and the trie root.
 fn proof_with_hashed_value(key: &[u8], value_hash: &[u8; 32]) -> (Vec<u8>, [u8; 32]) {
@@ -203,7 +190,7 @@ fn proof_with_hashed_value(key: &[u8], value_hash: &[u8; 32]) -> (Vec<u8>, [u8; 
 }
 
 /// Runs `function_to_call` of [`RUNTIME`], answering storage requests with
-/// [`StorageGet::answer_from_proof`] using the given proof.
+/// [`StorageGet::value_from_proof`] using the given proof.
 fn run_call_with_proof(function_to_call: &str, proof: &[u8], trie_root: &[u8; 32]) -> Vec<u8> {
     let proof =
         trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config { proof }).unwrap();
@@ -215,8 +202,8 @@ fn run_call_with_proof(function_to_call: &str, proof: &[u8], trie_root: &[u8; 32
                 return success.virtual_machine.value().as_ref().to_vec();
             }
             RuntimeCall::StorageGet(req) => {
-                let answer = req.answer_from_proof(&proof, trie_root).unwrap();
-                execution = req.inject_answer(answer);
+                let value = req.value_from_proof(&proof, trie_root).unwrap();
+                execution = req.inject_value(value.map(|(v, vers)| (iter::once(v), vers)));
             }
             _ => unreachable!(),
         }
@@ -247,6 +234,6 @@ fn get_needs_value_not_only_hash() {
         let RuntimeCall::StorageGet(req) = start(function) else {
             panic!()
         };
-        assert!(req.answer_from_proof(&proof, &trie_root).is_err());
+        assert!(req.value_from_proof(&proof, &trie_root).is_err());
     }
 }
