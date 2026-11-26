@@ -1384,6 +1384,11 @@ struct BackgroundTask<TPlat: PlatformRef> {
     next_bootnode_rotation: Pin<Box<TPlat::Delay>>,
 }
 
+/// Number of peers per chain kept in the address book, on top of the important nodes (the
+/// bootnodes). When a new peer is inserted past the limit, a peer without a slot is purged to make
+/// room. Important nodes are never purged, and don't take room from the discovered peers.
+const MAX_PEERS_PER_CHAIN: usize = 30;
+
 /// Interval between two rounds of moving out-slots away from the bootnodes. Each round frees at
 /// most one bootnode slot per chain.
 const BOOTNODE_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
@@ -2607,7 +2612,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     task.peering_strategy.insert_chain_peer_filtered(
                         chain_id,
                         peer_id.clone(),
-                        30, // TODO: constant
+                        address_book_limit(&task.important_nodes, chain_id),
                         |p| !is_important_node(&task.important_nodes, chain_id, p),
                     );
 
@@ -3614,7 +3619,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let insert_outcome = task.peering_strategy.insert_chain_peer_filtered(
                             chain_id,
                             peer_id.clone(),
-                            30, // TODO: constant
+                            address_book_limit(&task.important_nodes, chain_id),
                             |p| !is_important_node(&task.important_nodes, chain_id, p),
                         );
 
@@ -4162,7 +4167,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 task.peering_strategy.insert_chain_peer_filtered(
                                     chain_id,
                                     peer_id.clone(),
-                                    30, // TODO: constant
+                                    address_book_limit(&task.important_nodes, chain_id),
                                     |p| !is_important_node(&task.important_nodes, chain_id, p),
                                 );
                                 for address in addresses {
@@ -4604,6 +4609,18 @@ fn close_block_announces_link<TPlat: PlatformRef>(
             peer_id: peer_id.clone(),
         },
     ));
+}
+
+/// Returns the maximum number of peers of the chain in the address book: [`MAX_PEERS_PER_CHAIN`]
+/// plus the important nodes of the chain.
+fn address_book_limit(
+    important_nodes: &HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
+    chain_id: ChainId,
+) -> usize {
+    MAX_PEERS_PER_CHAIN
+        + important_nodes
+            .get(&chain_id)
+            .map_or(0, |nodes| nodes.len())
 }
 
 /// Returns true if the peer is an important node (in practice a bootnode) of the chain. Important
