@@ -425,5 +425,9 @@ mod tests {
         update(&mut steering, []);
         assert!(steering.random.is_empty());
         assert!(steering.peers_to_reserve().is_empty());
+
+        // An empty slot is filled under a cover left empty by bans.
+        steering.update_peers_needing_connections([], candidates(), true, &Duration::ZERO);
+        assert_eq!(steering.random.len(), RANDOM_SLOTS);
     }
 }

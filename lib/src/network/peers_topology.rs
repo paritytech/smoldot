@@ -210,8 +210,8 @@ where
     }
 
     /// Local-only connection candidates for `topics`: a small set of peers, chosen greedily,
-    /// covering every topic, each topic being covered by any of its `replication_factor`
-    /// closest known peers.
+    /// covering every topic that has a reachable peer among its `replication_factor` closest
+    /// known peers.
     ///
     /// Only the locally learned topology is used, avoiding network lookups that would reveal
     /// the topics.
@@ -633,6 +633,28 @@ mod tests {
             topology
                 .peers_for_topics(&[topic], |peer| pool.contains(peer))
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn peers_for_topics_keeps_connected_replacements_over_a_peer_covering_more_topics() {
+        // Closest to topic 1 with seeds 2 to 30: 15, 7, 12. Closest to topic 9: 15, 7, 21.
+        let mut topology = topology(3);
+        for seed in 2..=30 {
+            dht_peer(&mut topology, peer(seed), Duration::ZERO);
+        }
+        let topics = [topic(1), topic(9)];
+        assert_eq!(
+            topology.peers_for_topics(&topics, |_| false),
+            vec![peer(15)]
+        );
+
+        for seed in [12, 21] {
+            topology.on_substream_opened(peer(seed), &Duration::ZERO);
+        }
+        assert_eq!(
+            BTreeSet::from_iter(topology.peers_for_topics(&topics, |_| false)),
+            BTreeSet::from([peer(12), peer(21)])
         );
     }
 
