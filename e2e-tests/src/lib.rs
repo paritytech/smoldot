@@ -24,10 +24,10 @@ pub mod snapshot;
 pub mod statement;
 
 pub use network::{
-    elastic_scaling_genesis_overrides, prepare_runtime_spec, prepare_runtime_specs,
-    run_chainhead_v1_follow, run_chainhead_v1_unpin_early, run_lifecycle, run_smoke,
-    spawn_scenario, spawned_chain_spec_paths, webrtc_args, FollowChain, LiveNetwork, Scenario,
-    SmoldotDbPaths, SnapshotPaths, BEST_METRIC, ELASTIC_MAX_VALIDATORS_PER_CORE,
+    elastic_scaling_genesis_overrides, peer_id_from_multiaddr, prepare_runtime_spec,
+    prepare_runtime_specs, run_chainhead_v1_follow, run_chainhead_v1_unpin_early, run_lifecycle,
+    run_smoke, spawn_scenario, spawned_chain_spec_paths, webrtc_args, FollowChain, LiveNetwork,
+    Scenario, SmoldotDbPaths, SnapshotPaths, BEST_METRIC, ELASTIC_MAX_VALIDATORS_PER_CORE,
     ELASTIC_SCALING_CORES, ELASTIC_VALIDATOR_COUNT, FINALIZED_METRIC, PARA_ID,
 };
 
