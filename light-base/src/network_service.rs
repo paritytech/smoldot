@@ -4611,18 +4611,18 @@ fn close_block_announces_link<TPlat: PlatformRef>(
 }
 
 /// Picks a bootnode among the peers that hold an out-slot, to free its slot. Returns `None` if
-/// there is no such bootnode, or if freeing its slot would leave the chain without an open link.
+/// there is no such bootnode, if fewer than two slots are held, or if a slot doesn't have an open
+/// link yet. The latter makes the rotation wait until the previous replacement works.
 fn pick_bootnode_to_rotate<'a>(
     slot_peers: impl Iterator<Item = &'a PeerId>,
     is_bootnode: impl Fn(&PeerId) -> bool,
     is_open: impl Fn(&PeerId) -> bool,
 ) -> Option<&'a PeerId> {
     let slot_peers = slot_peers.collect::<Vec<_>>();
-    let candidate = *slot_peers.iter().find(|p| is_bootnode(p))?;
-    slot_peers
-        .iter()
-        .any(|p| *p != candidate && is_open(p))
-        .then_some(candidate)
+    if slot_peers.len() < 2 || !slot_peers.iter().all(|p| is_open(p)) {
+        return None;
+    }
+    slot_peers.into_iter().find(|p| is_bootnode(p))
 }
 
 #[cfg(test)]
@@ -4658,6 +4658,17 @@ mod tests {
         let [boot, other, _] = rotation_peers();
         let picked =
             pick_bootnode_to_rotate([&boot, &other].into_iter(), |p| *p == boot, |p| *p == boot);
+        assert_eq!(picked, None);
+    }
+
+    #[test]
+    fn rotate_waits_for_pending_slot() {
+        let [boot, other, pending] = rotation_peers();
+        let picked = pick_bootnode_to_rotate(
+            [&boot, &other, &pending].into_iter(),
+            |p| *p == boot,
+            |p| *p != pending,
+        );
         assert_eq!(picked, None);
     }
 
