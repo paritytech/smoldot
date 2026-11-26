@@ -308,6 +308,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             chains_by_next_discovery: BTreeMap::new(),
             secondary_reopens: BTreeMap::new(),
             next_peer_steering: None,
+            next_bootnode_rotation: Box::pin(config.platform.sleep(BOOTNODE_ROTATION_INTERVAL)),
         }));
 
         config.platform.spawn_task("network-service".into(), {
@@ -1380,7 +1381,17 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Delay until the next refresh of the statement links of every chain. `None` while no
     /// chain has topics to cover or links left to close.
     next_peer_steering: Option<Pin<Box<TPlat::Delay>>>,
+
+    /// Delay until the next round of moving out-slots away from the bootnodes.
+    next_bootnode_rotation: Pin<Box<TPlat::Delay>>,
 }
+
+/// Interval between two rounds of moving out-slots away from the bootnodes. Each round frees at
+/// most one bootnode slot per chain.
+const BOOTNODE_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long a bootnode freed by the rotation can't get the slot back on that chain.
+const BOOTNODE_ROTATION_BAN: Duration = Duration::from_secs(300);
 
 /// Interval between two refreshes of the statement links.
 const PEER_STEERING_INTERVAL: Duration = Duration::from_secs(5);
@@ -1482,6 +1493,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 peer_id: PeerId,
             },
             PeerSteering,
+            BootnodeRotation,
         }
 
         let wake_up_reason = {
@@ -1572,24 +1584,27 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             let now = task.platform.now();
 
                             // Until the chain first connects, prefer slots for important nodes
-                            // (the bootnodes); otherwise use the general pool.
-                            if !task.chains_ever_gossip_connected.contains(&chain_id) {
-                                if let basic_peering_strategy::AssignablePeer::Assignable(peer_id) =
-                                    task.peering_strategy.pick_assignable_peer_filtered(
-                                        &chain_id,
-                                        &now,
-                                        |peer_id| {
-                                            task.important_nodes
-                                                .get(&chain_id)
-                                                .map_or(false, |nodes| nodes.contains(peer_id))
-                                        },
-                                    )
-                                {
-                                    break 'search WakeUpReason::CanAssignSlot(
-                                        peer_id.clone(),
-                                        chain_id,
-                                    );
-                                }
+                            // (the bootnodes); afterwards, prefer the other nodes so that light
+                            // clients don't all stay on the bootnodes. Fall back to the general
+                            // pool in both cases.
+                            let want_important =
+                                !task.chains_ever_gossip_connected.contains(&chain_id);
+                            if let basic_peering_strategy::AssignablePeer::Assignable(peer_id) =
+                                task.peering_strategy.pick_assignable_peer_filtered(
+                                    &chain_id,
+                                    &now,
+                                    |peer_id| {
+                                        task.important_nodes
+                                            .get(&chain_id)
+                                            .map_or(false, |nodes| nodes.contains(peer_id))
+                                            == want_important
+                                    },
+                                )
+                            {
+                                break 'search WakeUpReason::CanAssignSlot(
+                                    peer_id.clone(),
+                                    chain_id,
+                                );
                             }
 
                             match task.peering_strategy.pick_assignable_peer(&chain_id, &now) {
@@ -1710,6 +1725,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let ((_, chain_id, peer_id), _) = next_reopen.remove_entry();
                 WakeUpReason::ReopenSecondaries { chain_id, peer_id }
             };
+            let bootnode_rotation = async {
+                task.next_bootnode_rotation.as_mut().await;
+                WakeUpReason::BootnodeRotation
+            };
             let peer_steering = async {
                 let Some(delay) = task.next_peer_steering.as_mut() else {
                     future::pending().await
@@ -1730,6 +1749,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 .or(start_discovery)
                 .or(reopen_secondaries)
                 .or(peer_steering)
+                .or(bootnode_rotation)
                 .await
         };
 
@@ -2022,40 +2042,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     );
                 }
 
-                if task.network.gossip_is_connected(
-                    chain_id,
-                    &peer_id,
-                    service::GossipKind::ConsensusTransactions,
-                ) {
-                    let _closed_result = task.network.gossip_close(
-                        chain_id,
-                        &peer_id,
-                        service::GossipKind::ConsensusTransactions,
-                    );
-                    debug_assert!(_closed_result.is_ok());
-
-                    log!(
-                        &task.platform,
-                        Debug,
-                        "network",
-                        "gossip-closed",
-                        chain = &task.network[chain_id].log_name,
-                        peer_id,
-                    );
-
-                    let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
-                    debug_assert!(_was_in.is_some());
-                    task.network[chain_id].metrics.gossip_peers_connected.dec();
-
-                    // Unlike the network-event handlers below, this message handler can run
-                    // while another event is already queued, hence the push to a queue.
-                    task.events_pending_send.push_back((
-                        chain_id,
-                        Event::Disconnected {
-                            peer_id: peer_id.clone(),
-                        },
-                    ));
-                }
+                close_block_announces_link(&mut task, chain_id, &peer_id);
 
                 // A statement link survives the closing of the block announces link, so it
                 // needs a close of its own.
@@ -2664,6 +2651,63 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     ?outcome,
                 );
+            }
+            WakeUpReason::BootnodeRotation => {
+                task.next_bootnode_rotation =
+                    Box::pin(task.platform.sleep(BOOTNODE_ROTATION_INTERVAL));
+
+                for chain_id in task.network.chains().collect::<Vec<_>>() {
+                    if !task.chains_ever_gossip_connected.contains(&chain_id) {
+                        continue;
+                    }
+                    let Some(important) = task.important_nodes.get(&chain_id) else {
+                        continue;
+                    };
+
+                    let Some(peer_id) = pick_bootnode_to_rotate(
+                        task.network.gossip_desired_iter(
+                            chain_id,
+                            service::GossipKind::ConsensusTransactions,
+                        ),
+                        |p| important.contains(p),
+                        |p| task.open_gossip_links.contains_key(&(chain_id, p.clone())),
+                    )
+                    .cloned() else {
+                        continue;
+                    };
+
+                    let now = task.platform.now();
+                    if !matches!(
+                        task.peering_strategy
+                            .pick_assignable_peer_filtered(&chain_id, &now, |p| !important
+                                .contains(p),),
+                        basic_peering_strategy::AssignablePeer::Assignable(_)
+                    ) {
+                        continue;
+                    }
+
+                    task.peering_strategy.unassign_slot_and_ban(
+                        &chain_id,
+                        &peer_id,
+                        now + BOOTNODE_ROTATION_BAN,
+                    );
+                    log!(
+                        &task.platform,
+                        Debug,
+                        "network",
+                        "slot-unassigned",
+                        chain = &task.network[chain_id].log_name,
+                        peer_id,
+                        ban_duration = ?BOOTNODE_ROTATION_BAN,
+                        reason = "bootnode-rotation"
+                    );
+                    task.network.gossip_remove_desired(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    );
+                    close_block_announces_link(&mut task, chain_id, &peer_id);
+                }
             }
             WakeUpReason::StartDiscovery(chain_id) => {
                 // Re-insert the chain in `chains_by_next_discovery`.
@@ -4521,11 +4565,70 @@ fn pop_p2p_if_matches(
     }
 }
 
+/// Closes the block announces link with the given peer, if it is open, and reports the
+/// disconnection to the subscribers.
+fn close_block_announces_link<TPlat: PlatformRef>(
+    task: &mut BackgroundTask<TPlat>,
+    chain_id: ChainId,
+    peer_id: &PeerId,
+) {
+    if !task.network.gossip_is_connected(
+        chain_id,
+        peer_id,
+        service::GossipKind::ConsensusTransactions,
+    ) {
+        return;
+    }
+
+    let _closed_result = task.network.gossip_close(
+        chain_id,
+        peer_id,
+        service::GossipKind::ConsensusTransactions,
+    );
+    debug_assert!(_closed_result.is_ok());
+
+    log!(
+        &task.platform,
+        Debug,
+        "network",
+        "gossip-closed",
+        chain = &task.network[chain_id].log_name,
+        peer_id,
+    );
+
+    let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
+    debug_assert!(_was_in.is_some());
+    task.network[chain_id].metrics.gossip_peers_connected.dec();
+
+    // This can run while another event is already queued, hence the push to a queue.
+    task.events_pending_send.push_back((
+        chain_id,
+        Event::Disconnected {
+            peer_id: peer_id.clone(),
+        },
+    ));
+}
+
+/// Picks a bootnode among the peers that hold an out-slot, to free its slot. Returns `None` if
+/// there is no such bootnode, or if freeing its slot would leave the chain without an open link.
+fn pick_bootnode_to_rotate<'a>(
+    slot_peers: impl Iterator<Item = &'a PeerId>,
+    is_bootnode: impl Fn(&PeerId) -> bool,
+    is_open: impl Fn(&PeerId) -> bool,
+) -> Option<&'a PeerId> {
+    let slot_peers = slot_peers.collect::<Vec<_>>();
+    let candidate = *slot_peers.iter().find(|p| is_bootnode(p))?;
+    slot_peers
+        .iter()
+        .any(|p| *p != candidate && is_open(p))
+        .then_some(candidate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         Role, TopicAffinity, TopicAffinityConfig, combined_topic_affinity,
-        dispatch_find_node_requests, pop_p2p_if_matches, service,
+        dispatch_find_node_requests, pick_bootnode_to_rotate, pop_p2p_if_matches, service,
     };
     use core::time::Duration;
     use rand_chacha::rand_core::SeedableRng as _;
@@ -4535,6 +4638,41 @@ mod tests {
         bloom_seed: 0x5EED_5EED_5EED_5EED_5EED_5EED_5EED_5EED,
         false_positive_rate: 0.01,
     };
+
+    fn rotation_peers() -> [PeerId; 3] {
+        [1u8, 2, 3].map(|n| {
+            PeerId::from_public_key(&smoldot::libp2p::peer_id::PublicKey::Ed25519([n; 32]))
+        })
+    }
+
+    #[test]
+    fn rotate_picks_bootnode_when_another_link_is_open() {
+        let [boot, other, _] = rotation_peers();
+        let picked = pick_bootnode_to_rotate([&boot, &other].into_iter(), |p| *p == boot, |_| true);
+        assert_eq!(picked, Some(&boot));
+    }
+
+    #[test]
+    fn rotate_keeps_last_open_link() {
+        let [boot, other, _] = rotation_peers();
+        let picked =
+            pick_bootnode_to_rotate([&boot, &other].into_iter(), |p| *p == boot, |p| *p == boot);
+        assert_eq!(picked, None);
+    }
+
+    #[test]
+    fn rotate_works_when_all_slots_are_bootnodes() {
+        let [a, b, _] = rotation_peers();
+        let picked = pick_bootnode_to_rotate([&a, &b].into_iter(), |_| true, |_| true);
+        assert_eq!(picked, Some(&a));
+    }
+
+    #[test]
+    fn rotate_nothing_without_bootnode_slot() {
+        let [a, b, c] = rotation_peers();
+        let picked = pick_bootnode_to_rotate([&a, &b].into_iter(), |p| *p == c, |_| true);
+        assert_eq!(picked, None);
+    }
 
     #[test]
     fn combined_topic_affinity_no_subscriber() {
