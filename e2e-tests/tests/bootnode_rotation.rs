@@ -20,9 +20,12 @@
 //! Spawns a westend-local relay with two validators and four full nodes. Only
 //! `validator-a` is listed in the chain spec `bootNodes`. Smoldot first fills
 //! a slot with it, discovers the other nodes, and once synced must free the
-//! bootnode slot: `validator-a` leaves `system_peers` and stays out while the
-//! other nodes take the slots. Five non-bootnodes are needed so that one of
-//! them is free to take the slot when smoldot's four slots are full.
+//! bootnode slot: `validator-a` leaves `system_peers` while the other nodes
+//! take the slots. It then stays out, as smoldot rejects the block announces
+//! link that `validator-a` reopens from its side while it is banned.
+//!
+//! At least four non-bootnodes are needed: three share smoldot's four slots
+//! with the bootnode and one is free to take its slot. The test has five.
 
 use anyhow::anyhow;
 use smoldot_e2e_tests::*;

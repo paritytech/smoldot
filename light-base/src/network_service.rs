@@ -1260,7 +1260,9 @@ struct BackgroundTask<TPlat: PlatformRef> {
     current_affinity_filter: HashMap<ChainId, AffinityFilter, fnv::FnvBuildHasher>,
 
     /// Important nodes per chain (in practice the bootnodes; see [`NetworkServiceChain::discover`]).
-    /// They get extra logging, and slot preference until the chain first connects.
+    /// They get extra logging and are never purged from the address book. They are preferred for
+    /// out slots while the chain has no open link and avoided otherwise, and their slots are
+    /// freed by the rotation once the chain is synced.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
 
@@ -4616,8 +4618,10 @@ fn is_important_node(
         .is_some_and(|nodes| nodes.contains(peer_id))
 }
 
-/// Forgets the statement substream of a peer after its block announces substream has closed. The
-/// statement substream closes with it, unless the peer has a statement link of its own.
+/// Removes a peer from the statement bookkeeping (V2/V3 peers, topology, steering) after the
+/// statement substream that follows its block announces substream may have gone, either because
+/// the block announces substream closed or because a secondary substream closed. Does nothing
+/// if the statement substream is still connected or if the peer is desired as a statement link.
 fn forget_following_statement_substream<TPlat: PlatformRef>(
     task: &mut BackgroundTask<TPlat>,
     chain_id: ChainId,

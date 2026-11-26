@@ -30,6 +30,7 @@ const ROTATION_TIMEOUT_MS = 240_000;
 // Shorter than the 300s ban of a rotated bootnode.
 const STAY_OUT_MS = 60_000;
 const MIN_PEERS_AFTER = 3;
+const RPC_TIMEOUT_MS = 5_000;
 
 export default async function bootnodeRotation(ctx) {
   const { report, env, files } = ctx;
@@ -83,7 +84,9 @@ export default async function bootnodeRotation(ctx) {
 }
 
 // Polls `system_peers`, which lists the gossip-connected peers, until `done`
-// returns true. Returns the peers, or null at the deadline.
+// returns true. Returns the peers, or null at the deadline. Throws if a call
+// gets no answer, so that a hung client can't pass as a peer list that never
+// matched.
 async function pollPeers(rpc, chain, done, deadline) {
   while (Date.now() < deadline) {
     const reqId = rpc.sendRpc(chain, "system_peers", []).toString();
@@ -96,8 +99,11 @@ async function pollPeers(rpc, chain, done, deadline) {
         }
         return msg.result ?? [];
       },
-      Math.min(deadline, Date.now() + 5_000),
+      Date.now() + RPC_TIMEOUT_MS,
     );
+    if (peers === undefined) {
+      throw new Error(`system_peers got no answer within ${RPC_TIMEOUT_MS}ms`);
+    }
     if (Array.isArray(peers) && done(peers)) {
       return peers;
     }
