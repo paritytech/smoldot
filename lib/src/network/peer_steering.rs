@@ -151,6 +151,11 @@ where
         self.banned.insert(peer, until);
     }
 
+    /// Whether `peer` has a ban that lasts past `now`.
+    pub fn is_banned(&self, peer: &PeerId, now: &TNow) -> bool {
+        self.banned.get(peer).is_some_and(|until| *until > *now)
+    }
+
     // === Reserved set ===
 
     /// Replace the set of peers that the caller holds desired under the statement gossip kind.
@@ -166,10 +171,14 @@ where
 
     /// Replace the set of peers needed to cover the subscribed topics, and fill the random
     /// slots left empty from `candidates`. Bans that ended as of `now` are forgotten.
+    ///
+    /// `keep_random_slots` is false when no topic is subscribed. An empty `peers` does not
+    /// show it, because `peers` is also empty while all peers of the topics are banned.
     pub fn update_peers_needing_connections<'a>(
         &mut self,
         peers: impl IntoIterator<Item = PeerId>,
         candidates: impl Iterator<Item = &'a PeerId>,
+        keep_random_slots: bool,
         now: &TNow,
     ) {
         self.banned.retain(|_, until| *until > *now);
@@ -177,11 +186,11 @@ where
         self.desired.extend(peers);
 
         // A random peer that the cover now needs, or that got banned, frees its slot. With no
-        // cover there is nothing to protect, so the random slots go as well.
+        // topic there is nothing to protect, so the random slots go as well.
         self.random.retain(|p| {
-            !self.desired.is_empty() && !self.desired.contains(p) && !self.banned.contains_key(p)
+            keep_random_slots && !self.desired.contains(p) && !self.banned.contains_key(p)
         });
-        if !self.desired.is_empty() && self.random.len() < RANDOM_SLOTS {
+        if keep_random_slots && self.random.len() < RANDOM_SLOTS {
             let picked = candidates
                 .filter(|p| {
                     !self.desired.contains(*p)
@@ -253,7 +262,14 @@ mod tests {
     }
 
     fn update(steering: &mut PeerSteering<Duration>, peers: impl IntoIterator<Item = PeerId>) {
-        steering.update_peers_needing_connections(peers, iter::empty(), &Duration::ZERO);
+        let peers = peers.into_iter().collect::<Vec<_>>();
+        let keep_random_slots = !peers.is_empty();
+        steering.update_peers_needing_connections(
+            peers,
+            iter::empty(),
+            keep_random_slots,
+            &Duration::ZERO,
+        );
     }
 
     #[test]
@@ -372,10 +388,12 @@ mod tests {
         steering.on_substream_opened(peer(1));
         steering.ban(peer(1), until);
         assert!(steering.connected.is_empty());
+        assert!(steering.is_banned(&peer(1), &Duration::ZERO));
+        assert!(!steering.is_banned(&peer(1), &until));
 
-        steering.update_peers_needing_connections([peer(1)], iter::empty(), &Duration::ZERO);
+        steering.update_peers_needing_connections([peer(1)], iter::empty(), true, &Duration::ZERO);
         assert!(steering.peers_to_reserve().is_empty());
-        steering.update_peers_needing_connections([peer(1)], iter::empty(), &until);
+        steering.update_peers_needing_connections([peer(1)], iter::empty(), true, &until);
         assert_eq!(steering.peers_to_reserve(), vec![peer(1)]);
     }
 
@@ -385,25 +403,32 @@ mod tests {
         let known = (1..=20).map(peer).collect::<Vec<_>>();
         let candidates = || known.iter();
 
-        steering.update_peers_needing_connections([peer(1)], candidates(), &Duration::ZERO);
+        steering.update_peers_needing_connections([peer(1)], candidates(), true, &Duration::ZERO);
         let random = steering.random.clone();
         assert_eq!(random.len(), RANDOM_SLOTS);
         assert!(!random.contains(&peer(1)));
         assert_eq!(steering.peers_to_reserve().len(), 1 + RANDOM_SLOTS);
 
         // The slot stays with its peer across refreshes, and a closed link frees it.
-        steering.update_peers_needing_connections([peer(1)], candidates(), &Duration::ZERO);
+        steering.update_peers_needing_connections([peer(1)], candidates(), true, &Duration::ZERO);
         assert_eq!(steering.random, random);
         steering.on_substream_closed(&random[0]);
-        steering.update_peers_needing_connections([peer(1)], candidates(), &Duration::ZERO);
+        steering.update_peers_needing_connections([peer(1)], candidates(), true, &Duration::ZERO);
         assert_eq!(steering.random.len(), RANDOM_SLOTS);
         assert!(steering.is_desired(&steering.random[0]));
 
-        // The slot survives a refresh without candidates, and goes with the cover.
+        // The slot survives a refresh without candidates and a cover left empty by bans, and
+        // goes with the topics.
         update(&mut steering, [peer(1)]);
         assert_eq!(steering.peers_to_reserve().len(), 1 + RANDOM_SLOTS);
+        steering.update_peers_needing_connections([], iter::empty(), true, &Duration::ZERO);
+        assert_eq!(steering.random.len(), RANDOM_SLOTS);
         update(&mut steering, []);
         assert!(steering.random.is_empty());
         assert!(steering.peers_to_reserve().is_empty());
+
+        // An empty slot is filled under a cover left empty by bans.
+        steering.update_peers_needing_connections([], candidates(), true, &Duration::ZERO);
+        assert_eq!(steering.random.len(), RANDOM_SLOTS);
     }
 }
