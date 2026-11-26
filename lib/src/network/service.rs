@@ -325,6 +325,75 @@ struct Chain<TChain> {
 
     /// See [`ChainConfig::user_data`].
     user_data: TChain,
+
+    /// See [`ChainNetwork::chain_traffic`].
+    traffic: ChainTraffic,
+}
+
+/// Bytes and messages exchanged over one protocol of one chain.
+///
+/// Sizes are the protocol payloads, without the Noise, Yamux or length-prefix framing around
+/// them. For request-response protocols, a message is a request or a response. Notification
+/// substream handshakes are counted in the bytes but not in the messages.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProtocolTraffic {
+    /// Bytes received from remotes.
+    pub bytes_in: u64,
+    /// Bytes sent to remotes.
+    pub bytes_out: u64,
+    /// Messages received from remotes.
+    pub messages_in: u64,
+    /// Messages sent to remotes.
+    pub messages_out: u64,
+}
+
+impl ProtocolTraffic {
+    fn record_in(&mut self, bytes: usize) {
+        self.record_handshake_in(bytes);
+        self.messages_in = self.messages_in.saturating_add(1);
+    }
+
+    fn record_out(&mut self, bytes: usize) {
+        self.record_handshake_out(bytes);
+        self.messages_out = self.messages_out.saturating_add(1);
+    }
+
+    fn record_handshake_in(&mut self, bytes: usize) {
+        self.bytes_in = self.bytes_in.saturating_add(bytes as u64);
+    }
+
+    fn record_handshake_out(&mut self, bytes: usize) {
+        self.bytes_out = self.bytes_out.saturating_add(bytes as u64);
+    }
+}
+
+/// Traffic of one chain, per protocol. See [`ChainNetwork::chain_traffic`].
+///
+/// Chain-agnostic protocols (identify, ping, bitswap) are not counted.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ChainTraffic {
+    /// Blocks requests and responses, in both directions.
+    pub blocks: ProtocolTraffic,
+    /// GrandPa warp sync requests.
+    pub warp_sync: ProtocolTraffic,
+    /// State requests.
+    pub state: ProtocolTraffic,
+    /// Storage proof requests, including child storage proof requests.
+    pub storage_proof: ProtocolTraffic,
+    /// Call proof requests.
+    pub call_proof: ProtocolTraffic,
+    /// Kademlia requests.
+    pub kademlia: ProtocolTraffic,
+    /// Block announces notifications.
+    pub block_announces: ProtocolTraffic,
+    /// Transactions notifications.
+    pub transactions: ProtocolTraffic,
+    /// GrandPa notifications.
+    pub grandpa: ProtocolTraffic,
+    /// Statement notifications, all protocol versions.
+    pub statements: ProtocolTraffic,
 }
 
 /// See [`ChainNetwork::inner`].
@@ -545,6 +614,7 @@ where
             grandpa_protocol_config: config.grandpa_protocol_config,
             enable_statement_protocol: config.enable_statement_protocol,
             user_data: config.user_data,
+            traffic: ChainTraffic::default(),
         });
 
         // TODO: consider optimizing this, as it's O(n) over the number of chains currently
@@ -796,6 +866,73 @@ where
     ///
     pub fn block_number_bytes(&self, chain_id: ChainId) -> usize {
         self.chains[chain_id.0].block_number_bytes
+    }
+
+    /// Returns the bytes and messages exchanged so far over each protocol of the given chain.
+    ///
+    /// The totals start at zero when the chain is added and only go up.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given [`ChainId`] is invalid.
+    ///
+    pub fn chain_traffic(&self, chain_id: ChainId) -> &ChainTraffic {
+        &self.chains[chain_id.0].traffic
+    }
+
+    /// Returns the traffic counters `protocol` is counted in, if it belongs to a chain.
+    fn protocol_traffic(&mut self, protocol: Protocol) -> Option<&mut ProtocolTraffic> {
+        let (chain_index, field): (usize, fn(&mut ChainTraffic) -> &mut ProtocolTraffic) =
+            match protocol {
+                Protocol::Identify | Protocol::Ping | Protocol::Bitswap => return None,
+                Protocol::Notifications(protocol) => return self.notifications_traffic(protocol),
+                Protocol::Sync { chain_index } => (chain_index, |t| &mut t.blocks),
+                Protocol::LightUnknown { chain_index } | Protocol::LightStorage { chain_index } => {
+                    (chain_index, |t| &mut t.storage_proof)
+                }
+                Protocol::LightCall { chain_index } => (chain_index, |t| &mut t.call_proof),
+                Protocol::Kad { chain_index } => (chain_index, |t| &mut t.kademlia),
+                Protocol::SyncWarp { chain_index } => (chain_index, |t| &mut t.warp_sync),
+                Protocol::State { chain_index } => (chain_index, |t| &mut t.state),
+            };
+        self.chains
+            .get_mut(chain_index)
+            .map(|chain| field(&mut chain.traffic))
+    }
+
+    /// Returns the traffic counters of the given notifications protocol, if its chain still
+    /// exists.
+    fn notifications_traffic(
+        &mut self,
+        protocol: NotificationsProtocol,
+    ) -> Option<&mut ProtocolTraffic> {
+        let chain = self.chains.get_mut(match protocol {
+            NotificationsProtocol::BlockAnnounces { chain_index }
+            | NotificationsProtocol::Transactions { chain_index }
+            | NotificationsProtocol::Grandpa { chain_index }
+            | NotificationsProtocol::Statement { chain_index, .. } => chain_index,
+        })?;
+        Some(match protocol {
+            NotificationsProtocol::BlockAnnounces { .. } => &mut chain.traffic.block_announces,
+            NotificationsProtocol::Transactions { .. } => &mut chain.traffic.transactions,
+            NotificationsProtocol::Grandpa { .. } => &mut chain.traffic.grandpa,
+            NotificationsProtocol::Statement { .. } => &mut chain.traffic.statements,
+        })
+    }
+
+    /// Queues a notification on the given substream and counts it if it was queued.
+    fn queue_counted_notification(
+        &mut self,
+        substream_id: SubstreamId,
+        protocol: NotificationsProtocol,
+        notification: Vec<u8>,
+    ) -> Result<(), collection::QueueNotificationError> {
+        let len = notification.len();
+        self.inner.queue_notification(substream_id, notification)?;
+        if let Some(traffic) = self.notifications_traffic(protocol) {
+            traffic.record_out(len);
+        }
+        Ok(())
     }
 
     /// Marks the given chain-peer combination as "desired".
@@ -1783,6 +1920,12 @@ where
                         .as_ref()
                         .unwrap_or_else(|| unreachable!());
 
+                    if let (Some(protocol), Ok(payload)) = (substream_info.protocol, &response)
+                        && let Some(traffic) = self.protocol_traffic(protocol)
+                    {
+                        traffic.record_in(payload.len());
+                    }
+
                     // Decode/verify the response.
                     let (response, chain_index) = match substream_info.protocol {
                         None => continue,
@@ -1960,7 +2103,12 @@ where
                         .0]
                         .clone();
 
-                    match substream_info.protocol {
+                    let protocol = substream_info.protocol;
+                    if let Some(traffic) = protocol.and_then(|p| self.protocol_traffic(p)) {
+                        traffic.record_in(request_payload.len());
+                    }
+
+                    match protocol {
                         None => {
                             // Substream concerns a chain that has been removed.
                             let _ = self.substreams.remove(&substream_id);
@@ -2053,6 +2201,12 @@ where
                         substream_id,
                     ));
                     debug_assert!(_was_in);
+
+                    if let Ok(handshake) = &result
+                        && let Some(traffic) = self.notifications_traffic(substream_protocol)
+                    {
+                        traffic.record_handshake_in(handshake.len());
+                    }
 
                     // The behaviour is very specific to the protocol.
                     match substream_protocol {
@@ -2482,7 +2636,11 @@ where
                                     a.extend_from_slice(b.as_ref());
                                     a
                                 });
-                                match self.inner.queue_notification(substream_id, packet) {
+                                match self.queue_counted_notification(
+                                    substream_id,
+                                    substream_protocol,
+                                    packet,
+                                ) {
                                     Ok(()) => {}
                                     Err(collection::QueueNotificationError::QueueFull) => {
                                         unreachable!()
@@ -2773,7 +2931,10 @@ where
                     }
                 }
 
-                collection::Event::NotificationsInOpen { substream_id, .. } => {
+                collection::Event::NotificationsInOpen {
+                    substream_id,
+                    remote_handshake,
+                } => {
                     // Remote would like to open a notifications substream with us.
 
                     // There exists three possible ways to handle this event:
@@ -2810,6 +2971,9 @@ where
                     let Protocol::Notifications(substream_protocol) = substream_protocol else {
                         unreachable!()
                     };
+                    if let Some(traffic) = self.notifications_traffic(substream_protocol) {
+                        traffic.record_handshake_in(remote_handshake.len());
+                    }
                     let (NotificationsProtocol::BlockAnnounces { chain_index }
                     | NotificationsProtocol::Transactions { chain_index }
                     | NotificationsProtocol::Grandpa { chain_index }
@@ -2876,9 +3040,11 @@ where
                             substream_id,
                         ));
                         debug_assert!(_was_inserted);
+                        let handshake =
+                            self.sent_notifications_protocol_handshake(substream_protocol);
                         self.inner.accept_in_notifications(
                             substream_id,
-                            self.notifications_protocol_handshake(substream_protocol),
+                            handshake,
                             self.notifications_protocol_max_notification_size(substream_protocol),
                         );
 
@@ -2987,11 +3153,15 @@ where
                         Some(Protocol::Notifications(p)) => p,
                         Some(_) => unreachable!(),
                     };
+                    let connection_id = substream_info.connection_id;
+                    if let Some(traffic) = self.notifications_traffic(substream_protocol) {
+                        traffic.record_in(notification.len());
+                    }
                     let (NotificationsProtocol::BlockAnnounces { chain_index }
                     | NotificationsProtocol::Transactions { chain_index }
                     | NotificationsProtocol::Grandpa { chain_index }
                     | NotificationsProtocol::Statement { chain_index, .. }) = substream_protocol;
-                    let peer_index = *self.inner[substream_info.connection_id]
+                    let peer_index = *self.inner[connection_id]
                         .peer_index
                         .as_ref()
                         .unwrap_or_else(|| unreachable!());
@@ -3836,6 +4006,10 @@ where
             codec::encode_protocol_name_string(protocol_name)
         };
 
+        if let Some(traffic) = self.protocol_traffic(protocol) {
+            traffic.record_out(request_data.len());
+        }
+
         let substream_id = self.inner.start_request(
             connection_id,
             protocol_name,
@@ -3995,6 +4169,12 @@ where
         } else {
             Err(())
         };
+
+        if let (Some(protocol), Ok(response)) = (substream_info.protocol, &response)
+            && let Some(traffic) = self.protocol_traffic(protocol)
+        {
+            traffic.record_out(response.len());
+        }
 
         self.inner.respond_in_request(substream_id, response);
     }
@@ -4237,15 +4417,17 @@ where
             ));
             debug_assert!(_was_inserted);
 
+            let handshake = self.sent_notifications_protocol_handshake(protocol);
             self.inner.accept_in_notifications(
                 in_substream_id,
-                self.notifications_protocol_handshake(protocol),
+                handshake,
                 self.notifications_protocol_max_notification_size(protocol),
             )
         }
 
         // Open the substream the link is anchored on. A statement link starts with V3 and
         // falls back to V2, then to V1, if the peer doesn't support it.
+        let chain_info = &self.chains[chain_id.0];
         let (anchor_protocol, anchor_protocol_name) = match kind {
             GossipKind::ConsensusTransactions => (
                 NotificationsProtocol::BlockAnnounces {
@@ -4268,11 +4450,13 @@ where
                 },
             ),
         };
+        let anchor_protocol_name = codec::encode_protocol_name_string(anchor_protocol_name);
+        let handshake = self.sent_notifications_protocol_handshake(anchor_protocol);
         let substream_id = self.inner.open_out_notifications(
             connection_id,
-            codec::encode_protocol_name_string(anchor_protocol_name),
+            anchor_protocol_name,
             self.notifications_protocol_handshake_timeout(anchor_protocol),
-            self.notifications_protocol_handshake(anchor_protocol),
+            handshake,
             self.notifications_protocol_max_handshake_size(anchor_protocol),
         );
         let _prev_value = self.substreams.insert(
@@ -4573,6 +4757,7 @@ where
 
         // Now sending out to all the grandpa substreams that exist.
         // TODO: O(n)
+        let mut sent = 0;
         for (_, _, _, _, substream_id) in
             self.notification_substreams_by_peer_id
                 .iter()
@@ -4584,9 +4769,13 @@ where
                 })
         {
             match self.inner.queue_notification(*substream_id, packet.clone()) {
-                Ok(()) => {}
+                Ok(()) => sent += 1,
                 Err(collection::QueueNotificationError::QueueFull) => {}
             }
+        }
+        let traffic = &mut self.chains[chain_id.0].traffic.grandpa;
+        for _ in 0..sent {
+            traffic.record_out(packet.len());
         }
 
         // Update the locally-stored state.
@@ -4839,7 +5028,7 @@ where
                 .map(|(_, _, _, _, substream_id)| *substream_id)
                 .ok_or(QueueNotificationError::NoConnection)?;
 
-            return match self.inner.queue_notification(substream_id, notification) {
+            return match self.queue_counted_notification(substream_id, protocol, notification) {
                 Ok(()) => Ok(()),
                 Err(collection::QueueNotificationError::QueueFull) => {
                     Err(QueueNotificationError::QueueFull)
@@ -4903,7 +5092,7 @@ where
             id
         };
 
-        match self.inner.queue_notification(substream_id, notification) {
+        match self.queue_counted_notification(substream_id, protocol, notification) {
             Ok(()) => Ok(()),
             Err(collection::QueueNotificationError::QueueFull) => {
                 Err(QueueNotificationError::QueueFull)
@@ -5546,11 +5735,12 @@ where
             NotificationsProtocol::BlockAnnounces { .. } => unreachable!(),
         });
 
+        let handshake = self.sent_notifications_protocol_handshake(protocol);
         let substream_id = self.inner.open_out_notifications(
             connection_id,
             protocol_name,
             self.notifications_protocol_handshake_timeout(protocol),
-            self.notifications_protocol_handshake(protocol),
+            handshake,
             self.notifications_protocol_max_handshake_size(protocol),
         );
         let _prev_value = self.substreams.insert(
@@ -5658,6 +5848,18 @@ where
         _protocol: NotificationsProtocol,
     ) -> Duration {
         Duration::from_secs(10)
+    }
+
+    /// Builds the local handshake of `protocol` and counts it as sent.
+    fn sent_notifications_protocol_handshake(
+        &mut self,
+        protocol: NotificationsProtocol,
+    ) -> Vec<u8> {
+        let handshake = self.notifications_protocol_handshake(protocol);
+        if let Some(traffic) = self.notifications_traffic(protocol) {
+            traffic.record_handshake_out(handshake.len());
+        }
+        handshake
     }
 
     /// Builds the handshake to send to the remote when opening a notifications protocol.

@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    log,
+    log, metrics,
     platform::{PlatformRef, SubstreamDirection},
 };
 
@@ -38,6 +38,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
         service::ConnectionId,
         service::ConnectionToCoordinator,
     )>,
+    metrics: Arc<metrics::NetworkMetrics>,
 ) {
     // We need to pin the receiver, as the type doesn't implement `Unpin`.
     let mut coordinator_to_connection = pin::pin!(coordinator_to_connection);
@@ -70,6 +71,12 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
                     let write_closed = socket_read_write.write_bytes_queueable.is_none();
 
                     task.read_write(&mut *socket_read_write);
+                    metrics
+                        .bytes_received
+                        .add((socket_read_write.read_bytes - read_bytes_before) as u64);
+                    metrics
+                        .bytes_sent
+                        .add((socket_read_write.write_bytes_queued - written_bytes_before) as u64);
 
                     if socket_read_write.read_bytes != read_bytes_before
                         || socket_read_write.write_bytes_queued != written_bytes_before
@@ -245,6 +252,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         service::ConnectionId,
         service::ConnectionToCoordinator,
     )>,
+    metrics: Arc<metrics::NetworkMetrics>,
 ) {
     // Future that sends a message to the coordinator. Only one message is sent to the coordinator
     // at a time. `None` if no message is being sent.
@@ -438,6 +446,12 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
 
                         let substream_fate = connection_task
                             .substream_read_write(&substream_id, &mut *socket_read_write);
+                        metrics
+                            .bytes_received
+                            .add((socket_read_write.read_bytes - read_bytes_before) as u64);
+                        metrics.bytes_sent.add(
+                            (socket_read_write.write_bytes_queued - written_bytes_before) as u64,
+                        );
 
                         if socket_read_write.read_bytes != read_bytes_before
                             || socket_read_write.write_bytes_queued != written_bytes_before
