@@ -362,6 +362,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     log_name: config.log_name,
                     block_number_bytes: config.block_number_bytes,
                     num_out_slots: config.num_out_slots,
+                    local_best_number: config.best_block.0,
                     num_references: NonZero::<usize>::new(1).unwrap(),
                     next_discovery_period: Duration::from_secs(2),
                     next_discovery_when: self.platform.now(),
@@ -1385,6 +1386,10 @@ struct BackgroundTask<TPlat: PlatformRef> {
 /// most one bootnode slot per chain.
 const BOOTNODE_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
 
+/// The rotation only runs on a chain whose local best block is at most this many blocks behind
+/// the best block reported by its peers.
+const BOOTNODE_ROTATION_SYNC_MARGIN: u64 = 4;
+
 /// How long a bootnode freed by the rotation can't get the slot back on that chain.
 const BOOTNODE_ROTATION_BAN: Duration = Duration::from_secs(300);
 
@@ -1429,6 +1434,10 @@ struct Chain<TPlat: PlatformRef> {
 
     /// See [`ConfigChain::num_out_slots`].
     num_out_slots: usize,
+
+    /// Number of the local best block, as last reported with
+    /// [`NetworkServiceChain::set_local_best_block`].
+    local_best_number: u64,
 
     /// See [`ConfigChain::metrics`].
     metrics: Arc<metrics::ChainMetrics>,
@@ -2349,6 +2358,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             ) => {
                 task.network
                     .set_chain_local_best_block(chain_id, best_hash, best_number);
+                task.network[chain_id].local_best_number = best_number;
             }
             WakeUpReason::MessageForChain(
                 chain_id,
@@ -2651,6 +2661,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     Box::pin(task.platform.sleep(BOOTNODE_ROTATION_INTERVAL));
 
                 for chain_id in task.network.chains().collect::<Vec<_>>() {
+                    if !is_near_peers_best(
+                        task.network[chain_id].local_best_number,
+                        task.open_gossip_links
+                            .iter()
+                            .filter(|((c, _), _)| *c == chain_id)
+                            .map(|(_, link)| link.best_block_number),
+                    ) {
+                        continue;
+                    }
                     let Some(important) = task.important_nodes.get(&chain_id) else {
                         continue;
                     };
@@ -4599,6 +4618,14 @@ fn close_block_announces_link<TPlat: PlatformRef>(
     ));
 }
 
+/// Returns true if `local_best` is at most [`BOOTNODE_ROTATION_SYNC_MARGIN`] blocks behind the
+/// highest of `peers_best`. Returns false if there is no peer.
+fn is_near_peers_best(local_best: u64, peers_best: impl Iterator<Item = u64>) -> bool {
+    peers_best
+        .max()
+        .is_some_and(|max| local_best.saturating_add(BOOTNODE_ROTATION_SYNC_MARGIN) >= max)
+}
+
 /// Picks a bootnode among the peers that hold an out-slot, to free its slot. Returns `None` if
 /// there is no such bootnode, if fewer than two slots are held, or if a slot doesn't have an open
 /// link yet. The latter makes the rotation wait until the previous replacement works.
@@ -4618,7 +4645,8 @@ fn pick_bootnode_to_rotate<'a>(
 mod tests {
     use super::{
         Role, TopicAffinity, TopicAffinityConfig, combined_topic_affinity,
-        dispatch_find_node_requests, pick_bootnode_to_rotate, pop_p2p_if_matches, service,
+        dispatch_find_node_requests, is_near_peers_best, pick_bootnode_to_rotate,
+        pop_p2p_if_matches, service,
     };
     use core::time::Duration;
     use rand_chacha::rand_core::SeedableRng as _;
@@ -4648,6 +4676,14 @@ mod tests {
         let picked =
             pick_bootnode_to_rotate([&boot, &other].into_iter(), |p| *p == boot, |p| *p == boot);
         assert_eq!(picked, None);
+    }
+
+    #[test]
+    fn near_peers_best() {
+        assert!(!is_near_peers_best(100, [].into_iter()));
+        assert!(is_near_peers_best(100, [90, 104].into_iter()));
+        assert!(!is_near_peers_best(100, [90, 105].into_iter()));
+        assert!(is_near_peers_best(110, [100].into_iter()));
     }
 
     #[test]
