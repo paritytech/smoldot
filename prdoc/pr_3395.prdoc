@@ -1,6 +1,0 @@
-changes:
-  - section: fixed
-    description: |
-      Runtime calls that write to a child trie, such as a `ContractsApi_call`
-      dry run, no longer fail with an inaccessible storage error, and no longer
-      get the peers that served the call proof banned.

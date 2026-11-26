@@ -198,7 +198,7 @@ struct Background<TPlat: PlatformRef> {
     transactions_subscriptions: hashbrown::HashMap<String, TransactionWatch, fnv::FnvBuildHasher>,
 
     /// Active `bitswap_unstable_stream` subscriptions, keyed by subscription ID. Holds the
-    /// [`bitswap_service::BitswapStreamHandle`] alive — dropping the entry (via
+    /// [`bitswap_service::BitswapStreamHandle`] alive - dropping the entry (via
     /// `bitswap_unstable_unstream` or task shutdown) drops the embedded cancel guard, which sends a
     /// Bitswap Cancel wantlist to peers we contacted on this subscription's behalf.
     bitswap_subscriptions: hashbrown::HashMap<String, BitswapSubscription, fnv::FnvBuildHasher>,
@@ -265,6 +265,8 @@ struct Background<TPlat: PlatformRef> {
     /// Active statement subscriptions, indexed by topic for efficient matching.
     statement_subscriptions: super::statement::StatementSubscriptions,
 
+    /// Identifies this service in [`network_service::NetworkServiceChain::update_topic_affinity`].
+    statement_affinity_subscriber: usize,
     statement_affinity_stale: bool,
     next_statement_affinity_update: Option<Pin<Box<TPlat::Delay>>>,
     last_statement_affinity_update: Option<TPlat::Instant>,
@@ -759,6 +761,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: false,
         statement_subscriptions: super::statement::StatementSubscriptions::with_capacity(16),
+        statement_affinity_subscriber: config.network_service.new_topic_affinity_subscriber(),
         statement_affinity_stale: false,
         next_statement_affinity_update: None,
         last_statement_affinity_update: None,
@@ -923,6 +926,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
         match wake_up_reason {
             WakeUpReason::ForegroundDead => {
                 // Service foreground has been destroyed. Stop the background task.
+                // The network service outlives this service when the chain was added several
+                // times, and must stop advertising the topics of the subscriptions.
+                if me.last_statement_affinity_update.is_some() {
+                    me.network_service
+                        .update_topic_affinity(
+                            me.statement_affinity_subscriber,
+                            network_service::TopicAffinity::Topics(Vec::new()),
+                        )
+                        .await;
+                }
                 return;
             }
 
@@ -947,14 +960,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.statement_affinity_stale = false;
                 me.last_statement_affinity_update = Some(me.platform.now());
 
-                let (combined_filter, topics) =
-                    me.statement_subscriptions.build_combined_affinity_filter(
-                        me.statement_protocol_config
-                            .as_ref()
-                            .expect("statement affinity requires statement protocol; qed"),
-                    );
                 me.network_service
-                    .update_topic_affinity(combined_filter, topics)
+                    .update_topic_affinity(
+                        me.statement_affinity_subscriber,
+                        me.statement_subscriptions.topic_affinity(),
+                    )
                     .await;
             }
 

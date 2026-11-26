@@ -106,7 +106,7 @@ impl Harness {
         self.now += amount;
     }
 
-    /// Delivers all pending coordinator->connection messages for the given side.
+    /// Delivers all pending coordinator-to-connection messages for the given side.
     fn deliver_coord_to_conn(&mut self, side: Side) -> bool {
         let mut progress = false;
         loop {
@@ -125,7 +125,7 @@ impl Harness {
         progress
     }
 
-    /// Pulls all connection->coordinator messages for the given side and injects them into its
+    /// Pulls all connection-to-coordinator messages for the given side and injects them into its
     /// coordinator. Does not call `next_event`.
     fn drain_conn_to_coord(&mut self, side: Side) -> bool {
         let mut progress = false;
@@ -200,7 +200,7 @@ impl Harness {
     }
 
     /// Runs the system until nothing more happens. The `deliver_*` flags control whether pending
-    /// coordinator->connection messages are delivered to each side; holding them back is what
+    /// coordinator-to-connection messages are delivered to each side; holding them back is what
     /// lets a test keep a message "in flight". Returns every event produced along the way.
     ///
     /// When neither side can make byte progress but a connection task has asked to be woken up
@@ -273,7 +273,7 @@ impl Harness {
 ///  6. The coordinator processes the `NotificationsInOpenCancel`, finds its records already gone
 ///     (removed in step 3), and re-sends a second `RejectInNotifications` (msg #2).
 ///  7. Msg #2 finds the ack queue empty and calls `reject_in_notifications_substream` on a
-///     substream that no longer exists in yamux -> panic before the fix.
+///     substream that no longer exists in yamux, which panicked before the fix.
 #[test]
 fn reject_in_notifications_double_send_after_remote_reset() {
     let mut harness = Harness::new();
@@ -386,7 +386,8 @@ fn reject_in_notifications_double_send_after_remote_reset() {
 ///     ack entry.
 ///  6. The held-back accept (msg #1) is delivered and consumes that single ack entry.
 ///  7. The held-back close (msg #2) finds the ack queue empty and calls
-///     `close_in_notifications_substream` on a substream that no longer exists in yamux -> panic.
+///     `close_in_notifications_substream` on a substream that no longer exists in yamux, which
+///     panics.
 #[test]
 fn close_in_notifications_crossing_remote_reset() {
     let mut harness = Harness::new();
@@ -699,7 +700,7 @@ impl MultiHarness {
         }
     }
 
-    /// Delivers all pending coordinator->connection messages for the given side.
+    /// Delivers all pending coordinator-to-connection messages for the given side.
     fn deliver_coord_to_conn(&mut self, side: Side) -> bool {
         let mut progress = false;
         loop {
@@ -718,7 +719,7 @@ impl MultiHarness {
         progress
     }
 
-    /// Pulls all connection->coordinator messages for the given side and injects them into its
+    /// Pulls all connection-to-coordinator messages for the given side and injects them into its
     /// coordinator. Does not call `next_event`.
     fn drain_conn_to_coord(&mut self, side: Side) -> bool {
         let mut progress = false;
@@ -1399,7 +1400,7 @@ fn multi_stream_queue_notification_crossing_remote_reset() {
         )));
 }
 
-/// The remote resets the data channel that carries an inbound substream while the API's answer
+/// The remote resets the data channel that carries an inbound substream while the answer of the API
 /// to `InboundNegotiated` is still in flight: the substream is still waiting for that answer
 /// (`InboundNegotiatingApiWait`) when the reset reaches the state machine.
 ///

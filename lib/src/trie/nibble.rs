@@ -42,7 +42,7 @@ impl Nibble {
         Some(Nibble(new_nibble))
     }
 
-    /// Converts an ASCII headecimal digit (i.e. `0..9`, `a..f`, `A..F`) into a nibble.
+    /// Converts an ASCII hexadecimal digit (i.e. `0..9`, `a..f`, `A..F`) into a nibble.
     ///
     /// Returns `None` if `digit` is out of range.
     pub fn from_ascii_hex_digit(digit: u8) -> Option<Self> {

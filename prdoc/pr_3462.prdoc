@@ -1,0 +1,6 @@
+changes:
+  - section: fixed
+    description: |
+      When a chain is added several times, the statement topic filter covers
+      the subscriptions of all its handles.
+fixes: [3447]

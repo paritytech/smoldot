@@ -24,13 +24,17 @@
 //!
 //! # Binary representation of CIDv1
 //!
+//! ```text
 //! cidv1 ::= <leb128(cid_version)><leb128(codec)><leb128(mh_type)><leb128(mh_len)><hash_digest>
+//! ```
 //!
 //! Subparts of the CIDv1 binary representation we are interested in are _CID prefix_ & _multihash_
 //! correspondingly:
 //!
+//! ```text
 //! cid_prefix ::= <leb128(cid_version)><leb128(codec)><leb128(mh_type)><leb128(mh_len)>
 //! multihash ::= <leb128(mh_type)><leb128(mh_len)><hash_digest>
+//! ```
 //!
 //! Here `leb128()` means LEB128 varint encoded values.
 //!
@@ -158,11 +162,11 @@ impl CidPrefix {
 /// See <https://github.com/multiformats/multicodec/blob/master/table.csv>.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MultihashType {
-    /// SHA-256 (code 0x12).
+    /// SHA-256 (code `0x12`).
     Sha2_256 = 0x12,
-    /// Keccak-256 (draft code 0x1b).
+    /// Keccak-256 (draft code `0x1b`).
     Keccak256 = 0x1b,
-    /// BLAKE2b-256 (code 0xb220).
+    /// BLAKE2b-256 (code `0xb220`).
     Blake2b256 = 0xb220,
 }
 
@@ -220,7 +224,7 @@ pub enum ParseError {
 }
 
 /// Decode multibase string encoded with base32 codec. Note that the string must start from
-/// multibase codec identifier for base32, which is character 'b'.
+/// multibase codec identifier for base32, which is character `b`.
 ///
 /// Base32 encoding itself is specified in
 /// [RFC 4648](https://datatracker.ietf.org/doc/html/rfc4648.html).
@@ -234,7 +238,7 @@ fn multibase_base32_decode(string: &str) -> Result<Vec<u8>, ParseError> {
 }
 
 /// Encode data as multibase with base32 codec. Note that the output will start from base32 codec
-/// identifier, which is character 'b'.
+/// identifier, which is character `b`.
 ///
 /// Base32 encoding itself is specified in
 /// [RFC 4648](https://datatracker.ietf.org/doc/html/rfc4648.html).
@@ -347,7 +351,7 @@ fn parse_cid_prefix<'a, E: nom::error::ParseError<&'a [u8]>>(
 mod tests {
     use super::*;
 
-    /// Build valid CIDv1 prefix: version=1, codec=0x55 (raw), sha2-256.
+    /// Build valid CIDv1 prefix: `version=1`, `codec=0x55` (raw), sha2-256.
     fn sample_prefix_bytes() -> Vec<u8> {
         vec![0x01, 0x55, 0x12, 0x20]
     }
