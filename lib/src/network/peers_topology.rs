@@ -35,6 +35,9 @@
 //! discovered peer counts as a statement peer until Identify or a refused statement substream
 //! says otherwise.
 //!
+//! Only a full node on the DHT path speaks `statement/3`. A peer on an older version wants
+//! every statement and is no candidate for a topic, unless no known peer speaks `statement/3`.
+//!
 //! A light client is never a replica of a topic, so the affinity oracle and the routing of
 //! statements between replicas of the full node have no counterpart here.
 
@@ -77,6 +80,8 @@ pub struct Config {
 struct PeerInfo<TNow> {
     /// `false` once the peer is known to lack the statement protocol.
     supports_protocol: bool,
+    /// Whether the peer speaks `statement/3`. `None` until Identify or a substream tells.
+    dht_path: Option<bool>,
     /// The statement substream to the peer is open.
     connected: bool,
     /// Cached `peer_key`. The peer id never changes and hashing is costly.
@@ -141,12 +146,12 @@ where
         }
     }
 
-    /// Record statement protocol support from the Identify response, or the lack of it from a
-    /// statement substream refused for an unknown protocol.
+    /// Record `statement/3` support from the Identify response, or the lack of the statement
+    /// protocol from a statement substream refused for an unknown protocol.
     ///
     /// Peers that do not support the statement protocol remain known but are excluded from
-    /// the candidates for a topic. An open statement substream proves support and outweighs a
-    /// negative answer.
+    /// the candidates for a topic. An open statement substream proves support and outweighs
+    /// either answer.
     pub fn on_peer_identified(
         &mut self,
         peer: PeerId,
@@ -154,19 +159,28 @@ where
         now: &TNow,
     ) {
         let info = self.get_or_insert_peer(peer, now);
-        info.supports_protocol = supports_statement_protocol || info.connected;
+        if info.connected {
+            return;
+        }
+        info.supports_protocol = supports_statement_protocol;
+        if supports_statement_protocol {
+            info.dht_path = Some(true);
+        }
     }
 
-    /// Record that the statement substream to `peer` opened.
+    /// Record that the statement substream to `peer` opened, on `statement/3` if `dht_path`.
     ///
     /// An open substream implies statement protocol support.
-    pub fn on_substream_opened(&mut self, peer: PeerId, now: &TNow) {
+    pub fn on_substream_opened(&mut self, peer: PeerId, dht_path: bool, now: &TNow) {
         let info = self.get_or_insert_peer(peer, now);
         info.supports_protocol = true;
+        info.dht_path = Some(dht_path);
         info.connected = true;
     }
 
     /// Record that the statement substream to `peer` closed.
+    ///
+    /// A peer on an older version keeps its mark, or it would be connected again at once.
     pub fn on_substream_closed(&mut self, peer: PeerId, now: &TNow) {
         if let Some(info) = self.discovered.get_mut(&peer) {
             info.connected = false;
@@ -181,12 +195,9 @@ where
         self.discovered.len()
     }
 
-    /// Known peers not known to lack the statement protocol, in no specific order.
+    /// Known candidates for a topic, in no specific order.
     pub fn statement_peers(&self) -> impl Iterator<Item = &PeerId> {
-        self.discovered
-            .iter()
-            .filter(|(_, info)| info.supports_protocol)
-            .map(|(peer, _)| peer)
+        self.candidates().map(|(peer, _)| peer)
     }
 
     /// Multiaddresses `peer` was discovered with. Empty for an unknown peer, or for a peer
@@ -246,14 +257,21 @@ where
     }
 
     /// Connected peers to send a statement on `topics` to: every connected peer among the
-    /// `replication_factor` closest known statement peers of one of the topics.
+    /// `replication_factor` closest known statement peers of one of the topics, and every
+    /// connected peer on an older version.
     ///
     /// The full node also routes to connected peers closer to a topic than itself. A light
     /// client is no replica and has no position in the key space, so it keeps only the replicas.
     pub fn routing_targets(&self, topics: &[Key]) -> BTreeSet<PeerId> {
+        let without_dht = self
+            .discovered
+            .iter()
+            .filter(|(_, info)| info.dht_path == Some(false))
+            .map(|(peer, _)| peer.clone());
         topics
             .iter()
             .flat_map(|topic| self.closest_known(topic, self.replication_factor.get()))
+            .chain(without_dht)
             .filter(|peer| self.discovered.get(peer).is_some_and(|info| info.connected))
             .collect()
     }
@@ -262,10 +280,13 @@ where
     /// over `MAX_KNOWN_PEERS`, least recently seen first.
     /// Returns whether the candidates for a topic changed.
     pub fn evict(&mut self, now: &TNow) -> bool {
+        // The candidates change only when a candidate goes, and `dht_path_known` holds until
+        // the first of them does.
+        let dht_path_known = self.dht_path_known();
         let mut changed = false;
         self.discovered.retain(|_, info| {
             let keep = info.connected || info.last_seen.clone() + PEER_STALENESS_TTL > *now;
-            changed |= !keep && info.supports_protocol;
+            changed |= !keep && info.is_candidate(dht_path_known);
             keep
         });
 
@@ -286,7 +307,7 @@ where
         }
         for (_, peer) in victims.into_iter().take(excess) {
             if let Some(info) = self.discovered.remove(&peer) {
-                changed |= info.supports_protocol;
+                changed |= info.is_candidate(dht_path_known);
             }
         }
         changed
@@ -301,6 +322,7 @@ where
             .entry(peer)
             .or_insert_with_key(|peer| PeerInfo {
                 supports_protocol: true,
+                dht_path: None,
                 connected: false,
                 key: peer_key(peer),
                 last_seen: now.clone(),
@@ -316,9 +338,7 @@ where
     /// reuse the key instead of looking it up again.
     fn closest_known_keyed(&self, topic: &Key, limit: usize) -> Vec<(PeerId, Key)> {
         let mut candidates = self
-            .discovered
-            .iter()
-            .filter(|(_, info)| info.supports_protocol)
+            .candidates()
             .map(|(peer, info)| (xor_distance(topic, &info.key), peer, info.key))
             .collect::<Vec<_>>();
         // Only the `limit` closest peers are kept, so the rest need no sorting.
@@ -331,6 +351,28 @@ where
             .into_iter()
             .map(|(_, peer, key)| (peer.clone(), key))
             .collect()
+    }
+
+    /// Peers that may hold a topic. See the [module documentation](self).
+    fn candidates(&self) -> impl Iterator<Item = (&PeerId, &PeerInfo<TNow>)> {
+        let dht_path_known = self.dht_path_known();
+        self.discovered
+            .iter()
+            .filter(move |(_, info)| info.is_candidate(dht_path_known))
+    }
+
+    /// Whether a known statement peer speaks `statement/3`.
+    fn dht_path_known(&self) -> bool {
+        self.discovered
+            .values()
+            .any(|info| info.supports_protocol && info.dht_path == Some(true))
+    }
+}
+
+impl<TNow> PeerInfo<TNow> {
+    /// Whether the peer may hold a topic, given [`PeersTopology::dht_path_known`].
+    fn is_candidate(&self, dht_path_known: bool) -> bool {
+        self.supports_protocol && !(dht_path_known && self.dht_path == Some(false))
     }
 }
 
@@ -449,7 +491,7 @@ mod tests {
 
         // An open substream implies support, even against a later negative answer, and closing
         // it keeps the peer known.
-        topology.on_substream_opened(peer(3), &now);
+        topology.on_substream_opened(peer(3), true, &now);
         topology.on_peer_identified(peer(3), false, &now);
         assert_eq!(topology.closest_known(&topic(9), 10), vec![peer(3)]);
         topology.on_substream_closed(peer(3), &now);
@@ -477,7 +519,7 @@ mod tests {
 
         // A connected peer outlives the TTL, and an event with an older `now` leaves
         // `last_seen` in place.
-        topology.on_substream_opened(peer(2), &start);
+        topology.on_substream_opened(peer(2), true, &start);
         dht_peer(&mut topology, peer(3), start);
         topology.on_peers_discovered([(peer(3), Vec::new())], &Duration::ZERO);
         assert!(!topology.evict(&(Duration::ZERO + PEER_STALENESS_TTL)));
@@ -670,7 +712,7 @@ mod tests {
 
         // Peer 21 is connected but is no replica of topic 1.
         for seed in [7, 21, 4] {
-            topology.on_substream_opened(peer(seed), &Duration::ZERO);
+            topology.on_substream_opened(peer(seed), true, &Duration::ZERO);
         }
         assert_eq!(
             topology.routing_targets(&[topic(1)]),
@@ -683,7 +725,7 @@ mod tests {
             topology.routing_targets(&[topic(1), topic(9)]),
             BTreeSet::from([peer(7)])
         );
-        topology.on_substream_opened(peer(12), &Duration::ZERO);
+        topology.on_substream_opened(peer(12), true, &Duration::ZERO);
         assert_eq!(
             topology.routing_targets(&[topic(17), topic(1), topic(17)]),
             BTreeSet::from([peer(12), peer(21), peer(7)])
@@ -691,5 +733,69 @@ mod tests {
 
         topology.on_substream_closed(peer(7), &Duration::ZERO);
         assert!(topology.routing_targets(&[topic(1)]).is_empty());
+
+        // A connected peer without the DHT path gets every statement.
+        topology.on_substream_opened(peer(30), false, &Duration::ZERO);
+        assert_eq!(
+            topology.routing_targets(&[topic(1)]),
+            BTreeSet::from([peer(30)])
+        );
+        assert_eq!(topology.routing_targets(&[]), BTreeSet::from([peer(30)]));
+    }
+
+    #[test]
+    fn a_peer_without_dht_is_a_candidate_only_while_no_peer_runs_the_dht_path() {
+        // Closest to topic 1 with seeds 2 to 30: 15, 7, 12.
+        let mut topology = topology(2);
+        let now = Duration::ZERO;
+        for seed in 2..=30 {
+            topology.on_peers_discovered([(peer(seed), Vec::new())], &now);
+        }
+
+        // No peer is known to run the DHT path, so a peer on an older version stays a candidate.
+        topology.on_substream_opened(peer(15), false, &now);
+        assert_eq!(topology.closest_known(&topic(1), 2), [peer(15), peer(7)]);
+        assert_eq!(topology.statement_peers().count(), 29);
+
+        // One peer on `statement/3` is enough to drop it, and closing its substream keeps it out.
+        topology.on_substream_opened(peer(30), true, &now);
+        assert_eq!(topology.closest_known(&topic(1), 2), [peer(7), peer(12)]);
+        assert_eq!(topology.peers_for_topics(&[topic(1)]), [peer(7)]);
+        assert_eq!(topology.statement_peers().count(), 28);
+        topology.on_substream_closed(peer(15), &now);
+        assert_eq!(topology.closest_known(&topic(1), 2), [peer(7), peer(12)]);
+
+        // Identify listing `statement/3` brings it back, and a `statement/3` substream does too.
+        topology.on_peer_identified(peer(15), true, &now);
+        assert_eq!(topology.closest_known(&topic(1), 2), [peer(15), peer(7)]);
+        topology.on_substream_opened(peer(7), false, &now);
+        topology.on_peer_identified(peer(7), true, &now);
+        assert_eq!(topology.closest_known(&topic(1), 2), [peer(15), peer(12)]);
+        topology.on_substream_opened(peer(7), true, &now);
+        assert_eq!(topology.closest_known(&topic(1), 2), [peer(15), peer(7)]);
+    }
+
+    #[test]
+    fn eviction_reports_only_a_change_of_the_candidates() {
+        let mut topology = topology(2);
+        let start = Duration::ZERO;
+        let stale = start + PEER_STALENESS_TTL;
+
+        // Peer 2 is on an older version and peer 3 runs the DHT path, so only peer 3 is a
+        // candidate and the eviction of peer 2 changes nothing.
+        topology.on_substream_opened(peer(2), false, &start);
+        topology.on_substream_closed(peer(2), &start);
+        topology.on_substream_opened(peer(3), true, &start);
+        assert!(!topology.evict(&stale));
+        assert_eq!(topology.known_peers_count(), 1);
+
+        // The eviction of the last peer on the DHT path makes peer 2 a candidate again.
+        topology.on_substream_opened(peer(2), false, &stale);
+        topology.on_substream_closed(peer(3), &start);
+        assert!(topology.evict(&stale));
+        assert_eq!(
+            topology.statement_peers().collect::<Vec<_>>(),
+            vec![&peer(2)]
+        );
     }
 }
