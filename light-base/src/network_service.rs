@@ -4040,13 +4040,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                     peering.topology.evict(&now);
 
+                    let has_topics = !peering.topics.is_empty();
                     let cover = peering.topology.peers_for_topics(&peering.topics, |peer| {
                         peering.steering.is_banned(peer, &now)
                     });
                     peering.steering.update_peers_needing_connections(
                         cover,
                         peering.topology.statement_peers(),
-                        !peering.topics.is_empty(),
+                        has_topics,
                         &now,
                     );
                     let release = peering.steering.peers_to_release();
@@ -4063,7 +4064,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             (peer_id, addresses)
                         })
                         .collect::<Vec<_>>();
-                    let has_topics = !peering.topics.is_empty();
 
                     let mut closed = Vec::new();
                     for peer_id in release {
