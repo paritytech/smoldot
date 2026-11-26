@@ -23,14 +23,17 @@ memory of past releases.
   each lockfile and confirm the only changes are the version bumps —
   unrelated drift means a lockfile was already stale on `main`; stop
   and surface it.
-- Step 5: insert the new section *below* `## Unreleased`. Skip
-  test-only / CI / docs / internal-refactor commits from the changelog.
-  Read the actual PR diffs before classifying entries; PR titles can
-  mislead (e.g. `wasm32v1-unknown` in title vs `wasm32v1-none` in code).
+- Step 5: generate the section with `python3 .github/scripts/prdoc.py
+  release <X.Y.Z>`; don't write it by hand. It deletes the `prdoc/*.prdoc`
+  files it used. Then compare `git log <prev-tag>..HEAD` with the generated
+  entries: read the PR diffs of user-visible changes that have no entry,
+  and propose wording fixes, since PR titles and prdoc text can mislead
+  (e.g. `wasm32v1-unknown` in title vs `wasm32v1-none` in code).
 - Step 6: run `cargo publish --dry-run --locked --allow-dirty -p smoldot`.
   Skip the `smoldot-light` dry-run when `smoldot` is also being bumped
   (it fails on path-dep resolution against crates.io).
-- Step 7 (commit): stage the nine files listed in the doc yourself, then
+- Step 7 (commit): stage the files listed in the doc yourself (including
+  the deleted `prdoc/` files), then
   show the staged diff stat and the exact commit message
   (`npm smoldot v<X.Y.Z>`) and let the user run `git commit` in their own
   shell. smoldot's branch protection on `main` rejects unsigned commits

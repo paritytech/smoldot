@@ -1,0 +1,7 @@
+changes:
+  - section: fixed
+    description: |
+      `ext_storage_clear_prefix` now ignores a prefix that starts with
+      `:child_storage:`, as Substrate does. Before, such a call deleted the root
+      entry of a child trie from the main trie while the child trie kept its
+      content.
