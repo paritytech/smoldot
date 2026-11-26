@@ -652,6 +652,22 @@ where
         }
     }
 
+    /// Returns `true` if the given peer is banned on the given chain and the ban hasn't expired
+    /// at `now`.
+    pub fn is_banned(&self, chain: &TChainId, peer_id: &PeerId, now: &TInstant) -> bool {
+        let (Some(&peer_id_index), Some(&chain_index)) = (
+            self.peer_ids_indices.get(peer_id),
+            self.chains_indices.get(chain),
+        ) else {
+            return false;
+        };
+
+        matches!(
+            self.peers_chains.get(&(peer_id_index, chain_index)),
+            Some(PeerChainState::Banned { expires }) if expires > now
+        )
+    }
+
     /// Picks an address from the list with zero connections, and sets the number of connections
     /// to one. Returns `None` if no such address is available.
     pub fn pick_address_and_add_connection(&mut self, peer_id: &PeerId) -> Option<&[u8]> {
@@ -1039,6 +1055,27 @@ mod tests {
         assert!(PeerChainState::Assignable < PeerChainState::Banned { expires: 0 });
         assert!(PeerChainState::Banned { expires: 5 } < PeerChainState::Banned { expires: 7 });
         assert!(PeerChainState::Banned { expires: u32::MAX } < PeerChainState::Slot);
+    }
+
+    #[test]
+    fn is_banned_until_expiry() {
+        let mut bps = BasicPeeringStrategy::<u32, Duration>::new(Config {
+            randomness_seed: [0; 32],
+            peers_capacity: 0,
+            chains_capacity: 0,
+        });
+
+        let peer_id = PeerId::from_public_key(&PublicKey::Ed25519([1; 32]));
+        assert!(!bps.is_banned(&0, &peer_id, &Duration::ZERO));
+
+        bps.insert_chain_peer(0, peer_id.clone(), usize::MAX);
+        bps.assign_slot(&0, &peer_id);
+        assert!(!bps.is_banned(&0, &peer_id, &Duration::ZERO));
+
+        bps.unassign_slot_and_ban(&0, &peer_id, Duration::from_secs(10));
+        assert!(bps.is_banned(&0, &peer_id, &Duration::from_secs(9)));
+        assert!(!bps.is_banned(&0, &peer_id, &Duration::from_secs(10)));
+        assert!(!bps.is_banned(&1, &peer_id, &Duration::from_secs(9)));
     }
 
     #[test]

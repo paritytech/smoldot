@@ -3741,12 +3741,18 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 // Statement links also appear among the opened undesired links and must
                 // not use up the inbound block announces slots.
-                if task
-                    .network
-                    .opened_gossip_undesired_by_chain(chain_id)
-                    .filter(|(_, kind)| *kind == service::GossipKind::ConsensusTransactions)
-                    .count()
-                    < 4
+                // A peer banned from the out slots, for example a bootnode freed by the
+                // rotation, can't come back through an inbound link.
+                let banned =
+                    task.peering_strategy
+                        .is_banned(&chain_id, &peer_id, &task.platform.now());
+                if !banned
+                    && task
+                        .network
+                        .opened_gossip_undesired_by_chain(chain_id)
+                        .filter(|(_, kind)| *kind == service::GossipKind::ConsensusTransactions)
+                        .count()
+                        < 4
                 {
                     log!(
                         &task.platform,
@@ -3772,7 +3778,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         "gossip-in-request",
                         chain = &task.network[chain_id].log_name,
                         peer_id,
-                        outcome = "rejected",
+                        outcome = if banned {
+                            "rejected-banned"
+                        } else {
+                            "rejected"
+                        },
                     );
                     task.network
                         .gossip_close(
