@@ -172,13 +172,13 @@ where
     /// Replace the set of peers needed to cover the subscribed topics, and fill the random
     /// slots left empty from `candidates`. Bans that ended as of `now` are forgotten.
     ///
-    /// `has_topics` tells whether a topic is subscribed. The cover is empty with topics when
-    /// every replica is banned.
+    /// `keep_random_slots` is false when no topic is subscribed. An empty `peers` does not
+    /// show it, because `peers` is also empty while all peers of the topics are banned.
     pub fn update_peers_needing_connections<'a>(
         &mut self,
         peers: impl IntoIterator<Item = PeerId>,
         candidates: impl Iterator<Item = &'a PeerId>,
-        has_topics: bool,
+        keep_random_slots: bool,
         now: &TNow,
     ) {
         self.banned.retain(|_, until| *until > *now);
@@ -187,9 +187,10 @@ where
 
         // A random peer that the cover now needs, or that got banned, frees its slot. With no
         // topic there is nothing to protect, so the random slots go as well.
-        self.random
-            .retain(|p| has_topics && !self.desired.contains(p) && !self.banned.contains_key(p));
-        if has_topics && self.random.len() < RANDOM_SLOTS {
+        self.random.retain(|p| {
+            keep_random_slots && !self.desired.contains(p) && !self.banned.contains_key(p)
+        });
+        if keep_random_slots && self.random.len() < RANDOM_SLOTS {
             let picked = candidates
                 .filter(|p| {
                     !self.desired.contains(*p)
@@ -262,11 +263,11 @@ mod tests {
 
     fn update(steering: &mut PeerSteering<Duration>, peers: impl IntoIterator<Item = PeerId>) {
         let peers = peers.into_iter().collect::<Vec<_>>();
-        let has_topics = !peers.is_empty();
+        let keep_random_slots = !peers.is_empty();
         steering.update_peers_needing_connections(
             peers,
             iter::empty(),
-            has_topics,
+            keep_random_slots,
             &Duration::ZERO,
         );
     }
