@@ -74,6 +74,20 @@ pub fn webrtc_args() -> Vec<Arg> {
     ]
 }
 
+/// Returns the peer id at the end of a `.../p2p/<peer_id>` multiaddr.
+pub fn peer_id_from_multiaddr(multiaddr: &str) -> Result<String, anyhow::Error> {
+    let suffix = multiaddr
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| anyhow!("multiaddr is empty: {multiaddr}"))?;
+    if !suffix.starts_with("12D3KooW") {
+        return Err(anyhow!(
+            "multiaddr {multiaddr} does not end with a /p2p/<peer_id> segment"
+        ));
+    }
+    Ok(suffix.to_owned())
+}
+
 pub const FINALIZED_METRIC: &str = "block_height{status=\"finalized\"}";
 pub const BEST_METRIC: &str = "block_height{status=\"best\"}";
 

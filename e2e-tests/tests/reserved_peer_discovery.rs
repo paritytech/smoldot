@@ -35,19 +35,6 @@ use smoldot_e2e_tests::*;
 use std::path::PathBuf;
 use zombienet_sdk::NetworkConfigBuilder;
 
-fn peer_id_from_multiaddr(multiaddr: &str) -> Result<String, anyhow::Error> {
-    let suffix = multiaddr
-        .rsplit('/')
-        .next()
-        .ok_or_else(|| anyhow!("multiaddr is empty: {multiaddr}"))?;
-    if !suffix.starts_with("12D3KooW") {
-        return Err(anyhow!(
-            "multiaddr {multiaddr} does not end with a /p2p/<peer_id> segment"
-        ));
-    }
-    Ok(suffix.to_owned())
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn reserved_peer_discovery() -> Result<(), anyhow::Error> {
     let _ = env_logger::try_init_from_env(
