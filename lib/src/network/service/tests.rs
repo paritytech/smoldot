@@ -21,13 +21,13 @@
 use super::{
     ChainConfig, ChainId, ChainNetwork, ChainTraffic, CloseGossipError, Config, ConnectionId,
     Event, GossipKind, GrandpaState, NotificationsOutErr, OpenGossipError, PeerId, ProtocolTraffic,
-    QueueNotificationError, RemoveChainError, SendTopicAffinityError, SingleStreamConnectionTask,
-    SingleStreamHandshakeKind, established, peer_id,
+    QueueNotificationError, RemoveChainError, RequestResult, SendTopicAffinityError,
+    SingleStreamConnectionTask, SingleStreamHandshakeKind, established, peer_id,
 };
 use crate::libp2p::{connection::noise::NoiseKey, read_write::ReadWrite};
 use crate::network::codec::{self, Role};
 use alloc::vec::Vec;
-use core::{cmp, mem, time::Duration};
+use core::{cmp, mem, num::NonZero, time::Duration};
 
 /// Maximum size of the byte pipe between the two connection tasks.
 const BUF: usize = 65536;
@@ -1834,4 +1834,70 @@ fn traffic_counts_refused_request() {
     assert!(alice.storage_proof.bytes_out > 0);
     assert_eq!(alice.storage_proof.messages_in, 0);
     assert_eq!(alice.storage_proof.bytes_in, 0);
+}
+
+/// A blocks request that the remote answers is counted on both sides: the request out and in,
+/// the response out and in.
+#[test]
+#[ignore = "needs the yamux fixes: a response sent with FIN in the same frame is cut off"]
+fn traffic_counts_answered_request() {
+    let mut harness = Harness::connected(false, false);
+    harness.bob.network.chains[harness.bob.chain_id.0].allow_inbound_block_requests = true;
+    let bob = harness.alice.remote.clone();
+    harness
+        .alice
+        .network
+        .start_blocks_request(
+            &bob,
+            harness.alice.chain_id,
+            codec::BlocksRequestConfig {
+                start: codec::BlocksRequestConfigStart::Number(1),
+                desired_count: NonZero::<u32>::new(1).unwrap(),
+                direction: codec::BlocksRequestDirection::Ascending,
+                fields: codec::BlocksRequestFields {
+                    header: true,
+                    body: false,
+                    justifications: false,
+                },
+            },
+            Duration::from_secs(10),
+        )
+        .unwrap();
+    let events = harness.pump();
+    let substream_id = events
+        .iter()
+        .find_map(|(side, event)| match (side, event) {
+            (Side::Bob, Event::BlocksRequestIn { substream_id, .. }) => Some(*substream_id),
+            _ => None,
+        })
+        .unwrap();
+
+    harness.bob.network.respond_blocks(
+        substream_id,
+        Some(alloc::vec![codec::BlockData {
+            hash: [2; 32],
+            header: Some(alloc::vec![3; 100]),
+            body: None,
+            justifications: None,
+        }]),
+    );
+    let events = harness.pump();
+    assert!(events.iter().any(|(side, event)| matches!(
+        (side, event),
+        (
+            Side::Alice,
+            Event::RequestResult {
+                response: RequestResult::Blocks(Ok(_)),
+                ..
+            }
+        )
+    )));
+
+    let alice = harness.alice.network.chain_traffic(harness.alice.chain_id);
+    let bob = harness.bob.network.chain_traffic(harness.bob.chain_id);
+    assert_eq!(alice.blocks.messages_out, 1);
+    assert_eq!(alice.blocks.messages_in, 1);
+    assert!(alice.blocks.bytes_in > 100);
+    assert_mirrored(alice.blocks, bob.blocks);
+    assert_mirrored(bob.blocks, alice.blocks);
 }

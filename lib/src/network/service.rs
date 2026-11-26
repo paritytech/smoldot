@@ -336,6 +336,7 @@ struct Chain<TChain> {
 /// them. For request-response protocols, a message is a request or a response. Notification
 /// substream handshakes are counted in the bytes but not in the messages.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProtocolTraffic {
     /// Bytes received from remotes.
     pub bytes_in: u64,
@@ -371,6 +372,7 @@ impl ProtocolTraffic {
 ///
 /// Chain-agnostic protocols (identify, ping, bitswap) are not counted.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChainTraffic {
     /// Blocks requests and responses, in both directions.
     pub blocks: ProtocolTraffic,
