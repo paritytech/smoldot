@@ -2661,6 +2661,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     Box::pin(task.platform.sleep(BOOTNODE_ROTATION_INTERVAL));
 
                 for chain_id in task.network.chains().collect::<Vec<_>>() {
+                    // Proceed only if chain is synced
                     if !is_near_peers_best(
                         task.network[chain_id].local_best_number,
                         task.open_gossip_links
@@ -2670,6 +2671,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     ) {
                         continue;
                     }
+                    // Proceed only if the chain has some bootnodes
                     let Some(important) = task.important_nodes.get(&chain_id) else {
                         continue;
                     };
