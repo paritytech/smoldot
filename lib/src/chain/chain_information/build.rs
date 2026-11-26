@@ -295,6 +295,11 @@ impl StorageGet {
     }
 
     /// See [`runtime_call::StorageGet::inject_answer`].
+    ///
+    /// # Panic
+    ///
+    /// See [`runtime_call::StorageGet::inject_answer`].
+    ///
     pub fn inject_answer(self, answer: runtime_call::StorageGetAnswer) -> ChainInformationBuild {
         ChainInformationBuild::from_call_in_progress(self.0.inject_answer(answer), self.1)
     }

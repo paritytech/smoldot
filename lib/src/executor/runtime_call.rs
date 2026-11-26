@@ -604,7 +604,9 @@ pub struct StorageGet {
 }
 
 impl StorageGet {
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
+    /// Returns the key whose value must be passed to [`StorageGet::inject_value`], or whose
+    /// existence must be passed to [`StorageGet::inject_existence`] if
+    /// [`StorageGet::is_existence_check`] returns `true`.
     pub fn key(&self) -> impl AsRef<[u8]> {
         enum Three<A, B, C> {
             A(A),
@@ -719,6 +721,13 @@ impl StorageGet {
     }
 
     /// Injects an answer found with [`StorageGet::answer_from_proof`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if `answer` is [`StorageGetAnswer::Exists`] and
+    /// [`StorageGet::is_existence_check`] returns `false`, which can happen if `answer` was
+    /// found for a different request.
+    ///
     pub fn inject_answer(self, answer: StorageGetAnswer) -> RuntimeCall {
         match answer {
             StorageGetAnswer::Exists(exists) => self.inject_existence(exists),
@@ -793,7 +802,7 @@ impl<'a> StorageGetAnswer<'a> {
     ///
     /// If `is_existence_check` is `true`, only the existence of the value is looked up, which
     /// succeeds even if the proof only contains the hash of the value.
-    pub fn from_proof(
+    fn from_proof(
         proof: &'a trie::proof_decode::DecodedTrieProof<impl AsRef<[u8]>>,
         trie_root: &[u8; 32],
         key: &[u8],
