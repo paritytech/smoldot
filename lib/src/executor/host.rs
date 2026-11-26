@@ -2543,8 +2543,8 @@ impl ExternalStorageGet {
     /// Returns `true` if the runtime only needs to know whether the value exists, and not the
     /// value itself.
     ///
-    /// When `true`, any value can be passed to [`ExternalStorageGet::resume`] as long as it is
-    /// `Some` if the entry exists, and `None` otherwise.
+    /// When `true`, [`ExternalStorageGet::resume`] can be passed an empty value if the entry
+    /// exists, and `None` otherwise.
     pub fn is_existence_check(&self) -> bool {
         matches!(
             self.inner.common.registered_functions[self.calling],

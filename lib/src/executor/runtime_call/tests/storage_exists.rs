@@ -22,7 +22,10 @@
 use core::iter;
 
 use super::super::{Config, RuntimeCall, StorageGet, StorageProofSizeBehavior, run};
-use crate::executor::{host, storage_diff};
+use crate::{
+    executor::{host, storage_diff},
+    trie, util,
+};
 
 /// Runtime whose functions all ignore their input.
 ///
@@ -68,13 +71,8 @@ const RUNTIME: &str = r#"
 )
 "#;
 
-/// Calls `function_to_call` of [`RUNTIME`]. Storage requests are answered as if `abc` had the
-/// value `value` in the main trie and in the child trie `xyz`, using
-/// [`StorageGet::inject_existence`] when possible.
-///
-/// Returns the output of the call and, for each storage request, the value of
-/// [`StorageGet::is_existence_check`].
-fn run_call(function_to_call: &str, value: Option<&[u8]>) -> (Vec<u8>, Vec<bool>) {
+/// Starts calling `function_to_call` of [`RUNTIME`].
+fn start(function_to_call: &str) -> RuntimeCall {
     let virtual_machine = host::HostVmPrototype::new(host::Config {
         module: host::tests::with_core_version_custom_sections(wat::parse_str(RUNTIME).unwrap()),
         heap_pages: host::HeapPages::new(1024),
@@ -83,7 +81,7 @@ fn run_call(function_to_call: &str, value: Option<&[u8]>) -> (Vec<u8>, Vec<bool>
     })
     .unwrap();
 
-    let mut execution = run(Config {
+    run(Config {
         virtual_machine,
         function_to_call,
         parameter: iter::empty::<&[u8]>(),
@@ -93,7 +91,17 @@ fn run_call(function_to_call: &str, value: Option<&[u8]>) -> (Vec<u8>, Vec<bool>
         calculate_trie_changes: false,
         calculate_child_tries_roots_on_finish: false,
     })
-    .unwrap();
+    .unwrap()
+}
+
+/// Calls `function_to_call` of [`RUNTIME`]. Storage requests are answered as if `abc` had the
+/// value `value` in the main trie and in the child trie `xyz`, using
+/// [`StorageGet::inject_existence`] when possible.
+///
+/// Returns the output of the call and, for each storage request, the value of
+/// [`StorageGet::is_existence_check`].
+fn run_call(function_to_call: &str, value: Option<&[u8]>) -> (Vec<u8>, Vec<bool>) {
+    let mut execution = start(function_to_call);
 
     let mut existence_checks = Vec::new();
 
@@ -163,28 +171,82 @@ fn get_isnt_existence_check() {
 #[test]
 #[should_panic]
 fn inject_existence_panics_if_value_needed() {
-    let virtual_machine = host::HostVmPrototype::new(host::Config {
-        module: host::tests::with_core_version_custom_sections(wat::parse_str(RUNTIME).unwrap()),
-        heap_pages: host::HeapPages::new(1024),
-        exec_hint: crate::executor::vm::ExecHint::ExecuteOnceWithNonDeterministicValidation,
-        allow_unresolved_imports: false,
-    })
-    .unwrap();
-
-    let execution = run(Config {
-        virtual_machine,
-        function_to_call: "get",
-        parameter: iter::empty::<&[u8]>(),
-        storage_main_trie_changes: storage_diff::TrieDiff::empty(),
-        storage_proof_size_behavior: StorageProofSizeBehavior::Unimplemented,
-        max_log_level: 0,
-        calculate_trie_changes: false,
-        calculate_child_tries_roots_on_finish: false,
-    })
-    .unwrap();
-
-    let RuntimeCall::StorageGet(req) = execution else {
+    let RuntimeCall::StorageGet(req) = start("get") else {
         panic!()
     };
     let _ = req.inject_existence(true);
+}
+
+/// Builds a proof made of a single root node of key `key`, whose storage value is the hash
+/// `value_hash`. The value itself isn't in the proof. Returns the proof and the trie root.
+fn proof_with_hashed_value(key: &[u8], value_hash: &[u8; 32]) -> (Vec<u8>, [u8; 32]) {
+    let node = trie::trie_node::encode(trie::trie_node::Decoded {
+        partial_key: trie::bytes_to_nibbles(key.iter().copied()),
+        children: [None::<&[u8]>; 16],
+        storage_value: trie::trie_node::StorageValue::Hashed(value_hash),
+    })
+    .unwrap()
+    .fold(Vec::new(), |mut a, b| {
+        a.extend_from_slice(b.as_ref());
+        a
+    });
+
+    let trie_root: [u8; 32] = blake2_rfc::blake2b::blake2b(32, &[], &node)
+        .as_bytes()
+        .try_into()
+        .unwrap();
+
+    let mut proof = util::encode_scale_compact_usize(1).as_ref().to_vec();
+    proof.extend_from_slice(util::encode_scale_compact_usize(node.len()).as_ref());
+    proof.extend_from_slice(&node);
+    (proof, trie_root)
+}
+
+/// Runs `function_to_call` of [`RUNTIME`], answering storage requests with
+/// [`StorageGet::answer_from_proof`] using the given proof.
+fn run_call_with_proof(function_to_call: &str, proof: &[u8], trie_root: &[u8; 32]) -> Vec<u8> {
+    let proof =
+        trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config { proof }).unwrap();
+
+    let mut execution = start(function_to_call);
+    loop {
+        match execution {
+            RuntimeCall::Finished(Ok(success)) => {
+                return success.virtual_machine.value().as_ref().to_vec();
+            }
+            RuntimeCall::StorageGet(req) => {
+                let answer = req.answer_from_proof(&proof, trie_root).unwrap();
+                execution = req.inject_answer(answer);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn exists_answered_from_value_hash() {
+    let (proof, trie_root) = proof_with_hashed_value(b"abc", &[0xaa; 32]);
+    assert_eq!(run_call_with_proof("exists", &proof, &trie_root), [1]);
+}
+
+#[test]
+fn exists_false_from_proof_of_absence() {
+    let (proof, trie_root) = proof_with_hashed_value(b"abd", &[0xaa; 32]);
+    assert_eq!(run_call_with_proof("exists", &proof, &trie_root), [0]);
+}
+
+#[test]
+fn get_needs_value_not_only_hash() {
+    let (proof, trie_root) = proof_with_hashed_value(b"abc", &[0xaa; 32]);
+    let proof = trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+        proof: &proof[..],
+    })
+    .unwrap();
+
+    for function in ["get", "read_empty"] {
+        let RuntimeCall::StorageGet(req) = start(function) else {
+            panic!()
+        };
+        assert!(req.answer_from_proof(&proof, &trie_root).is_err());
+    }
 }

@@ -3615,9 +3615,9 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
         match call {
             executor::runtime_call::RuntimeCall::StorageGet(get) => {
                 let answer = if let Some(trie_root) = trie_root {
-                    storage_get_answer_from_proof(&get, call_proof, trie_root)
+                    get.answer_from_proof(call_proof, trie_root)
                 } else {
-                    Ok(StorageGetAnswer::Value(None))
+                    Ok(executor::runtime_call::StorageGetAnswer::Value(None))
                 };
                 let Ok(answer) = answer else {
                     return (
@@ -3630,7 +3630,7 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
                 timing.proof_access_duration += platform.now() - proof_access_duration_before;
 
                 let runtime_call_duration_before = platform.now();
-                call = answer.inject(get);
+                call = get.inject_answer(answer);
                 timing.virtual_machine_call_duration +=
                     platform.now() - runtime_call_duration_before;
             }
@@ -3941,51 +3941,6 @@ fn get_trie_root_for_child_or_main<'a>(
     }
 }
 
-/// Answer to a [`executor::runtime_call::StorageGet`], found in a proof.
-enum StorageGetAnswer<'a> {
-    Exists(bool),
-    Value(Option<(&'a [u8], trie::TrieEntryVersion)>),
-}
-
-impl StorageGetAnswer<'_> {
-    fn inject(
-        self,
-        get: executor::runtime_call::StorageGet,
-    ) -> executor::runtime_call::RuntimeCall {
-        match self {
-            StorageGetAnswer::Exists(exists) => get.inject_existence(exists),
-            StorageGetAnswer::Value(value) => {
-                get.inject_value(value.map(|(val, vers)| (iter::once(val), vers)))
-            }
-        }
-    }
-}
-
-/// Finds in the proof the answer to a [`executor::runtime_call::StorageGet`].
-///
-/// Existence checks are answered even if the proof only contains the hash of the value, which
-/// is what full nodes put in proofs for `ext_storage_exists_version_1`.
-fn storage_get_answer_from_proof<'a>(
-    get: &executor::runtime_call::StorageGet,
-    proof: &'a proof_decode::DecodedTrieProof<impl AsRef<[u8]>>,
-    trie_root: &[u8; 32],
-) -> Result<StorageGetAnswer<'a>, proof_decode::IncompleteProofError> {
-    if get.is_existence_check() {
-        let info = proof.trie_node_info(
-            trie_root,
-            trie::bytes_to_nibbles(get.key().as_ref().iter().copied()),
-        )?;
-        Ok(StorageGetAnswer::Exists(!matches!(
-            info.storage_value,
-            proof_decode::StorageValue::None
-        )))
-    } else {
-        Ok(StorageGetAnswer::Value(
-            proof.storage_value(trie_root, get.key().as_ref())?,
-        ))
-    }
-}
-
 /// Injects a value from the decoded proof into the call.
 fn inject_proof_into_call(
     call: executor::runtime_call::RuntimeCall,
@@ -4001,18 +3956,16 @@ fn inject_proof_into_call(
                 &state.block_state_trie_root_hash,
                 child_trie.as_deref(),
             ) {
-                Ok(Some(trie_root)) => {
-                    match storage_get_answer_from_proof(&get, decoded_proof, trie_root) {
-                        Ok(answer) => answer.inject(get),
-                        Err(_) => {
-                            state.failed_attempts += 1;
-                            state
-                                .inaccessible_errors
-                                .push(RuntimeCallInaccessibleError::MissingProofEntry);
-                            executor::runtime_call::RuntimeCall::StorageGet(get)
-                        }
+                Ok(Some(trie_root)) => match get.answer_from_proof(decoded_proof, trie_root) {
+                    Ok(answer) => get.inject_answer(answer),
+                    Err(_) => {
+                        state.failed_attempts += 1;
+                        state
+                            .inaccessible_errors
+                            .push(RuntimeCallInaccessibleError::MissingProofEntry);
+                        executor::runtime_call::RuntimeCall::StorageGet(get)
                     }
-                }
+                },
                 Ok(None) => {
                     // Child trie doesn't exist, inject None
                     get.inject_value(None::<(iter::Empty<Vec<u8>>, _)>)
