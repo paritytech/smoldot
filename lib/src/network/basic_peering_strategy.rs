@@ -204,6 +204,19 @@ where
         peer_id: PeerId,
         max_peers_per_chain: usize,
     ) -> InsertChainPeerResult {
+        self.insert_chain_peer_filtered(chain, peer_id, max_peers_per_chain, |_| true)
+    }
+
+    /// Same as [`BasicPeeringStrategy::insert_chain_peer`], but only peers for which `can_remove`
+    /// returns `true` can be removed to make room. If there is no such peer, the limit is
+    /// exceeded.
+    pub fn insert_chain_peer_filtered(
+        &mut self,
+        chain: TChainId,
+        peer_id: PeerId,
+        max_peers_per_chain: usize,
+        mut can_remove: impl FnMut(&PeerId) -> bool,
+    ) -> InsertChainPeerResult {
         let peer_id_index = self.get_or_insert_peer_index(&peer_id);
         let chain_index = self.get_or_insert_chain_index(&chain);
 
@@ -224,6 +237,7 @@ where
                         (chain_index, PeerChainState::Assignable, usize::MIN)
                             ..(chain_index, PeerChainState::Slot, usize::MIN),
                     )
+                    .filter(|(_, _, peer_index)| can_remove(&self.peer_ids[*peer_index]))
                     .choose(&mut self.randomness)
                     .map(|(_, _, peer_index)| *peer_index)
             } else {
@@ -1055,6 +1069,30 @@ mod tests {
         assert!(PeerChainState::Assignable < PeerChainState::Banned { expires: 0 });
         assert!(PeerChainState::Banned { expires: 5 } < PeerChainState::Banned { expires: 7 });
         assert!(PeerChainState::Banned { expires: u32::MAX } < PeerChainState::Slot);
+    }
+
+    #[test]
+    fn insert_chain_peer_filtered_keeps_protected_peers() {
+        let mut bps = BasicPeeringStrategy::<u32, Duration>::new(Config {
+            randomness_seed: [0; 32],
+            peers_capacity: 0,
+            chains_capacity: 0,
+        });
+
+        let protected = PeerId::from_public_key(&PublicKey::Ed25519([1; 32]));
+        bps.insert_chain_peer(0, protected.clone(), 1);
+        bps.unassign_slot_and_ban(&0, &protected, Duration::from_secs(10));
+
+        for n in 2..20 {
+            let peer_id = PeerId::from_public_key(&PublicKey::Ed25519([n; 32]));
+            let result = bps.insert_chain_peer_filtered(0, peer_id, 1, |p| *p != protected);
+            assert!(!matches!(
+                result,
+                InsertChainPeerResult::Inserted { peer_removed: Some(ref p) } if *p == protected
+            ));
+        }
+
+        assert!(bps.is_banned(&0, &protected, &Duration::ZERO));
     }
 
     #[test]

@@ -2602,8 +2602,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     // Note that we must call this function before `insert_address`, as documented
                     // in `basic_peering_strategy`.
-                    task.peering_strategy
-                        .insert_chain_peer(chain_id, peer_id.clone(), 30); // TODO: constant
+                    task.peering_strategy.insert_chain_peer_filtered(
+                        chain_id,
+                        peer_id.clone(),
+                        30, // TODO: constant
+                        |p| !is_important_node(&task.important_nodes, chain_id, p),
+                    );
 
                     for addr in addrs {
                         let _ =
@@ -3605,9 +3609,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     if !valid_addrs.is_empty() {
                         // Note that we must call this function before `insert_address`,
                         // as documented in `basic_peering_strategy`.
-                        let insert_outcome =
-                            task.peering_strategy
-                                .insert_chain_peer(chain_id, peer_id.clone(), 30); // TODO: constant
+                        let insert_outcome = task.peering_strategy.insert_chain_peer_filtered(
+                            chain_id,
+                            peer_id.clone(),
+                            30, // TODO: constant
+                            |p| !is_important_node(&task.important_nodes, chain_id, p),
+                        );
 
                         if let basic_peering_strategy::InsertChainPeerResult::Inserted {
                             peer_removed,
@@ -4150,11 +4157,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             // must call this function before `insert_address`, as documented
                             // in `basic_peering_strategy`.
                             if !addresses.is_empty() {
-                                task.peering_strategy.insert_chain_peer(
+                                task.peering_strategy.insert_chain_peer_filtered(
                                     chain_id,
                                     peer_id.clone(),
-                                    30,
-                                ); // TODO: constant
+                                    30, // TODO: constant
+                                    |p| !is_important_node(&task.important_nodes, chain_id, p),
+                                );
                                 for address in addresses {
                                     let _ =
                                         task.peering_strategy.insert_address(&peer_id, address, 10); // TODO: constant
@@ -4594,6 +4602,18 @@ fn close_block_announces_link<TPlat: PlatformRef>(
             peer_id: peer_id.clone(),
         },
     ));
+}
+
+/// Returns true if the peer is an important node (in practice a bootnode) of the chain. Important
+/// nodes are never removed from the address book to make room for discovered peers.
+fn is_important_node(
+    important_nodes: &HashMap<ChainId, HashSet<PeerId, fnv::FnvBuildHasher>, fnv::FnvBuildHasher>,
+    chain_id: ChainId,
+    peer_id: &PeerId,
+) -> bool {
+    important_nodes
+        .get(&chain_id)
+        .is_some_and(|nodes| nodes.contains(peer_id))
 }
 
 /// Forgets the statement substream of a peer after its block announces substream has closed. The
