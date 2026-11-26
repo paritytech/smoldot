@@ -2540,6 +2540,21 @@ impl ExternalStorageGet {
         self.max_size
     }
 
+    /// Returns `true` if the runtime only needs to know whether the value exists, and not the
+    /// value itself.
+    ///
+    /// When `true`, any value can be passed to [`ExternalStorageGet::resume`] as long as it is
+    /// `Some` if the entry exists, and `None` otherwise.
+    pub fn is_existence_check(&self) -> bool {
+        matches!(
+            self.inner.common.registered_functions[self.calling],
+            FunctionImport::Resolved(
+                HostFunction::ext_storage_exists_version_1
+                    | HostFunction::ext_default_child_storage_exists_version_1
+            )
+        )
+    }
+
     /// Same as [`ExternalStorageGet::resume`], but passes the full value, without taking the
     /// offset and maximum size into account.
     ///

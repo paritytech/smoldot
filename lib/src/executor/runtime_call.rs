@@ -672,6 +672,30 @@ impl StorageGet {
         }
     }
 
+    /// Returns `true` if only the existence of the storage value is needed, in which case
+    /// [`StorageGet::inject_existence`] can be used instead of [`StorageGet::inject_value`].
+    pub fn is_existence_check(&self) -> bool {
+        match (&self.inner.vm, self.inner.root_calculation.as_ref()) {
+            (host::HostVm::ExternalStorageGet(req), None) => req.is_existence_check(),
+            _ => false,
+        }
+    }
+
+    /// Injects whether the storage value exists.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`StorageGet::is_existence_check`] returns `false`.
+    ///
+    pub fn inject_existence(mut self, exists: bool) -> RuntimeCall {
+        assert!(self.is_existence_check());
+        let host::HostVm::ExternalStorageGet(req) = self.inner.vm else {
+            unreachable!()
+        };
+        self.inner.vm = req.resume(if exists { Some((&[], 0)) } else { None });
+        self.inner.run()
+    }
+
     /// Injects the corresponding storage value.
     pub fn inject_value(
         mut self,
