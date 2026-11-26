@@ -2690,10 +2690,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     let now = task.platform.now();
                     // Make sure a non-bootnode peer exists before releasing a slot.
+                    let not_bootnode = |p: &PeerId| !important.contains(p);
                     if !matches!(
-                        task.peering_strategy
-                            .pick_assignable_peer_filtered(&chain_id, &now, |p| !important
-                                .contains(p),),
+                        task.peering_strategy.pick_assignable_peer_filtered(
+                            &chain_id,
+                            &now,
+                            not_bootnode
+                        ),
                         basic_peering_strategy::AssignablePeer::Assignable(_)
                     ) {
                         continue;
