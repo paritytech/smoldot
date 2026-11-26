@@ -2512,12 +2512,18 @@ async fn run_background<TPlat: PlatformRef>(
                                 virtual_machine_call_duration = ?timing.virtual_machine_call_duration,
                                 proof_access_duration = ?timing.proof_access_duration,
                             );
+                            let severity = match error {
+                                RuntimeCallInaccessibleError::MissingProofEntry => {
+                                    network_service::BanSeverity::Low
+                                }
+                                _ => network_service::BanSeverity::High,
+                            };
                             operation.inaccessible_errors.push(error);
                             background
                                 .network_service
                                 .ban_and_disconnect(
                                     call_proof_sender,
-                                    network_service::BanSeverity::High,
+                                    severity,
                                     network_service::BanReason::InvalidCallProof,
                                 )
                                 .await;
