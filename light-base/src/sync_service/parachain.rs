@@ -1751,7 +1751,7 @@ fn run_single_runtime_call(
                 };
 
                 let storage_value = if let Some(trie_root) = &trie_root {
-                    proof.storage_value(trie_root, get.key().as_ref())
+                    get.value_from_proof(proof, trie_root)
                 } else {
                     Ok(None)
                 };

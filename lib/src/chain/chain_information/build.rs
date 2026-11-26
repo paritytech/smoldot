@@ -285,6 +285,16 @@ impl StorageGet {
         ChainInformationBuild::from_call_in_progress(self.0.inject_value(value), self.1)
     }
 
+    /// See [`runtime_call::StorageGet::value_from_proof`].
+    pub fn value_from_proof<'a>(
+        &self,
+        proof: &'a trie::proof_decode::DecodedTrieProof<impl AsRef<[u8]>>,
+        trie_root: &[u8; 32],
+    ) -> Result<Option<(&'a [u8], TrieEntryVersion)>, trie::proof_decode::IncompleteProofError>
+    {
+        self.0.value_from_proof(proof, trie_root)
+    }
+
     /// Returns the runtime call currently being made.
     pub fn call_in_progress(&self) -> RuntimeCall {
         self.1.call_in_progress.unwrap()

@@ -36,6 +36,7 @@ use crate::{
 use alloc::collections::BTreeMap;
 
 mod clear_prefix;
+mod storage_exists;
 
 #[test]
 fn execute_blocks() {

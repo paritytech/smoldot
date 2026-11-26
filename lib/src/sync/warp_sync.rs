@@ -2290,22 +2290,21 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                 chain_information::build::InProgress::StorageGet(get) => {
                     // TODO: child tries not supported
                     let (proof, downloaded_source) = calls.get(&get.call_in_progress()).unwrap();
-                    let value = match proof
-                        .storage_value(&self.inner.warped_header_state_root, get.key().as_ref())
-                    {
-                        Ok(v) => v,
-                        Err(proof_decode::IncompleteProofError { .. }) => {
-                            return (
-                                self.inner,
-                                Err(BuildChainInformationError::SourceMisbehavior(
-                                    SourceMisbehavior {
-                                        source_id: *downloaded_source,
-                                        error: SourceMisbehaviorTy::MerkleProofEntriesMissing,
-                                    },
-                                )),
-                            );
-                        }
-                    };
+                    let value =
+                        match get.value_from_proof(proof, &self.inner.warped_header_state_root) {
+                            Ok(v) => v,
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                return (
+                                    self.inner,
+                                    Err(BuildChainInformationError::SourceMisbehavior(
+                                        SourceMisbehavior {
+                                            source_id: *downloaded_source,
+                                            error: SourceMisbehaviorTy::MerkleProofEntriesMissing,
+                                        },
+                                    )),
+                                );
+                            }
+                        };
 
                     get.inject_value(value.map(|(val, ver)| (iter::once(val), ver)))
                 }

@@ -672,6 +672,45 @@ impl StorageGet {
         }
     }
 
+    /// Returns `true` if only the existence of the storage value is needed.
+    fn is_existence_check(&self) -> bool {
+        match (&self.inner.vm, self.inner.root_calculation.as_ref()) {
+            (host::HostVm::ExternalStorageGet(req), None) => req.is_existence_check(),
+            _ => false,
+        }
+    }
+
+    /// Finds in the given proof the value to pass to [`StorageGet::inject_value`].
+    ///
+    /// `trie_root` must be the root of the trie the request reads from, as indicated by
+    /// [`StorageGet::child_trie`].
+    ///
+    /// If the runtime only needs to know whether the value exists, an empty value is returned
+    /// in place of the actual value. This works even if the proof only contains the hash of the
+    /// value, which is what full nodes put in proofs for `ext_storage_exists_version_1`.
+    pub fn value_from_proof<'a>(
+        &self,
+        proof: &'a trie::proof_decode::DecodedTrieProof<impl AsRef<[u8]>>,
+        trie_root: &[u8; 32],
+    ) -> Result<Option<(&'a [u8], TrieEntryVersion)>, trie::proof_decode::IncompleteProofError>
+    {
+        if !self.is_existence_check() {
+            return proof.storage_value(trie_root, self.key().as_ref());
+        }
+
+        let info = proof.trie_node_info(
+            trie_root,
+            trie::bytes_to_nibbles(self.key().as_ref().iter().copied()),
+        )?;
+        Ok(match info.storage_value {
+            trie::proof_decode::StorageValue::None => None,
+            trie::proof_decode::StorageValue::Known { inline: true, .. } => {
+                Some((&[], TrieEntryVersion::V0))
+            }
+            _ => Some((&[], TrieEntryVersion::V1)),
+        })
+    }
+
     /// Injects the corresponding storage value.
     pub fn inject_value(
         mut self,

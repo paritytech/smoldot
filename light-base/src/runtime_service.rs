@@ -3615,7 +3615,7 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
         match call {
             executor::runtime_call::RuntimeCall::StorageGet(get) => {
                 let storage_value = if let Some(trie_root) = trie_root {
-                    call_proof.storage_value(trie_root, get.key().as_ref())
+                    get.value_from_proof(call_proof, trie_root)
                 } else {
                     Ok(None)
                 };
@@ -3949,7 +3949,6 @@ fn inject_proof_into_call(
 ) -> executor::runtime_call::RuntimeCall {
     match call {
         executor::runtime_call::RuntimeCall::StorageGet(get) => {
-            let key: Vec<u8> = get.key().as_ref().to_vec();
             let child_trie = get.child_trie().map(|c| c.as_ref().to_vec());
 
             match get_trie_root_for_child_or_main(
@@ -3957,7 +3956,7 @@ fn inject_proof_into_call(
                 &state.block_state_trie_root_hash,
                 child_trie.as_deref(),
             ) {
-                Ok(Some(trie_root)) => match decoded_proof.storage_value(trie_root, &key) {
+                Ok(Some(trie_root)) => match get.value_from_proof(decoded_proof, trie_root) {
                     Ok(value) => get.inject_value(value.map(|(val, vers)| (iter::once(val), vers))),
                     Err(_) => {
                         state.failed_attempts += 1;
