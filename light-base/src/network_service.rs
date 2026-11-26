@@ -2720,6 +2720,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         service::GossipKind::ConsensusTransactions,
                     );
                     close_block_announces_link(&mut task, chain_id, &peer_id);
+                    forget_following_statement_substream(&mut task, chain_id, &peer_id);
                 }
             }
             WakeUpReason::StartDiscovery(chain_id) => {
@@ -3175,27 +3176,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     );
                 }
 
-                // The statement substream closes with the block announces substream, unless
-                // the peer has a statement link of its own.
-                if !task.network.gossip_is_connected(
-                    chain_id,
-                    &peer_id,
-                    service::GossipKind::Statement,
-                ) && !task
-                    .network
-                    .gossip_desired_iter(chain_id, service::GossipKind::Statement)
-                    .any(|p| *p == peer_id)
-                {
-                    if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
-                        peers.remove(&peer_id);
-                    }
-                    if let Some(peering) = &mut task.network[chain_id].statement_peering {
-                        peering
-                            .topology
-                            .on_substream_closed(peer_id.clone(), &task.platform.now());
-                        peering.steering.on_substream_closed(&peer_id);
-                    }
-                }
+                forget_following_statement_substream(&mut task, chain_id, &peer_id);
 
                 debug_assert!(task.events_pending_send.is_empty());
                 task.events_pending_send
@@ -3220,25 +3201,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // the peer stays unreachable for statements until a reopen succeeds. A peer
                 // desired under the statement kind has a statement link of its own, which has
                 // its own events and might still be opening.
-                if !task.network.gossip_is_connected(
-                    chain_id,
-                    &peer_id,
-                    service::GossipKind::Statement,
-                ) && !task
-                    .network
-                    .gossip_desired_iter(chain_id, service::GossipKind::Statement)
-                    .any(|p| *p == peer_id)
-                {
-                    if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
-                        peers.remove(&peer_id);
-                    }
-                    if let Some(peering) = &mut task.network[chain_id].statement_peering {
-                        peering
-                            .topology
-                            .on_substream_closed(peer_id.clone(), &task.platform.now());
-                        peering.steering.on_substream_closed(&peer_id);
-                    }
-                }
+                forget_following_statement_substream(&mut task, chain_id, &peer_id);
 
                 // Reopen at once the first time, as polkadot-sdk reserves the peer for these
                 // protocols slightly after block announces open. Afterwards, retry at a short
@@ -4618,6 +4581,35 @@ fn close_block_announces_link<TPlat: PlatformRef>(
             peer_id: peer_id.clone(),
         },
     ));
+}
+
+/// Forgets the statement substream of a peer after its block announces substream has closed. The
+/// statement substream closes with it, unless the peer has a statement link of its own.
+fn forget_following_statement_substream<TPlat: PlatformRef>(
+    task: &mut BackgroundTask<TPlat>,
+    chain_id: ChainId,
+    peer_id: &PeerId,
+) {
+    if task
+        .network
+        .gossip_is_connected(chain_id, peer_id, service::GossipKind::Statement)
+        || task
+            .network
+            .gossip_desired_iter(chain_id, service::GossipKind::Statement)
+            .any(|p| p == peer_id)
+    {
+        return;
+    }
+
+    if let Some(peers) = task.v2_statement_peers.get_mut(&chain_id) {
+        peers.remove(peer_id);
+    }
+    if let Some(peering) = &mut task.network[chain_id].statement_peering {
+        peering
+            .topology
+            .on_substream_closed(peer_id.clone(), &task.platform.now());
+        peering.steering.on_substream_closed(peer_id);
+    }
 }
 
 /// Returns true if `local_best` is at most [`BOOTNODE_ROTATION_SYNC_MARGIN`] blocks behind the
